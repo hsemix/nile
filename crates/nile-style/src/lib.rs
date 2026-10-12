@@ -7,6 +7,7 @@
 //! - a small user-agent stylesheet
 //! - inheritance of text properties
 
+mod anim;
 mod colors;
 mod gradient;
 mod grid;
@@ -22,6 +23,7 @@ use selectors::context::{
     SelectorCaches,
 };
 use selectors::matching::matches_selector;
+pub use anim::{AnimValue, AnimationSpec, Animator, Direction, Fill, Timing, TransitionSpec};
 pub use grid::{area_lines, Breadth, GridAutoFlow, GridLine, GridPlace, Track, TrackItem, TrackRepeat};
 pub use gradient::{TransformFn, ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
 pub use parse::{Declaration, Rule, Stylesheet, Value};
@@ -124,6 +126,17 @@ pub enum Clear {
     Left,
     Right,
     Both,
+}
+
+/// Whether the user can select an element's text. Off unless the page asks for it,
+/// as in desktop UIs (and Sciter, where it is `behavior: htmlarea`); inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UserSelect {
+    #[default]
+    None,
+    Text,
+    /// Selectable, and a click selects the whole run.
+    All,
 }
 
 /// `position`. `Fixed` is laid out like `Absolute` (against the parent, scrolling with the page).
@@ -292,6 +305,8 @@ pub struct ComputedStyle {
     pub border_radius: f32,
     pub opacity: f32,
     pub transform: Vec<TransformFn>,
+    pub transitions: Vec<TransitionSpec>,
+    pub animations: Vec<AnimationSpec>,
     /// Origin of `transform` within the border box.
     pub transform_origin: (StopPos, StopPos),
     /// Outer shadows, first = topmost. `inset` ones are parsed but not painted yet.
@@ -310,6 +325,9 @@ pub struct ComputedStyle {
     pub italic: bool,
     pub underline: bool,
     pub line_through: bool,
+    pub user_select: UserSelect,
+    /// `text-selection-background-color` (Sciter); inherited.
+    pub selection_bg: Option<Color>,
     pub text_transform: TextTransform,
     /// Extra space after each character, in px.
     pub letter_spacing: f32,
@@ -374,6 +392,8 @@ impl Default for ComputedStyle {
             border_radius: 0.0,
             opacity: 1.0,
             transform: Vec::new(),
+            transitions: Vec::new(),
+            animations: Vec::new(),
             transform_origin: (StopPos::Fraction(0.5), StopPos::Fraction(0.5)),
             box_shadow: Vec::new(),
             color: Color::BLACK,
@@ -386,6 +406,8 @@ impl Default for ComputedStyle {
             italic: false,
             underline: false,
             line_through: false,
+            user_select: UserSelect::None,
+            selection_bg: None,
             text_transform: TextTransform::None,
             letter_spacing: 0.0,
             vars: Rc::default(),
@@ -525,6 +547,8 @@ impl ComputedStyle {
             underline: parent.underline,
             line_through: parent.line_through,
             text_transform: parent.text_transform,
+            user_select: parent.user_select,
+            selection_bg: parent.selection_bg,
             letter_spacing: parent.letter_spacing,
             vars: parent.vars.clone(),
             ..Default::default()
@@ -537,6 +561,7 @@ pub(crate) const ROOT_FONT_SIZE: f32 = 16.0;
 const UA_STYLESHEET: &str = r#"
 head, script, style, title, meta, link, option, optgroup { display: none }
 img { display: inline-block }
+[selectable] { user-select: text }
 html, body, div, p, h1, h2, h3, section, header, footer, main, nav, ul, li { display: block }
 span, a, b, strong, em, i, u, s, del, br, label { display: inline }
 form { display: block }
@@ -567,6 +592,7 @@ input[type=button], input[type=submit], input[type=reset] { width: auto; backgro
 "#;
 
 /// Computed styles for every node, indexed by `NodeId.0`.
+#[derive(Clone)]
 pub struct StyleMap {
     pub styles: Vec<ComputedStyle>,
     /// Styles depend on the viewport size (`@media`, `vw`, ...): restyle when it changes.
@@ -574,6 +600,8 @@ pub struct StyleMap {
     pseudo: HashMap<(NodeId, PseudoElement), NodeId>,
     origins: HashMap<NodeId, NodeId>,
     contents: HashMap<NodeId, String>,
+    /// `@keyframes` by name.
+    pub(crate) keyframes: HashMap<String, Vec<parse::Frame>>,
 }
 
 /// `::before`/`::after` boxes found while styling. Each gets an id past the end of the
@@ -586,6 +614,11 @@ struct Generated {
 }
 
 impl StyleMap {
+    /// Some element has a `transition` or `animation`.
+    pub fn animates(&self) -> bool {
+        self.styles.iter().any(|s| !s.transitions.is_empty() || !s.animations.is_empty())
+    }
+
     /// The generated `::before` / `::after` box of `element`, if it has one.
     pub fn pseudo(&self, element: NodeId, kind: PseudoElement) -> Option<NodeId> {
         self.pseudo.get(&(element, kind)).copied()
@@ -659,6 +692,12 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
         MatchingForInvalidation::No,
     );
     let uses_viewport = Cell::new(author.iter().any(|s| s.uses_viewport));
+    let mut keyframes: HashMap<String, Vec<parse::Frame>> = HashMap::new();
+    for sheet in &author {
+        for k in &sheet.keyframes {
+            keyframes.insert(k.name.clone(), k.frames.clone());
+        }
+    }
     let has_pseudo = author.iter().any(|s| s.rules.iter().any(|r| r.selectors.slice().iter().any(|sel| sel.has_pseudo_element())));
     let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo };
     let mut generated = Generated::default();
@@ -669,6 +708,7 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
         pseudo: generated.pseudo,
         origins: generated.origins,
         contents: generated.contents,
+        keyframes,
     }
 }
 
@@ -1284,6 +1324,23 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.background_repeat = bg_repeat(before).unwrap_or((true, true));
             }
         }
+        "user-select" | "-webkit-user-select" | "-moz-user-select" => {
+            s.user_select = match first.and_then(Value::ident) {
+                Some("none") => UserSelect::None,
+                Some("text" | "contain") => UserSelect::Text,
+                Some("all") => UserSelect::All,
+                // `auto` takes the parent's value, which is already inherited.
+                _ => return,
+            }
+        }
+        // Sciter's way to make an element's text selectable.
+        "behavior" => {
+            if v.iter().any(|x| x.ident() == Some("htmlarea")) {
+                s.user_select = UserSelect::Text;
+            }
+        }
+        "text-selection-background-color" => s.selection_bg = first.and_then(color).or(s.selection_bg),
+        "text-selection" => s.selection_bg = v.get(1).and_then(color).or(s.selection_bg),
         "transform" => {
             let list: Vec<TransformFn> = v
                 .iter()
@@ -1460,7 +1517,9 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         "align-items" => s.align_items = first.and_then(align).unwrap_or(s.align_items),
         _ => {
             // Grid and gap properties; anything else is unsupported and ignored, like a browser would.
-            grid::apply(s, &d.name, v, fs);
+            if !anim::apply_properties(s, &d.name, v) {
+                grid::apply(s, &d.name, v, fs);
+            }
         }
     }
 }
@@ -1844,6 +1903,20 @@ mod tests {
     }
 
     #[test]
+    fn text_selection_is_opt_in() {
+        let doc = Document::parse(
+            r#"<style>.t { user-select: text } .k { behavior: htmlarea; text-selection-background-color: #ff0 }</style>
+               <div id="a">x</div><div id="b" class="t"><p id="b2" style="user-select: none">y</p><p id="b3" style="user-select: auto">z</p></div>
+               <div id="c" selectable>w</div><div id="d" class="k"><span id="d2">v</span></div><div id="e" style="user-select: all"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let us = |id: &str| style_of(&doc, &styles, id).user_select;
+        assert_eq!((us("a"), us("b"), us("b2"), us("b3")), (UserSelect::None, UserSelect::Text, UserSelect::None, UserSelect::Text));
+        assert_eq!((us("c"), us("d"), us("d2"), us("e")), (UserSelect::Text, UserSelect::Text, UserSelect::Text, UserSelect::All));
+        assert_eq!(style_of(&doc, &styles, "d2").selection_bg, Some(Color::rgb(255, 255, 0))); // inherited
+    }
+
+    #[test]
     fn transform_lists_parse() {
         let doc = Document::parse(
             r#"<div id="a" style="transform: translate(10px, 50%) rotate(0.25turn) scale(2) skewX(10deg) matrix(1,0,0,1,5,6); transform-origin: left 10px"></div>
@@ -1865,5 +1938,67 @@ mod tests {
         assert_eq!(a.transform_origin, (StopPos::Fraction(0.0), StopPos::Px(10.0)));
         assert!(style_of(&doc, &styles, "b").transform.is_empty());
         assert!(style_of(&doc, &styles, "c").transform.is_empty());
+    }
+
+    fn opacity_at(animator: &mut Animator, base: &StyleMap, styles: &mut StyleMap, doc: &Document, now: f64, restyled: bool) -> f32 {
+        animator.update(base, styles, now, restyled);
+        let n = doc.find(|n| n.attr("id") == Some("a")).unwrap();
+        styles.get(n).opacity
+    }
+
+    #[test]
+    fn transitions_start_on_target_changes() {
+        let mut doc = Document::parse(
+            r#"<style>#a { opacity: 1; width: 100px; transition: opacity 1s linear, width 2s linear 1s } #a.on { opacity: 0; width: 200px }</style><div id="a"></div>"#,
+        );
+        let a = doc.find(|n| n.attr("id") == Some("a")).unwrap();
+        let mut animator = Animator::new();
+        let base = compute_styles(&doc);
+        let mut styles = base.clone();
+        assert_eq!(opacity_at(&mut animator, &base, &mut styles, &doc, 0.0, true), 1.0);
+        assert!(!animator.is_active());
+
+        doc.set_attr(a, "class", "on");
+        let base = compute_styles(&doc);
+        let mut styles = base.clone();
+        assert_eq!(opacity_at(&mut animator, &base, &mut styles, &doc, 10.0, true), 1.0); // just started
+        assert!(animator.is_active());
+        assert!((opacity_at(&mut animator, &base, &mut styles, &doc, 10.25, false) - 0.75).abs() < 1e-4);
+        assert_eq!(styles.get(a).width, Length::Px(100.0)); // still inside its 1s delay
+        // Reversing midway starts from where it is now.
+        doc.set_attr(a, "class", "");
+        let base = compute_styles(&doc);
+        let mut styles = base.clone();
+        let mid = opacity_at(&mut animator, &base, &mut styles, &doc, 10.5, true);
+        assert!((mid - 0.5).abs() < 1e-4, "{mid}");
+        assert!((opacity_at(&mut animator, &base, &mut styles, &doc, 11.0, false) - 0.75).abs() < 1e-4);
+        assert_eq!(opacity_at(&mut animator, &base, &mut styles, &doc, 12.0, false), 1.0);
+        // The width never moved: it was still waiting out its 1s delay when reversed.
+        assert_eq!(styles.get(a).width, Length::Px(100.0));
+        animator.update(&base, &mut styles, 20.0, false);
+        assert!(!animator.is_active());
+        assert_eq!(styles.get(a).width, Length::Px(100.0));
+    }
+
+    #[test]
+    fn keyframe_animations_run_repeat_and_fill() {
+        let doc = Document::parse(
+            r#"<style>@keyframes fade { from { opacity: 0 } 50% { opacity: 1 } to { opacity: 0.5; transform: translateX(10px) } }
+               #a { animation: fade 2s linear 1s 2 alternate both } </style><div id="a"></div>"#,
+        );
+        let a = doc.find(|n| n.attr("id") == Some("a")).unwrap();
+        let mut animator = Animator::new();
+        let base = compute_styles(&doc);
+        let mut styles = base.clone();
+        // Before its delay, `backwards` fill holds the first frame.
+        assert_eq!(opacity_at(&mut animator, &base, &mut styles, &doc, 0.0, true), 0.0);
+        assert!((opacity_at(&mut animator, &base, &mut styles, &doc, 1.5, false) - 0.5).abs() < 1e-4);
+        assert!((opacity_at(&mut animator, &base, &mut styles, &doc, 2.0, false) - 1.0).abs() < 1e-4);
+        assert_eq!(styles.get(a).transform, vec![TransformFn::Translate(StopPos::Px(5.0), StopPos::Px(0.0))]);
+        // The second iteration runs backwards: 1s in is the same as 1s from the end.
+        assert!((opacity_at(&mut animator, &base, &mut styles, &doc, 4.0, false) - 1.0).abs() < 1e-4);
+        // Done at 1 + 2*2 = 5s; `forwards` keeps the last (reversed) frame: from { opacity: 0 }.
+        assert_eq!(opacity_at(&mut animator, &base, &mut styles, &doc, 6.0, false), 0.0);
+        assert!(!animator.is_active());
     }
 }

@@ -1,6 +1,7 @@
 //! CSS parsing on top of `cssparser`'s tokenizer.
 
 use crate::selector::{NileImpl, NileParser};
+use crate::anim::Timing;
 use crate::gradient::{TransformFn, ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
 use crate::{colors, Color};
 use std::cell::Cell;
@@ -41,6 +42,10 @@ pub enum Value {
     Fr(f32),
     /// `url(...)`.
     Url(String),
+    /// A duration in seconds.
+    Time(f32),
+    /// `cubic-bezier()` or `steps()`.
+    Timing(Timing),
     Transform(TransformFn),
     /// A top-level `/` (grid lines).
     Slash,
@@ -90,9 +95,23 @@ pub struct Rule {
     pub declarations: Vec<Declaration>,
 }
 
+/// An `@keyframes` rule: the declarations at each offset (0..=1), in offset order.
+#[derive(Debug, Clone)]
+pub struct Keyframes {
+    pub name: String,
+    pub frames: Vec<Frame>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Frame {
+    pub offset: f32,
+    pub declarations: Vec<Declaration>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    pub keyframes: Vec<Keyframes>,
     /// Some rule or value depended on the viewport size (`@media`, `vw`, ...).
     pub uses_viewport: bool,
 }
@@ -108,14 +127,15 @@ impl Stylesheet {
         let used = Cell::new(false);
         let cx = Cx { viewport, uses_viewport: &used };
         let mut parser = Parser::new(css);
-        let mut rules = Vec::new();
-        rules_in(&mut parser, &cx, &mut rules);
-        Stylesheet { rules, uses_viewport: used.get() }
+        let mut sheet = Stylesheet::default();
+        rules_in(&mut parser, &cx, &mut sheet);
+        sheet.uses_viewport = used.get();
+        sheet
     }
 }
 
 /// Parses rules and at-rules until the input ends.
-fn rules_in(p: &mut Parser<'_>, cx: &Cx, rules: &mut Vec<Rule>) {
+fn rules_in(p: &mut Parser<'_>, cx: &Cx, sheet: &mut Stylesheet) {
     while !p.is_exhausted() {
         let state = p.state();
         let at = match p.next() {
@@ -123,12 +143,12 @@ fn rules_in(p: &mut Parser<'_>, cx: &Cx, rules: &mut Vec<Rule>) {
             _ => None,
         };
         if let Some(name) = at {
-            at_rule(p, cx, &name, rules);
+            at_rule(p, cx, &name, sheet);
             continue;
         }
         p.reset(&state);
         match parse_rule(p, cx) {
-            Ok(Some(rule)) => rules.push(rule),
+            Ok(Some(rule)) => sheet.rules.push(rule),
             Ok(None) => {}
             // Skip the broken rule and keep going, as browsers do.
             Err(_) => {
@@ -143,24 +163,63 @@ fn rules_in(p: &mut Parser<'_>, cx: &Cx, rules: &mut Vec<Rule>) {
 
 /// `@media` rules are evaluated now and their rules kept or dropped; every other
 /// at-rule (`@import`, `@font-face`, `@keyframes`, ...) is skipped.
-fn at_rule(p: &mut Parser<'_>, cx: &Cx, name: &str, rules: &mut Vec<Rule>) {
+fn at_rule(p: &mut Parser<'_>, cx: &Cx, name: &str, sheet: &mut Stylesheet) {
     let start = p.position();
     let _ = p.parse_until_before(Delimiter::CurlyBracketBlock | Delimiter::Semicolon, |p| {
         while p.next().is_ok() {}
         Ok::<_, ParseError<()>>(())
     });
-    let prelude = p.slice_from(start).to_ascii_lowercase();
+    let raw_prelude = p.slice_from(start).trim().to_string();
+    let prelude = raw_prelude.to_ascii_lowercase();
     if let Ok(Token::CurlyBracketBlock) = p.next() {
-        if name == "media" {
+        if name == "keyframes" || name == "-webkit-keyframes" {
+            let frames = p.parse_nested_block(|p| Ok::<_, ParseError<()>>(keyframes_in(p, cx))).unwrap_or_default();
+            let name = raw_prelude.trim_matches(|c| c == '"' || c == '\'').to_string();
+            if !name.is_empty() && !frames.is_empty() {
+                sheet.keyframes.push(Keyframes { name, frames });
+            }
+        } else if name == "media" {
             cx.uses_viewport.set(true);
             if media_matches(&prelude, cx.viewport) {
                 let _ = p.parse_nested_block(|p| {
-                    rules_in(p, cx, rules);
+                    rules_in(p, cx, sheet);
                     Ok::<_, ParseError<()>>(())
                 });
             }
         }
     }
+}
+
+/// The frames inside `@keyframes`: `from`, `to` and percentages, comma separated.
+fn keyframes_in(p: &mut Parser<'_>, cx: &Cx) -> Vec<Frame> {
+    let mut frames = Vec::new();
+    while !p.is_exhausted() {
+        let offsets: PResult<Vec<f32>> = p.parse_until_before(Delimiter::CurlyBracketBlock, |p| {
+            let mut offsets = Vec::new();
+            while !p.is_exhausted() {
+                match p.next()? {
+                    Token::Ident(i) if i.eq_ignore_ascii_case("from") => offsets.push(0.0),
+                    Token::Ident(i) if i.eq_ignore_ascii_case("to") => offsets.push(1.0),
+                    Token::Percentage { unit_value, .. } => offsets.push(unit_value.clamp(0.0, 1.0)),
+                    Token::Comma => {}
+                    _ => return Err(ParseError::custom(())),
+                }
+            }
+            Ok(offsets)
+        });
+        match (p.next(), offsets) {
+            (Ok(Token::CurlyBracketBlock), Ok(offsets)) => {
+                let declarations = p.parse_nested_block(|p| Ok::<_, ParseError<()>>(declarations_in(p, cx))).unwrap_or_default();
+                for offset in offsets {
+                    frames.push(Frame { offset, declarations: declarations.clone() });
+                }
+            }
+            (Ok(_), _) => {}
+            (Err(_), _) => break,
+        }
+    }
+    frames.sort_by(|a, b| a.offset.total_cmp(&b.offset));
+    frames
 }
 
 /// Evaluates a media query list against the viewport: width/height features
@@ -355,6 +414,8 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
                     "rem" => Value::Rem(value),
                     "pt" => Value::Px(value * 4.0 / 3.0),
                     "fr" => Value::Fr(value),
+                    "s" => Value::Time(value),
+                    "ms" => Value::Time(value / 1000.0),
                     "deg" => Value::Angle(value),
                     "turn" => Value::Angle(value * 360.0),
                     "rad" => Value::Angle(value.to_degrees()),
@@ -430,6 +491,18 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
                     match transform_fn(&name, &args) {
                         Some(t) => Value::Transform(t),
                         None => return Ok(None),
+                    }
+                }
+                "cubic-bezier" | "steps" => {
+                    let args = p.parse_nested_block(|p| gradient_items(p, cx))?;
+                    let nums: Vec<f32> = args.iter().filter_map(|a| if let [Value::Number(n)] = a.as_slice() { Some(*n) } else { None }).collect();
+                    match (name.as_str(), nums.as_slice()) {
+                        ("cubic-bezier", [a, b, c, d]) if (0.0..=1.0).contains(a) && (0.0..=1.0).contains(c) => Value::Timing(Timing::Bezier(*a, *b, *c, *d)),
+                        ("steps", [n]) if *n >= 1.0 => {
+                            let start = args.get(1).and_then(|a| a.first()).and_then(Value::ident).is_some_and(|i| i == "start" || i == "jump-start");
+                            Value::Timing(Timing::Steps(*n as u32, start))
+                        }
+                        _ => return Ok(None),
                     }
                 }
                 "attr" => {

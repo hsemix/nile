@@ -47,6 +47,19 @@ cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --typ
 cargo test --workspace
 ```
 
+## Word-style ribbon demo
+
+```sh
+cargo run -p nile-shell -- examples/word-ribbon.html
+cargo run -p nile-shell -- examples/word-ribbon.html --png docs/word-ribbon.png --width 1280 --height 900 --scale 2
+```
+
+An interactive ribbon with seven tabs, grouped commands, navigation, a document
+preview and a status bar. Font, style and alignment commands format the Overview
+paragraph; formatting undo/redo, document search and zoom also work. Other commands
+report a design-preview message. This is a UI example, not a document editor;
+save, sharing and clipboard commands do not persist or transfer content.
+
 ## What's supported today
 
 - **Selectors** (Servo's `selectors` crate): type, `.class`, `#id`, attributes (`[a]`, `[a^=b]`, ...), the
@@ -82,7 +95,10 @@ cargo test --workspace
 - **Form controls:** `<input>` (text, password, placeholder, `value`), `<textarea>` (wrapping, newlines, Up/Down
   by line), checkboxes and radio groups (including `<label>` clicks), `<button>`, disabled states, a blinking
   caret with click-to-place that scrolls into view, typing, Backspace/Delete/arrows/Home/End, Tab and Shift+Tab
-  focus order (`tabindex` respected), and `input`/`change`/`focus`/`blur` events. Text selection in inputs and
+  focus order (`tabindex` respected), and `input`/`change`/`focus`/`blur` events. Undo/redo (Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z, Ctrl+Y; typing and Backspace runs group into one step), word-wise
+  movement and deletion (Alt or Ctrl+arrows/Backspace/Delete, Cmd+arrows/Backspace on macOS), and keyboard scrolling
+  outside text inputs (arrows, Page Up/Down, Space, Home/End on the focused or hovered scroller, then the page).
+  Page text selection (off by default, like a desktop UI: opt in with `user-select: text`/`all`, a `selectable` attribute, or Sciter's `behavior: htmlarea`; `text-selection-background-color` sets the highlight): drag, double-click (word), triple-click (run), Shift+click, Ctrl/Cmd+A and Ctrl/Cmd+C, with `window.getSelection().toString()`. Text selection in inputs and
   textareas: Shift+arrows/Home/End, drag, Shift+click, double-click (word), triple-click (all), Ctrl/Cmd+A, and
   copy/cut/paste through the system clipboard; Tab selects an input's contents. In JS: `selectionStart`,
   `selectionEnd`, `setSelectionRange()`, `select()`. `<select>` with `<option>`s: a drop-down that opens on click,
@@ -103,7 +119,7 @@ cargo test --workspace
   `text-transform`, `letter-spacing`, outer `box-shadow` (several, blurred, spread) and painted `opacity` (a layer
   over the whole subtree) and `position: relative|absolute` (against the nearest positioned ancestor) with `top/right/bottom/left/inset` and `z-index` (see
   `examples/position.html`) `linear-gradient`/`radial-gradient` and their `repeating-` forms as `background`
-  (`examples/gradients.html`), `transform` (`translate`, `scale`, `rotate`, `skew`, `matrix`, with `transform-origin`; hit testing and `getBoundingClientRect` follow it; `examples/transforms.html`), `<img>` (PNG/JPEG/WebP/GIF from files next to the page or `data:` URLs; sized by CSS, `width`/`height` attributes or the picture) and `background-image: url()` with `background-size`/`-position`/`-repeat` (`examples/images.html`), `float`/`clear` (`examples/float.html`), `display: grid` (`grid-template-columns/rows` with `px`/`%`/`fr`/`auto`/`minmax()`/`repeat()` incl. `auto-fill`/`auto-fit`,
+  (`examples/gradients.html`), `transition` (any animatable property or `all`, with delay, `ease`/`linear`/`cubic-bezier()`/`steps()`; a change mid-transition continues from where it is) and `@keyframes` `animation` (iterations, `infinite`, direction, fill modes, delays; `examples/animations.html`) over opacity, colors, lengths, padding/border widths, radius, `transform` and more, `transform` (`translate`, `scale`, `rotate`, `skew`, `matrix`, with `transform-origin`; hit testing and `getBoundingClientRect` follow it; `examples/transforms.html`), `<img>` (PNG/JPEG/WebP/GIF from files next to the page or `data:` URLs; sized by CSS, `width`/`height` attributes or the picture) and `background-image: url()` with `background-size`/`-position`/`-repeat` (`examples/images.html`), `float`/`clear` (`examples/float.html`), `display: grid` (`grid-template-columns/rows` with `px`/`%`/`fr`/`auto`/`minmax()`/`repeat()` incl. `auto-fill`/`auto-fit`,
   `grid-auto-*`, `grid-column/row` with spans and line numbers, `grid-template-areas` + `grid-area`, `row-gap`/`column-gap`,
   `justify-items`/`justify-self`/`align-self`/`align-content`/`place-*`; `examples/grid.html`), and `::before`/`::after` with `content` (strings, `attr()`, quotes; any `display`, including
   inline-block and absolute; `examples/pseudo.html`) too. See `examples/css-compat.html` for a page that checks these.
@@ -116,13 +132,14 @@ cargo test --workspace
 - **Inline layout is partial.** Shrink-to-fit `inline-block` uses max-content (it won't narrow to fit a
   line), inline margins are ignored, a wrapped inline's border/radius isn't sliced at the break, only the
   innermost decorated inline is painted, and block children of an inline element don't split the run.
-- Form gaps: selection works only inside inputs/textareas (no selecting page text); no undo/redo, word-wise
-  movement (Alt/Ctrl+arrows), IME or drag-and-drop; no `<form>` submit or validation; `<select>` is single-choice only (no `multiple`, `size`, `<optgroup>` labels), its
+- Selection gaps: page text selection works across runs in paint order (so `z-index` reordering can scramble the
+  selection order), can't start inside a link or control, has no keyboard (Shift+arrows), and ignores `user-select: none` on a span inside a selectable block (it applies per paragraph/run); `text-selection-color` isn't painted; `Range`/
+  `Selection` objects beyond `toString()`/`removeAllRanges()` are missing. Form gaps: no IME or drag-and-drop; no `<form>` submit or validation; `<select>` is single-choice only (no `multiple`, `size`, `<optgroup>` labels), its
   list doesn't scroll or flip above the select near the bottom edge, and it closes when the page scrolls; Home/End in a
   `<textarea>` use hard line breaks only; `selectionStart/End` count characters, not UTF-16 units; `value` lives
   in the `value` attribute (no separate default value). Sciter's `Element.value` for other behaviors isn't there.
-- Scrollbars are overlay indicators only: no dragging or track clicks, no `scrollbar-*` styling, no keyboard
-  scrolling (Page Up/Down, arrows); clipping ignores `border-radius`; `white-space: pre`/`pre-wrap` don't preserve
+- Scrollbars are thin overlay bars (draggable; clicking the track jumps there), with no `scrollbar-*` styling, no
+  hover/fade behavior and no arrow buttons; clipping ignores `border-radius`; `white-space: pre`/`pre-wrap` don't preserve
   whitespace yet (`pre` just doesn't wrap).
 - JS gaps: `fetch`, bare/`@sciter`/`@env`-style module specifiers (only relative and absolute paths),
   `window.location`, `devicePixelRatio` (always 1), element-level scrolling (`scrollTop` only works on the

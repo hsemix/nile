@@ -701,6 +701,14 @@
   });
 
   // ---- computed style, window metrics, scrolling ---------------------------
+  // `window.getSelection()`: the text selected on the page (not inside inputs).
+  g.getSelection = () => ({
+    toString: () => N.pageSelection(),
+    get isCollapsed() { return N.pageSelection() === ""; },
+    get rangeCount() { return N.pageSelection() === "" ? 0 : 1; },
+    removeAllRanges: () => N.clearPageSelection(),
+    empty: () => N.clearPageSelection(),
+  });
   g.getComputedStyle = (el) => {
     const get = (n) => {
       n = kebab(n);

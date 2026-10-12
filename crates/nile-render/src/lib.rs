@@ -25,6 +25,10 @@ pub struct Overlay<'a> {
     pub caret: Option<(NodeId, usize)>,
     /// The input with a selection and the selected byte range of its displayed text.
     pub selection: Option<(NodeId, usize, usize)>,
+    /// The window's logical size, for the page's own scrollbar.
+    pub viewport: (f32, f32),
+    /// Selected page text: `(text run, from, to)` byte ranges.
+    pub page_selection: &'a [(usize, usize, usize)],
 }
 
 pub struct Renderer {
@@ -48,7 +52,7 @@ impl Renderer {
 
     /// Paint the whole tree.
     pub fn paint(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, overlay: &Overlay) {
-        let Overlay { scroll_y, offsets, caret, selection } = *overlay;
+        let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection } = *overlay;
         canvas.save();
         canvas.translate((0.0, -scroll_y));
         // Boxes that wrap their subtree (an `overflow` clip, or an `opacity` layer) end
@@ -84,8 +88,12 @@ impl Renderer {
                     }
                 }
                 BoxContent::Text(content) => {
+                    let highlight = styles.get(b.node).selection_bg;
                     if let Some((_, from, to)) = selection.filter(|(n, ..)| content.owners.iter().any(|(_, o)| o == n)) {
-                        paint_selection(canvas, b.rect, content, from, to);
+                        paint_selection(canvas, b.rect, content, from, to, highlight);
+                    }
+                    if let Some(&(_, from, to)) = page_selection.iter().find(|(run, ..)| *run == i) {
+                        paint_selection(canvas, b.rect, content, from, to, highlight);
                     }
                     self.paint_text(canvas, b.rect, content);
                     if let Some((_, at)) = caret.filter(|(n, _)| content.owners.iter().any(|(_, o)| o == n)) {
@@ -104,6 +112,9 @@ impl Renderer {
             self.paint_menu(canvas, menu);
         }
         canvas.restore();
+        if let Some(t) = nile_layout::page_thumb(viewport, tree.content_height, scroll_y) {
+            paint_thumb(canvas, &t);
+        }
     }
 
     /// The open `<select>` list: white panel, highlighted row, a mark on the chosen one.
@@ -595,37 +606,32 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
 /// Thin overlay scrollbars for an `overflow: auto | scroll` box that has more to show.
 fn paint_scrollbars(canvas: &Canvas, b: &LayoutBox, offsets: &ScrollOffsets) {
     let Some(sb) = &b.scroll else { return };
-    let (max_x, max_y) = sb.max_offset();
     let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    paint.set_color(Color::from_argb(110, 0, 0, 0));
-    const THICK: f32 = 6.0;
-    const EDGE: f32 = 2.0;
-    let c = sb.clip;
-    if sb.wheel_y && max_y > 0.0 {
-        let len = (c.height * c.height / sb.content_height).clamp(16.0, c.height);
-        let top = c.y + (c.height - len) * (oy / max_y).clamp(0.0, 1.0);
-        let r = Rect::from_xywh(c.x + c.width - THICK - EDGE, top, THICK, len);
-        canvas.draw_round_rect(r, THICK / 2.0, THICK / 2.0, &paint);
-    }
-    if sb.wheel_x && max_x > 0.0 {
-        let len = (c.width * c.width / sb.content_width).clamp(16.0, c.width);
-        let left = c.x + (c.width - len) * (ox / max_x).clamp(0.0, 1.0);
-        let r = Rect::from_xywh(left, c.y + c.height - THICK - EDGE, len, THICK);
-        canvas.draw_round_rect(r, THICK / 2.0, THICK / 2.0, &paint);
+    for t in sb.thumbs(ox, oy) {
+        paint_thumb(canvas, &t);
     }
 }
 
+fn paint_thumb(canvas: &Canvas, t: &nile_layout::Thumb) {
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(Color::from_argb(110, 0, 0, 0));
+    let r = Rect::from_xywh(t.rect.x, t.rect.y, t.rect.width, t.rect.height);
+    canvas.draw_round_rect(r, nile_layout::SCROLLBAR_THICK / 2.0, nile_layout::SCROLLBAR_THICK / 2.0, &paint);
+}
+
 /// Highlight bytes `from..to` of a text run.
-fn paint_selection(canvas: &Canvas, origin: LRect, content: &TextContent, from: usize, to: usize) {
+fn paint_selection(canvas: &Canvas, origin: LRect, content: &TextContent, from: usize, to: usize, color: Option<CssColor>) {
     let layout = &content.layout;
     let sel = Selection::new(
         Cursor::from_byte_index(layout, from, Affinity::Downstream),
         Cursor::from_byte_index(layout, to, Affinity::Upstream),
     );
     let mut paint = Paint::default();
-    paint.set_color(Color::from_argb(90, 59, 130, 246));
+    match color {
+        Some(c) => paint.set_color(Color::from_argb(c.a, c.r, c.g, c.b)),
+        None => paint.set_color(Color::from_argb(90, 59, 130, 246)),
+    };
     for (r, _) in sel.geometry(layout) {
         let rect = Rect::from_ltrb(
             origin.x + r.x0 as f32,

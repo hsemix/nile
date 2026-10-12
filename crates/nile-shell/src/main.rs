@@ -11,10 +11,10 @@
 use std::{cell::RefCell, num::NonZeroU32, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 
 use nile_dom::{Document, NodeId, ScriptSource};
-use nile_layout::{FileImages, LayoutOptions, LayoutTree, MenuRequest, ScrollOffsets};
+use nile_layout::{TextPoint, FileImages, LayoutOptions, LayoutTree, MenuRequest, ScrollOffsets};
 use nile_render::{Overlay, Renderer};
 use nile_script::{Environment, ScriptHost, UiEvent};
-use nile_style::{compute_styles_in, InteractionState, StyleMap};
+use nile_style::{compute_styles_in, Animator, InteractionState, StyleMap};
 use nile_text::TextEngine;
 use skia_safe::{surfaces, AlphaType, Color, ColorType, EncodedImageFormat, ImageInfo};
 use winit::{
@@ -79,7 +79,13 @@ struct View {
     doc: Rc<RefCell<Document>>,
     /// `doc.version` that `styles` were computed for.
     seen_version: u64,
+    /// What the styles are right now: `base` with transitions and animations applied.
     styles: StyleMap,
+    /// The cascaded target styles, kept while the page animates.
+    base: Option<StyleMap>,
+    animator: Animator,
+    /// Time zero of transitions and animations.
+    clock: Instant,
     text: TextEngine,
     layout: Option<(f32, f32, LayoutTree)>,
     /// Logical viewport size, so hit testing and scripts can lay out on demand.
@@ -92,6 +98,8 @@ struct View {
     /// Elements scrolled since the page last looked, to fire `scroll` events.
     scrolled: Vec<NodeId>,
     interaction: InteractionState,
+    /// Text selected on the page itself (not in an input).
+    page_sel: Option<PageSel>,
     /// Where `<img>` and `url()` backgrounds are read from: the page's folder.
     images: FileImages,
     /// The open `<select>` drop-down and its highlighted row.
@@ -106,15 +114,74 @@ struct View {
     focus_changes: Vec<(Option<NodeId>, Option<NodeId>)>,
 }
 
+/// A selection over the page's text, valid for one version of the document.
+#[derive(Clone, Copy)]
+struct PageSel {
+    anchor: TextPoint,
+    focus: TextPoint,
+    version: u64,
+}
+
+impl View {
+    /// The selected text runs and byte ranges, if the selection is still current.
+    fn page_ranges(&mut self) -> Vec<(usize, usize, usize)> {
+        let Some(sel) = self.page_sel else { return Vec::new() };
+        if sel.version != self.doc.borrow().version {
+            self.page_sel = None;
+            return Vec::new();
+        }
+        if sel.anchor == sel.focus {
+            return Vec::new();
+        }
+        self.layout().selection_ranges(sel.anchor, sel.focus)
+    }
+
+    fn page_selected_text(&mut self) -> String {
+        let ranges = self.page_ranges();
+        self.layout().selection_text(&ranges)
+    }
+
+    fn set_page_sel(&mut self, anchor: TextPoint, focus: TextPoint) {
+        self.page_sel = Some(PageSel { anchor, focus, version: self.doc.borrow().version });
+    }
+}
+
 impl View {
     /// Recompute styles (after an interaction change or a DOM mutation).
     // TODO: restyle only the affected elements and relayout only if a
     // layout-affecting property changed.
     fn restyle(&mut self) {
         let doc = self.doc.borrow();
-        self.styles = compute_styles_in(&doc, &self.interaction, self.viewport);
+        let fresh = compute_styles_in(&doc, &self.interaction, self.viewport);
         self.seen_version = doc.version;
         self.layout = None;
+        drop(doc);
+        self.adopt(fresh);
+    }
+
+    /// Take freshly cascaded styles, starting transitions for what changed.
+    fn adopt(&mut self, fresh: StyleMap) {
+        if fresh.animates() || self.animator.is_tracking() {
+            let now = self.clock.elapsed().as_secs_f64();
+            self.styles = fresh.clone();
+            let base = self.base.insert(fresh);
+            self.animator.update(base, &mut self.styles, now, true);
+        } else {
+            self.styles = fresh;
+            self.base = None;
+        }
+    }
+
+    /// Advance transitions and animations to now. True if styles changed.
+    fn animate(&mut self) -> bool {
+        let Some(base) = &self.base else { return false };
+        if !self.animator.is_active() {
+            return false;
+        }
+        let now = self.clock.elapsed().as_secs_f64();
+        self.animator.update(base, &mut self.styles, now, false);
+        self.layout = None;
+        true
     }
 
     /// Restyle if scripts changed the document. True if they did.
@@ -243,6 +310,16 @@ impl Environment for Env {
         (a.min(c).min(len), a.max(c).min(len))
     }
 
+    fn selected_text(&self) -> String {
+        let mut v = self.0.borrow_mut();
+        v.sync();
+        v.page_selected_text()
+    }
+
+    fn clear_selected_text(&self) {
+        self.0.borrow_mut().page_sel = None;
+    }
+
     fn set_selection(&self, node: NodeId, start: usize, end: usize) {
         let mut v = self.0.borrow_mut();
         let len = nile_layout::control_value(&v.doc.borrow(), node).chars().count();
@@ -291,9 +368,77 @@ struct Page {
     clipboard: Box<dyn Clipboard>,
     /// Value when the focused input got focus, to decide whether `change` fires.
     value_at_focus: Option<String>,
+    /// A mouse drag extending the page selection.
+    page_drag: bool,
+    /// A scrollbar thumb being dragged.
+    bar_drag: Option<BarDrag>,
+    /// Undo/redo stacks of the text inputs edited so far.
+    history: std::collections::HashMap<NodeId, History>,
     /// Blink phase of the caret and when it flips next.
     caret_visible: bool,
     blink_at: Instant,
+}
+
+/// A scrollbar thumb held by the pointer.
+struct BarDrag {
+    /// The scrolling element, or `None` for the page.
+    node: Option<NodeId>,
+    /// The scrollbar where it was grabbed, in painted coordinates.
+    thumb: nile_layout::Thumb,
+    /// How far into the thumb (along the track) the pointer grabbed it.
+    grab: f32,
+}
+
+/// What an edit did, so runs of the same kind (typing, repeated Backspace) undo as one step.
+#[derive(Clone, Copy, PartialEq)]
+enum EditKind {
+    Insert,
+    Backspace,
+    Delete,
+    /// Paste, cut, a replaced selection: always its own step.
+    Other,
+}
+
+/// An input's value and selection (anchor, caret).
+#[derive(Clone)]
+struct EditState {
+    value: String,
+    anchor: usize,
+    caret: usize,
+}
+
+#[derive(Default)]
+struct History {
+    undo: Vec<EditState>,
+    redo: Vec<EditState>,
+    /// The last edit's kind and where the caret ended, for coalescing.
+    last: Option<(EditKind, usize)>,
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Start of the word before `at`, skipping separators first.
+fn word_start(chars: &[char], mut at: usize) -> usize {
+    while at > 0 && !is_word_char(chars[at - 1]) {
+        at -= 1;
+    }
+    while at > 0 && is_word_char(chars[at - 1]) {
+        at -= 1;
+    }
+    at
+}
+
+/// End of the word after `at`, skipping separators first.
+fn word_end(chars: &[char], mut at: usize) -> usize {
+    while at < chars.len() && !is_word_char(chars[at]) {
+        at += 1;
+    }
+    while at < chars.len() && is_word_char(chars[at]) {
+        at += 1;
+    }
+    at
 }
 
 impl Page {
@@ -307,7 +452,10 @@ impl Page {
         let view = Rc::new(RefCell::new(View {
             doc: doc.clone(),
             seen_version: doc.borrow().version,
-            styles,
+            styles: StyleMap::clone(&styles),
+            base: None,
+            animator: Animator::new(),
+            clock: Instant::now(),
             text: TextEngine::new(),
             layout: None,
             viewport,
@@ -320,9 +468,11 @@ impl Page {
             caret: 0,
             pending_sel: std::collections::HashMap::new(),
             interaction,
+            page_sel: None,
             images: FileImages::new(path.parent().map(PathBuf::from).unwrap_or_default()),
             focus_changes: Vec::new(),
         }));
+        view.borrow_mut().adopt(styles);
 
         let scripts = match ScriptHost::new(doc.clone(), Rc::new(Env(view.clone()))) {
             Ok(host) => {
@@ -387,6 +537,9 @@ impl Page {
             last_click: None,
             clipboard: Box::new(MemoryClipboard::default()),
             value_at_focus: None,
+            history: std::collections::HashMap::new(),
+            bar_drag: None,
+            page_drag: false,
             caret_visible: true,
             blink_at: Instant::now() + CARET_BLINK,
         }
@@ -504,7 +657,12 @@ impl Page {
     fn wheel(&mut self, dx: f32, dy: f32) {
         self.close_menu();
         let target = self.pointer.and_then(|(x, y)| self.hit_test(x, y));
-        let mut cur = target;
+        self.scroll_chain(target, dx, dy);
+    }
+
+    /// Scroll by a wheel-style delta starting at `start` and chaining outwards to the page.
+    fn scroll_chain(&mut self, start: Option<NodeId>, dx: f32, dy: f32) {
+        let mut cur = start;
         while let Some(n) = cur {
             let moved = {
                 let mut v = self.view.borrow_mut();
@@ -528,10 +686,130 @@ impl Page {
             }
             cur = self.doc.borrow().node(n).parent;
         }
-        self.view.borrow_mut().scroll_y -= dy;
-        // Content moved under a stationary pointer. The page scroll is clamped
-        // at paint, so hover may lag one frame at its limits.
+        {
+            let mut v = self.view.borrow_mut();
+            let max = (v.layout().content_height - v.viewport.1).max(0.0);
+            v.scroll_y = (v.scroll_y - dy).clamp(0.0, max);
+        }
         self.refresh_hover();
+    }
+
+    /// Keyboard scrolling when no text is being edited: arrows, Page Up/Down, Space
+    /// (Shift reverses), Home and End. Scrolls the scroller under the focus or pointer,
+    /// then the page. True if the key was a scroll key.
+    fn scroll_key(&mut self, key: &str, mods: ModifiersState) -> bool {
+        if mods.control_key() || mods.alt_key() || mods.super_key() {
+            return false;
+        }
+        let start = self.interaction().focus.or_else(|| self.pointer.and_then(|(x, y)| self.hit_test(x, y)));
+        // The scroller the key applies to, to size a "page" and tell if it can scroll at all.
+        let page = {
+            let mut v = self.view.borrow_mut();
+            let mut cur = start;
+            let mut found = None;
+            while let Some(n) = cur {
+                if let Some(sb) = v.layout().scroll_box(n).copied() {
+                    if sb.wheel_y {
+                        found = Some(sb.clip.height);
+                        break;
+                    }
+                }
+                cur = self.doc.borrow().node(n).parent;
+            }
+            found.unwrap_or(v.viewport.1) * 0.875
+        };
+        let (dx, dy) = match key {
+            "ArrowDown" => (0.0, -40.0),
+            "ArrowUp" => (0.0, 40.0),
+            "ArrowRight" => (-40.0, 0.0),
+            "ArrowLeft" => (40.0, 0.0),
+            "PageDown" => (0.0, -page),
+            "PageUp" => (0.0, page),
+            " " => (0.0, if mods.shift_key() { page } else { -page }),
+            "End" => (0.0, -1.0e7),
+            "Home" => (0.0, 1.0e7),
+            _ => return false,
+        };
+        self.scroll_chain(start, dx, dy);
+        true
+    }
+
+    /// The scrollbar under a viewport point: who scrolls, its geometry in painted
+    /// coordinates (document coordinates for elements), and whether the thumb itself
+    /// (rather than the track) is under the point.
+    fn scrollbar_at(&mut self, x: f32, y: f32) -> Option<(Option<NodeId>, nile_layout::Thumb, bool)> {
+        let mut v = self.view.borrow_mut();
+        if v.viewport.0 <= 0.0 {
+            return None;
+        }
+        // A little slack either side of the thin bar makes it easy to grab.
+        let near = |r: nile_layout::Rect, px: f32, py: f32| px >= r.x - 4.0 && px <= r.x + r.width + 4.0 && py >= r.y - 2.0 && py <= r.y + r.height + 2.0;
+        let (scroll, viewport) = (v.scroll_y, v.viewport);
+        let content = v.layout().content_height;
+        if let Some(t) = nile_layout::page_thumb(viewport, content, scroll) {
+            if near(t.track, x, y) {
+                return Some((None, t, near(t.rect, x, y)));
+            }
+        }
+        let offsets = v.scroll_offsets.clone();
+        let (dx, dy) = (x, y + scroll);
+        let tree = v.layout();
+        let places = tree.placements(&offsets);
+        for (b, p) in tree.boxes.iter().zip(&places).rev() {
+            let Some(sb) = &b.scroll else { continue };
+            let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
+            for t in sb.thumbs(ox, oy) {
+                let t = nile_layout::Thumb { rect: p.xf.bounds(t.rect), track: p.xf.bounds(t.track), ..t };
+                if near(t.track, dx, dy) {
+                    return Some((Some(b.node), t, near(t.rect, dx, dy)));
+                }
+            }
+        }
+        None
+    }
+
+    /// Start dragging a scrollbar under the pointer (a click on its track jumps there).
+    fn scrollbar_press(&mut self, x: f32, y: f32) -> bool {
+        if self.view.borrow().menu.is_some() {
+            return false;
+        }
+        let Some((node, thumb, on_thumb)) = self.scrollbar_at(x, y) else { return false };
+        let pos = self.bar_axis(node, thumb.vertical, x, y);
+        let start = if thumb.vertical { thumb.rect.y } else { thumb.rect.x };
+        let len = if thumb.vertical { thumb.rect.height } else { thumb.rect.width };
+        let grab = if on_thumb { pos - start } else { len / 2.0 };
+        self.bar_drag = Some(BarDrag { node, thumb, grab });
+        self.bar_drag_to(x, y);
+        true
+    }
+
+    /// The pointer's coordinate along a scrollbar's axis, in that scrollbar's space.
+    fn bar_axis(&self, node: Option<NodeId>, vertical: bool, x: f32, y: f32) -> f32 {
+        if vertical {
+            if node.is_some() { y + self.view.borrow().scroll_y } else { y }
+        } else {
+            x
+        }
+    }
+
+    fn bar_drag_to(&mut self, x: f32, y: f32) -> bool {
+        let Some(drag) = &self.bar_drag else { return false };
+        let (node, thumb, grab) = (drag.node, drag.thumb, drag.grab);
+        let offset = thumb.offset_for(self.bar_axis(node, thumb.vertical, x, y) - grab);
+        match node {
+            None => self.view.borrow_mut().scroll_y = offset,
+            Some(n) => {
+                let moved = {
+                    let mut v = self.view.borrow_mut();
+                    let (ox, oy) = v.scroll_offsets.get(&n).copied().unwrap_or_default();
+                    if thumb.vertical { v.set_element_scroll(n, ox, offset) } else { v.set_element_scroll(n, offset, oy) }
+                };
+                if moved {
+                    self.sync();
+                }
+            }
+        }
+        true
     }
 
     /// Scroll the focused input/textarea so its caret is visible.
@@ -604,6 +882,19 @@ impl Page {
 
     fn pointer_moved(&mut self, x: f32, y: f32) -> bool {
         self.pointer = Some((x, y));
+        if self.bar_drag.is_some() {
+            return self.bar_drag_to(x, y);
+        }
+        if self.page_drag {
+            if let Some(p) = self.page_text_point() {
+                let mut v = self.view.borrow_mut();
+                if let Some(s) = v.page_sel {
+                    v.set_page_sel(s.anchor, p);
+                }
+            }
+            self.refresh_hover();
+            return true;
+        }
         // With a drop-down open the pointer belongs to it.
         if self.view.borrow().menu.is_some() {
             return self.menu_hover(x, y);
@@ -680,6 +971,11 @@ impl Page {
     /// Primary button down: the hovered element becomes active and focus moves
     /// to its nearest focusable ancestor (or is cleared).
     fn press(&mut self) -> bool {
+        if let Some((x, y)) = self.pointer {
+            if self.scrollbar_press(x, y) {
+                return true;
+            }
+        }
         // While a drop-down is open the click is decided on release.
         if self.view.borrow().menu.is_some() {
             return false;
@@ -722,14 +1018,94 @@ impl Page {
                 changed |= before != (self.anchor(), self.caret());
             }
         }
+        if self.interaction().focus.is_some_and(|f| self.is_text_input(f)) {
+            self.view.borrow_mut().page_sel = None;
+        } else if self.interaction().focus.is_none() {
+            changed |= self.begin_page_selection();
+        }
         self.show_caret();
         changed
+    }
+
+    /// The page text position nearest the pointer.
+    fn page_text_point(&mut self) -> Option<TextPoint> {
+        let (x, y) = self.pointer?;
+        let mut v = self.view.borrow_mut();
+        let scroll = v.scroll_y;
+        let offsets = v.scroll_offsets.clone();
+        v.layout().text_point_at(x, y + scroll, &offsets)
+    }
+
+    /// A press on plain page content: start (or, with shift, extend) a text selection;
+    /// double-click picks a word and triple-click a whole run.
+    fn begin_page_selection(&mut self) -> bool {
+        let clicks = self.register_click();
+        // The press has to land on something selectable, not merely near some text.
+        let hit_selectable = self
+            .interaction()
+            .hover
+            .is_some_and(|n| self.view.borrow().styles.get(n).user_select != nile_style::UserSelect::None);
+        let point = if hit_selectable { self.page_text_point() } else { None };
+        let Some(p) = point else {
+            let had = self.view.borrow_mut().page_sel.take().is_some();
+            return had;
+        };
+        let shift = self.mods.shift_key();
+        let mut v = self.view.borrow_mut();
+        let current = v.page_sel.filter(|s| s.version == v.doc.borrow().version);
+        let whole = v.layout().selects_whole_run(p.run);
+        match (clicks, current) {
+            (_, _) if whole => {
+                if let Some((a, b)) = v.layout().word_at(p, true) {
+                    v.set_page_sel(a, b);
+                }
+            }
+            (1, Some(s)) if shift => v.set_page_sel(s.anchor, p),
+            (1, _) => {
+                v.set_page_sel(p, p);
+                drop(v);
+                self.page_drag = true;
+                return true;
+            }
+            (n, _) => {
+                if let Some((a, b)) = v.layout().word_at(p, n >= 3) {
+                    v.set_page_sel(a, b);
+                }
+            }
+        }
+        true
+    }
+
+    /// Keys for the page selection when no input is being edited: copy and select all.
+    fn page_key(&mut self, key: &str, mods: ModifiersState) -> bool {
+        if self.interaction().focus.is_some_and(|f| self.is_text_input(f)) || !(mods.control_key() || mods.super_key()) {
+            return false;
+        }
+        if key.eq_ignore_ascii_case("c") {
+            let text = self.view.borrow_mut().page_selected_text();
+            if text.is_empty() {
+                return false;
+            }
+            self.clipboard.set_text(&text);
+            return true;
+        }
+        if key.eq_ignore_ascii_case("a") {
+            let mut v = self.view.borrow_mut();
+            let Some((a, b)) = v.layout().text_extent() else { return false };
+            v.set_page_sel(a, b);
+            return true;
+        }
+        false
     }
 
     /// Primary button up: `mouseup`, then `click` on the common ancestor of the
     /// pressed and released elements.
     fn release(&mut self) -> bool {
+        if self.bar_drag.take().is_some() {
+            return true;
+        }
         self.drag = None;
+        self.page_drag = false;
         if self.view.borrow().menu.is_some() {
             return self.menu_release();
         }
@@ -780,7 +1156,15 @@ impl Page {
     fn tick(&mut self) -> (bool, Option<Duration>) {
         let (c1, n1) = self.run_timers();
         let (c2, n2) = self.blink();
-        (c1 | c2, [n1, n2].into_iter().flatten().min())
+        let (c3, n3) = self.animate();
+        (c1 | c2 | c3, [n1, n2, n3].into_iter().flatten().min())
+    }
+
+    /// Step transitions and animations; wake again in a frame while any is running.
+    fn animate(&mut self) -> (bool, Option<Duration>) {
+        let mut v = self.view.borrow_mut();
+        let changed = v.animate();
+        (changed, v.animator.is_active().then_some(Duration::from_millis(16)))
     }
 
     /// Elements Tab visits: positive `tabindex` first (ascending), then the
@@ -841,6 +1225,9 @@ impl Page {
     /// Default action for a key the page didn't cancel: Tab moves focus,
     /// anything else edits the focused text input.
     fn default_key(&mut self, key: &str, mods: ModifiersState) -> bool {
+        if self.view.borrow().menu.is_none() && self.page_key(key, mods) {
+            return true;
+        }
         let changed = if self.view.borrow().menu.is_some() {
             self.menu_key(key)
         } else if key == "Tab" {
@@ -848,7 +1235,8 @@ impl Page {
         } else if self.interaction().focus.is_some_and(|f| self.is_select(f)) {
             self.select_key(key, mods)
         } else {
-            self.edit_key(key, mods)
+            let editing = self.interaction().focus.is_some_and(|f| self.is_text_input(f));
+            self.edit_key(key, mods) || (!editing && self.scroll_key(key, mods))
         };
         if changed {
             self.show_caret();
@@ -1207,6 +1595,7 @@ impl Page {
         let readonly = self.is_disabled(focus) || self.doc.borrow().node(focus).attr("readonly").is_some();
         let multiline = self.is_textarea(focus);
         let (command, shift) = (mods.control_key() || mods.super_key(), mods.shift_key());
+        let word_mod = mods.alt_key() || (mods.control_key() && !cfg!(target_os = "macos"));
         let mut chars: Vec<char> = self.value_of(focus).chars().collect();
         let len = chars.len();
         let (anchor, caret) = (self.anchor().min(len), self.caret().min(len));
@@ -1242,6 +1631,18 @@ impl Page {
                     edit = Some((lo, hi, text));
                 }
             }
+            k if command && k.eq_ignore_ascii_case("z") && !readonly => {
+                return if shift { self.redo(focus) } else { self.undo(focus) };
+            }
+            k if mods.control_key() && !cfg!(target_os = "macos") && k.eq_ignore_ascii_case("y") && !readonly => {
+                return self.redo(focus);
+            }
+            // Alt+Backspace / Ctrl+Backspace (and Cmd+Backspace on macOS, to the line start).
+            "Backspace" if !readonly && (word_mod || mods.super_key()) && lo == hi && caret > 0 => {
+                let from = if mods.super_key() { chars[..caret].iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1) } else { word_start(&chars, caret) };
+                edit = Some((from, caret, String::new()));
+            }
+            "Delete" if !readonly && word_mod && lo == hi && caret < len => edit = Some((caret, word_end(&chars, caret), String::new())),
             "Backspace" if !readonly => {
                 if lo != hi {
                     edit = Some((lo, hi, String::new()));
@@ -1256,6 +1657,11 @@ impl Page {
                     edit = Some((caret, caret + 1, String::new()));
                 }
             }
+            // Alt (macOS) or Ctrl moves by word; Cmd+Arrow goes to the line's ends.
+            "ArrowLeft" if mods.super_key() => target = Some(chars[..caret].iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1)),
+            "ArrowRight" if mods.super_key() => target = Some(chars[caret..].iter().position(|c| *c == '\n').map_or(len, |i| caret + i)),
+            "ArrowLeft" if word_mod => target = Some(word_start(&chars, caret)),
+            "ArrowRight" if word_mod => target = Some(word_end(&chars, caret)),
             "ArrowLeft" => target = Some(if !shift && lo != hi { lo } else { caret.saturating_sub(1) }),
             "ArrowRight" => target = Some(if !shift && lo != hi { hi } else { (caret + 1).min(len) }),
             // Multi-line: Home/End go to the line's ends (hard breaks only).
@@ -1298,13 +1704,68 @@ impl Page {
         }
         let Some((from, to, text)) = edit else { return false };
         let inserted = text.chars().count();
+        let kind = match key {
+            _ if lo != hi || command => EditKind::Other,
+            "Backspace" if !word_mod => EditKind::Backspace,
+            "Delete" if !word_mod => EditKind::Delete,
+            k if k.chars().count() == 1 && inserted == 1 => EditKind::Insert,
+            _ => EditKind::Other,
+        };
+        self.record_edit(focus, kind, EditState { value: chars.iter().collect(), anchor, caret });
         chars.splice(from..to, text.chars());
         let value: String = chars.iter().collect();
         self.doc.borrow_mut().set_attr(focus, "value", &value);
         self.set_sel(from + inserted, from + inserted);
+        if let Some(h) = self.history.get_mut(&focus) {
+            h.last = Some((kind, from + inserted));
+        }
         self.sync();
         self.emit(focus, UiEvent::Plain("input"));
         true
+    }
+
+    /// Remember the state before an edit, unless it continues the previous one.
+    fn record_edit(&mut self, node: NodeId, kind: EditKind, before: EditState) {
+        let h = self.history.entry(node).or_default();
+        let continues = kind != EditKind::Other && h.last == Some((kind, before.caret)) && before.anchor == before.caret;
+        if !continues {
+            h.undo.push(before);
+            if h.undo.len() > 200 {
+                h.undo.remove(0);
+            }
+        }
+        h.redo.clear();
+    }
+
+    fn current_state(&self, node: NodeId) -> EditState {
+        let len = self.value_of(node).chars().count();
+        EditState { value: self.value_of(node), anchor: self.anchor().min(len), caret: self.caret().min(len) }
+    }
+
+    fn apply_state(&mut self, node: NodeId, state: EditState) -> bool {
+        self.doc.borrow_mut().set_attr(node, "value", &state.value);
+        self.set_sel(state.anchor, state.caret);
+        self.sync();
+        self.emit(node, UiEvent::Plain("input"));
+        true
+    }
+
+    fn undo(&mut self, node: NodeId) -> bool {
+        let now = self.current_state(node);
+        let Some(h) = self.history.get_mut(&node) else { return false };
+        let Some(prev) = h.undo.pop() else { return false };
+        h.redo.push(now);
+        h.last = None;
+        self.apply_state(node, prev)
+    }
+
+    fn redo(&mut self, node: NodeId) -> bool {
+        let now = self.current_state(node);
+        let Some(h) = self.history.get_mut(&node) else { return false };
+        let Some(next) = h.redo.pop() else { return false };
+        h.undo.push(now);
+        h.last = None;
+        self.apply_state(node, next)
     }
 
     /// Caret to draw: the focused text input and the caret's byte offset in its displayed text.
@@ -1417,6 +1878,8 @@ impl Page {
         let caret = self.caret_for_paint();
         let selection = self.selection_for_paint();
         let mut view = self.view.borrow_mut();
+        view.layout();
+        let page_selection = view.page_ranges();
         let max_scroll = (view.layout().content_height - lh).max(0.0);
         view.scroll_y = view.scroll_y.clamp(0.0, max_scroll);
         let scroll = view.scroll_y;
@@ -1431,7 +1894,7 @@ impl Page {
             canvas,
             tree,
             &view.styles,
-            &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection },
+            &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection },
         );
         canvas.restore();
     }
@@ -1457,19 +1920,25 @@ struct Snapshot {
     pointer: Option<Pointer>,
     typed: Option<String>,
     wait_ms: u64,
+    settle_ms: u64,
+    /// `--select X1,Y1,X2,Y2`: drag a text selection.
+    select: Option<[f32; 4]>,
 }
 
 fn render_png(page: &mut Page, snap: Snapshot) {
-    let Snapshot { out, width, height, scale, pointer, typed, wait_ms } = snap;
+    let Snapshot { out, width, height, scale, pointer, typed, wait_ms, settle_ms, select } = snap;
     let out = out.as_str();
     // Let timers run (animations, setTimeout) before the snapshot.
-    let deadline = Instant::now() + Duration::from_millis(wait_ms);
-    while Instant::now() < deadline {
-        let (_, next) = page.run_timers();
-        let Some(next) = next else { break };
-        std::thread::sleep(next.min(deadline.saturating_duration_since(Instant::now())));
-    }
-    page.run_timers();
+    let wait = |page: &mut Page, ms: u64| {
+        let deadline = Instant::now() + Duration::from_millis(ms);
+        while Instant::now() < deadline {
+            let (_, next) = page.tick();
+            let Some(next) = next else { break };
+            std::thread::sleep(next.min(deadline.saturating_duration_since(Instant::now())));
+        }
+        page.run_timers();
+    };
+    wait(page, wait_ms);
     if let Some(p) = pointer {
         // Lay out first so there is something to hit test.
         page.layout(width as f32, height as f32);
@@ -1483,6 +1952,13 @@ fn render_png(page: &mut Page, snap: Snapshot) {
         if p.wheel != 0.0 {
             page.wheel(0.0, p.wheel);
         }
+    }
+    if let Some([x1, y1, x2, y2]) = select {
+        page.layout(width as f32, height as f32);
+        page.pointer_moved(x1, y1);
+        page.press();
+        page.pointer_moved(x2, y2);
+        page.release();
     }
     if let Some(text) = typed {
         let mut rest = text.as_str();
@@ -1516,6 +1992,8 @@ fn render_png(page: &mut Page, snap: Snapshot) {
             page.key("keyup", key, mods);
         }
     }
+    // After the input: transitions it started, and anything it scheduled.
+    wait(page, settle_ms);
     let (pw, ph) = ((width as f32 * scale) as u32, (height as f32 * scale) as u32);
     let mut pixels = vec![0u8; (pw * ph * 4) as usize];
     page.paint(&mut pixels, pw, ph, scale);
@@ -1669,6 +2147,8 @@ fn main() {
     let mut png = None;
     let mut pointer = None;
     let mut wait_ms = 0u64;
+    let mut settle_ms = 0u64;
+    let mut select = None;
     let mut typed = None;
     let (mut width, mut height, mut scale) = (900u32, 640u32, 1.0f32);
 
@@ -1691,6 +2171,13 @@ fn main() {
                 }
             }
             "--type" => typed = args.next(),
+            "--select" => {
+                let v: Vec<f32> = args.next().unwrap_or_default().split(',').filter_map(|n| n.parse().ok()).collect();
+                if let [a, b, c, d] = v[..] {
+                    select = Some([a, b, c, d]);
+                }
+            }
+            "--settle" => settle_ms = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--wait" => wait_ms = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--scale" => scale = args.next().and_then(|v| v.parse().ok()).unwrap_or(scale),
             _ => file = Some(PathBuf::from(arg)),
@@ -1706,7 +2193,7 @@ fn main() {
         page.clipboard = Box::new(SystemClipboard::default());
     }
     if let Some(out) = png {
-        render_png(&mut page, Snapshot { out, width, height, scale, pointer, typed, wait_ms });
+        render_png(&mut page, Snapshot { out, width, height, scale, pointer, typed, wait_ms, settle_ms, select });
         return;
     }
 
@@ -2002,6 +2489,217 @@ cd</textarea>
         press_key(&mut p, "ArrowLeft", ModifiersState::SHIFT);
         press_key(&mut p, "Backspace", none); // deletes just the selection
         assert_eq!(val(&p, "t"), "hello");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn undo_redo_groups_typing_and_backspace_runs() {
+        let (mut p, path) = page(r#"<body style="margin:0"><input id="t"><input id="u" value="hello"></body>"#, "undo");
+        let none = ModifiersState::default();
+        let ctrl = ModifiersState::CONTROL;
+        click(&mut p, "t");
+        for c in ["a", "b", "c"] {
+            press_key(&mut p, c, none);
+        }
+        assert_eq!(val(&p, "t"), "abc");
+        press_key(&mut p, "z", ctrl); // the whole run is one step
+        assert_eq!(val(&p, "t"), "");
+        press_key(&mut p, "z", ctrl | ModifiersState::SHIFT);
+        assert_eq!((val(&p, "t").as_str(), p.caret()), ("abc", 3));
+        // Moving the caret ends a run.
+        press_key(&mut p, "ArrowLeft", none);
+        press_key(&mut p, "X", none);
+        assert_eq!(val(&p, "t"), "abXc");
+        press_key(&mut p, "z", ctrl);
+        assert_eq!((val(&p, "t").as_str(), p.caret()), ("abc", 2));
+        press_key(&mut p, "z", ctrl);
+        assert_eq!(val(&p, "t"), "");
+        press_key(&mut p, "z", ctrl); // nothing left to undo
+        assert_eq!(val(&p, "t"), "");
+        // A new edit drops what could be redone.
+        press_key(&mut p, "q", none);
+        press_key(&mut p, "z", ctrl | ModifiersState::SHIFT);
+        assert_eq!(val(&p, "t"), "q");
+
+        click(&mut p, "u");
+        press_key(&mut p, "End", none);
+        for _ in 0..3 {
+            press_key(&mut p, "Backspace", none);
+        }
+        assert_eq!(val(&p, "u"), "he");
+        press_key(&mut p, "z", ctrl);
+        assert_eq!(val(&p, "u"), "hello");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn word_wise_movement_and_deletion() {
+        let (mut p, path) = page(r#"<body style="margin:0"><input id="t" value="one two, three"></body>"#, "words");
+        let none = ModifiersState::default();
+        let alt = ModifiersState::ALT;
+        click(&mut p, "t");
+        press_key(&mut p, "End", none);
+        press_key(&mut p, "ArrowLeft", alt);
+        assert_eq!(p.caret(), 9); // start of "three"
+        press_key(&mut p, "ArrowLeft", alt);
+        assert_eq!(p.caret(), 4);
+        press_key(&mut p, "ArrowRight", alt);
+        assert_eq!(p.caret(), 7); // end of "two"
+        press_key(&mut p, "ArrowRight", alt | ModifiersState::SHIFT);
+        assert_eq!((p.anchor(), p.caret()), (7, 14));
+        press_key(&mut p, "ArrowLeft", none);
+        press_key(&mut p, "End", none);
+        press_key(&mut p, "Backspace", alt);
+        assert_eq!(val(&p, "t"), "one two, ");
+        press_key(&mut p, "Home", none);
+        press_key(&mut p, "Delete", alt);
+        assert_eq!(val(&p, "t"), " two, ");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn keyboard_scrolls_the_page_and_scrollers() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="box" tabindex="0" style="width:100px; height:80px; overflow:auto"><div style="height:400px">in</div></div>
+               <input id="t" value="x"><div style="height:1000px">tall</div></body>"#,
+            "keyscroll",
+        );
+        let none = ModifiersState::default();
+        // Nothing focused or hovered: the page scrolls.
+        press_key(&mut p, "ArrowDown", none);
+        assert_eq!(p.view.borrow().scroll_y, 40.0);
+        press_key(&mut p, "PageDown", none); // 0.875 of the 300px viewport
+        assert_eq!(p.view.borrow().scroll_y, 40.0 + 262.5);
+        press_key(&mut p, " ", ModifiersState::SHIFT);
+        assert_eq!(p.view.borrow().scroll_y, 40.0);
+        press_key(&mut p, "End", none);
+        let end = p.view.borrow().scroll_y;
+        assert!(end > 700.0 && end < 900.0, "{end}");
+        press_key(&mut p, "ArrowDown", none); // already at the end
+        assert_eq!(p.view.borrow().scroll_y, end);
+        press_key(&mut p, "Home", none);
+        assert_eq!(p.view.borrow().scroll_y, 0.0);
+        // A focused scroller takes the keys first.
+        click(&mut p, "box");
+        press_key(&mut p, "PageDown", none);
+        assert_eq!(offset(&p, "box"), (0.0, 70.0));
+        assert_eq!(p.view.borrow().scroll_y, 0.0);
+        // In a text input the keys are for editing.
+        click(&mut p, "t");
+        press_key(&mut p, "ArrowDown", none);
+        assert_eq!(p.view.borrow().scroll_y, 0.0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scrollbars_drag_and_jump() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="box" style="width:100px; height:80px; overflow:auto"><div style="height:400px">in</div></div>
+               <div style="height:1000px">tall</div></body>"#,
+            "bars",
+        );
+        // The box's thumb: 16px long at the top of a 80px track (x 92..98); 320px scroll range.
+        p.pointer_moved(95.0, 8.0);
+        assert!(p.press());
+        p.pointer_moved(95.0, 40.0); // 32 of the 64 free px
+        assert_eq!(offset(&p, "box"), (0.0, 160.0));
+        p.pointer_moved(95.0, 500.0); // dragging past the end clamps
+        assert_eq!(offset(&p, "box"), (0.0, 320.0));
+        p.pointer_moved(10.0, 10.0); // hover doesn't change while a thumb is held
+        assert!(p.release());
+        // Clicking its track jumps there (thumb centred on the pointer).
+        p.pointer_moved(95.0, 48.0);
+        p.press();
+        p.release();
+        let y = offset(&p, "box").1;
+        assert!((y - 160.0).abs() < 8.0 * 5.0 + 1.0, "{y}"); // within a few px of the middle
+        // The page's own bar sits at the right edge of the 600x300 viewport.
+        let before = p.view.borrow().scroll_y;
+        p.pointer_moved(595.0, 150.0);
+        assert!(p.press());
+        p.pointer_moved(595.0, 290.0);
+        p.release();
+        let after = p.view.borrow().scroll_y;
+        assert!(after > before + 300.0, "{after}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn selected(p: &Page) -> String {
+        p.view.borrow_mut().page_selected_text()
+    }
+
+    #[test]
+    fn page_text_is_only_selectable_when_asked_for() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0; font-size:20px"><p id="plain" style="margin:0">not selectable</p>
+               <p id="attr" selectable style="margin:0">with attribute</p>
+               <div style="behavior: htmlarea"><p id="beh" style="margin:0">sciter behavior</p></div>
+               <p id="all" style="margin:0; user-select: all">click selects everything here</p>
+               <p id="off" selectable style="margin:0"><span id="inner" style="user-select: none">locked</span></p></body>"#,
+            "userselect",
+        );
+        let drag = |p: &mut Page, id: &str| {
+            let (_, y) = center(p, id);
+            p.pointer_moved(1.0, y);
+            p.press();
+            p.pointer_moved(590.0, y);
+            p.release();
+        };
+        drag(&mut p, "plain");
+        assert_eq!(selected(&p), "");
+        drag(&mut p, "attr");
+        assert_eq!(selected(&p), "with attribute");
+        drag(&mut p, "beh");
+        assert_eq!(selected(&p), "sciter behavior");
+        // `user-select: all`: one click takes the whole run.
+        let (_, y) = center(&p, "all");
+        p.pointer_moved(40.0, y);
+        p.press();
+        p.release();
+        assert_eq!(selected(&p), "click selects everything here");
+        // Select all skips what can't be selected.
+        press_key(&mut p, "a", ModifiersState::CONTROL);
+        let all = selected(&p);
+        assert!(all.contains("with attribute") && all.contains("sciter behavior") && !all.contains("not selectable"), "{all}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn page_text_selection_by_drag_word_run_and_copy() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0; font-size:20px; user-select:text"><p id="a" style="margin:0">alpha beta gamma</p>
+               <p id="b" style="margin:0">second <b>bold</b> tail</p><input id="t" value="inside">
+               <script>document.addEventListener('click', () => console.log('sel:' + window.getSelection().toString()))</script></body>"#,
+            "pagesel",
+        );
+        // Drag from the first paragraph's left edge to the second's right side.
+        let (_, ay) = center(&p, "a");
+        let (_, by) = center(&p, "b");
+        p.pointer_moved(1.0, ay);
+        p.press();
+        p.pointer_moved(560.0, by);
+        p.release();
+        assert_eq!(selected(&p), "alpha beta gamma\nsecond bold tail");
+        // Copying puts it on the clipboard.
+        press_key(&mut p, "c", ModifiersState::CONTROL);
+        assert_eq!(p.clipboard.text().as_deref(), Some("alpha beta gamma\nsecond bold tail"));
+        // A double-click picks the word under the pointer, a triple-click the run.
+        p.pointer_moved(80.0, ay);
+        p.press();
+        p.release();
+        p.press();
+        p.release();
+        assert_eq!(selected(&p), "beta");
+        p.press();
+        p.release();
+        assert_eq!(selected(&p), "alpha beta gamma");
+        // Select all, then clicking an input drops the page selection.
+        press_key(&mut p, "a", ModifiersState::CONTROL);
+        assert_eq!(selected(&p), "alpha beta gamma\nsecond bold tail");
+        click(&mut p, "t");
+        assert_eq!(selected(&p), "");
+        press_key(&mut p, "a", ModifiersState::CONTROL); // now it selects the input's text
+        assert_eq!(selected(&p), "");
         let _ = std::fs::remove_file(path);
     }
 

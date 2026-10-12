@@ -63,6 +63,29 @@ pub struct TextContent {
     pub decos: Vec<InlineDeco>,
     /// Which element each byte range of the run's text belongs to (for hit testing).
     pub owners: Vec<(Range<usize>, NodeId)>,
+    /// The text the layout shaped.
+    pub text: String,
+    /// Byte ranges of `text` that are padding/border spacers, not content.
+    pub spacers: Vec<Range<usize>>,
+    /// The text of a form control; page selection skips it.
+    pub control: bool,
+    /// May the user select this text (`user-select`).
+    pub user_select: nile_style::UserSelect,
+}
+
+impl TextContent {
+    /// Can page selection include this run: not a form control, and not `user-select: none`.
+    pub fn selectable(&self) -> bool {
+        !self.control && self.user_select != nile_style::UserSelect::None
+    }
+}
+
+/// A place in the page's text: a text run (an index into [`LayoutTree::boxes`]) and a
+/// byte offset into its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TextPoint {
+    pub run: usize,
+    pub byte: usize,
 }
 
 pub struct LayoutBox {
@@ -97,7 +120,70 @@ pub struct ScrollBox {
     pub content_height: f32,
 }
 
+/// Overlay scrollbar metrics, shared by painting and dragging.
+pub const SCROLLBAR_THICK: f32 = 6.0;
+pub const SCROLLBAR_EDGE: f32 = 2.0;
+
+/// One scrollbar: its thumb and the strip it slides in, in the same coordinates as the
+/// box it belongs to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Thumb {
+    pub rect: Rect,
+    pub track: Rect,
+    pub vertical: bool,
+    /// Largest scroll offset along this axis.
+    pub max: f32,
+}
+
+impl Thumb {
+    fn new(track: Rect, vertical: bool, view: f32, content: f32, offset: f32) -> Option<Thumb> {
+        let max = (content - view).max(0.0);
+        if max <= 0.0 || view <= 0.0 {
+            return None;
+        }
+        let len = (view * view / content).clamp(16.0_f32.min(view), view);
+        let at = (view - len) * (offset / max).clamp(0.0, 1.0);
+        let rect = if vertical {
+            Rect { x: track.x, y: track.y + at, width: track.width, height: len }
+        } else {
+            Rect { x: track.x + at, y: track.y, width: len, height: track.height }
+        };
+        Some(Thumb { rect, track, vertical, max })
+    }
+
+    /// The scroll offset that puts the thumb's start at `pos` (a coordinate along the track).
+    pub fn offset_for(&self, pos: f32) -> f32 {
+        let (start, len, thumb) = if self.vertical {
+            (self.track.y, self.track.height, self.rect.height)
+        } else {
+            (self.track.x, self.track.width, self.rect.width)
+        };
+        let free = (len - thumb).max(f32::EPSILON);
+        ((pos - start) / free).clamp(0.0, 1.0) * self.max
+    }
+}
+
+/// The page's own vertical scrollbar, in viewport coordinates.
+pub fn page_thumb(viewport: (f32, f32), content_height: f32, scroll_y: f32) -> Option<Thumb> {
+    let track = Rect { x: viewport.0 - SCROLLBAR_THICK - SCROLLBAR_EDGE, y: 0.0, width: SCROLLBAR_THICK, height: viewport.1 };
+    Thumb::new(track, true, viewport.1, content_height, scroll_y)
+}
+
 impl ScrollBox {
+    /// The scrollbars to show at scroll offsets `(ox, oy)`.
+    pub fn thumbs(&self, ox: f32, oy: f32) -> Vec<Thumb> {
+        let (c, mut out) = (self.clip, Vec::new());
+        if self.wheel_y {
+            let track = Rect { x: c.x + c.width - SCROLLBAR_THICK - SCROLLBAR_EDGE, y: c.y, width: SCROLLBAR_THICK, height: c.height };
+            out.extend(Thumb::new(track, true, c.height, self.content_height, oy));
+        }
+        if self.wheel_x {
+            let track = Rect { x: c.x, y: c.y + c.height - SCROLLBAR_THICK - SCROLLBAR_EDGE, width: c.width, height: SCROLLBAR_THICK };
+            out.extend(Thumb::new(track, false, c.width, self.content_width, ox));
+        }
+        out
+    }
+
     /// Largest scroll offsets (x, y).
     pub fn max_offset(&self) -> (f32, f32) {
         ((self.content_width - self.clip.width).max(0.0), (self.content_height - self.clip.height).max(0.0))
@@ -306,6 +392,111 @@ impl LayoutTree {
         out
     }
 
+    /// The text position nearest a point in painted coordinates, among the page's own text
+    /// (form controls are skipped): the run under the point, else the closest one.
+    pub fn text_point_at(&self, x: f32, y: f32, offsets: &ScrollOffsets) -> Option<TextPoint> {
+        let places = self.placements(offsets);
+        let mut best: Option<(f32, f32, usize, f32, f32)> = None;
+        for (i, (b, p)) in self.boxes.iter().zip(&places).enumerate() {
+            let BoxContent::Text(c) = &b.content else { continue };
+            if !c.selectable() || c.text.trim().is_empty() {
+                continue;
+            }
+            let (lx, ly) = p.to_layout(x, y);
+            let r = b.rect;
+            let dy = if ly < r.y { r.y - ly } else if ly > r.y + r.height { ly - r.y - r.height } else { 0.0 };
+            let dx = if lx < r.x { r.x - lx } else if lx > r.x + r.width { lx - r.x - r.width } else { 0.0 };
+            // Same row beats a nearer column on another row; later boxes win ties.
+            if best.is_none_or(|(by, bx, ..)| (dy, dx) <= (by, bx)) {
+                best = Some((dy, dx, i, lx, ly));
+            }
+        }
+        let (_, _, i, lx, ly) = best?;
+        let BoxContent::Text(c) = &self.boxes[i].content else { return None };
+        let r = self.boxes[i].rect;
+        Some(TextPoint { run: i, byte: Cursor::from_point(&c.layout, lx - r.x, ly - r.y).index().min(c.text.len()) })
+    }
+
+    /// The word (or the whole run, for `whole_run`) around a point returned by `text_point_at`.
+    pub fn word_at(&self, p: TextPoint, whole_run: bool) -> Option<(TextPoint, TextPoint)> {
+        let BoxContent::Text(c) = &self.boxes[p.run].content else { return None };
+        let range = if whole_run {
+            0..c.text.len()
+        } else {
+            // The word whose glyphs sit at the caret position.
+            let g = Cursor::from_byte_index(&c.layout, p.byte.min(c.text.len()), Affinity::Downstream).geometry(&c.layout, 1.0);
+            let (x, y) = ((g.x0 + g.x1) as f32 / 2.0 + 0.5, (g.y0 + g.y1) as f32 / 2.0);
+            Selection::word_from_point(&c.layout, x, y).text_range()
+        };
+        Some((TextPoint { run: p.run, byte: range.start }, TextPoint { run: p.run, byte: range.end }))
+    }
+
+    /// A click on this run selects all of it (`user-select: all`).
+    pub fn selects_whole_run(&self, run: usize) -> bool {
+        matches!(&self.boxes[run].content, BoxContent::Text(c) if c.user_select == nile_style::UserSelect::All)
+    }
+
+    /// The first and last text positions of the page.
+    pub fn text_extent(&self) -> Option<(TextPoint, TextPoint)> {
+        let mut runs = self.boxes.iter().enumerate().filter_map(|(i, b)| match &b.content {
+            BoxContent::Text(c) if c.selectable() && !c.text.trim().is_empty() => Some((i, c.text.len())),
+            _ => None,
+        });
+        let (first, _) = runs.next().or(None)?;
+        let (last, len) = runs.next_back().unwrap_or((first, self.text_len(first)));
+        Some((TextPoint { run: first, byte: 0 }, TextPoint { run: last, byte: len }))
+    }
+
+    fn text_len(&self, run: usize) -> usize {
+        match &self.boxes[run].content {
+            BoxContent::Text(c) => c.text.len(),
+            _ => 0,
+        }
+    }
+
+    /// What `a..b` (either order) selects, as `(run, from, to)` per text run.
+    pub fn selection_ranges(&self, a: TextPoint, b: TextPoint) -> Vec<(usize, usize, usize)> {
+        let (from, to) = if a <= b { (a, b) } else { (b, a) };
+        let mut out = Vec::new();
+        for run in from.run..=to.run.min(self.boxes.len().saturating_sub(1)) {
+            let BoxContent::Text(c) = &self.boxes[run].content else { continue };
+            if !c.selectable() {
+                continue;
+            }
+            let start = if run == from.run { from.byte } else { 0 };
+            let end = if run == to.run { to.byte } else { c.text.len() };
+            if start < end {
+                out.push((run, start, end.min(c.text.len())));
+            }
+        }
+        out
+    }
+
+    /// The text of a selection, as copying would give it: padding spacers dropped, runs
+    /// on different lines separated by newlines.
+    pub fn selection_text(&self, ranges: &[(usize, usize, usize)]) -> String {
+        let mut out = String::new();
+        let mut prev: Option<&LayoutBox> = None;
+        for &(run, from, to) in ranges {
+            let b = &self.boxes[run];
+            let BoxContent::Text(c) = &b.content else { continue };
+            if let Some(p) = prev {
+                out.push(if b.rect.y >= p.rect.y + p.rect.height - 1.0 { '\n' } else { ' ' });
+            }
+            let mut at = from;
+            while at < to {
+                let Some(ch) = c.text[at..].chars().next() else { break };
+                let spacer = c.spacers.iter().any(|r| r.contains(&at));
+                if !spacer {
+                    out.push(if ch == '\u{a0}' { ' ' } else { ch });
+                }
+                at += ch.len_utf8();
+            }
+            prev = Some(b);
+        }
+        out
+    }
+
     /// Byte offset into the text of `node` (an input) nearest to a point in
     /// document coordinates, for placing a caret by clicking.
     pub fn text_index_at(&self, node: NodeId, x: f32, y: f32) -> Option<usize> {
@@ -472,6 +663,10 @@ enum NodeCtx {
         kids: Vec<InlineKid>,
         decos: Vec<InlineDeco>,
         owners: Vec<(Range<usize>, NodeId)>,
+        text: String,
+        spacers: Vec<Range<usize>>,
+        control: bool,
+        user_select: nile_style::UserSelect,
         /// Never wrap (single-line text inputs).
         nowrap: bool,
     },
@@ -1008,6 +1203,10 @@ fn build_control_text(
             kids: Vec::new(),
             decos: Vec::new(),
             owners,
+            text: display.clone(),
+            spacers: Vec::new(),
+            control: true,
+            user_select: nile_style::UserSelect::None,
             nowrap: node.tag() != Some("textarea"),
         },
     )
@@ -1355,6 +1554,7 @@ fn build_inline_run_in(
     }
     let base = text_style(block_style);
     let shaped = text.shape_spans(&inline.text, &base, &inline.spans, &inline.boxes, 1.0);
+    let spacers = inline.spans.iter().filter(|(_, ts)| ts.spacer).map(|(r, _)| r.clone()).collect();
     // Attribute the run to the first node; paint only needs the layout.
     tree.new_leaf_with_context(
         Style::default(),
@@ -1365,6 +1565,10 @@ fn build_inline_run_in(
             kids,
             decos: inline.decos,
             owners: inline.owners,
+            text: inline.text,
+            spacers,
+            control: false,
+            user_select: block_style.user_select,
             nowrap: block_style.nowrap,
         },
     )
@@ -1408,7 +1612,7 @@ fn flatten(
             let transform = box_transform(styles.get(*id), rect);
             out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform })
         }
-        Some(NodeCtx::Text { node, layout, align, kids, decos, owners, nowrap }) => {
+        Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
             // Taffy rounds box sizes to whole pixels, which can shave a
             // fraction off the measured width and force a spurious wrap, so
@@ -1426,6 +1630,7 @@ fn flatten(
             let kids = kids.clone();
             let decos = decos.clone();
             let owners = owners.clone();
+            let (text, spacers, control, user_select) = (text.clone(), spacers.clone(), *control, *user_select);
             let placed: Vec<_> = layout
                 .lines()
                 .flat_map(|line| line.items().collect::<Vec<_>>())
@@ -1437,7 +1642,7 @@ fn flatten(
             out.push(LayoutBox {
                 node: *node,
                 rect,
-                content: BoxContent::Text(Box::new(TextContent { layout, decos, owners })),
+                content: BoxContent::Text(Box::new(TextContent { layout, decos, owners, text, spacers, control, user_select })),
                 subtree_end: 0,
                 scroll: None,
                 image: None,
