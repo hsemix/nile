@@ -47,6 +47,10 @@ pub trait Environment {
     fn interaction(&self) -> InteractionState;
     /// Move keyboard focus (`el.focus()` / `el.blur()`).
     fn set_focus(&self, node: Option<NodeId>);
+    /// `[scrollLeft, scrollTop, scrollWidth, scrollHeight]` of an element that clips its content.
+    fn element_scroll(&self, node: NodeId) -> Option<[f32; 4]>;
+    /// Scroll an element (clamped to its range); fires a `scroll` event if it moved.
+    fn scroll_element_to(&self, node: NodeId, x: f32, y: f32);
 }
 
 /// Resolves `./` and `../` imports against the importing module's file.
@@ -312,6 +316,18 @@ fn install_natives(
         let env = env.clone();
         move || -> i32 { id_out(env.interaction().focus) }
     });
+    native!("elScroll", {
+        let env = env.clone();
+        move |id: i32| -> Option<Vec<f32>> { node(id).and_then(|n| env.element_scroll(n)).map(|r| r.to_vec()) }
+    });
+    native!("elScrollTo", {
+        let env = env.clone();
+        move |id: i32, x: f32, y: f32| {
+            if let Some(n) = node(id) {
+                env.scroll_element_to(n, x, y);
+            }
+        }
+    });
     native!("now", move || start.elapsed().as_secs_f64() * 1000.0);
     native!("log", move |level: String, msg: String| {
         match level.as_str() {
@@ -480,6 +496,10 @@ mod tests {
             InteractionState::default()
         }
         fn set_focus(&self, _: Option<NodeId>) {}
+        fn element_scroll(&self, _: NodeId) -> Option<[f32; 4]> {
+            None
+        }
+        fn scroll_element_to(&self, _: NodeId, _: f32, _: f32) {}
     }
 
     fn host(html: &str) -> (ScriptHost, Rc<RefCell<Document>>) {

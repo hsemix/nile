@@ -75,6 +75,15 @@ pub enum Display {
     None,
 }
 
+/// `overflow` on one axis. `Scroll` covers both `scroll` and `auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum OverflowKind {
+    #[default]
+    Visible,
+    Hidden,
+    Scroll,
+}
+
 /// Native-looking control drawn by the renderer (`appearance`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Appearance {
@@ -131,9 +140,10 @@ pub struct ComputedStyle {
     /// `box-sizing: border-box` (the CSS default is `content-box`).
     pub border_box: bool,
     pub appearance: Appearance,
-    /// `overflow: hidden | scroll | auto` on either axis: content is clipped to the padding box.
-    // TODO: scrolling; for now every non-visible overflow just clips.
-    pub overflow_hidden: bool,
+    /// Non-visible overflow clips content to the padding box; `Scroll` also lets the
+    /// wheel scroll it (`Hidden` can still be scrolled from script).
+    pub overflow_x: OverflowKind,
+    pub overflow_y: OverflowKind,
     /// The element's `checked` state flag (checkbox/radio marks), resolved at cascade time.
     pub checked: bool,
 
@@ -160,6 +170,9 @@ pub struct ComputedStyle {
     pub font_family: String,
     pub line_height: f32,
     pub text_align: TextAlign,
+    /// `white-space: nowrap | pre`: inline content doesn't wrap.
+    // TODO: `pre` and `pre-wrap` should also preserve whitespace and newlines.
+    pub nowrap: bool,
     pub italic: bool,
     pub underline: bool,
     pub line_through: bool,
@@ -180,7 +193,8 @@ impl Default for ComputedStyle {
             border_width: Edges::all(0.0),
             border_box: false,
             appearance: Appearance::None,
-            overflow_hidden: false,
+            overflow_x: OverflowKind::Visible,
+            overflow_y: OverflowKind::Visible,
             checked: false,
             flex_direction: FlexDirection::Row,
             flex_wrap: false,
@@ -200,6 +214,7 @@ impl Default for ComputedStyle {
             font_family: "sans-serif".into(),
             line_height: 1.2,
             text_align: TextAlign::Start,
+            nowrap: false,
             italic: false,
             underline: false,
             line_through: false,
@@ -208,6 +223,11 @@ impl Default for ComputedStyle {
 }
 
 impl ComputedStyle {
+    /// True if content is clipped (and so can be scrolled) on either axis.
+    pub fn clips(&self) -> bool {
+        self.overflow_x != OverflowKind::Visible || self.overflow_y != OverflowKind::Visible
+    }
+
     /// The CSS text of a property's computed value, as `getComputedStyle`
     /// reports it. `None` for properties we don't track. Sizes are in px;
     /// `width`/`height` report `auto` here (the used size comes from layout).
@@ -234,7 +254,19 @@ impl ComputedStyle {
                 Display::None => "none",
             }
             .into(),
-            "overflow" => if self.overflow_hidden { "hidden" } else { "visible" }.into(),
+            "overflow" | "overflow-x" | "overflow-y" => {
+                let name = |k: OverflowKind| match k {
+                    OverflowKind::Visible => "visible",
+                    OverflowKind::Hidden => "hidden",
+                    OverflowKind::Scroll => "auto",
+                };
+                match prop {
+                    "overflow-x" => name(self.overflow_x).into(),
+                    "overflow-y" => name(self.overflow_y).into(),
+                    _ if self.overflow_x == self.overflow_y => name(self.overflow_x).into(),
+                    _ => format!("{} {}", name(self.overflow_x), name(self.overflow_y)),
+                }
+            }
             "appearance" => match self.appearance {
                 Appearance::None => "none",
                 Appearance::Checkbox => "checkbox",
@@ -268,6 +300,7 @@ impl ComputedStyle {
             "font-size" => px(self.font_size),
             "font-weight" => (self.font_weight as i32).to_string(),
             "font-family" => self.font_family.clone(),
+            "white-space" => if self.nowrap { "nowrap" } else { "normal" }.into(),
             "font-style" => if self.italic { "italic" } else { "normal" }.into(),
             "line-height" => px(self.line_height * self.font_size),
             "text-align" => match self.text_align {
@@ -307,6 +340,7 @@ impl ComputedStyle {
             font_family: parent.font_family.clone(),
             line_height: parent.line_height,
             text_align: parent.text_align,
+            nowrap: parent.nowrap,
             italic: parent.italic,
             // TODO: decorations aren't really inherited in CSS; they propagate
             // to inline descendants, which this approximates.
@@ -338,7 +372,7 @@ button, input { display: inline-block; font-size: 13px; color: #000000; padding:
   border: 1px solid #767676; border-radius: 3px; background: #efefef }
 input { background: #ffffff; width: 160px; min-height: 16px; margin: 2px; overflow: hidden }
 textarea { display: inline-block; font-size: 13px; color: #000000; padding: 3px 4px; border: 1px solid #767676;
-  border-radius: 3px; background: #ffffff; width: 200px; height: 60px; margin: 2px; overflow: hidden }
+  border-radius: 3px; background: #ffffff; width: 200px; height: 60px; margin: 2px; overflow: auto }
 input:focus, textarea:focus { border-color: #1d4ed8 }
 button:disabled, input:disabled, textarea:disabled { color: #8a8a8a; background: #f0f0f0; border-color: #c4c4c4 }
 input[type=checkbox], input[type=radio] { width: 13px; height: 13px; min-height: 0; padding: 0;
@@ -525,11 +559,21 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
             }
         }
         "overflow" | "overflow-x" | "overflow-y" => {
-            // Either axis being non-visible clips (we clip both).
-            s.overflow_hidden = match first.and_then(Value::ident) {
-                Some("hidden" | "scroll" | "auto" | "clip") => true,
-                Some("visible") => false,
-                _ => return,
+            let kind = |v: Option<&Value>| match v.and_then(Value::ident) {
+                Some("hidden" | "clip") => Some(OverflowKind::Hidden),
+                Some("scroll" | "auto") => Some(OverflowKind::Scroll),
+                Some("visible") => Some(OverflowKind::Visible),
+                _ => None,
+            };
+            let Some(first_kind) = kind(first) else { return };
+            match d.name.as_str() {
+                "overflow-x" => s.overflow_x = first_kind,
+                "overflow-y" => s.overflow_y = first_kind,
+                // `overflow: <x> [<y>]`
+                _ => {
+                    s.overflow_x = first_kind;
+                    s.overflow_y = kind(v.get(1)).unwrap_or(first_kind);
+                }
             }
         }
         "appearance" | "-webkit-appearance" => {
@@ -629,6 +673,13 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                     _ => return,
                 },
                 None => return,
+            }
+        }
+        "white-space" => {
+            s.nowrap = match first.and_then(Value::ident) {
+                Some("nowrap" | "pre") => true,
+                Some("normal" | "pre-wrap" | "pre-line") => false,
+                _ => return,
             }
         }
         "font-style" => {

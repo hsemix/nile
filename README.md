@@ -42,6 +42,7 @@ cargo run -p nile-shell -- examples/scripting.html --png out.png --click 60,80 -
 cargo run -p nile-shell -- examples/measure.html --png out.png                              # layout queries from JS
 cargo run -p nile-shell -- examples/todo/index.html --png out.png --click 60,128          # modules + JSX + Sciter helpers
 cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --type "Ada{Backspace}x"   # form controls
+cargo run -p nile-shell -- examples/scrolling.html --png out.png --wheel 100,100,-60                    # element scrolling
 cargo test --workspace
 ```
 
@@ -51,10 +52,14 @@ cargo test --workspace
   descendant / `>` / `+` / `~` combinators, `:first-child`, `:last-child`, `:nth-child()`, `:not()`, `:is()`,
   `:root`, `:empty`, and `:hover` / `:active` / `:focus` (driven by `InteractionState`; nothing sets it
   until events land). Rules with unsupported selectors (pseudo-elements, `:visited`, ...) are dropped.
-- **Overflow:** `overflow: hidden | scroll | auto` clips a box's contents to its padding box (no scrolling yet).
+- **Overflow and scrolling:** `overflow` / `overflow-x` / `overflow-y` (`hidden` clips to the padding box; `auto` and
+  `scroll` also scroll with the wheel, with scroll chaining to the page, and draw overlay scrollbars). Hit testing,
+  hover and `getBoundingClientRect` follow scrolled content; `scrollTop`/`scrollLeft`/`scrollWidth`/`scrollHeight`,
+  `scrollTo`/`scrollBy` and `scroll` events work on elements (see `examples/scrolling.html`). Inputs and textareas
+  scroll to keep the caret visible.
 - **Properties:** `display` (block, inline, inline-block, flex, none), `box-sizing`, `width/height` + min/max, `margin`, `padding`,
   `border`, `border-radius`, `background(-color)`, `color`, `font-size/weight/family`,
-  `line-height`, `text-align`, `font-style`, `text-decoration` (underline, line-through), `flex`, `flex-direction/wrap/grow/shrink/basis`,
+  `line-height`, `text-align`, `white-space` (`nowrap`), `font-style`, `text-decoration` (underline, line-through), `flex`, `flex-direction/wrap/grow/shrink/basis`,
   `justify-content`, `align-items`, `gap`.
 - **JavaScript DOM** (QuickJS): `document`, `Element`/`Node`/`Text`, `querySelector(All)`, `matches`, `closest`,
   `classList`, `style`, `dataset`, attributes, `innerHTML`/`textContent`, `createElement`, tree edits,
@@ -95,7 +100,9 @@ cargo test --workspace
 - Form gaps: no text selection, clipboard, undo or IME; no `<select>`, `<form>` submit or validation; Home/End in a
   `<textarea>` use hard line breaks only; `value` lives in the `value` attribute (no separate default value).
   Sciter's `Element.value` for other behaviors isn't there.
-- `overflow` only clips: there are no scrollbars or scrolling, and clipping ignores `border-radius`.
+- Scrollbars are overlay indicators only: no dragging or track clicks, no `scrollbar-*` styling, no keyboard
+  scrolling (Page Up/Down, arrows); clipping ignores `border-radius`; `white-space: pre`/`pre-wrap` don't preserve
+  whitespace yet (`pre` just doesn't wrap).
 - JS gaps: `fetch`, bare/`@sciter`/`@env`-style module specifiers (only relative and absolute paths),
   `window.location`, `devicePixelRatio` (always 1), element-level scrolling (`scrollTop` only works on the
   page), `offsetParent` (approximated by the parent). From Sciter: class components, `componentUpdate`,
@@ -111,8 +118,7 @@ cargo test --workspace
 
 1. **Incremental updates** — the `cursor` property, and restyling /
    relaying out only what a state change affects (today every change restyles the whole page).
-2. **More controls + Sciter compatibility** — `<select>`, text selection/clipboard, element scrolling and
-   scrollbars, `@env`/`@sciter`/`@sys` modules, class components and `componentUpdate`, `this://` URLs.
+2. **More controls + Sciter compatibility** — `<select>`, text selection/clipboard, draggable scrollbars and keyboard scrolling, `@env`/`@sciter`/`@sys` modules, class components and `componentUpdate`, `this://` URLs.
 3. **Stacking contexts + GPU** — paint tree with opacity, transforms, clipping,
    overflow scrolling; Skia on Metal (macOS), D3D (Windows), Vulkan/GL (Linux).
 4. **Embedding API** — a C ABI (`cbindgen`) so Go, C#, Python, etc. can host it.

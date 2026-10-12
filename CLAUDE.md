@@ -47,6 +47,7 @@ cargo run -p nile-shell -- examples/scripting.html --png out.png --click 60,80 -
 cargo run -p nile-shell -- examples/measure.html --png out.png
 cargo run -p nile-shell -- examples/todo/index.html --png out.png --click 60,128   # modules + JSX
 cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --type "Ada{Backspace}x"
+cargo run -p nile-shell -- examples/scrolling.html --png out.png --wheel 100,100,-60
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings          # CI enforces this
 ```
@@ -83,9 +84,13 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
   `on()` handlers get `(evt, matched)` with `this` = the attached element; JSX
   returns vnode arrays that `append`/`content`/`patch` render. Check the docs
   before adding more, don't write Sciter API shapes from memory.
-- `overflow: hidden` clips via `LayoutBox::subtree_end` (the flat paint list needs
-  to know where a box's descendants end): the renderer saves a clip when it paints
-  such a box and restores at `subtree_end`.
+- `overflow` boxes: layout gives each clipping element a `ScrollBox` (padding-box
+  clip + scrollable extent) and `LayoutBox::subtree_end` marks where its subtree
+  ends in the flat paint list. Scroll offsets live in the shell's `View`
+  (`scroll_offsets`); `LayoutTree::placements(offsets)` turns them into per-box
+  shifts and clips, used by `hit_test_scrolled`, `text_index_at_scrolled` and
+  `node_rect_scrolled`, and the renderer applies the same offsets while painting.
+  Use the `_scrolled` variants anywhere a pointer or script coordinate is involved.
 - Form controls: `Page` in the shell owns default actions (`click_default`:
   checkbox/radio/label) and text editing (`edit_key`, `caret` in chars of `value`).
   An `<input>`'s text is synthesized in layout (`build_control_text`), the
@@ -115,7 +120,8 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
 
 ## Next up
 
-Element scrolling (`overflow: auto|scroll` with wheel scrolling, scrollbars, JS
-`scrollTop` on elements) and text selection (shift/drag, copy/paste), then
-`<select>`. Also open: incremental restyle, the `cursor` property, `@env`/
-`@sciter` modules, symbol fallback check on Windows/Linux.
+Text selection (shift+arrows, drag, double-click word, select-all) with
+copy/cut/paste in inputs and textareas, then `<select>`. Also open: draggable
+scrollbars and keyboard scrolling, `white-space: pre*` whitespace handling,
+incremental restyle, the `cursor` property, `@env`/`@sciter` modules, symbol
+fallback check on Windows/Linux.

@@ -18,7 +18,7 @@ use std::ops::Range;
 pub use nile_dom::NodeId;
 use nile_dom::{Document, NodeKind};
 use nile_style::{
-    Align, Color, ComputedStyle, Display, Edges, FlexDirection, Length, StyleMap, TextAlign,
+    Align, Color, ComputedStyle, Display, Edges, FlexDirection, Length, OverflowKind, StyleMap, TextAlign,
 };
 use nile_text::{
     break_lines, collapse_whitespace, Affinity, Alignment, Cluster, Cursor, InlineBoxSpec, PositionedLayoutItem, TextEngine,
@@ -66,6 +66,47 @@ pub struct LayoutBox {
     /// Index in `LayoutTree::boxes` just past this box's last descendant, so
     /// painting can scope a clip to the subtree.
     pub subtree_end: usize,
+    /// Set for elements with non-visible `overflow` that have content to clip.
+    pub scroll: Option<ScrollBox>,
+}
+
+/// Clipping and scroll extent of an `overflow` box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollBox {
+    /// The padding box (where content is clipped), in unscrolled document coordinates.
+    pub clip: Rect,
+    /// The wheel may scroll this axis (`overflow: auto | scroll`).
+    pub wheel_x: bool,
+    pub wheel_y: bool,
+    /// Size of the scrollable content from the padding box's origin (`scrollWidth/Height`).
+    pub content_width: f32,
+    pub content_height: f32,
+}
+
+impl ScrollBox {
+    /// Largest scroll offsets (x, y).
+    pub fn max_offset(&self) -> (f32, f32) {
+        ((self.content_width - self.clip.width).max(0.0), (self.content_height - self.clip.height).max(0.0))
+    }
+}
+
+/// Scroll offsets of `overflow` elements, in CSS px.
+pub type ScrollOffsets = std::collections::HashMap<NodeId, (f32, f32)>;
+
+/// Where a box actually paints: its rect shifted by the scroll offsets of the
+/// containers around it, and the clip those containers impose.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Placement {
+    pub dx: f32,
+    pub dy: f32,
+    pub clip: Option<Rect>,
+}
+
+fn intersect(a: Option<Rect>, b: Rect) -> Rect {
+    let Some(a) = a else { return b };
+    let (l, t) = (a.x.max(b.x), a.y.max(b.y));
+    let (r, bt) = ((a.x + a.width).min(b.x + b.width), (a.y + a.height).min(b.y + b.height));
+    Rect { x: l, y: t, width: (r - l).max(0.0), height: (bt - t).max(0.0) }
 }
 
 /// Boxes in paint order (pre-order DOM traversal).
@@ -86,15 +127,115 @@ struct InlineKid {
 }
 
 impl LayoutTree {
+    /// Find `overflow` boxes and measure what they hold.
+    fn compute_scroll_boxes(&mut self, styles: &StyleMap) {
+        let n = self.boxes.len();
+        let clips: Vec<bool> = self
+            .boxes
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                matches!(b.content, BoxContent::Element) && styles.get(b.node).clips() && b.subtree_end > i + 1
+            })
+            .collect();
+        for i in 0..n {
+            if !clips[i] {
+                continue;
+            }
+            let b = &self.boxes[i];
+            let s = styles.get(b.node);
+            let w = s.border_width;
+            let clip = Rect {
+                x: b.rect.x + w.left,
+                y: b.rect.y + w.top,
+                width: (b.rect.width - w.left - w.right).max(0.0),
+                height: (b.rect.height - w.top - w.bottom).max(0.0),
+            };
+            // Extent of the contents. A nested `overflow` box counts as its own
+            // rect only: what it clips doesn't make this one scrollable.
+            let (mut right, mut bottom) = (clip.x + clip.width, clip.y + clip.height);
+            let mut j = i + 1;
+            while j < b.subtree_end {
+                let c = &self.boxes[j];
+                let (cr, cb) = match &c.content {
+                    BoxContent::Text(t) => (
+                        c.rect.x + c.rect.width.max(t.layout.full_width()),
+                        c.rect.y + c.rect.height.max(t.layout.height()),
+                    ),
+                    BoxContent::Element => (c.rect.x + c.rect.width, c.rect.y + c.rect.height),
+                };
+                right = right.max(cr);
+                bottom = bottom.max(cb);
+                j = if clips[j] { c.subtree_end } else { j + 1 };
+            }
+            let scroll = ScrollBox {
+                clip,
+                wheel_x: s.overflow_x == OverflowKind::Scroll,
+                wheel_y: s.overflow_y == OverflowKind::Scroll,
+                content_width: right - clip.x,
+                content_height: bottom - clip.y,
+            };
+            self.boxes[i].scroll = Some(scroll);
+        }
+    }
+
+    /// The scroll box of element `node`, if it clips content.
+    pub fn scroll_box(&self, node: NodeId) -> Option<&ScrollBox> {
+        self.index.get(&node).and_then(|&i| self.boxes[i].scroll.as_ref())
+    }
+
+    /// Where every box paints under `offsets` (parallel to `boxes`).
+    pub fn placements(&self, offsets: &ScrollOffsets) -> Vec<Placement> {
+        let mut out = Vec::with_capacity(self.boxes.len());
+        let mut stack: Vec<(usize, Placement)> = Vec::new();
+        for (i, b) in self.boxes.iter().enumerate() {
+            while stack.last().is_some_and(|(end, _)| i >= *end) {
+                stack.pop();
+            }
+            let cur = stack.last().map_or(Placement::default(), |(_, p)| *p);
+            out.push(cur);
+            if let Some(sb) = &b.scroll {
+                let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
+                let shifted = Rect { x: sb.clip.x + cur.dx, y: sb.clip.y + cur.dy, ..sb.clip };
+                stack.push((b.subtree_end, Placement { dx: cur.dx - ox, dy: cur.dy - oy, clip: Some(intersect(cur.clip, shifted)) }));
+            }
+        }
+        out
+    }
+
     /// Byte offset into the text of `node` (an input) nearest to a point in
     /// document coordinates, for placing a caret by clicking.
     pub fn text_index_at(&self, node: NodeId, x: f32, y: f32) -> Option<usize> {
-        let b = self.boxes.iter().find(|b| match &b.content {
+        self.text_index_at_scrolled(node, x, y, &ScrollOffsets::new())
+    }
+
+    /// [`LayoutTree::text_index_at`] where the point is in painted (scrolled) coordinates.
+    pub fn text_index_at_scrolled(&self, node: NodeId, x: f32, y: f32, offsets: &ScrollOffsets) -> Option<usize> {
+        let (i, b) = self.text_box_of(node)?;
+        let BoxContent::Text(c) = &b.content else { return None };
+        let p = self.placements(offsets)[i];
+        Some(Cursor::from_point(&c.layout, x - p.dx - b.rect.x, y - p.dy - b.rect.y).index())
+    }
+
+    fn text_box_of(&self, node: NodeId) -> Option<(usize, &LayoutBox)> {
+        self.boxes.iter().enumerate().find(|(_, b)| match &b.content {
             BoxContent::Text(c) => c.owners.iter().any(|(_, n)| *n == node),
             _ => false,
-        })?;
+        })
+    }
+
+    /// The caret rectangle at byte offset `at` of `node`'s text, in unscrolled
+    /// document coordinates (used to scroll it into view).
+    pub fn caret_rect(&self, node: NodeId, at: usize) -> Option<Rect> {
+        let (_, b) = self.text_box_of(node)?;
         let BoxContent::Text(c) = &b.content else { return None };
-        Some(Cursor::from_point(&c.layout, x - b.rect.x, y - b.rect.y).index())
+        let g = Cursor::from_byte_index(&c.layout, at, Affinity::Downstream).geometry(&c.layout, 1.0);
+        Some(Rect {
+            x: b.rect.x + g.x0 as f32,
+            y: b.rect.y + g.y0 as f32,
+            width: (g.x1 - g.x0) as f32,
+            height: (g.y1 - g.y0) as f32,
+        })
     }
 
     /// The caret one line up (`dir < 0`) or down from byte offset `at` of
@@ -118,12 +259,26 @@ impl LayoutTree {
     /// a box; an inline element's rect is the union of its text runs (without
     /// padding). `None` if it generated nothing (e.g. `display: none`, or empty).
     pub fn node_rect(&self, node: NodeId) -> Option<Rect> {
+        self.node_rect_with(node, None)
+    }
+
+    /// [`LayoutTree::node_rect`] where the element paints: shifted by the scroll
+    /// offsets of the containers around it.
+    pub fn node_rect_scrolled(&self, node: NodeId, offsets: &ScrollOffsets) -> Option<Rect> {
+        self.node_rect_with(node, Some(&self.placements(offsets)))
+    }
+
+    fn node_rect_with(&self, node: NodeId, places: Option<&[Placement]>) -> Option<Rect> {
+        let shift = |i: usize| places.map_or((0.0, 0.0), |p| (p[i].dx, p[i].dy));
         if let Some(&i) = self.index.get(&node) {
-            return Some(self.boxes[i].rect);
+            let (dx, dy) = shift(i);
+            let r = self.boxes[i].rect;
+            return Some(Rect { x: r.x + dx, y: r.y + dy, ..r });
         }
         let (mut l, mut t, mut r, mut b) = (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-        for tb in &self.boxes {
+        for (ti, tb) in self.boxes.iter().enumerate() {
             let BoxContent::Text(c) = &tb.content else { continue };
+            let (dx, dy) = shift(ti);
             let ranges: Vec<_> = c.owners.iter().filter(|(_, n)| *n == node).map(|(r, _)| r.clone()).collect();
             if ranges.is_empty() {
                 continue;
@@ -139,10 +294,10 @@ impl LayoutTree {
                         continue;
                     }
                     let fm = gr.run().font_metrics();
-                    l = l.min(tb.rect.x + gr.offset());
-                    r = r.max(tb.rect.x + gr.offset() + gr.advance());
-                    t = t.min(tb.rect.y + gr.baseline() - fm.ascent);
-                    b = b.max(tb.rect.y + gr.baseline() + fm.descent);
+                    l = l.min(tb.rect.x + dx + gr.offset());
+                    r = r.max(tb.rect.x + dx + gr.offset() + gr.advance());
+                    t = t.min(tb.rect.y + dy + gr.baseline() - fm.ascent);
+                    b = b.max(tb.rect.y + dy + gr.baseline() + fm.descent);
                 }
             }
         }
@@ -152,8 +307,20 @@ impl LayoutTree {
     /// The innermost element under `(x, y)` in document coordinates: the
     /// topmost element box, or the inline element owning the text there.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
-        for b in self.boxes.iter().rev() {
-            let r = b.rect;
+        self.hit_test_scrolled(x, y, &ScrollOffsets::new())
+    }
+
+    /// [`LayoutTree::hit_test`] with scrolled containers: boxes are tested where
+    /// they paint, and a container's clip hides what it has scrolled out of view.
+    pub fn hit_test_scrolled(&self, x: f32, y: f32, offsets: &ScrollOffsets) -> Option<NodeId> {
+        let places = self.placements(offsets);
+        for (b, p) in self.boxes.iter().zip(&places).rev() {
+            if let Some(c) = p.clip {
+                if x < c.x || y < c.y || x >= c.x + c.width || y >= c.y + c.height {
+                    continue;
+                }
+            }
+            let r = Rect { x: b.rect.x + p.dx, y: b.rect.y + p.dy, ..b.rect };
             if x < r.x || y < r.y || x >= r.x + r.width || y >= r.y + r.height {
                 continue;
             }
@@ -237,7 +404,9 @@ pub fn layout(
         .filter(|(_, b)| matches!(b.content, BoxContent::Element))
         .map(|(i, b)| (b.node, i))
         .collect();
-    LayoutTree { boxes, content_height, index }
+    let mut tree = LayoutTree { boxes, content_height, index };
+    tree.compute_scroll_boxes(styles);
+    tree
 }
 
 fn measure_text(
@@ -646,7 +815,7 @@ fn build_inline_run(
             kids,
             decos: inline.decos,
             owners: inline.owners,
-            nowrap: false,
+            nowrap: block_style.nowrap,
         },
     )
     .ok()
@@ -679,14 +848,22 @@ fn flatten(
 
     match tree.get_node_context_mut(n) {
         Some(NodeCtx::Element(id)) => {
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0 })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None })
         }
         Some(NodeCtx::Text { node, layout, align, kids, decos, owners, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
             // Taffy rounds box sizes to whole pixels, which can shave a
             // fraction off the measured width and force a spurious wrap, so
             // allow one pixel of slack.
-            break_lines(layout, if *nowrap { None } else { Some(rect.width + 1.0) }, *align);
+            // A non-wrapping run breaks at least as wide as its text, so it stays on
+            // one line but still aligns within a wider box.
+            let width = if *nowrap {
+                break_lines(layout, None, Alignment::Start);
+                rect.width.max(layout.full_width())
+            } else {
+                rect.width
+            };
+            break_lines(layout, Some(width + 1.0), *align);
             let layout = (**layout).clone();
             let kids = kids.clone();
             let decos = decos.clone();
@@ -704,6 +881,7 @@ fn flatten(
                 rect,
                 content: BoxContent::Text(Box::new(TextContent { layout, decos, owners })),
                 subtree_end: 0,
+                scroll: None,
             });
             for b in placed {
                 let kid = kids[b.id as usize];
@@ -816,8 +994,8 @@ fn taffy_style(s: &ComputedStyle) -> Style {
         padding: rect_px(s.padding),
         border: rect_px(s.border_width),
         overflow: taffy::Point {
-            x: if s.overflow_hidden { taffy::Overflow::Clip } else { taffy::Overflow::Visible },
-            y: if s.overflow_hidden { taffy::Overflow::Clip } else { taffy::Overflow::Visible },
+            x: if s.overflow_x != OverflowKind::Visible { taffy::Overflow::Clip } else { taffy::Overflow::Visible },
+            y: if s.overflow_y != OverflowKind::Visible { taffy::Overflow::Clip } else { taffy::Overflow::Visible },
         },
         flex_direction: match s.flex_direction {
             FlexDirection::Row => taffy::FlexDirection::Row,
@@ -996,6 +1174,78 @@ second</textarea><textarea id="e"></textarea></body>"#,
         assert_eq!(tree.move_caret_vertically(id("t"), 0, -1), None);
         let rect = tree.node_rect(id("e")).unwrap();
         assert_eq!((rect.width, rect.height), (210.0, 68.0), "UA size plus padding and border");
+    }
+
+    #[test]
+    fn nowrap_text_still_aligns_in_a_wider_box() {
+        let doc = Document::parse(
+            r#"<body style="margin:0"><div id="d" style="width:200px; text-align:center; white-space:nowrap">hi</div></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 400.0, 100.0);
+        let d = doc.find(|n| n.attr("id") == Some("d")).unwrap();
+        let tb = tree
+            .boxes
+            .iter()
+            .find(|b| matches!(&b.content, BoxContent::Text(c) if c.owners.iter().any(|(_, n)| *n == d)));
+        let BoxContent::Text(c) = &tb.unwrap().content else { unreachable!() };
+        let line = c.layout.lines().next().unwrap();
+        let (x, adv) = (line.metrics().offset, line.metrics().advance);
+        assert!(x > 80.0 && x + adv < 130.0, "centered in 200px: offset {x}, advance {adv}");
+    }
+
+    #[test]
+    fn nowrap_keeps_text_on_one_line() {
+        let html = |ws: &str| {
+            format!(
+                r#"<body style="margin:0"><div id="d" style="width:60px; {ws}">a fairly long run of words</div></body>"#
+            )
+        };
+        let height = |ws: &str| {
+            let doc = Document::parse(&html(ws));
+            let styles = compute_styles(&doc);
+            let mut text = TextEngine::new();
+            let tree = layout(&doc, &styles, &mut text, 400.0, 100.0);
+            tree.node_rect(doc.find(|n| n.attr("id") == Some("d")).unwrap()).unwrap().height
+        };
+        assert!(height("") > height("white-space: nowrap") * 2.0);
+    }
+
+    #[test]
+    fn overflow_boxes_scroll_clip_and_hit_test() {
+        let doc = Document::parse(
+            r#"<body style="margin:0"><div id="box" style="width:100px; height:50px; overflow:auto; border:2px solid red">
+                 <div id="a" style="height:40px">a</div><div id="b" style="height:40px">b</div><div id="c" style="height:40px">c</div>
+               </div><div id="hidden" style="width:50px; height:20px; overflow:hidden"><div style="width:200px; height:10px"></div></div>
+               <div id="plain" style="height:10px"></div></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 800.0, 400.0);
+        let id = |s: &str| doc.find(|n| n.attr("id") == Some(s)).unwrap();
+        let sb = tree.scroll_box(id("box")).unwrap();
+        assert_eq!((sb.clip.width, sb.clip.height), (100.0, 50.0));
+        assert_eq!(sb.content_height, 120.0, "three 40px rows");
+        assert_eq!(sb.max_offset(), (0.0, 70.0));
+        assert!(sb.wheel_y && sb.wheel_x);
+        let h = tree.scroll_box(id("hidden")).unwrap();
+        assert!(!h.wheel_x && h.max_offset().0 == 150.0, "hidden clips and can be scrolled from script");
+        assert!(tree.scroll_box(id("plain")).is_none());
+
+        // Unscrolled: row c is clipped away; scrolled by 70 it is under the pointer.
+        let none = ScrollOffsets::new();
+        let mut off = ScrollOffsets::new();
+        off.insert(id("box"), (0.0, 70.0));
+        let (x, y) = (20.0, 2.0 + 45.0); // near the bottom of the viewport of the box
+        assert_eq!(tree.hit_test_scrolled(x, y, &none), Some(id("b")));
+        assert_eq!(tree.hit_test_scrolled(x, y, &off), Some(id("c")));
+        // Outside the clip the scrolled-away content can't be hit; the page behind can.
+        assert_ne!(tree.hit_test_scrolled(x, 2.0 + 60.0, &none), Some(id("c")));
+        // Rects follow the scroll.
+        let r0 = tree.node_rect(id("c")).unwrap();
+        let r1 = tree.node_rect_scrolled(id("c"), &off).unwrap();
+        assert_eq!(r0.y - r1.y, 70.0);
     }
 
     #[test]

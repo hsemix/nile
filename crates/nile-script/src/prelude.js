@@ -337,10 +337,26 @@
       const cs = getComputedStyle(this);
       return Math.max(0, Math.round(r[dim] - (parseFloat(cs.getPropertyValue(a)) || 0) - (parseFloat(cs.getPropertyValue(b)) || 0)));
     }
-    // Only the page itself scrolls so far.
-    get scrollTop() { return this === documentObj.documentElement || this === documentObj.body ? N.scrollY() : 0; }
-    set scrollTop(v) { if (this === documentObj.documentElement || this === documentObj.body) N.scrollTo(+v || 0); }
-    get scrollLeft() { return 0; }
+    // Elements with non-visible `overflow` scroll; the root and <body> scroll the page.
+    get scrollTop() { return this._isRoot() ? N.scrollY() : (N.elScroll(this._id) || [0, 0])[1]; }
+    set scrollTop(v) { if (this._isRoot()) N.scrollTo(+v || 0); else { const s = N.elScroll(this._id); if (s) N.elScrollTo(this._id, s[0], +v || 0); } }
+    get scrollLeft() { return this._isRoot() ? 0 : (N.elScroll(this._id) || [0])[0]; }
+    set scrollLeft(v) { if (!this._isRoot()) { const s = N.elScroll(this._id); if (s) N.elScrollTo(this._id, +v || 0, s[1]); } }
+    get scrollWidth() { const s = N.elScroll(this._id); return s ? Math.round(s[2]) : this.clientWidth; }
+    get scrollHeight() { const s = N.elScroll(this._id); return s ? Math.round(s[3]) : this.clientHeight; }
+    _isRoot() { return this === documentObj.documentElement || this === documentObj.body; }
+    scrollTo(a, b) {
+      const s = N.elScroll(this._id);
+      if (!s) return;
+      if (typeof a === "object" && a !== null) N.elScrollTo(this._id, a.left ?? s[0], a.top ?? s[1]);
+      else N.elScrollTo(this._id, +a || 0, +b || 0);
+    }
+    scrollBy(a, b) {
+      const s = N.elScroll(this._id);
+      if (!s) return;
+      const [dx, dy] = typeof a === "object" && a !== null ? [a.left || 0, a.top || 0] : [+a || 0, +b || 0];
+      N.elScrollTo(this._id, s[0] + dx, s[1] + dy);
+    }
     scrollIntoView() { const r = N.rect(this._id); if (r) N.scrollTo(N.scrollY() + r[1]); }
   }
 
@@ -694,6 +710,7 @@
       if (MOUSE.has(kind)) ev = new MouseEvent(kind, o);
       else if (KEY.has(kind)) ev = new KeyboardEvent(kind, o);
       else if (kind === "focus" || kind === "blur") ev = new FocusEvent(kind, { ...o, bubbles: false });
+      else if (kind === "scroll") ev = new Event(kind, { ...o, bubbles: false, cancelable: false });
       else ev = new Event(kind, o);
       ev.isTrusted = true;
       return dispatch(target, ev);

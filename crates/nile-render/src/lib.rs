@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use nile_layout::{BoxContent, LayoutBox, LayoutTree, NodeId, Rect as LRect, TextContent};
+use nile_layout::{BoxContent, LayoutBox, LayoutTree, NodeId, Rect as LRect, ScrollOffsets, TextContent};
 use nile_style::{Appearance, Color as CssColor, Edges, StyleMap};
 use nile_text::{Affinity, Cursor, PositionedLayoutItem};
 use skia_safe::{
@@ -39,48 +39,40 @@ impl Renderer {
         styles: &StyleMap,
         scroll_y: f32,
         caret: Option<(NodeId, usize)>,
+        offsets: &ScrollOffsets,
     ) {
         canvas.save();
         canvas.translate((0.0, -scroll_y));
-        // `overflow: hidden` clips a box's subtree; each clip ends where its subtree does.
-        let mut clips: Vec<usize> = Vec::new();
+        // An `overflow` box clips and scrolls its subtree; each ends where the subtree does.
+        let mut open: Vec<(usize, &LayoutBox)> = Vec::new();
         for (i, b) in tree.boxes.iter().enumerate() {
-            while clips.last().is_some_and(|end| i >= *end) {
+            while open.last().is_some_and(|(end, _)| i >= *end) {
+                let (_, container) = open.pop().expect("checked above");
                 canvas.restore();
-                clips.pop();
+                paint_scrollbars(canvas, container, offsets);
             }
             match &b.content {
                 BoxContent::Element => {
                     self.paint_box(canvas, b, styles);
-                    let s = styles.get(b.node);
-                    if s.overflow_hidden && b.subtree_end > i + 1 {
-                        let w = s.border_width;
-                        let r = b.rect;
+                    if let Some(sb) = &b.scroll {
+                        let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
                         canvas.save();
-                        canvas.clip_rect(
-                            Rect::from_ltrb(r.x + w.left, r.y + w.top, r.x + r.width - w.right, r.y + r.height - w.bottom),
-                            None,
-                            true,
-                        );
-                        clips.push(b.subtree_end);
+                        canvas.clip_rect(skia_rect(sb.clip), None, true);
+                        canvas.translate((-ox, -oy));
+                        open.push((b.subtree_end, b));
                     }
                 }
                 BoxContent::Text(content) => {
-                    let caret_here = caret.filter(|(n, _)| content.owners.iter().any(|(_, o)| o == n));
-                    // Keep the caret in view by scrolling the text left inside its input.
-                    let (sx, sy) = caret_here.map_or((0.0, 0.0), |(n, at)| caret_scroll(tree, styles, n, content, at));
-                    canvas.save();
-                    canvas.translate((-sx, -sy));
                     self.paint_text(canvas, b.rect, content);
-                    if let Some((_, at)) = caret_here {
+                    if let Some((_, at)) = caret.filter(|(n, _)| content.owners.iter().any(|(_, o)| o == n)) {
                         paint_caret(canvas, b.rect, content, at, styles.get(b.node).color);
                     }
-                    canvas.restore();
                 }
             }
         }
-        for _ in clips {
+        while let Some((_, container)) = open.pop() {
             canvas.restore();
+            paint_scrollbars(canvas, container, offsets);
         }
         canvas.restore();
     }
@@ -260,14 +252,29 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
     }
 }
 
-/// How far to scroll an input's text (left, up) so the caret at `at` stays inside its content box.
-fn caret_scroll(tree: &LayoutTree, styles: &StyleMap, input: NodeId, content: &TextContent, at: usize) -> (f32, f32) {
-    let Some(rect) = tree.node_rect(input) else { return (0.0, 0.0) };
-    let s = styles.get(input);
-    let inner_w = rect.width - s.border_width.left - s.border_width.right - s.padding.left - s.padding.right;
-    let inner_h = rect.height - s.border_width.top - s.border_width.bottom - s.padding.top - s.padding.bottom;
-    let g = Cursor::from_byte_index(&content.layout, at, Affinity::Downstream).geometry(&content.layout, 1.0);
-    ((g.x0 as f32 + 1.0 - inner_w).max(0.0), (g.y1 as f32 - inner_h).max(0.0))
+/// Thin overlay scrollbars for an `overflow: auto | scroll` box that has more to show.
+fn paint_scrollbars(canvas: &Canvas, b: &LayoutBox, offsets: &ScrollOffsets) {
+    let Some(sb) = &b.scroll else { return };
+    let (max_x, max_y) = sb.max_offset();
+    let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(Color::from_argb(110, 0, 0, 0));
+    const THICK: f32 = 6.0;
+    const EDGE: f32 = 2.0;
+    let c = sb.clip;
+    if sb.wheel_y && max_y > 0.0 {
+        let len = (c.height * c.height / sb.content_height).clamp(16.0, c.height);
+        let top = c.y + (c.height - len) * (oy / max_y).clamp(0.0, 1.0);
+        let r = Rect::from_xywh(c.x + c.width - THICK - EDGE, top, THICK, len);
+        canvas.draw_round_rect(r, THICK / 2.0, THICK / 2.0, &paint);
+    }
+    if sb.wheel_x && max_x > 0.0 {
+        let len = (c.width * c.width / sb.content_width).clamp(16.0, c.width);
+        let left = c.x + (c.width - len) * (ox / max_x).clamp(0.0, 1.0);
+        let r = Rect::from_xywh(left, c.y + c.height - THICK - EDGE, len, THICK);
+        canvas.draw_round_rect(r, THICK / 2.0, THICK / 2.0, &paint);
+    }
 }
 
 /// A 1px caret at byte offset `at` of a text run.

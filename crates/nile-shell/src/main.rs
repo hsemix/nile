@@ -4,13 +4,14 @@
 //!   nile page.html --png out.png        render headless
 //!        [--width 900] [--height 640] [--scale 2]
 //!        [--hover X,Y] [--press X,Y] [--click X,Y]   simulate the pointer (logical px)
+//!        [--wheel X,Y,DY]              scroll at a point (negative DY scrolls content up)
 //!        [--type TEXT]                 type into the focused input ({Backspace}, {ArrowLeft}, ... for keys)
 //!        [--wait MS]                   let timers run this long before the snapshot
 
 use std::{cell::RefCell, num::NonZeroU32, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 
 use nile_dom::{Document, NodeId, ScriptSource};
-use nile_layout::LayoutTree;
+use nile_layout::{LayoutTree, ScrollOffsets};
 use nile_render::Renderer;
 use nile_script::{Environment, ScriptHost, UiEvent};
 use nile_style::{compute_styles_with, InteractionState, StyleMap};
@@ -43,6 +44,10 @@ struct View {
     scroll_y: f32,
     /// A script moved the scroll position; the window needs repainting.
     scroll_dirty: bool,
+    /// Scroll offsets of `overflow` elements.
+    scroll_offsets: ScrollOffsets,
+    /// Elements scrolled since the page last looked, to fire `scroll` events.
+    scrolled: Vec<NodeId>,
     interaction: InteractionState,
     /// Focus moves made by scripts, so the page can fire `blur`/`focus` for them.
     focus_changes: Vec<(Option<NodeId>, Option<NodeId>)>,
@@ -66,6 +71,21 @@ impl View {
             self.restyle();
         }
         changed
+    }
+
+    /// Scroll an `overflow` element, clamped to its range. True if it moved.
+    fn set_element_scroll(&mut self, node: NodeId, x: f32, y: f32) -> bool {
+        self.sync();
+        let Some((mx, my)) = self.layout().scroll_box(node).map(|sb| sb.max_offset()) else { return false };
+        let new = (x.clamp(0.0, mx), y.clamp(0.0, my));
+        let old = self.scroll_offsets.get(&node).copied().unwrap_or_default();
+        if new == old {
+            return false;
+        }
+        self.scroll_offsets.insert(node, new);
+        self.scrolled.push(node);
+        self.scroll_dirty = true;
+        true
     }
 
     fn set_viewport(&mut self, width: f32, height: f32) {
@@ -93,7 +113,8 @@ impl Environment for Env {
         let mut v = self.0.borrow_mut();
         v.sync();
         let scroll = v.scroll_y;
-        let r = v.layout().node_rect(node)?;
+        let offsets = v.scroll_offsets.clone();
+        let r = v.layout().node_rect_scrolled(node, &offsets)?;
         Some([r.x, r.y - scroll, r.width, r.height])
     }
 
@@ -119,6 +140,18 @@ impl Environment for Env {
 
     fn interaction(&self) -> InteractionState {
         self.0.borrow().interaction
+    }
+
+    fn element_scroll(&self, node: NodeId) -> Option<[f32; 4]> {
+        let mut v = self.0.borrow_mut();
+        v.sync();
+        let (ox, oy) = v.scroll_offsets.get(&node).copied().unwrap_or_default();
+        let sb = *v.layout().scroll_box(node)?;
+        Some([ox, oy, sb.content_width, sb.content_height])
+    }
+
+    fn scroll_element_to(&self, node: NodeId, x: f32, y: f32) {
+        self.0.borrow_mut().set_element_scroll(node, x, y);
     }
 
     fn set_focus(&self, node: Option<NodeId>) {
@@ -170,6 +203,8 @@ impl Page {
             viewport,
             scroll_y,
             scroll_dirty: false,
+            scroll_offsets: ScrollOffsets::new(),
+            scrolled: Vec::new(),
             interaction,
             focus_changes: Vec::new(),
         }));
@@ -262,14 +297,21 @@ impl Page {
     /// Pick up DOM changes and script-driven scrolling. True if the page
     /// needs repainting.
     fn sync(&mut self) -> bool {
-        let (changed, moves) = {
+        let (changed, moves, scrolled) = {
             let mut v = self.view.borrow_mut();
             let changed = v.sync();
-            (std::mem::take(&mut v.scroll_dirty) | changed, std::mem::take(&mut v.focus_changes))
+            (
+                std::mem::take(&mut v.scroll_dirty) | changed,
+                std::mem::take(&mut v.focus_changes),
+                std::mem::take(&mut v.scrolled),
+            )
         };
         let moved = !moves.is_empty();
         for (old, new) in moves {
             self.focus_moved(old, new);
+        }
+        for node in scrolled {
+            self.emit(node, UiEvent::Plain("scroll"));
         }
         changed | moved
     }
@@ -317,7 +359,72 @@ impl Page {
             return None;
         }
         let scroll = v.scroll_y;
-        v.layout().hit_test(x, y + scroll)
+        let offsets = v.scroll_offsets.clone();
+        v.layout().hit_test_scrolled(x, y + scroll, &offsets)
+    }
+
+    /// Scroll under the pointer by a wheel delta (positive scrolls content up/left,
+    /// i.e. `dy > 0` is wheel-up): the innermost `overflow: auto | scroll` ancestor
+    /// that can still move that way takes it, else the page does.
+    fn wheel(&mut self, dx: f32, dy: f32) {
+        let target = self.pointer.and_then(|(x, y)| self.hit_test(x, y));
+        let mut cur = target;
+        while let Some(n) = cur {
+            let moved = {
+                let mut v = self.view.borrow_mut();
+                let sb = v.layout().scroll_box(n).copied();
+                let (ox, oy) = v.scroll_offsets.get(&n).copied().unwrap_or_default();
+                match sb {
+                    Some(sb) => {
+                        let (mx, my) = sb.max_offset();
+                        let can_y = sb.wheel_y && ((dy > 0.0 && oy > 0.0) || (dy < 0.0 && oy < my));
+                        let can_x = sb.wheel_x && ((dx > 0.0 && ox > 0.0) || (dx < 0.0 && ox < mx));
+                        (can_x || can_y)
+                            && v.set_element_scroll(n, if can_x { ox - dx } else { ox }, if can_y { oy - dy } else { oy })
+                    }
+                    None => false,
+                }
+            };
+            if moved {
+                self.sync();
+                self.refresh_hover();
+                return;
+            }
+            cur = self.doc.borrow().node(n).parent;
+        }
+        self.view.borrow_mut().scroll_y -= dy;
+        // Content moved under a stationary pointer. The page scroll is clamped
+        // at paint, so hover may lag one frame at its limits.
+        self.refresh_hover();
+    }
+
+    /// Scroll the focused input/textarea so its caret is visible.
+    fn reveal_caret(&mut self) {
+        let Some(f) = self.interaction().focus.filter(|f| self.is_text_input(*f)) else { return };
+        let at = nile_layout::caret_byte(&self.doc.borrow(), f, self.caret);
+        let mut v = self.view.borrow_mut();
+        v.sync();
+        let tree = v.layout();
+        let (Some(c), Some(sb)) = (tree.caret_rect(f, at), tree.scroll_box(f).copied()) else { return };
+        let (ox, oy) = v.scroll_offsets.get(&f).copied().unwrap_or_default();
+        // Reveal the caret plus the box's padding, so the first line scrolls fully to the top.
+        let pad = v.styles.get(f).padding;
+        let (clip, cx, cy) = (sb.clip, c.x - sb.clip.x, c.y - sb.clip.y);
+        let nx = if cx - pad.left < ox {
+            (cx - pad.left).max(0.0)
+        } else if cx + c.width + 1.0 + pad.right > ox + clip.width {
+            cx + c.width + 1.0 + pad.right - clip.width
+        } else {
+            ox
+        };
+        let ny = if cy - pad.top < oy {
+            (cy - pad.top).max(0.0)
+        } else if cy + c.height + pad.bottom > oy + clip.height {
+            cy + c.height + pad.bottom - clip.height
+        } else {
+            oy
+        };
+        v.set_element_scroll(f, nx, ny);
     }
 
     /// Nearest ancestor-or-self that can take focus (links, form controls, `tabindex`).
@@ -398,7 +505,8 @@ impl Page {
             let at = {
                 let mut v = self.view.borrow_mut();
                 let scroll = v.scroll_y;
-                v.layout().text_index_at(f, x, y + scroll)
+                let offsets = v.scroll_offsets.clone();
+                v.layout().text_index_at_scrolled(f, x, y + scroll, &offsets)
             };
             if let Some(at) = at {
                 let caret = nile_layout::caret_char(&self.doc.borrow(), f, at);
@@ -435,6 +543,7 @@ impl Page {
     fn show_caret(&mut self) {
         self.caret_visible = true;
         self.blink_at = Instant::now() + CARET_BLINK;
+        self.reveal_caret();
     }
 
     /// Flip the caret when its blink is due. Returns whether the page changed
@@ -836,7 +945,7 @@ impl Page {
         canvas.save();
         canvas.scale((scale, scale));
         let tree = &view.layout.as_ref().expect("laid out above").2;
-        self.renderer.paint(canvas, tree, &view.styles, scroll, caret);
+        self.renderer.paint(canvas, tree, &view.styles, scroll, caret, &view.scroll_offsets);
         canvas.restore();
     }
 }
@@ -848,6 +957,8 @@ struct Pointer {
     press: bool,
     /// Release again after pressing (a full click).
     release: bool,
+    /// Wheel delta to apply at the point (positive scrolls content down, like wheel-up).
+    wheel: f32,
 }
 
 /// Options for a headless render.
@@ -881,6 +992,9 @@ fn render_png(page: &mut Page, snap: Snapshot) {
         }
         if p.release {
             page.release();
+        }
+        if p.wheel != 0.0 {
+            page.wheel(0.0, p.wheel);
         }
     }
     if let Some(text) = typed {
@@ -1001,10 +1115,11 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => y * 40.0,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / window.scale_factor() as f32,
                 };
-                self.page.view.borrow_mut().scroll_y -= dy;
-                // Content moved under a stationary pointer. Clamping happens in
-                // paint, so hover may lag one frame at the scroll limits.
-                self.page.refresh_hover();
+                let dx = match delta {
+                    MouseScrollDelta::LineDelta(x, _) => x * 40.0,
+                    MouseScrollDelta::PixelDelta(p) => p.x as f32 / window.scale_factor() as f32,
+                };
+                self.page.wheel(dx, dy);
                 window.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
@@ -1059,13 +1174,17 @@ fn main() {
             "--png" => png = args.next(),
             "--width" => width = args.next().and_then(|v| v.parse().ok()).unwrap_or(width),
             "--height" => height = args.next().and_then(|v| v.parse().ok()).unwrap_or(height),
-            "--hover" | "--press" | "--click" => {
-                let xy = args.next().and_then(|v| {
-                    let (x, y) = v.split_once(',')?;
-                    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
-                });
-                if let Some((x, y)) = xy {
-                    pointer = Some(Pointer { x, y, press: arg != "--hover", release: arg == "--click" });
+            "--hover" | "--press" | "--click" | "--wheel" => {
+                // X,Y (or X,Y,DY for --wheel), in logical px.
+                let nums: Vec<f32> = args.next().map(|v| v.split(',').filter_map(|n| n.trim().parse().ok()).collect()).unwrap_or_default();
+                if let [x, y, rest @ ..] = nums.as_slice() {
+                    pointer = Some(Pointer {
+                        x: *x,
+                        y: *y,
+                        press: arg == "--press" || arg == "--click",
+                        release: arg == "--click",
+                        wheel: if arg == "--wheel" { rest.first().copied().unwrap_or(0.0) } else { 0.0 },
+                    });
                 }
             }
             "--type" => typed = args.next(),
@@ -1075,7 +1194,7 @@ fn main() {
         }
     }
     let Some(file) = file else {
-        eprintln!("usage: nile <file.html> [--png out.png] [--width N] [--height N] [--scale N] [--hover X,Y] [--press X,Y] [--click X,Y] [--type TEXT] [--wait MS]");
+        eprintln!("usage: nile <file.html> [--png out.png] [--width N] [--height N] [--scale N] [--hover X,Y] [--press X,Y] [--click X,Y] [--wheel X,Y,DY] [--type TEXT] [--wait MS]");
         std::process::exit(2);
     };
 
@@ -1275,6 +1394,72 @@ cd</textarea>
         key(&mut p, "ArrowDown"); // past the last line: end of text
         key(&mut p, "Y");
         assert_eq!(log(&p).last().map(String::as_str), Some("\"ab\\nX\\ncdY\""));
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn offset(p: &Page, id: &str) -> (f32, f32) {
+        let n = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+        p.view.borrow().scroll_offsets.get(&n).copied().unwrap_or_default()
+    }
+
+    #[test]
+    fn wheel_scrolls_the_innermost_box_then_chains_to_the_page() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="box" style="width:100px; height:50px; overflow:auto">
+                 <div style="height:40px">a</div><div style="height:40px">b</div><div style="height:40px">c</div></div>
+               <div style="height:600px">tall</div>
+               <script>
+                 $('#box').addEventListener('scroll', () => console.log('scroll:' + $('#box').scrollTop));
+               </script></body>"#,
+            "wheel",
+        );
+        let (x, y) = center(&p, "box");
+        p.pointer_moved(x, y);
+        p.wheel(0.0, -30.0); // wheel down: scroll content up by 30
+        assert_eq!(offset(&p, "box"), (0.0, 30.0));
+        p.wheel(0.0, -100.0); // clamps at the end (120 - 50 = 70)
+        assert_eq!(offset(&p, "box"), (0.0, 70.0));
+        assert_eq!(p.view.borrow().scroll_y, 0.0);
+        p.wheel(0.0, -40.0); // box is at its limit: the page takes it
+        assert_eq!(offset(&p, "box"), (0.0, 70.0));
+        assert_eq!(p.view.borrow().scroll_y, 40.0);
+        p.pointer_moved(x, 5.0); // the page moved under the pointer: back over the box
+        p.wheel(0.0, 100.0); // wheel up: the box scrolls back first
+        assert_eq!(offset(&p, "box"), (0.0, 0.0));
+        assert_eq!(log(&p), ["scroll:30", "scroll:70", "scroll:0"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scripts_scroll_elements_and_the_caret_stays_visible() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="box" style="width:100px; height:50px; overflow:hidden">
+                 <div style="height:200px; width:300px">x</div></div>
+               <textarea id="t" style="width:100px; height:40px"></textarea>
+               <script>
+                 const b = $('#box');
+                 b.scrollTop = 80; b.scrollLeft = 500;
+                 console.log(b.scrollTop, b.scrollLeft, b.scrollWidth, b.scrollHeight, b.clientHeight);
+                 b.scrollBy(-30, 0); b.scrollTo({ top: 5 });
+                 console.log(b.scrollLeft, b.scrollTop);
+                 console.log(document.createElement('p').scrollTop);
+               </script></body>"#,
+            "scrolljs",
+        );
+        assert_eq!(log(&p)[0], "80 200 300 200 50");
+        assert_eq!(log(&p)[1], "170 5");
+        assert_eq!(log(&p)[2], "0");
+        // Typing past the bottom of the textarea scrolls it to keep the caret in view.
+        click(&mut p, "t");
+        for k in ["a", "Enter", "b", "Enter", "c", "Enter", "d", "Enter", "e"] {
+            p.default_key(k, ModifiersState::default());
+        }
+        assert!(offset(&p, "t").1 > 0.0, "scrolled to the caret: {:?}", offset(&p, "t"));
+        p.default_key("Home", ModifiersState::default());
+        for _ in 0..4 {
+            p.default_key("ArrowUp", ModifiersState::default());
+        }
+        assert_eq!(offset(&p, "t").1, 0.0, "back at the top");
         let _ = std::fs::remove_file(path);
     }
 }

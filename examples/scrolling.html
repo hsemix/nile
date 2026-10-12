@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+  <title>nile — scrolling</title>
+  <style>
+    body { margin: 0; padding: 20px; font-family: sans-serif; color: #1f2933; background: #f4f1ea; font-size: 14px }
+    h1 { font-size: 18px; margin: 0 0 12px 0 }
+    .row { display: flex; gap: 20px; margin-bottom: 16px }
+    .panel { width: 220px; height: 130px; overflow: auto; background: #ffffff; border: 1px solid #d6d3cb; border-radius: 6px; padding: 6px 10px }
+    .panel p { margin: 0 0 6px 0 }
+    .wide { width: 420px; height: 70px; overflow-x: auto; overflow-y: hidden; white-space: nowrap }
+    .item { display: inline-block; width: 90px; height: 40px; margin-right: 8px; background: #bbf7d0; border-radius: 6px; text-align: center }
+    .hint { color: #6b7280; font-size: 12px }
+  </style>
+</head>
+<body>
+  <h1>Scrolling</h1>
+  <div class="row">
+    <div class="panel" id="list">
+      <p>Row 1 — scroll me with the wheel</p><p>Row 2</p><p>Row 3</p><p>Row 4</p><p>Row 5</p>
+      <p>Row 6</p><p>Row 7</p><p>Row 8</p><p>Row 9</p><p>Row 10</p><p>Row 11</p><p>Row 12 — the end</p>
+    </div>
+    <div>
+      <div class="hint" id="info">scrollTop: 0</div>
+      <textarea id="ta" style="width: 180px; height: 70px">One
+Two
+Three
+Four
+Five
+Six
+Seven</textarea>
+    </div>
+  </div>
+  <div class="panel wide" id="strip">
+    <span class="item">1</span><span class="item">2</span><span class="item">3</span><span class="item">4</span>
+    <span class="item">5</span><span class="item">6</span><span class="item">7</span><span class="item">8</span>
+  </div>
+  <script>
+    $('#list').on('scroll', () => { $('#info').textContent = 'scrollTop: ' + $('#list').scrollTop + ' of ' + ($('#list').scrollHeight - $('#list').clientHeight); });
+    $('#list').scrollTop = 60;
+    $('#strip').scrollLeft = 140;
+  </script>
+</body>
+</html>
