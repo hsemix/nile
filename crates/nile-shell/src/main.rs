@@ -23,7 +23,7 @@ use winit::{
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, ModifiersState, NamedKey},
-    window::{Window, WindowId},
+    window::{CursorIcon, Window, WindowId},
 };
 
 /// Text clipboard. The system one in the window; an in-memory one for headless
@@ -146,29 +146,53 @@ impl View {
     }
 }
 
+/// Print how long a phase took when `NILE_TRACE` is set (for finding what to optimise).
+fn traced<T>(label: &str, f: impl FnOnce() -> T) -> T {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("NILE_TRACE").is_some()) {
+        return f();
+    }
+    let t = Instant::now();
+    let out = f();
+    eprintln!("[trace] {label}: {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+    out
+}
+
 impl View {
     /// Recompute styles (after an interaction change or a DOM mutation).
     // TODO: restyle only the affected elements and relayout only if a
     // layout-affecting property changed.
     fn restyle(&mut self) {
         let doc = self.doc.borrow();
-        let fresh = compute_styles_in(&doc, &self.interaction, self.viewport);
+        let fresh = traced("style", || compute_styles_in(&doc, &self.interaction, self.viewport));
+        let dom_changed = doc.version != self.seen_version;
         self.seen_version = doc.version;
-        self.layout = None;
         drop(doc);
-        self.adopt(fresh);
+        let old = self.adopt(fresh);
+        self.reuse_layout_if_paint_only(&old, dom_changed);
+    }
+
+    /// Keep the laid-out boxes when a restyle only changed how things are painted (hover
+    /// colors, fades, ...); otherwise throw them away.
+    fn reuse_layout_if_paint_only(&mut self, old: &StyleMap, dom_changed: bool) {
+        let keep = !dom_changed && self.layout.is_some() && self.styles.same_layout(old);
+        match (&mut self.layout, keep) {
+            (Some((_, _, tree)), true) => tree.refresh_paint(&self.styles),
+            _ => self.layout = None,
+        }
     }
 
     /// Take freshly cascaded styles, starting transitions for what changed.
-    fn adopt(&mut self, fresh: StyleMap) {
+    fn adopt(&mut self, fresh: StyleMap) -> StyleMap {
         if fresh.animates() || self.animator.is_tracking() {
             let now = self.clock.elapsed().as_secs_f64();
-            self.styles = fresh.clone();
+            let old = std::mem::replace(&mut self.styles, fresh.clone());
             let base = self.base.insert(fresh);
             self.animator.update(base, &mut self.styles, now, true);
+            old
         } else {
-            self.styles = fresh;
             self.base = None;
+            std::mem::replace(&mut self.styles, fresh)
         }
     }
 
@@ -179,8 +203,12 @@ impl View {
             return false;
         }
         let now = self.clock.elapsed().as_secs_f64();
-        self.animator.update(base, &mut self.styles, now, false);
-        self.layout = None;
+        let old = traced("animate: snapshot", || self.layout.is_some().then(|| self.styles.clone()));
+        traced("animate: update", || self.animator.update(base, &mut self.styles, now, false));
+        match old {
+            Some(old) => traced("animate: compare", || self.reuse_layout_if_paint_only(&old, false)),
+            None => self.layout = None,
+        }
         true
     }
 
@@ -245,7 +273,7 @@ impl View {
         let stale = !matches!(&self.layout, Some((w, h, _)) if *w == width && *h == height);
         if stale {
             let options = LayoutOptions { menu: self.menu, scroll_y: self.scroll_y, offsets: Some(&self.scroll_offsets), images: Some(&self.images) };
-            let tree = nile_layout::layout_with(&self.doc.borrow(), &self.styles, &mut self.text, width, height, &options);
+            let tree = traced("layout", || nile_layout::layout_with(&self.doc.borrow(), &self.styles, &mut self.text, width, height, &options));
             self.layout = Some((width, height, tree));
         }
         &self.layout.as_ref().unwrap().2
@@ -875,6 +903,19 @@ impl Page {
                 return Some(id);
             }
             id = n.parent?;
+        }
+    }
+
+    /// The pointer shape for what's under the pointer: a pressed scrollbar thumb or an open
+    /// drop-down use the arrow; otherwise the hovered element's `cursor`.
+    fn cursor(&self) -> nile_style::Cursor {
+        use nile_style::Cursor;
+        if self.bar_drag.is_some() || self.view.borrow().menu.is_some() {
+            return Cursor::Default;
+        }
+        match self.interaction().hover {
+            Some(n) => self.view.borrow().styles.get(n).cursor,
+            None => Cursor::Auto,
         }
     }
 
@@ -2075,12 +2116,14 @@ impl Page {
         canvas.save();
         canvas.scale((scale, scale));
         let tree = &view.layout.as_ref().expect("laid out above").2;
-        self.renderer.paint(
-            canvas,
-            tree,
-            &view.styles,
-            &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection },
-        );
+        traced("paint", || {
+            self.renderer.paint(
+                canvas,
+                tree,
+                &view.styles,
+                &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection },
+            )
+        });
         canvas.restore();
     }
 }
@@ -2200,6 +2243,37 @@ struct App {
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     mods: ModifiersState,
+    /// The pointer shape last given to the window.
+    cursor: nile_style::Cursor,
+}
+
+impl App {
+    /// Show the CSS `cursor` of whatever is under the pointer.
+    fn sync_cursor(&mut self) {
+        let want = self.page.cursor();
+        if want == self.cursor {
+            return;
+        }
+        self.cursor = want;
+        let Some(w) = &self.window else { return };
+        use nile_style::Cursor as C;
+        w.set_cursor_visible(want != C::None);
+        w.set_cursor(match want {
+            C::Auto | C::Default | C::None => CursorIcon::Default,
+            C::Pointer => CursorIcon::Pointer,
+            C::Text => CursorIcon::Text,
+            C::Crosshair => CursorIcon::Crosshair,
+            C::Move => CursorIcon::Move,
+            C::NotAllowed => CursorIcon::NotAllowed,
+            C::Wait => CursorIcon::Wait,
+            C::Progress => CursorIcon::Progress,
+            C::Help => CursorIcon::Help,
+            C::Grab => CursorIcon::Grab,
+            C::Grabbing => CursorIcon::Grabbing,
+            C::ResizeH => CursorIcon::ColResize,
+            C::ResizeV => CursorIcon::RowResize,
+        });
+    }
 }
 
 /// DOM `KeyboardEvent.key` for a winit key.
@@ -2248,7 +2322,14 @@ impl ApplicationHandler for App {
         });
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        self.handle_window_event(event_loop, id, event);
+        self.sync_cursor();
+    }
+}
+
+impl App {
+    fn handle_window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(window) = self.window.clone() else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -2383,7 +2464,7 @@ fn main() {
     }
 
     let event_loop = EventLoop::new().expect("event loop");
-    let mut app = App { page, window: None, surface: None, mods: ModifiersState::default() };
+    let mut app = App { page, window: None, surface: None, mods: ModifiersState::default(), cursor: nile_style::Cursor::Auto };
     event_loop.run_app(&mut app).expect("run app");
 }
 
@@ -3125,6 +3206,52 @@ cd</textarea>
         let l = p.view.borrow_mut().layout().list_box(id).unwrap().scroll;
         assert!(l > 0.0 && selected_rows(&p) == [5], "End selects and scrolls to the last row");
         assert_eq!(log(&p).last().map(String::as_str), Some("change:F"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn paint_only_restyles_keep_the_layout_and_layout_changes_drop_it() {
+        let (mut p, path) = page(
+            r#"<style>
+                 #a { width: 100px; height: 40px; background: #eee; transform: rotate(0deg) }
+                 #a:hover { background: #09f; box-shadow: 0 0 4px #000; transform: rotate(3deg) }
+                 #b { width: 100px; height: 40px }
+                 #b:hover { height: 80px }
+               </style><body style="margin:0"><div id="a"></div><div id="b"></div></body>"#,
+            "paint-only",
+        );
+        let built = |p: &Page| p.view.borrow().layout.is_some();
+        assert!(built(&p));
+        let (x, y) = center(&p, "a");
+        p.pointer_moved(x, y);
+        assert!(built(&p), "colors, shadows and transforms don't need a new layout");
+        let a = p.doc.borrow().find(|n| n.attr("id") == Some("a")).unwrap();
+        let xf = p.view.borrow_mut().layout().boxes.iter().find(|b| b.node == a).unwrap().transform.unwrap();
+        assert!(xf.b != 0.0, "but the box picks up its new transform");
+        p.layout(600.0, 300.0);
+        let (x, y) = center(&p, "b");
+        p.pointer_moved(x, y);
+        assert!(!built(&p), "a height change does");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cursor_follows_the_hovered_element() {
+        use nile_style::Cursor;
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><a id="l" href="#" style="display:block;height:20px">link</a>
+               <input id="i"><div id="g" style="height:20px;cursor:grab"><span id="s">x</span></div><div id="d" style="height:20px">plain</div></body>"##,
+            "cursor",
+        );
+        let at = |p: &mut Page, id: &str| {
+            let (x, y) = center(p, id);
+            p.pointer_moved(x, y);
+            p.cursor()
+        };
+        assert_eq!(at(&mut p, "l"), Cursor::Pointer);
+        assert_eq!(at(&mut p, "i"), Cursor::Text);
+        assert_eq!(at(&mut p, "s"), Cursor::Grab, "inherited by children");
+        assert_eq!(at(&mut p, "d"), Cursor::Auto);
         let _ = std::fs::remove_file(path);
     }
 }

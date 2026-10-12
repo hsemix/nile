@@ -212,6 +212,30 @@ pub enum FlexDirection {
     ColumnReverse,
 }
 
+/// The mouse pointer shape over an element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Cursor {
+    /// The platform picks: an I-beam over text and inputs, else the arrow.
+    #[default]
+    Auto,
+    Default,
+    Pointer,
+    Text,
+    Crosshair,
+    Move,
+    NotAllowed,
+    Wait,
+    Progress,
+    Help,
+    Grab,
+    Grabbing,
+    /// `col-resize`, `ew-resize`
+    ResizeH,
+    /// `row-resize`, `ns-resize`
+    ResizeV,
+    None,
+}
+
 /// `vertical-align`; only table cells act on it.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum VerticalAlign {
@@ -289,6 +313,8 @@ pub struct ComputedStyle {
     pub border_collapse: bool,
     /// `vertical-align` for table cells.
     pub vertical_align: VerticalAlign,
+    /// `cursor`; inherited.
+    pub cursor: Cursor,
     pub align_self: Align,
     pub align_content: Align,
 
@@ -391,6 +417,7 @@ impl Default for ComputedStyle {
             border_spacing: (0.0, 0.0),
             border_collapse: false,
             vertical_align: VerticalAlign::Baseline,
+            cursor: Cursor::Auto,
             align_self: Align::Normal,
             align_content: Align::Normal,
             justify_items: Align::Normal,
@@ -579,6 +606,7 @@ impl ComputedStyle {
             user_select: parent.user_select,
             border_spacing: parent.border_spacing,
             border_collapse: parent.border_collapse,
+            cursor: parent.cursor,
             selection_bg: parent.selection_bg,
             letter_spacing: parent.letter_spacing,
             vars: parent.vars.clone(),
@@ -613,6 +641,10 @@ em, i { font-style: italic }
 u, a { text-decoration: underline }
 s, del { text-decoration: line-through }
 a { color: #0000ee }
+a[href] { cursor: pointer }
+input, textarea { cursor: text }
+button, select, input[type=checkbox], input[type=radio], input[type=button], input[type=submit] { cursor: default }
+:disabled { cursor: not-allowed }
 button, input { display: inline-block; font-size: 13px; color: #000000; padding: 3px 8px;
   border: 1px solid #767676; border-radius: 3px; background: #efefef }
 input { background: #ffffff; width: 160px; min-height: 16px; margin: 2px; overflow: hidden }
@@ -652,7 +684,48 @@ struct Generated {
     contents: HashMap<NodeId, String>,
 }
 
+impl ComputedStyle {
+    /// Whether `other` differs from `self` only in properties that change how a box is painted,
+    /// not where it goes or how it is shaped: colors, shadows, radius, backgrounds, transforms
+    /// and opacity. Laid-out boxes stay valid across such a change (see `LayoutTree::refresh_paint`).
+    pub fn same_layout(&self, other: &ComputedStyle) -> bool {
+        let mut a = self.clone();
+        a.background = other.background;
+        a.background_image = other.background_image.clone();
+        a.background_size = other.background_size;
+        a.background_position = other.background_position;
+        a.background_repeat = other.background_repeat;
+        a.border_color = other.border_color;
+        a.border_color_set = other.border_color_set;
+        a.border_style = other.border_style;
+        a.border_radius = other.border_radius;
+        a.box_shadow = other.box_shadow.clone();
+        a.selection_bg = other.selection_bg;
+        a.transitions = other.transitions.clone();
+        a.animations = other.animations.clone();
+        a.transform_origin = other.transform_origin;
+        a.cursor = other.cursor;
+        // Whether a box is faded or transformed decides its paint order; how much doesn't.
+        if (a.opacity < 1.0) == (other.opacity < 1.0) {
+            a.opacity = other.opacity;
+        }
+        if a.transform.is_empty() == other.transform.is_empty() {
+            a.transform = other.transform.clone();
+        }
+        a == *other
+    }
+}
+
 impl StyleMap {
+    /// Whether every box would lay out as it did under `other`: same nodes and generated
+    /// boxes, and only paint-level differences in the styles.
+    pub fn same_layout(&self, other: &StyleMap) -> bool {
+        self.styles.len() == other.styles.len()
+            && self.pseudo == other.pseudo
+            && self.contents == other.contents
+            && self.styles.iter().zip(&other.styles).all(|(a, b)| a.same_layout(b))
+    }
+
     /// Some element has a `transition` or `animation`.
     pub fn animates(&self) -> bool {
         self.styles.iter().any(|s| !s.transitions.is_empty() || !s.animations.is_empty())
@@ -2044,5 +2117,24 @@ mod tests {
         // Done at 1 + 2*2 = 5s; `forwards` keeps the last (reversed) frame: from { opacity: 0 }.
         assert_eq!(opacity_at(&mut animator, &base, &mut styles, &doc, 6.0, false), 0.0);
         assert!(!animator.is_active());
+    }
+
+    #[test]
+    fn same_layout_ignores_paint_properties_only() {
+        let doc = Document::parse(
+            r#"<div id="a" style="width:10px; transform:scale(1)"></div><div id="b" style="width:10px; background:red; box-shadow:0 0 2px red; transform:rotate(1deg); cursor:pointer"></div>
+               <div id="c" style="width:20px"></div><div id="d" style="width:10px; opacity:0; color:red"></div>"#,
+        );
+        let s = compute_styles(&doc);
+        let st = |id: &str| s.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        assert!(st("a").same_layout(&st("b")), "background, shadow, transform amount and cursor are paint-level");
+        assert!(!st("a").same_layout(&st("c")), "width is not");
+        assert!(!st("a").same_layout(&st("d")), "text color is baked into text layouts");
+        let mut faded = st("a");
+        faded.opacity = 0.5;
+        assert!(!st("a").same_layout(&faded), "becoming translucent changes paint order");
+        let mut fainter = faded.clone();
+        fainter.opacity = 0.2;
+        assert!(faded.same_layout(&fainter), "but fading further doesn't");
     }
 }

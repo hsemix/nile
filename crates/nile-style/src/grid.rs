@@ -2,7 +2,7 @@
 //! properties; layout turns the results into Taffy's grid style.
 
 use crate::parse::{RepeatKind, Value};
-use crate::{length, px, Align, ComputedStyle, Length, VerticalAlign};
+use crate::{length, px, Align, ComputedStyle, Cursor, Length, VerticalAlign};
 
 /// The size of a track's min or max.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -240,6 +240,12 @@ pub(crate) fn apply(s: &mut ComputedStyle, name: &str, v: &[Value], fs: f32) -> 
                 s.border_spacing = (h, v.get(1).and_then(|x| px(x, fs)).unwrap_or(h));
             }
         }
+        "cursor" => {
+            // The first keyword we know wins; `url(...)` fallbacks are skipped.
+            if let Some(c) = v.iter().filter_map(Value::ident).find_map(cursor_of) {
+                s.cursor = c;
+            }
+        }
         "border-collapse" => match first.and_then(Value::ident) {
             Some("collapse") => s.border_collapse = true,
             Some("separate") => s.border_collapse = false,
@@ -296,6 +302,27 @@ pub fn area_lines(areas: &[Vec<String>], name: &str) -> Option<(i16, i16, i16, i
         }
     }
     found.map(|(r0, r1, c0, c1)| (r0 as i16 + 1, r1 as i16 + 1, c0 as i16 + 1, c1 as i16 + 1))
+}
+
+fn cursor_of(name: &str) -> Option<Cursor> {
+    Some(match name {
+        "auto" => Cursor::Auto,
+        "default" => Cursor::Default,
+        "pointer" => Cursor::Pointer,
+        "text" | "vertical-text" => Cursor::Text,
+        "crosshair" => Cursor::Crosshair,
+        "move" | "all-scroll" => Cursor::Move,
+        "not-allowed" | "no-drop" => Cursor::NotAllowed,
+        "wait" => Cursor::Wait,
+        "progress" => Cursor::Progress,
+        "help" => Cursor::Help,
+        "grab" => Cursor::Grab,
+        "grabbing" => Cursor::Grabbing,
+        "col-resize" | "ew-resize" | "e-resize" | "w-resize" => Cursor::ResizeH,
+        "row-resize" | "ns-resize" | "n-resize" | "s-resize" => Cursor::ResizeV,
+        "none" => Cursor::None,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

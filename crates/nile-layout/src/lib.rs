@@ -427,6 +427,16 @@ impl LayoutTree {
     }
 
     /// Where every box paints under `offsets` (parallel to `boxes`).
+    /// Bring paint-level state back in step with `styles` after a restyle that changed
+    /// nothing `StyleMap::same_layout` cares about: only transforms are baked into boxes.
+    pub fn refresh_paint(&mut self, styles: &StyleMap) {
+        for b in &mut self.boxes {
+            if matches!(b.content, BoxContent::Element) {
+                b.transform = box_transform(styles.get(b.node), b.rect);
+            }
+        }
+    }
+
     /// The rows of a list-box `<select>`.
     pub fn list_box(&self, select: NodeId) -> Option<&ListBox> {
         self.lists.get(&select)
