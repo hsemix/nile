@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+<style>
+  body { margin: 0; padding: 16px; font-family: sans-serif; font-size: 13px; background: #f4f1ea }
+  h2 { margin: 12px 0 6px 0; font-size: 12px; color: #555 }
+  .row { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap }
+  .bg { width: 130px; height: 80px; border: 2px solid #333; border-radius: 8px; background-color: #fff }
+  img { border-radius: 6px }
+</style>
+</head>
+<body>
+  <h2>&lt;img&gt;: natural size, width only, both, with border radius</h2>
+  <div class="row">
+    <img src="images/photo.png">
+    <img src="images/photo.png" width="80">
+    <img src="images/photo.png" style="width: 100px; height: 100px">
+    <img src="images/missing.png" width="40" height="40" style="background: #ddd">
+  </div>
+  <h2>Inline in text: <img src="images/tile.png" height="16"> a 16px icon and a data URI <img height="14" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="> inside a line.</h2>
+  <h2>background-image: repeat, no-repeat center, cover, contain, size, position</h2>
+  <div class="row">
+    <div class="bg" style="background-image: url(images/tile.png)"></div>
+    <div class="bg" style="background: #fff url(images/photo.png) no-repeat center"></div>
+    <div class="bg" style="background: url(images/photo.png) center / cover"></div>
+    <div class="bg" style="background: #cde url(images/photo.png) no-repeat center / contain"></div>
+    <div class="bg" style="background-image: url(images/tile.png); background-size: 40px; background-repeat: repeat-x"></div>
+    <div class="bg" style="background: url(images/photo.png) no-repeat right bottom / 60px"></div>
+  </div>
+</body>
+</html>

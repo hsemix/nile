@@ -14,10 +14,14 @@
 //! (only the innermost is painted).
 
 use std::ops::Range;
+use std::rc::Rc;
+
+mod images;
+pub use images::{FileImages, ImageData, ImageLoader};
 
 pub use nile_dom::NodeId;
 use nile_dom::{Document, NodeKind};
-use nile_style::{BorderStyle, Position, PseudoElement, TextTransform, 
+use nile_style::{area_lines, Breadth, BorderStyle, GridLine, GridPlace, Position, Track, TrackItem, TrackRepeat, PseudoElement, TextTransform, 
     Align, Color, ComputedStyle, Display, Edges, FlexDirection, Length, OverflowKind, StyleMap, TextAlign,
 };
 use nile_text::{
@@ -69,6 +73,10 @@ pub struct LayoutBox {
     pub subtree_end: usize,
     /// Set for elements with non-visible `overflow` that have content to clip.
     pub scroll: Option<ScrollBox>,
+    /// The picture an `<img>` shows.
+    pub image: Option<Rc<ImageData>>,
+    /// The picture of `background-image: url(...)`.
+    pub bg_image: Option<Rc<ImageData>>,
 }
 
 /// Clipping and scroll extent of an `overflow` box.
@@ -136,6 +144,8 @@ pub struct LayoutOptions<'a> {
     pub menu: Option<MenuRequest>,
     /// Scroll offsets, so the menu opens under where its select actually paints.
     pub offsets: Option<&'a ScrollOffsets>,
+    /// Where `<img src>` and `url()` backgrounds come from; without one they don't show.
+    pub images: Option<&'a dyn ImageLoader>,
 }
 
 pub struct MenuItem {
@@ -427,6 +437,8 @@ impl LayoutTree {
 
 enum NodeCtx {
     Element(NodeId),
+    /// An `<img>`: a leaf of its picture's size (0 x 0 without one).
+    Replaced { id: NodeId, size: (f32, f32), image: Option<Rc<ImageData>> },
     Text {
         node: NodeId,
         layout: Box<TextLayout>,
@@ -447,6 +459,15 @@ fn measure_node(
     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |known, available| match ctx {
         Some(NodeCtx::Text { layout, align, nowrap, .. }) => {
             measure_text(layout, *align, known, available, *nowrap)
+        }
+        Some(NodeCtx::Replaced { size: (w, h), .. }) => {
+            let (w, h) = (*w, *h);
+            match (known.width, known.height) {
+                (Some(kw), Some(kh)) => Size { width: kw, height: kh },
+                (Some(kw), None) if w > 0.0 => Size { width: kw, height: kw * h / w },
+                (None, Some(kh)) if h > 0.0 => Size { width: kh * w / h, height: kh },
+                (kw, kh) => Size { width: kw.unwrap_or(w), height: kh.unwrap_or(h) },
+            }
         }
         _ => Size::ZERO,
     })
@@ -472,6 +493,7 @@ pub fn layout_with(
 ) -> LayoutTree {
     let mut tree: TaffyTree<NodeCtx> = TaffyTree::new();
 
+    load_images(doc, styles, options.images);
     let html = doc.find(|n| n.tag() == Some("html")).unwrap_or(Document::ROOT);
     // Absolute boxes with no positioned ancestor use the root as their containing block.
     CONTAINING_BLOCKS.with(|s| s.borrow_mut().push(Vec::new()));
@@ -634,6 +656,8 @@ fn measure_text(
 }
 
 thread_local! {
+    /// Images the page uses, by the `src`/`url()` text they were requested with.
+    static IMAGES: std::cell::RefCell<std::collections::HashMap<String, Rc<ImageData>>> = std::cell::RefCell::default();
     /// Absolutely positioned boxes waiting to be attached to their containing block: one
     /// list per positioned ancestor being built, the root's at the bottom.
     static CONTAINING_BLOCKS: std::cell::RefCell<Vec<Vec<taffy::NodeId>>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -673,6 +697,63 @@ fn hand_off_absolute(style: &ComputedStyle, n: taffy::NodeId) -> Option<taffy::N
     Some(n)
 }
 
+/// Ask `loader` for every image the document and styles name.
+fn load_images(doc: &Document, styles: &StyleMap, loader: Option<&dyn ImageLoader>) {
+    IMAGES.with(|m| {
+        let mut m = m.borrow_mut();
+        m.clear();
+        let Some(loader) = loader else { return };
+        let mut want = |src: &str| {
+            if !m.contains_key(src) {
+                if let Some(img) = loader.load(src) {
+                    m.insert(src.to_string(), img);
+                }
+            }
+        };
+        for n in &doc.nodes {
+            if n.tag() == Some("img") {
+                if let Some(src) = n.attr("src") {
+                    want(src);
+                }
+            }
+        }
+        for s in &styles.styles {
+            if let Some(url) = &s.background_url {
+                want(url);
+            }
+        }
+    });
+}
+
+fn image_for(src: &str) -> Option<Rc<ImageData>> {
+    IMAGES.with(|m| m.borrow().get(src).cloned())
+}
+
+/// An `<img>`: sized by CSS, else its `width`/`height` attributes, else its picture.
+fn build_image(doc: &Document, styles: &StyleMap, tree: &mut TaffyTree<NodeCtx>, id: NodeId) -> Option<taffy::NodeId> {
+    let node = doc.node(id);
+    let style = styles.get(id);
+    let image = node.attr("src").and_then(image_for);
+    let mut ts = taffy_style(style);
+    let attr = |name: &str| node.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
+    if style.width == Length::Auto {
+        if let Some(w) = attr("width") {
+            ts.size.width = Dimension::length(w);
+        }
+    }
+    if style.height == Length::Auto {
+        if let Some(h) = attr("height") {
+            ts.size.height = Dimension::length(h);
+        }
+    }
+    let size = image.as_ref().map_or((0.0, 0.0), |i| (i.width as f32, i.height as f32));
+    if size.0 > 0.0 && size.1 > 0.0 {
+        ts.aspect_ratio = Some(size.0 / size.1);
+    }
+    let n = tree.new_leaf_with_context(ts, NodeCtx::Replaced { id, size, image }).ok()?;
+    hand_off_absolute(style, n)
+}
+
 fn build(
     doc: &Document,
     styles: &StyleMap,
@@ -685,6 +766,9 @@ fn build(
     }
     let node = doc.node(id);
     let style = styles.get(id);
+    if node.tag() == Some("img") && style.display != Display::None {
+        return build_image(doc, styles, tree, id);
+    }
 
     match &node.kind {
         // Text outside any block container (e.g. directly under the document).
@@ -930,30 +1014,43 @@ fn build_children(
         let pseudo = styles.is_pseudo(c);
         let is_inline = if pseudo {
             let cs = styles.get(c);
-            matches!(cs.display, Display::Inline | Display::InlineBlock) && !cs.position.out_of_flow()
+            matches!(cs.display, Display::Inline | Display::InlineBlock) && !cs.position.out_of_flow() && cs.float == nile_style::Float::None
         } else {
             match &doc.node(c).kind {
                 NodeKind::Text(_) => true,
                 NodeKind::Element { .. } => {
                     let cs = styles.get(c);
-                    matches!(cs.display, Display::Inline | Display::InlineBlock) && !cs.position.out_of_flow()
+                    matches!(cs.display, Display::Inline | Display::InlineBlock) && !cs.position.out_of_flow() && cs.float == nile_style::Float::None
                 }
                 NodeKind::Document => false,
             }
         };
-        if is_inline && parent_style.display != Display::Flex {
+        if is_inline && !matches!(parent_style.display, Display::Flex | Display::Grid) {
             run.push(c);
         } else {
             flush(&mut run, &mut out, text, tree);
             if !pseudo && matches!(doc.node(c).kind, NodeKind::Text(_)) {
                 out.extend(build_inline_run(doc, styles, text, tree, &[c], parent_style));
             } else {
-                out.extend(build(doc, styles, text, tree, c));
+                let built = build(doc, styles, text, tree, c);
+                if let (Some(n), Some(name)) = (built, &styles.get(c).grid_area_name) {
+                    place_in_area(tree, n, &parent_style.grid_areas, name);
+                }
+                out.extend(built);
             }
         }
     }
     flush(&mut run, &mut out, text, tree);
     out
+}
+
+/// Put a grid item named by `grid-area` on the cells of that area.
+fn place_in_area(tree: &mut TaffyTree<NodeCtx>, n: taffy::NodeId, areas: &[Vec<String>], name: &str) {
+    let Some((r0, r1, c0, c1)) = area_lines(areas, name) else { return };
+    let mut style = tree.style(n).unwrap().clone();
+    style.grid_row = taffy::Line { start: taffy::style_helpers::line(r0), end: taffy::style_helpers::line(r1) };
+    style.grid_column = taffy::Line { start: taffy::style_helpers::line(c0), end: taffy::style_helpers::line(c1) };
+    tree.set_style(n, style).unwrap();
 }
 
 struct InlineText {
@@ -1276,7 +1373,12 @@ fn flatten(
 
     match tree.get_node_context_mut(n) {
         Some(NodeCtx::Element(id)) => {
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None })
+            let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image })
+        }
+        Some(NodeCtx::Replaced { id, image, .. }) => {
+            let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image })
         }
         Some(NodeCtx::Text { node, layout, align, kids, decos, owners, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
@@ -1310,6 +1412,8 @@ fn flatten(
                 content: BoxContent::Text(Box::new(TextContent { layout, decos, owners })),
                 subtree_end: 0,
                 scroll: None,
+                image: None,
+                bg_image: None,
             });
             for b in placed {
                 let kid = kids[b.id as usize];
@@ -1443,10 +1547,57 @@ fn align_items(a: Align) -> Option<AlignItems> {
     })
 }
 
+fn track_fn(t: Track) -> taffy::TrackSizingFunction {
+    let min = match t.min {
+        Breadth::Px(p) => taffy::MinTrackSizingFunction::length(p),
+        Breadth::Percent(p) => taffy::MinTrackSizingFunction::percent(p),
+        Breadth::MinContent => taffy::MinTrackSizingFunction::min_content(),
+        Breadth::MaxContent => taffy::MinTrackSizingFunction::max_content(),
+        Breadth::Auto | Breadth::Fr(_) => taffy::MinTrackSizingFunction::auto(),
+    };
+    let max = match t.max {
+        Breadth::Px(p) => taffy::MaxTrackSizingFunction::length(p),
+        Breadth::Percent(p) => taffy::MaxTrackSizingFunction::percent(p),
+        Breadth::Fr(f) => taffy::MaxTrackSizingFunction::fr(f),
+        Breadth::MinContent => taffy::MaxTrackSizingFunction::min_content(),
+        Breadth::MaxContent => taffy::MaxTrackSizingFunction::max_content(),
+        Breadth::Auto => taffy::MaxTrackSizingFunction::auto(),
+    };
+    taffy::style_helpers::minmax(min, max)
+}
+
+fn template_item(item: &TrackItem) -> taffy::GridTemplateComponent<String> {
+    match item {
+        TrackItem::Track(t) => taffy::GridTemplateComponent::Single(track_fn(*t)),
+        TrackItem::Repeat(kind, tracks) => taffy::GridTemplateComponent::Repeat(taffy::GridTemplateRepetition {
+            count: match kind {
+                TrackRepeat::Count(n) => taffy::RepetitionCount::Count(*n),
+                TrackRepeat::AutoFill => taffy::RepetitionCount::AutoFill,
+                TrackRepeat::AutoFit => taffy::RepetitionCount::AutoFit,
+            },
+            tracks: tracks.iter().copied().map(track_fn).collect(),
+            line_names: Vec::new(),
+        }),
+    }
+}
+
+fn grid_line(l: GridLine) -> taffy::GridPlacement {
+    match l {
+        GridLine::Auto => taffy::GridPlacement::Auto,
+        GridLine::Line(n) => taffy::style_helpers::line(n),
+        GridLine::Span(n) => taffy::style_helpers::span(n),
+    }
+}
+
+fn placement(p: GridPlace) -> taffy::Line<taffy::GridPlacement> {
+    taffy::Line { start: grid_line(p.start), end: grid_line(p.end) }
+}
+
 fn taffy_style(s: &ComputedStyle) -> Style {
     Style {
         display: match s.display {
             Display::Flex => taffy::Display::Flex,
+            Display::Grid => taffy::Display::Grid,
             Display::None => taffy::Display::None,
             Display::Block | Display::Inline | Display::InlineBlock => taffy::Display::Block,
         },
@@ -1459,6 +1610,17 @@ fn taffy_style(s: &ComputedStyle) -> Style {
             taffy::Rect::auto()
         } else {
             taffy::Rect { top: lpa(s.inset.top), right: lpa(s.inset.right), bottom: lpa(s.inset.bottom), left: lpa(s.inset.left) }
+        },
+        float: match s.float {
+            nile_style::Float::None => taffy::Float::None,
+            nile_style::Float::Left => taffy::Float::Left,
+            nile_style::Float::Right => taffy::Float::Right,
+        },
+        clear: match s.clear {
+            nile_style::Clear::None => taffy::Clear::None,
+            nile_style::Clear::Left => taffy::Clear::Left,
+            nile_style::Clear::Right => taffy::Clear::Right,
+            nile_style::Clear::Both => taffy::Clear::Both,
         },
         box_sizing: if s.border_box { BoxSizing::BorderBox } else { BoxSizing::ContentBox },
         size: Size { width: dim(s.width), height: dim(s.height) },
@@ -1488,7 +1650,23 @@ fn taffy_style(s: &ComputedStyle) -> Style {
         flex_basis: dim(s.flex_basis),
         justify_content: justify(s.justify_content),
         align_items: align_items(s.align_items),
-        gap: Size { width: LengthPercentage::length(s.gap), height: LengthPercentage::length(s.gap) },
+        align_self: align_items(s.align_self),
+        align_content: justify(s.align_content),
+        justify_items: align_items(s.justify_items),
+        justify_self: align_items(s.justify_self),
+        gap: Size { width: LengthPercentage::length(s.column_gap), height: LengthPercentage::length(s.row_gap) },
+        grid_template_columns: s.grid_template_columns.iter().map(template_item).collect(),
+        grid_template_rows: s.grid_template_rows.iter().map(template_item).collect(),
+        grid_auto_columns: s.grid_auto_columns.iter().copied().map(track_fn).collect(),
+        grid_auto_rows: s.grid_auto_rows.iter().copied().map(track_fn).collect(),
+        grid_auto_flow: match (s.grid_auto_flow.column, s.grid_auto_flow.dense) {
+            (false, false) => taffy::GridAutoFlow::Row,
+            (true, false) => taffy::GridAutoFlow::Column,
+            (false, true) => taffy::GridAutoFlow::RowDense,
+            (true, true) => taffy::GridAutoFlow::ColumnDense,
+        },
+        grid_row: placement(s.grid_row),
+        grid_column: placement(s.grid_column),
         ..Default::default()
     }
 }
@@ -1674,7 +1852,7 @@ second</textarea><textarea id="e"></textarea></body>"#,
         assert!(e.height > 16.0, "an empty select still has a line");
         assert!(tree.menu.is_none());
 
-        let opts = LayoutOptions { menu: Some(MenuRequest { select: id("s"), highlight: Some(0) }), offsets: None };
+        let opts = LayoutOptions { menu: Some(MenuRequest { select: id("s"), highlight: Some(0) }), offsets: None, images: None };
         let tree = layout_with(&doc, &styles, &mut text, 800.0, 400.0, &opts);
         let m = tree.menu.as_ref().unwrap();
         assert_eq!((m.rect.x, m.rect.y), (s.x, s.y + s.height), "opens right under the select");
@@ -1958,5 +2136,70 @@ second</textarea><textarea id="e"></textarea></body>"#,
         let at = |id: &str| order.iter().position(|n| *n == node(id)).unwrap();
         assert!(at("lo") < at("flow") && at("flow") < at("plain") && at("plain") < at("hi"));
         assert_eq!(tree.hit_test(5.0, 5.0), Some(node("hi")));
+    }
+
+    #[test]
+    fn grid_tracks_gaps_spans_and_areas() {
+        let doc = Document::parse(
+            r#"<body style="margin:0"><div style="display:grid; width:320px; grid-template-columns: 100px 1fr 2fr; grid-auto-rows: 20px; gap: 10px 5px">
+               <div id="a"></div><div id="b" style="grid-column: span 2"></div><div id="c"></div></div>
+               <div style="display:grid; width:200px; height:100px; grid-template-columns: 50px 1fr; grid-template-rows: 30px 1fr;
+                           grid-template-areas: 'h h' 's m'">
+               <div id="m" style="grid-area: m"></div><div id="h" style="grid-area: h"></div></div></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 400.0, 300.0);
+        let r = |id: &str| tree.node_rect(doc.find(|n| n.attr("id") == Some(id)).unwrap()).unwrap();
+        // 320 - 100 - 2 gaps of 5 = 210 split 1:2 -> 70 and 140.
+        let (a, b, c) = (r("a"), r("b"), r("c"));
+        assert_eq!((a.x, a.width, a.y, a.height), (0.0, 100.0, 0.0, 20.0));
+        assert_eq!((b.x, b.width), (105.0, 70.0 + 5.0 + 140.0));
+        assert_eq!((c.x, c.y), (0.0, 30.0));
+        let (m, h) = (r("m"), r("h"));
+        assert_eq!((h.x, h.y, h.width, h.height), (0.0, 50.0, 200.0, 30.0));
+        assert_eq!((m.x, m.width, m.height), (50.0, 150.0, 70.0));
+    }
+
+    #[test]
+    fn floats_sit_side_by_side_and_clear_drops_below() {
+        let doc = Document::parse(
+            r#"<body style="margin:0"><div style="width:300px"><div id="a" style="float:left; width:50px; height:20px"></div>
+               <div id="b" style="float:left; width:60px; height:30px"></div><div id="r" style="float:right; width:40px; height:10px"></div>
+               <div id="c" style="clear:both; height:5px"></div></div></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 400.0, 300.0);
+        let r = |id: &str| tree.node_rect(doc.find(|n| n.attr("id") == Some(id)).unwrap()).unwrap();
+        assert_eq!((r("a").x, r("a").y), (0.0, 0.0));
+        assert_eq!((r("b").x, r("b").y), (50.0, 0.0));
+        assert_eq!((r("r").x, r("r").y), (260.0, 0.0));
+        assert_eq!(r("c").y, 30.0); // below the tallest float
+    }
+
+    #[test]
+    fn images_size_from_the_picture_or_attributes() {
+        const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        // The test picture is 1x1; scale it up with attributes and CSS.
+        let html = format!(
+            r#"<body style="margin:0"><img id="a" src="{PNG}"><img id="b" src="{PNG}" width="40"><img id="c" src="{PNG}" style="height: 30px">
+               <img id="d" src="missing.png" width="20" height="10"><div id="e" style="width:50px; height:50px; background: url({PNG})"></div></body>"#
+        );
+        let doc = Document::parse(&html);
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let loader = FileImages::new("/nonexistent");
+        let options = LayoutOptions { images: Some(&loader), ..Default::default() };
+        let tree = layout_with(&doc, &styles, &mut text, 600.0, 300.0, &options);
+        let find = |id: &str| doc.find(|n| n.attr("id") == Some(id)).unwrap();
+        let size = |id: &str| tree.node_rect(find(id)).map(|r| (r.width, r.height)).unwrap();
+        assert_eq!(size("a"), (1.0, 1.0));
+        assert_eq!(size("b"), (40.0, 40.0)); // aspect ratio keeps it square
+        assert_eq!(size("c"), (30.0, 30.0));
+        assert_eq!(size("d"), (20.0, 10.0)); // no picture: attributes still size it
+        let boxes = |id: &str| tree.boxes.iter().find(|b| b.node == find(id) && matches!(b.content, BoxContent::Element)).unwrap();
+        assert!(boxes("a").image.is_some() && boxes("d").image.is_none());
+        assert!(boxes("e").bg_image.is_some());
     }
 }
