@@ -23,6 +23,6 @@ precomputed-hash = "0.1"
 taffy = "0.14"
 parley = "0.12"
 skia-safe = "0.93"
-rquickjs = "0.14"
+rquickjs = { version = "0.14", features = ["loader"] }
 winit = "0.30"
 softbuffer = "0.4"

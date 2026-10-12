@@ -110,6 +110,10 @@ impl Environment for Env {
         v.scroll_y = y.max(0.0);
         v.scroll_dirty = true;
     }
+
+    fn interaction(&self) -> InteractionState {
+        self.0.borrow().interaction
+    }
 }
 
 /// One loaded document plus everything needed to paint and interact with it.
@@ -149,23 +153,41 @@ impl Page {
         let scripts = match ScriptHost::new(doc.clone(), Rc::new(Env(view.clone()))) {
             Ok(host) => {
                 let sources = doc.borrow().script_sources();
-                for src in sources {
-                    let code = match src {
-                        ScriptSource::Inline(code) => code,
-                        ScriptSource::External(rel) => {
-                            let file = path.parent().unwrap_or(std::path::Path::new(".")).join(&rel);
-                            match std::fs::read_to_string(&file) {
-                                Ok(code) => code,
-                                Err(e) => {
-                                    eprintln!("[js] could not load {}: {e}", file.display());
-                                    continue;
-                                }
-                            }
+                let dir = path.parent().unwrap_or(std::path::Path::new("."));
+                let read = |rel: &str| -> Option<(String, String)> {
+                    let file = dir.join(rel);
+                    match std::fs::read_to_string(&file) {
+                        Ok(code) => Some((file.to_string_lossy().into_owned(), code)),
+                        Err(e) => {
+                            eprintln!("[js] could not load {}: {e}", file.display());
+                            None
                         }
-                    };
-                    if let Err(e) = host.run(&code) {
+                    }
+                };
+                let report = |r: Result<(), String>| {
+                    if let Err(e) = r {
                         eprintln!("[js error] {e}");
                     }
+                };
+                // Classic scripts run in order; modules are deferred until after them.
+                let mut modules = Vec::new();
+                for src in sources {
+                    match src {
+                        ScriptSource::Inline(code) => report(host.run(&code)),
+                        ScriptSource::External(rel) => {
+                            if let Some((_, code)) = read(&rel) {
+                                report(host.run(&code));
+                            }
+                        }
+                        ScriptSource::ModuleInline(code) => {
+                            // Named like a file in the page's folder so relative imports resolve.
+                            modules.push((format!("{}#module{}", path.display(), modules.len()), code));
+                        }
+                        ScriptSource::ModuleExternal(rel) => modules.extend(read(&rel)),
+                    }
+                }
+                for (name, code) in modules {
+                    report(host.run_module(&name, &code));
                 }
                 host.fire_load();
                 Some(host)

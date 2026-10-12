@@ -62,6 +62,8 @@ pub enum PseudoClass {
     Hover,
     Active,
     Focus,
+    /// A runtime flag from [`nile_dom::STATE_NAMES`], e.g. `:checked`.
+    State(&'static str),
 }
 
 impl ToCss for PseudoClass {
@@ -70,6 +72,10 @@ impl ToCss for PseudoClass {
             PseudoClass::Hover => ":hover",
             PseudoClass::Active => ":active",
             PseudoClass::Focus => ":focus",
+            PseudoClass::State(name) => {
+                dest.write_char(':')?;
+                return dest.write_str(name);
+            }
         })
     }
 }
@@ -134,7 +140,10 @@ impl<'i> Parser<'i> for NileParser {
             "hover" => Ok(PseudoClass::Hover),
             "active" => Ok(PseudoClass::Active),
             "focus" => Ok(PseudoClass::Focus),
-            _ => Err(ParseError::custom(SelectorParseErrorKind::UnsupportedPseudoClassOrElement)),
+            _ => match nile_dom::STATE_NAMES.iter().find(|s| s.eq_ignore_ascii_case(&name)) {
+                Some(state) => Ok(PseudoClass::State(state)),
+                None => Err(ParseError::custom(SelectorParseErrorKind::UnsupportedPseudoClassOrElement)),
+            },
         }
     }
 }
@@ -279,6 +288,7 @@ impl Element for ElementRef<'_> {
             PseudoClass::Hover => self.contains(self.state.hover),
             PseudoClass::Active => self.contains(self.state.active),
             PseudoClass::Focus => self.state.focus == Some(self.id),
+            PseudoClass::State(name) => self.doc.has_state(self.id, name),
         }
     }
 
@@ -349,11 +359,15 @@ impl Query {
     }
 
     pub fn matches(&self, doc: &Document, id: NodeId) -> bool {
+        self.matches_with(doc, id, &InteractionState::default())
+    }
+
+    /// Like [`Query::matches`], with `:hover`/`:active`/`:focus` resolved against `state`.
+    pub fn matches_with(&self, doc: &Document, id: NodeId, state: &InteractionState) -> bool {
         use selectors::context::{
             MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, QuirksMode, SelectorCaches,
         };
-        let state = InteractionState::default();
-        let el = ElementRef::new(doc, id, &state);
+        let el = ElementRef::new(doc, id, state);
         let mut caches = SelectorCaches::default();
         let mut ctx = MatchingContext::new(
             MatchingMode::Normal,
@@ -368,9 +382,13 @@ impl Query {
 
     /// Descendants of `root` (not `root` itself) that match, in document order.
     pub fn select_all(&self, doc: &Document, root: NodeId) -> Vec<NodeId> {
+        self.select_all_with(doc, root, &InteractionState::default())
+    }
+
+    pub fn select_all_with(&self, doc: &Document, root: NodeId, state: &InteractionState) -> Vec<NodeId> {
         doc.descendants(root)
             .into_iter()
-            .filter(|id| matches!(doc.node(*id).kind, NodeKind::Element { .. }) && self.matches(doc, *id))
+            .filter(|id| matches!(doc.node(*id).kind, NodeKind::Element { .. }) && self.matches_with(doc, *id, state))
             .collect()
     }
 }

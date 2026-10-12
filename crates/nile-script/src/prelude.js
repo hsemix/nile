@@ -286,7 +286,34 @@
     get previousElementSibling() { for (let n = this.previousSibling; n; n = n.previousSibling) if (n.nodeType === 1) return n; return null; }
     get innerHTML() { return N.innerHTML(this._id); }
     set innerHTML(v) { N.setInnerHTML(this._id, String(v)); }
-    append(...items) { for (const i of items) this.appendChild(typeof i === "object" ? i : documentObj.createTextNode(String(i))); }
+    // `append`, `prepend` and `content` take vnodes (from JSX), strings/numbers
+    // (text), DOM nodes, or arrays of those; null/false are skipped.
+    append(...items) { for (const n of materialize(expand(items, this))) this.appendChild(n); }
+    prepend(...items) {
+      const first = this.firstChild;
+      for (const n of materialize(expand(items, this))) this.insertBefore(n, first);
+    }
+    content(...items) {
+      const nodes = materialize(expand(items, this));
+      N.setText(this._id, "");
+      for (const n of nodes) this.appendChild(n);
+      return this;
+    }
+    // Sciter: reconcile this element with a vnode, reusing matching DOM.
+    // Simplified: children match by key, id, then tag, in order.
+    patch(vnode, onlyChildren = false) {
+      const items = expand(vnode, this.parentElement);
+      if (onlyChildren) return patchChildren(this, items), this;
+      const root = items.find((i) => i && i.tag);
+      if (root) {
+        applyAttrs(this, root.attrs, currentAttrs(this));
+        patchChildren(this, root.kids);
+      }
+      return this;
+    }
+    insertAfter(node, ref) { this.insertBefore(node, ref ? ref.nextSibling : this.firstChild); return node; }
+    get elementIndex() { const p = this.parentElement; return p ? p.children.indexOf(this) : -1; }
+    get nodeIndex() { const p = this.parentNode; return p ? p.childNodes.indexOf(this) : -1; }
     querySelector(s) { const r = N.select(this._id, String(s)); return r.length ? wrap(r[0]) : null; }
     querySelectorAll(s) { return N.select(this._id, String(s)).map(wrap); }
     matches(s) { return N.matches(this._id, String(s)); }
@@ -317,6 +344,103 @@
     scrollIntoView() { const r = N.rect(this._id); if (r) N.scrollTo(N.scrollY() + r[1]); }
   }
 
+  // ---- vnodes -------------------------------------------------------------
+  // JSX produces vnodes: arrays [tag, attrs, children] (Sciter's shape).
+  // `expand` resolves components and fragments into plain {tag, attrs, kids}
+  // objects, strings and DOM nodes; `materialize` turns those into DOM nodes.
+  const isVNode = (x) => Array.isArray(x) && x.$v === true;
+
+  function expand(x, parent, out = []) {
+    if (x == null || x === false || x === true) return out;
+    if (typeof x === "string" || typeof x === "number") out.push(String(x));
+    else if (x instanceof Node) out.push(x);
+    else if (isVNode(x)) {
+      const [tag, attrs, kids] = x;
+      if (tag === JSX.Fragment) expand(kids, parent, out);
+      else if (typeof tag === "function") expand(tag(attrs || {}, flat(kids), parent), parent, out);
+      else out.push({ tag: String(tag), attrs: attrs || {}, kids: expand(kids, null) });
+    } else if (Array.isArray(x)) for (const y of x) expand(y, parent, out);
+    else out.push(String(x));
+    return out;
+  }
+
+  function flat(x, out = []) {
+    if (Array.isArray(x) && !isVNode(x)) for (const y of x) flat(y, out);
+    else if (x != null && x !== false) out.push(x);
+    return out;
+  }
+
+  function materialize(items) {
+    return items.map((it) => {
+      if (typeof it === "string") return documentObj.createTextNode(it);
+      if (it instanceof Node) return it;
+      const el = documentObj.createElement(it.tag);
+      applyAttrs(el, it.attrs, null);
+      for (const k of materialize(it.kids)) el.appendChild(k);
+      if (typeof it.attrs.ref === "function") it.attrs.ref(el);
+      return el;
+    });
+  }
+
+  // What `patch` compares against: the element's real attributes plus JSX-set handlers.
+  const currentAttrs = (el) => Object.assign(Object.fromEntries(el.getAttributeNames().map((n) => [n, 1])), el._vattrs);
+
+  // Apply vnode attributes; with `old` (the previous attrs), drop what's gone.
+  function applyAttrs(el, attrs, old) {
+    el._h = el._h || {};
+    const setOn = (type, fn) => {
+      if (el._h[type]) el.removeEventListener(type, el._h[type]);
+      el._h[type] = fn;
+      if (fn) el.addEventListener(type, fn);
+    };
+    for (const k of Object.keys(old || {})) {
+      if (k in attrs) continue;
+      if (/^on[A-Za-z]/.test(k)) setOn(k.slice(2).toLowerCase(), null);
+      else if (k !== "key" && k !== "ref") el.removeAttribute(k === "className" ? "class" : k);
+    }
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === "key") { el._key = v; continue; }
+      if (k === "ref") continue;
+      if (/^on[A-Za-z]/.test(k) && (typeof v === "function" || v == null)) { setOn(k.slice(2).toLowerCase(), v || null); continue; }
+      const name = k === "className" ? "class" : k;
+      if (v == null || v === false) el.removeAttribute(name);
+      else if (name === "style" && typeof v === "object") el.setAttribute("style", Object.entries(v).map(([p, val]) => kebab(p) + ": " + val).join("; "));
+      else if (name === "class" && typeof v !== "string") {
+        el.setAttribute("class", Array.isArray(v) ? v.filter(Boolean).join(" ") : Object.keys(v).filter((c) => v[c]).join(" "));
+      } else el.setAttribute(name, v === true ? "" : String(v));
+    }
+    el._vattrs = attrs;
+  }
+
+  function patchChildren(el, items) {
+    const dom = el.childNodes;
+    const used = new Set();
+    const result = [];
+    for (const it of items) {
+      let node;
+      if (typeof it === "string") {
+        node = dom.find((n) => !used.has(n) && n.nodeType === 3);
+        if (node) { if (node.data !== it) node.data = it; } else node = documentObj.createTextNode(it);
+      } else if (it instanceof Node) node = it;
+      else {
+        const key = it.attrs.key;
+        node = dom.find((n) => !used.has(n) && n.nodeType === 1 && n.localName === it.tag.toLowerCase() &&
+          (key === undefined ? n._key === undefined : n._key === key) && (!it.attrs.id || n.id === String(it.attrs.id)));
+        if (node) {
+          applyAttrs(node, it.attrs, currentAttrs(node));
+          patchChildren(node, it.kids);
+        } else node = materialize([it])[0];
+      }
+      used.add(node);
+      result.push(node);
+    }
+    for (const n of dom) if (!used.has(n)) el.removeChild(n);
+    result.forEach((n, i) => {
+      const cur = el.childNodes[i];
+      if (cur !== n) el.insertBefore(n, cur || null);
+    });
+  }
+
   class Document extends Node {
     get nodeName() { return "#document"; }
     get readyState() { return readyState; }
@@ -343,6 +467,101 @@
     dispatchEvent: (ev) => dispatch(g, ev),
     performance: { now: () => N.now() },
     queueMicrotask: (f) => { Promise.resolve().then(f).catch(report); },
+  });
+
+  // ---- JSX ---------------------------------------------------------------
+  // `<div class="a">hi</div>` compiles to JSX("div", {class: "a"}, ["hi"]).
+  // Like Sciter, the default returns a vnode array that append/content/patch
+  // render; function components are called as Component(props, kids, parent).
+  // Replace `globalThis.JSX` to change what JSX means (e.g. Mithril's `m`).
+  function JSX(tag, attrs, kids) {
+    const v = [tag, attrs, kids];
+    Object.defineProperty(v, "$v", { value: true });
+    return v;
+  }
+  JSX.Fragment = function Fragment() {};
+  g.JSX = JSX;
+
+  // ---- Sciter-style helpers ----------------------------------------------
+  g.$ = (s) => documentObj.querySelector(s);
+  g.$$ = (s) => documentObj.querySelectorAll(s);
+  for (const C of [Element, Document]) {
+    C.prototype.$ = C.prototype.querySelector;
+    C.prototype.$$ = C.prototype.querySelectorAll;
+  }
+
+  // on("click mousedown.ns ^keydown", [selector], handler)
+  //   handler(evt, matched): `this` is the element it is attached to; `matched`
+  //   is the descendant matching `selector` (or the element itself).
+  //   A leading ^ subscribes in the capturing phase; `.ns` adds a namespace.
+  const subs = new WeakMap(); // element -> [{ type, ns, capture, handler, wrapper }]
+  const parseSpec = (spec) => {
+    const capture = spec.startsWith("^");
+    const [type, ns = ""] = spec.replace(/^\^/, "").split(".");
+    return { type, ns, capture };
+  };
+  function subscribe(el, types, selector, handler, once) {
+    if (typeof selector === "function") [selector, handler] = [null, selector];
+    for (const spec of String(types).split(/\s+/).filter(Boolean)) {
+      const { type, ns, capture } = parseSpec(spec);
+      const wrapper = (ev) => {
+        let m = el;
+        if (selector) {
+          m = ev.target instanceof Element ? ev.target.closest(selector) : null;
+          if (!m || !el.contains(m)) return;
+        }
+        if (once) off(el, null, handler);
+        return handler.call(el, ev, m);
+      };
+      let list = subs.get(el);
+      if (!list) subs.set(el, (list = []));
+      list.push({ type, ns, capture, handler, wrapper });
+      el.addEventListener(type, wrapper, capture);
+    }
+    return el;
+  }
+  // off("click"), off(".ns"), off(handler), off("click", handler)
+  function off(el, what, handler) {
+    if (typeof what === "function") [what, handler] = [null, what];
+    const want = what ? parseSpec(String(what)) : null;
+    const list = subs.get(el) || [];
+    for (const rec of list.slice()) {
+      if (handler && rec.handler !== handler) continue;
+      if (want && ((want.type && rec.type !== want.type) || (want.ns && rec.ns !== want.ns))) continue;
+      el.removeEventListener(rec.type, rec.wrapper, rec.capture);
+      list.splice(list.indexOf(rec), 1);
+    }
+    return el;
+  }
+  EventTarget.prototype.on = function (types, selector, handler) { return subscribe(this, types, selector, handler, false); };
+  EventTarget.prototype.once = function (types, selector, handler) { return subscribe(this, types, selector, handler, true); };
+  EventTarget.prototype.off = function (what, handler) { return off(this, what, handler); };
+
+  // Element.state: runtime flags. hover/active/focus come from interaction;
+  // the others (checked, disabled, readonly, expanded, ...) are stored on the
+  // element and matched by the same-named pseudo-classes.
+  const FLAGS = ["checked", "disabled", "readonly", "expanded", "collapsed", "current", "selected", "invalid", "busy"];
+  Object.defineProperty(Element.prototype, "state", {
+    get() {
+      return new Proxy({}, {
+        get: (_, k) => (k === "hover" || k === "active" || k === "focus" ? this.matches(":" + k) : FLAGS.includes(k) ? N.getState(this._id, k) : undefined),
+        set: (_, k, v) => { if (FLAGS.includes(k)) N.setState(this._id, k, !!v); return true; },
+        has: (_, k) => FLAGS.includes(k) || k === "hover" || k === "active" || k === "focus",
+      });
+    },
+  });
+
+  // Element.attributes: an array-like of { name, value } (a simplified NamedNodeMap).
+  Object.defineProperty(Element.prototype, "attributes", {
+    get() {
+      const attrs = this.getAttributeNames().map((name) => {
+        const a = { name };
+        Object.defineProperty(a, "value", { enumerable: true, get: () => this.getAttribute(name), set: (v) => this.setAttribute(name, v) });
+        return a;
+      });
+      attrs.getNamedItem = (n) => attrs.find((a) => a.name === String(n).toLowerCase()) || null;
+      return new Proxy(attrs, { get: (t, k) => (k in t || typeof k === "symbol" ? t[k] : t.getNamedItem(k) ?? undefined) });
+    },
   });
 
   // ---- computed style, window metrics, scrolling ---------------------------

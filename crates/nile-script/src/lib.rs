@@ -18,10 +18,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nile_dom::{Document, NodeId, NodeKind};
-use nile_style::Query;
+use nile_style::{InteractionState, Query};
 use rquickjs::{
-    function::Func, CatchResultExt, Context, Ctx, Exception, Function, Object, Runtime,
+    function::Func,
+    loader::{ImportAttributes, Loader, Resolver},
+    module::Declared,
+    CatchResultExt, Context, Ctx, Exception, Function, Module, Object, Runtime,
 };
+
+mod jsx;
 
 const PRELUDE: &str = include_str!("prelude.js");
 
@@ -38,6 +43,67 @@ pub trait Environment {
     fn viewport(&self) -> (f32, f32);
     fn scroll_y(&self) -> f32;
     fn scroll_to(&self, y: f32);
+    /// Hover/active/focus, for `:hover` etc. in selectors scripts evaluate.
+    fn interaction(&self) -> InteractionState;
+}
+
+/// Resolves `./` and `../` imports against the importing module's file.
+struct FileResolver;
+
+impl Resolver for FileResolver {
+    fn resolve<'js>(
+        &mut self,
+        _ctx: &Ctx<'js>,
+        base: &str,
+        name: &str,
+        _attributes: Option<ImportAttributes<'js>>,
+    ) -> rquickjs::Result<String> {
+        let path = std::path::Path::new(name);
+        if name.starts_with("./") || name.starts_with("../") {
+            // Inline modules are named `page.html#moduleN`; imports resolve from the page's folder.
+            let base_file = base.split('#').next().unwrap_or(base);
+            let dir = std::path::Path::new(base_file).parent().unwrap_or(std::path::Path::new(""));
+            Ok(normalize(&dir.join(path)))
+        } else if path.is_absolute() {
+            Ok(normalize(path))
+        } else {
+            Err(rquickjs::Error::new_resolving(base, name))
+        }
+    }
+}
+
+/// Lexically remove `.` and `..` components.
+fn normalize(path: &std::path::Path) -> String {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.to_string_lossy().into_owned()
+}
+
+/// Loads module files from disk, transforming JSX.
+struct FileLoader;
+
+impl Loader for FileLoader {
+    fn load<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        name: &str,
+        _attributes: Option<ImportAttributes<'js>>,
+    ) -> rquickjs::Result<Module<'js, Declared>> {
+        let source = std::fs::read_to_string(name).map_err(|_| rquickjs::Error::new_loading(name))?;
+        let source = jsx::transform(&source).unwrap_or(source);
+        Module::declare(ctx.clone(), name, source)
+    }
 }
 
 /// An input event for [`ScriptHost::dispatch`].
@@ -189,20 +255,30 @@ fn install_natives(
             d.borrow_mut().detach(n);
         }
     }));
+    native!("getState", with_doc!(d => move |id: i32, name: String| -> bool {
+        node(id).is_some_and(|n| d.borrow().has_state(n, &name))
+    }));
+    native!("setState", with_doc!(d => move |id: i32, name: String, on: bool| {
+        if let Some(n) = node(id) {
+            d.borrow_mut().set_state(n, &name, on);
+        }
+    }));
     native!("byId", with_doc!(d => move |id: String| -> i32 {
         let d = d.borrow();
         id_out(d.descendants(Document::ROOT).into_iter().find(|n| d.node(*n).attr("id") == Some(id.as_str())))
     }));
-    native!("select", with_doc!(d => move |ctx: Ctx<'_>, root: i32, css: String| -> rquickjs::Result<Vec<i32>> {
+    native!("select", with_doc!(d => { let env = env.clone(); move |ctx: Ctx<'_>, root: i32, css: String| -> rquickjs::Result<Vec<i32>> {
+        let q = Query::parse(&css).map_err(|e| Exception::throw_message(&ctx, &format!("SyntaxError: {e}")))?;
+        let state = env.interaction();
+        let d = d.borrow();
+        Ok(node(root).map(|r| q.select_all_with(&d, r, &state).into_iter().map(|n| n.0 as i32).collect()).unwrap_or_default())
+    } }));
+    native!("matches", with_doc!(d => { let env = env.clone(); move |ctx: Ctx<'_>, id: i32, css: String| -> rquickjs::Result<bool> {
         let q = Query::parse(&css).map_err(|e| Exception::throw_message(&ctx, &format!("SyntaxError: {e}")))?;
         let d = d.borrow();
-        Ok(node(root).map(|r| q.select_all(&d, r).into_iter().map(|n| n.0 as i32).collect()).unwrap_or_default())
-    }));
-    native!("matches", with_doc!(d => move |ctx: Ctx<'_>, id: i32, css: String| -> rquickjs::Result<bool> {
-        let q = Query::parse(&css).map_err(|e| Exception::throw_message(&ctx, &format!("SyntaxError: {e}")))?;
-        let d = d.borrow();
-        Ok(node(id).is_some_and(|n| matches!(d.node(n).kind, NodeKind::Element { .. }) && q.matches(&d, n)))
-    }));
+        let state = env.interaction();
+        Ok(node(id).is_some_and(|n| matches!(d.node(n).kind, NodeKind::Element { .. }) && q.matches_with(&d, n, &state)))
+    } }));
     native!("rect", {
         let env = env.clone();
         move |id: i32| -> Option<Vec<f32>> { node(id).and_then(|n| env.bounding_rect(n)).map(|r| r.to_vec()) }
@@ -244,6 +320,7 @@ impl ScriptHost {
     /// owner compares `doc.version` after each call to see if anything changed.
     pub fn new(doc: Rc<RefCell<Document>>, env: Rc<dyn Environment>) -> rquickjs::Result<Self> {
         let runtime = Runtime::new()?;
+        runtime.set_loader(FileResolver, FileLoader);
         let context = Context::full(&runtime)?;
         let log = Arc::new(Mutex::new(Vec::new()));
         let start = Instant::now();
@@ -265,9 +342,27 @@ impl ScriptHost {
 
     /// Run a classic script. Errors are returned as readable strings.
     pub fn run(&self, source: &str) -> Result<(), String> {
+        let source = jsx::transform(source).unwrap_or_else(|| source.to_string());
         let result = self
             .context
             .with(|ctx| ctx.eval::<(), _>(source).catch(&ctx).map_err(|e| e.to_string()));
+        self.drain_jobs();
+        result
+    }
+
+    /// Run an ES module. `name` is its file path (or `page.html#module0` for an
+    /// inline module); relative `import`s resolve from its folder.
+    pub fn run_module(&self, name: &str, source: &str) -> Result<(), String> {
+        let source = jsx::transform(source).unwrap_or_else(|| source.to_string());
+        let result = self.context.with(|ctx| {
+            let promise = Module::evaluate(ctx.clone(), name, source).catch(&ctx).map_err(|e| e.to_string())?;
+            match promise.finish::<()>().catch(&ctx) {
+                // Still waiting on a timer or similar (top-level await): fine.
+                Err(rquickjs::CaughtError::Error(rquickjs::Error::WouldBlock)) => Ok(()),
+                Err(e) => Err(e.to_string()),
+                Ok(()) => Ok(()),
+            }
+        });
         self.drain_jobs();
         result
     }
@@ -370,6 +465,9 @@ mod tests {
         }
         fn scroll_to(&self, y: f32) {
             *self.0.borrow_mut() = y;
+        }
+        fn interaction(&self) -> InteractionState {
+            InteractionState::default()
         }
     }
 
@@ -530,6 +628,186 @@ mod tests {
         assert_eq!(out[2], "640 480 0");
         assert_eq!(out[3], format!("30 {} 30", 20 * b - 30));
         assert_eq!(out[4], "100");
+    }
+
+    #[test]
+    fn jsx_builds_dom_in_classic_scripts() {
+        let (host, doc) = host(r#"<div id="root"></div>"#);
+        host.run(
+            r#"
+            const Card = (props, kids) => <section class="card" data-n={props.n}>{kids}</section>;
+            let clicked = 0;
+            const items = ['a', 'b'];
+            const view = (
+              <Card n={2}>
+                <h1 style={{ color: 'red', fontSize: '20px' }} onclick={() => clicked++}>Title &amp; more</h1>
+                <ul class={['x', false, 'y']}>{items.map((t, i) => <li key={i} hidden={i === 1}>{t}</li>)}</ul>
+                <>frag</>
+                {null}{false}{3}
+              </Card>
+            );
+            document.getElementById('root').append(view);
+            document.querySelector('h1').click();
+            console.log(clicked, document.getElementById('root').innerHTML);
+            "#,
+        )
+        .unwrap();
+        let _ = doc;
+        assert_eq!(
+            host.console_output()[0],
+            r#"1 <section class="card" data-n="2"><h1 style="color: red; font-size: 20px">Title &amp; more</h1><ul class="x y"><li>a</li><li hidden="">b</li></ul>frag3</section>"#
+        );
+    }
+
+    #[test]
+    fn modules_import_relative_files_with_jsx() {
+        let dir = std::env::temp_dir().join(format!("nile-mod-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(dir.join("lib/util.js"), "export const twice = (n) => n * 2;\nexport default 'dflt';").unwrap();
+        std::fs::write(
+            dir.join("lib/view.jsx"),
+            "import { twice } from './util.js';\nexport const View = ({ n }) => <b>{twice(n)}</b>;",
+        )
+        .unwrap();
+        let (host, _) = host(r#"<div id="root"></div>"#);
+        let page = dir.join("page.html");
+        host.run_module(
+            &format!("{}#module0", page.display()),
+            r#"
+            import dflt, { twice } from './lib/util.js';
+            import { View } from './lib/view.jsx';
+            document.getElementById('root').append(<View n={21} />);
+            console.log(dflt, twice(4), document.getElementById('root').innerHTML);
+            "#,
+        )
+        .unwrap();
+        assert_eq!(host.console_output(), vec!["dflt 8 <b>42</b>"]);
+        // Errors surface as messages.
+        let err = host.run_module(&format!("{}#module1", page.display()), "import './missing.js';").unwrap_err();
+        assert!(err.contains("missing.js"), "{err}");
+        let err = host.run_module(&format!("{}#module2", page.display()), "import 'bare';").unwrap_err();
+        assert!(err.contains("bare"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn jsx_compiles_to_vnodes_like_sciter() {
+        let (host, _) = host("");
+        host.run(
+            r#"
+            const v = <h1 id="hw">Hello</h1>;
+            console.log(Array.isArray(v), v[0], JSON.stringify(v[1]), JSON.stringify(v[2]), JSON.stringify(<br/>));
+            "#,
+        )
+        .unwrap();
+        assert_eq!(host.console_output(), vec![r#"true h1 {"id":"hw"} ["Hello"] ["br",null,null]"#]);
+    }
+
+    #[test]
+    fn sciter_selectors_and_delegation() {
+        let (host, _) = host(r#"<ul id="l"><li class="a"><b>1</b></li><li class="a">2</li></ul>"#);
+        host.run(
+            r#"
+            const l = $('#l');
+            console.log($$('li').length, l.$$('.a').length, l.$('b').textContent, l.children[1].elementIndex);
+
+            // this = the element handler is attached to; second arg = matched descendant.
+            const seen = [];
+            l.on('click', 'li', function (evt, li) { seen.push(this.id + ':' + li.textContent + ':' + (li === evt.target.closest('li'))); });
+            $$('li')[0].$('b').click();     // bubbles from <b>, delegated to the li
+            l.click();                       // not inside an li: ignored
+
+            // namespaces, off by name / namespace / function, once, capture
+            const hits = [];
+            const h = () => hits.push('h');
+            l.on('click.one', h).on('click.two', () => hits.push('two')).once('click', () => hits.push('once'));
+            l.click(); l.click();
+            l.off('.two'); l.click();
+            l.off(h); l.click();
+            l.off('click'); l.click();
+            const order = [];
+            l.on('^click', () => order.push('capture'));
+            l.on('click', () => order.push('bubble'));
+            $$('li')[1].click();
+            console.log(seen.join(','));
+            console.log(hits.join(','));
+            console.log(order.join(','));
+            "#,
+        )
+        .unwrap();
+        let out = host.console_output();
+        assert_eq!(out[0], "2 2 1 1");
+        assert_eq!(out[1], "l:1:true");
+        // 1st click: h,two,once; 2nd: h,two; after off('.two'): h; after off(h): nothing; then off('click').
+        assert_eq!(out[2], "h,two,once,h,two,h");
+        assert_eq!(out[3], "capture,bubble");
+    }
+
+    #[test]
+    fn element_state_flags_and_attributes() {
+        let (host, _) = host(
+            r#"<style>#i:checked { color: red } </style><input id="i" type="checkbox" title="t"><p id="p"></p>"#,
+        );
+        host.run(
+            r#"
+            const i = $('#i');
+            console.log(i.state.checked, i.state.disabled, i.state.hover, 'checked' in i.state);
+            i.state.checked = true;
+            console.log(i.state.checked, i.hasAttribute('checked'), i.matches(':checked'), $$('input:checked').length);
+            i.state.checked = false;
+            console.log($$(':checked').length);
+            const names = [...i.attributes].map((a) => a.name + '=' + a.value).join(',');
+            i.attributes.title.value = 'new';
+            console.log(names, i.getAttribute('title'), i.attributes.length, i.attributes.type.value, i.attributes.nope);
+            console.log(i.value, $('#p').nodeIndex, $('#p').insertAfter(document.createElement('hr'), $('#p')).tagName, $('#p').insert);
+            "#,
+        )
+        .unwrap();
+        let out = host.console_output();
+        assert_eq!(out[0], "false false false true");
+        assert_eq!(out[1], "true false true 1");
+        assert_eq!(out[2], "0");
+        assert_eq!(out[3], "id=i,type=checkbox,title=t new 3 checkbox undefined");
+        assert_eq!(out[4], "undefined 1 HR undefined");
+    }
+
+    #[test]
+    fn content_prepend_and_patch() {
+        let (host, doc) = host(r#"<div id="root"><p id="keep" class="old" title="gone">old</p>stray</div>"#);
+        host.run(
+            r#"
+            const root = $('#root');
+            const keep = $('#keep');
+            const ids = [];
+            root.patch(
+              <div>
+                <p id="keep" class="new" onclick={() => ids.push('clicked')}>fresh</p>
+                <ul><li key="a">A</li><li key="b">B</li></ul>
+                {['x', 'y']}
+              </div>
+            );
+            console.log(keep === $('#keep'), keep.className, keep.hasAttribute('title'), root.innerHTML);
+            keep.click();
+            const a = $('li');
+            // Re-patch with the items swapped: keyed DOM is reused, not rebuilt.
+            root.patch(<div><p id="keep" class="new">fresh</p><ul><li key="b">B</li><li key="a">A</li></ul></div>);
+            console.log(ids.join(), $('li') !== a, $$('li')[1] === a, root.innerHTML);
+            root.prepend(<hr/>, 'text');
+            console.log(root.firstChild.tagName, root.childNodes[1].data, root.children.length);
+            root.content(<i>only</i>);
+            console.log(root.innerHTML);
+            "#,
+        )
+        .unwrap();
+        let _ = doc;
+        let out = host.console_output();
+        assert_eq!(
+            out[0],
+            r#"true new false <p id="keep" class="new">fresh</p><ul><li>A</li><li>B</li></ul>xy"#
+        );
+        assert_eq!(out[1], r#"clicked true true <p id="keep" class="new">fresh</p><ul><li>B</li><li>A</li></ul>"#);
+        assert_eq!(out[2], "HR text 3");
+        assert_eq!(out[3], "<i>only</i>");
     }
 
     #[test]
