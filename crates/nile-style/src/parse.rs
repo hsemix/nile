@@ -1,6 +1,7 @@
 //! CSS parsing on top of `cssparser`'s tokenizer.
 
 use crate::selector::{NileImpl, NileParser};
+use crate::gradient::{ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
 use crate::{colors, Color};
 use std::cell::Cell;
 use cssparser::{Delimiter, ParseError, Parser, Token};
@@ -31,6 +32,11 @@ pub enum Value {
     Color(Color),
     /// A top-level `,` (lists such as `box-shadow`).
     Comma,
+    /// `attr(name)`, in `content`.
+    Attr(String),
+    /// An angle in degrees.
+    Angle(f32),
+    Gradient(Box<Gradient>),
 }
 
 impl Value {
@@ -330,6 +336,10 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
                     "em" => Value::Em(value),
                     "rem" => Value::Rem(value),
                     "pt" => Value::Px(value * 4.0 / 3.0),
+                    "deg" => Value::Angle(value),
+                    "turn" => Value::Angle(value * 360.0),
+                    "rad" => Value::Angle(value.to_degrees()),
+                    "grad" => Value::Angle(value * 0.9),
                     u => match ABSOLUTE_UNITS.iter().find(|(n, _)| *n == u) {
                         Some((_, k)) => Value::Px(value * k),
                         None => return Ok(None),
@@ -358,6 +368,17 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
                     let q = p.parse_nested_block(|p| math_function(&name, p, cx))?;
                     q.into_value()
                 }
+                "linear-gradient" | "repeating-linear-gradient" | "radial-gradient" | "repeating-radial-gradient" => {
+                    let items = p.parse_nested_block(|p| gradient_items(p, cx))?;
+                    match build_gradient(&name, items) {
+                        Some(g) => Value::Gradient(Box::new(g)),
+                        None => return Ok(None),
+                    }
+                }
+                "attr" => {
+                    let name = p.parse_nested_block(|p| Ok::<_, ParseError<()>>(p.expect_ident()?.to_string()))?;
+                    Value::Attr(name)
+                }
                 // `var()`, `url()`, gradients, ...: not handled here.
                 _ => {
                     p.parse_nested_block(|p| {
@@ -370,6 +391,137 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
         }
         _ => return Ok(None),
     }))
+}
+
+/// The comma-separated items inside a gradient function.
+fn gradient_items(p: &mut Parser<'_>, cx: &Cx) -> PResult<Vec<Vec<Value>>> {
+    let mut items = Vec::new();
+    let mut cur = Vec::new();
+    while !p.is_exhausted() {
+        match parse_value(p, cx)? {
+            Some(Value::Comma) => items.push(std::mem::take(&mut cur)),
+            Some(v) => cur.push(v),
+            None => {}
+        }
+    }
+    items.push(cur);
+    Ok(items)
+}
+
+fn stop_pos(v: &Value) -> Option<StopPos> {
+    match v {
+        Value::Px(px) => Some(StopPos::Px(*px)),
+        Value::Percent(p) => Some(StopPos::Fraction(p / 100.0)),
+        Value::Number(n) if *n == 0.0 => Some(StopPos::Px(0.0)),
+        _ => None,
+    }
+}
+
+/// Builds a gradient from its items: an optional first item that configures the
+/// direction or shape, then color stops (a color with up to two positions).
+fn build_gradient(name: &str, mut items: Vec<Vec<Value>>) -> Option<Gradient> {
+    let repeating = name.starts_with("repeating-");
+    let radial = name.ends_with("radial-gradient");
+    let config = if items.first()?.iter().any(|v| v.color().is_some()) { None } else { Some(items.remove(0)) };
+    let mut stops = Vec::new();
+    for item in &items {
+        let color = item.iter().find_map(Value::color);
+        let mut positions = item.iter().filter_map(stop_pos);
+        // An item with no color is a color hint (`50%`), which isn't supported.
+        let Some(color) = color else { continue };
+        match (positions.next(), positions.next()) {
+            (Some(a), Some(b)) => {
+                stops.push(ColorStop { color, pos: Some(a) });
+                stops.push(ColorStop { color, pos: Some(b) });
+            }
+            (pos, _) => stops.push(ColorStop { color, pos }),
+        }
+    }
+    if stops.len() < 2 {
+        return None;
+    }
+    let config = config.unwrap_or_default();
+    let kind = if radial { radial_kind(&config)? } else { GradientKind::Linear(linear_dir(&config)?) };
+    Some(Gradient { kind, stops, repeating })
+}
+
+fn linear_dir(config: &[Value]) -> Option<LinearDir> {
+    if config.is_empty() {
+        return Some(LinearDir::Angle(180.0));
+    }
+    if let [Value::Angle(a)] = config {
+        return Some(LinearDir::Angle(*a));
+    }
+    if config.first().and_then(Value::ident) != Some("to") {
+        return None;
+    }
+    let (mut x, mut y) = (0i8, 0i8);
+    for v in &config[1..] {
+        match v.ident()? {
+            "left" => x = -1,
+            "right" => x = 1,
+            "top" => y = -1,
+            "bottom" => y = 1,
+            _ => return None,
+        }
+    }
+    Some(match (x, y) {
+        (0, -1) => LinearDir::Angle(0.0),
+        (1, 0) => LinearDir::Angle(90.0),
+        (0, 1) => LinearDir::Angle(180.0),
+        (-1, 0) => LinearDir::Angle(270.0),
+        (0, 0) => return None,
+        (x, y) => LinearDir::Corner(x, y),
+    })
+}
+
+fn radial_kind(config: &[Value]) -> Option<GradientKind> {
+    let center = (StopPos::Fraction(0.5), StopPos::Fraction(0.5));
+    let (shape_part, at_part) = match config.iter().position(|v| v.ident() == Some("at")) {
+        Some(i) => (&config[..i], &config[i + 1..]),
+        None => (config, &[][..]),
+    };
+    let mut circle = None;
+    let mut extent = None;
+    let mut radii = Vec::new();
+    for v in shape_part {
+        match v.ident() {
+            Some("circle") => circle = Some(true),
+            Some("ellipse") => circle = Some(false),
+            Some("closest-side") => extent = Some(Extent::ClosestSide),
+            Some("closest-corner") => extent = Some(Extent::ClosestCorner),
+            Some("farthest-side") => extent = Some(Extent::FarthestSide),
+            Some("farthest-corner") => extent = Some(Extent::FarthestCorner),
+            Some(_) => return None,
+            None => radii.push(stop_pos(v)?),
+        }
+    }
+    let circle = circle.unwrap_or(radii.len() == 1);
+    let extent = match radii.as_slice() {
+        [] => extent.unwrap_or(Extent::FarthestCorner),
+        [r] => Extent::Radii(*r, *r),
+        [rx, ry, ..] => Extent::Radii(*rx, *ry),
+    };
+    // `at <x> [<y>]`, with keywords or lengths.
+    let mut x = None;
+    let mut y = None;
+    let mut free = Vec::new();
+    for v in at_part {
+        let half = StopPos::Fraction(0.5);
+        match v.ident() {
+            Some("left") => x = Some(StopPos::Fraction(0.0)),
+            Some("right") => x = Some(StopPos::Fraction(1.0)),
+            Some("top") => y = Some(StopPos::Fraction(0.0)),
+            Some("bottom") => y = Some(StopPos::Fraction(1.0)),
+            Some("center") => free.push(half),
+            Some(_) => return None,
+            None => free.push(stop_pos(v)?),
+        }
+    }
+    let mut free = free.into_iter();
+    let x = x.or_else(|| free.next()).unwrap_or(center.0);
+    let y = y.or_else(|| free.next()).unwrap_or(center.1);
+    Some(GradientKind::Radial { circle, extent, at: (x, y) })
 }
 
 /// `vw`, `vh`, `vmin`, `vmax` as pixels of the current viewport.
@@ -641,7 +793,7 @@ mod tests {
     fn parses_rules_and_skips_unsupported() {
         let sheet = Stylesheet::parse(
             "h1, .title { color: #333; margin: 0 auto } div > p:first-child { color: red } \
-             a:hover { color: blue } p::before { color: red } @import url(x.css); \
+             a:hover { color: blue } p::marker { color: red } @import url(x.css); \
              li:unknown { color: red } #x.y[data-a=b] { gap: 4px }",
         );
         assert_eq!(sheet.rules.len(), 4);

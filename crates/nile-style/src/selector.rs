@@ -90,13 +90,19 @@ impl NonTSPseudoClass for PseudoClass {
     }
 }
 
-/// No pseudo-elements are supported yet, so this has no values.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PseudoElement {}
+/// The generated-content pseudo-elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PseudoElement {
+    Before,
+    After,
+}
 
 impl ToCss for PseudoElement {
-    fn to_css<W: fmt::Write>(&self, _: &mut W) -> fmt::Result {
-        match *self {}
+    fn to_css<W: fmt::Write>(&self, dest: &mut W) -> fmt::Result {
+        dest.write_str(match self {
+            PseudoElement::Before => "::before",
+            PseudoElement::After => "::after",
+        })
     }
 }
 
@@ -130,6 +136,17 @@ impl<'i> Parser<'i> for NileParser {
 
     fn parse_nth_child_of(&self) -> bool {
         true
+    }
+
+    fn parse_pseudo_element(
+        &self,
+        name: CowRcStr<'i>,
+    ) -> Result<PseudoElement, ParseError<Self::Error>> {
+        match_ignore_ascii_case! { &name,
+            "before" => Ok(PseudoElement::Before),
+            "after" => Ok(PseudoElement::After),
+            _ => Err(ParseError::custom(SelectorParseErrorKind::UnsupportedPseudoClassOrElement)),
+        }
     }
 
     fn parse_non_ts_pseudo_class(
@@ -292,8 +309,10 @@ impl Element for ElementRef<'_> {
         }
     }
 
-    fn match_pseudo_element(&self, pe: &PseudoElement, _: &mut MatchingContext<NileImpl>) -> bool {
-        match *pe {}
+    // Normal matching never selects the element itself for a pseudo-element selector;
+    // the cascade matches those separately in `ForStatelessPseudoElement` mode.
+    fn match_pseudo_element(&self, _: &PseudoElement, _: &mut MatchingContext<NileImpl>) -> bool {
+        false
     }
 
     fn apply_selector_flags(&self, _flags: ElementSelectorFlags) {}

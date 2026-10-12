@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+<style>
+  body { margin: 0; padding: 20px; font-family: sans-serif; font-size: 14px; background: #f4f1ea }
+  h2 { margin: 0 0 8px 0; font-size: 15px }
+  .quote::before { content: "\201C"; color: #2a7; font-size: 24px }
+  .quote::after { content: "\201D"; color: #2a7; font-size: 24px }
+  a[href]::after { content: " (" attr(href) ")"; color: #888; font-size: 12px }
+  .tag { padding: 2px 8px; background: #ddd; border-radius: 9px }
+  .tag::before { content: "#"; color: #e74; font-weight: bold }
+  .item::before { content: ""; display: inline-block; width: 8px; height: 8px; background: #2a7;
+                  border-radius: 4px; margin-right: 6px }
+  .card { position: relative; width: 240px; height: 70px; background: white; border: 1px solid #ccc; padding: 10px; margin-top: 12px }
+  .card::after { content: "NEW"; position: absolute; top: -8px; right: -8px; background: #e74; color: white;
+                 padding: 2px 8px; border-radius: 10px; font-size: 11px }
+  .rule::after { content: ""; display: block; height: 3px; background: #37e; margin-top: 4px }
+  button:hover::before { content: "\2192 " }
+</style>
+</head>
+<body>
+  <h2>Generated content</h2>
+  <p class="quote">Quoted text keeps going and wraps around the closing mark nicely</p>
+  <p>Visit <a href="https://example.com">our site</a> today.</p>
+  <p><span class="tag">nile</span> <span class="tag">rust</span></p>
+  <p class="item">An item with a drawn bullet</p>
+  <p class="item">Another item</p>
+  <div class="card">A card with an absolutely positioned ::after badge</div>
+  <p class="rule" style="margin-top: 24px">Underlined by a block ::after</p>
+  <button>Hover me</button>
+</body>
+</html>

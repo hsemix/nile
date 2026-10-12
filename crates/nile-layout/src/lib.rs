@@ -17,7 +17,7 @@ use std::ops::Range;
 
 pub use nile_dom::NodeId;
 use nile_dom::{Document, NodeKind};
-use nile_style::{BorderStyle, Position, TextTransform, 
+use nile_style::{BorderStyle, Position, PseudoElement, TextTransform, 
     Align, Color, ComputedStyle, Display, Edges, FlexDirection, Length, OverflowKind, StyleMap, TextAlign,
 };
 use nile_text::{
@@ -118,6 +118,8 @@ pub struct LayoutTree {
     pub menu: Option<MenuBox>,
     /// Element boxes by node, for `node_rect`.
     index: std::collections::HashMap<NodeId, usize>,
+    /// Generated (`::before`/`::after`) box -> its element, so hits land on the element.
+    origins: std::collections::HashMap<NodeId, NodeId>,
 }
 
 /// Ask for a `<select>`'s drop-down to be laid out under it.
@@ -407,7 +409,7 @@ impl LayoutTree {
                 continue;
             }
             match &b.content {
-                BoxContent::Element => return Some(b.node),
+                BoxContent::Element => return Some(self.origins.get(&b.node).copied().unwrap_or(b.node)),
                 BoxContent::Text(c) => {
                     let Some((cluster, _)) = Cluster::from_point_exact(&c.layout, x - r.x, y - r.y) else {
                         continue;
@@ -507,10 +509,11 @@ pub fn layout_with(
     let index = boxes
         .iter()
         .enumerate()
-        .filter(|(_, b)| matches!(b.content, BoxContent::Element))
+        .filter(|(_, b)| matches!(b.content, BoxContent::Element) && !styles.is_pseudo(b.node))
         .map(|(i, b)| (b.node, i))
         .collect();
-    let mut tree = LayoutTree { boxes, content_height, menu: None, index };
+    let origins = styles.origins().clone();
+    let mut tree = LayoutTree { boxes, content_height, menu: None, index, origins };
     tree.compute_scroll_boxes(styles);
     if let Some(req) = options.menu {
         tree.menu = build_menu(doc, styles, text, &tree, req, options.offsets);
@@ -630,6 +633,9 @@ fn build(
     tree: &mut TaffyTree<NodeCtx>,
     id: NodeId,
 ) -> Option<taffy::NodeId> {
+    if styles.is_pseudo(id) {
+        return build_pseudo(doc, styles, text, tree, id);
+    }
     let node = doc.node(id);
     let style = styles.get(id);
 
@@ -643,7 +649,7 @@ fn build(
             let children = if is_value_control(node) {
                 build_control_text(doc, styles, text, tree, id).into_iter().collect()
             } else {
-                build_children(doc, styles, text, tree, node.children.as_slice(), style)
+                build_children(doc, styles, text, tree, &kids(doc, styles, id), style)
             };
             let mut ts = taffy_style(style);
             if node.tag() == Some("select") && style.width == Length::Auto {
@@ -658,6 +664,35 @@ fn build(
 }
 
 /// `<input>` types whose `value` is drawn as a line of text.
+/// The children of `id` with its generated `::before` and `::after` boxes around them.
+fn kids(doc: &Document, styles: &StyleMap, id: NodeId) -> Vec<NodeId> {
+    let node = doc.node(id);
+    let mut out = Vec::with_capacity(node.children.len() + 2);
+    out.extend(styles.pseudo(id, PseudoElement::Before));
+    out.extend(node.children.iter().copied());
+    out.extend(styles.pseudo(id, PseudoElement::After));
+    out
+}
+
+/// A `::before`/`::after` box that isn't part of an inline run: a block, flex item or
+/// inline-block, holding its text.
+fn build_pseudo(
+    doc: &Document,
+    styles: &StyleMap,
+    text: &mut TextEngine,
+    tree: &mut TaffyTree<NodeCtx>,
+    id: NodeId,
+) -> Option<taffy::NodeId> {
+    let style = styles.get(id);
+    if style.display == Display::None {
+        return None;
+    }
+    let children: Vec<taffy::NodeId> = build_inline_run_in(doc, styles, text, tree, &[id], style, Some(id)).into_iter().collect();
+    let n = tree.new_with_children(taffy_style(style), &children).ok()?;
+    tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
+    Some(n)
+}
+
 fn is_value_control(node: &nile_dom::Node) -> bool {
     node.tag() == Some("textarea")
         || node.tag() == Some("select")
@@ -841,20 +876,25 @@ fn build_children(
         }
     };
     for &c in children {
-        let node = doc.node(c);
-        let is_inline = match &node.kind {
-            NodeKind::Text(_) => true,
-            NodeKind::Element { .. } => {
-                let cs = styles.get(c);
-                matches!(cs.display, Display::Inline | Display::InlineBlock) && !cs.position.out_of_flow()
+        let pseudo = styles.is_pseudo(c);
+        let is_inline = if pseudo {
+            let cs = styles.get(c);
+            matches!(cs.display, Display::Inline | Display::InlineBlock) && !cs.position.out_of_flow()
+        } else {
+            match &doc.node(c).kind {
+                NodeKind::Text(_) => true,
+                NodeKind::Element { .. } => {
+                    let cs = styles.get(c);
+                    matches!(cs.display, Display::Inline | Display::InlineBlock) && !cs.position.out_of_flow()
+                }
+                NodeKind::Document => false,
             }
-            NodeKind::Document => false,
         };
         if is_inline && parent_style.display != Display::Flex {
             run.push(c);
         } else {
             flush(&mut run, &mut out, text, tree);
-            if matches!(node.kind, NodeKind::Text(_)) {
+            if !pseudo && matches!(doc.node(c).kind, NodeKind::Text(_)) {
                 out.extend(build_inline_run(doc, styles, text, tree, &[c], parent_style));
             } else {
                 out.extend(build(doc, styles, text, tree, c));
@@ -875,6 +915,8 @@ struct InlineText {
     open: Vec<NodeId>,
     /// True where a following space would be collapsed away.
     collapse: bool,
+    /// Set while a generated box lays out its own text.
+    inside: Option<NodeId>,
 }
 
 /// Builds and sizes an inline-block, returning its Parley box spec (at index 0).
@@ -895,6 +937,7 @@ impl InlineText {
             owners: Vec::new(),
             open: Vec::new(),
             collapse: true,
+            inside: None,
         }
     }
 
@@ -908,6 +951,10 @@ impl InlineText {
         deco: u32,
         make_box: &mut BoxMaker,
     ) {
+        if styles.is_pseudo(id) {
+            self.collect_pseudo(styles, id, deco, make_box);
+            return;
+        }
         let node = doc.node(id);
         match &node.kind {
             NodeKind::Text(raw) => {
@@ -971,7 +1018,7 @@ impl InlineText {
                 // TODO: block-level descendants of an inline element should
                 // split the run; for now their text is flowed inline.
                 self.open.push(id);
-                for &c in &node.children {
+                for c in kids(doc, styles, id) {
                     self.collect(doc, styles, c, deco, make_box);
                 }
                 self.open.pop();
@@ -980,6 +1027,57 @@ impl InlineText {
                 }
             }
             NodeKind::Document => {}
+        }
+    }
+
+    /// A generated box in the flow: an inline with its text, or an inline-block.
+    /// `inside` is the box itself when it's building its own contents.
+    fn collect_pseudo(&mut self, styles: &StyleMap, id: NodeId, deco: u32, make_box: &mut BoxMaker) {
+        let es = styles.get(id);
+        let inside = self.inside == Some(id);
+        if es.display == Display::None {
+            return;
+        }
+        if !inside && es.display == Display::InlineBlock {
+            if let Some(spec) = make_box(id) {
+                self.boxes.push(InlineBoxSpec { index: self.text.len(), ..spec });
+                self.collapse = false;
+            }
+            return;
+        }
+        let origin = styles.origin(id);
+        let own = (!inside && has_inline_paint(es)).then(|| {
+            self.decos.push(InlineDeco {
+                background: es.background,
+                border_color: es.border_color,
+                border_style: es.border_style,
+                border: es.border_width,
+                padding: es.padding,
+                radius: es.border_radius,
+            });
+            self.decos.len() - 1
+        });
+        let deco = own.map_or(deco, |i| i as u32 + 1);
+        if own.is_some() {
+            self.push_spacer(origin, es, deco, es.padding.left + es.border_width.left);
+        }
+        let collapsed = transform_text(&collapse_whitespace(styles.content(id)), es.text_transform);
+        let piece = if self.collapse { collapsed.strip_prefix(' ').unwrap_or(&collapsed) } else { &collapsed };
+        if !piece.is_empty() {
+            let start = self.text.len();
+            self.text.push_str(piece);
+            let mut ts = text_style(es);
+            ts.deco = deco;
+            self.spans.push((start..self.text.len(), ts));
+            let range = start..self.text.len();
+            self.owners.push((range.clone(), origin));
+            for &outer in self.open.iter().rev() {
+                self.owners.push((range.clone(), outer));
+            }
+            self.collapse = piece.ends_with(' ');
+        }
+        if own.is_some() {
+            self.push_spacer(origin, es, deco, es.padding.right + es.border_width.right);
         }
     }
 
@@ -1028,7 +1126,21 @@ fn build_inline_run(
     run: &[NodeId],
     block_style: &ComputedStyle,
 ) -> Option<taffy::NodeId> {
+    build_inline_run_in(doc, styles, text, tree, run, block_style, None)
+}
+
+/// [`build_inline_run`], where `inside` is a generated box whose own text this is.
+fn build_inline_run_in(
+    doc: &Document,
+    styles: &StyleMap,
+    text: &mut TextEngine,
+    tree: &mut TaffyTree<NodeCtx>,
+    run: &[NodeId],
+    block_style: &ComputedStyle,
+    inside: Option<NodeId>,
+) -> Option<taffy::NodeId> {
     let mut inline = InlineText::new();
+    inline.inside = inside;
     let mut kids: Vec<InlineKid> = Vec::new();
     {
         let mut make_box = |id: NodeId| {
@@ -1042,7 +1154,7 @@ fn build_inline_run(
             .ok()?;
             let size = tree.layout(n).ok()?.size;
             // A textarea sits on its bottom edge, not on its text.
-            let baseline = if doc.node(id).tag() == Some("textarea") { None } else { last_baseline(tree, n) };
+            let baseline = if !styles.is_pseudo(id) && doc.node(id).tag() == Some("textarea") { None } else { last_baseline(tree, n) };
             let m = styles.get(id).margin;
             let px = |l: Length| if let Length::Px(v) = l { v } else { 0.0 };
             kids.push(InlineKid { node: n, dx: px(m.left), dy: px(m.top) });
@@ -1709,5 +1821,31 @@ second</textarea><textarea id="e"></textarea></body>"#,
         assert_eq!(rect("c").y, 0.0); // out-of-flow boxes take no space
         let d = rect("d");
         assert_eq!((d.x, d.y), (7.0, 25.0)); // 20 (after c) + 5
+    }
+
+    #[test]
+    fn generated_content_flows_and_hits_its_element() {
+        let doc = Document::parse(
+            r#"<style>p::before { content: "ab"; } p::after { content: ""; display: block; height: 10px }
+               #m::before { content: ""; display: inline-block; width: 30px; height: 12px }</style>
+               <body style="margin:0"><p id="p" style="margin:0">text</p><div id="m" style="width:200px"></div></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 300.0, 200.0);
+        let p = doc.find(|n| n.attr("id") == Some("p")).unwrap();
+        let rect = tree.node_rect(p).unwrap();
+        // One text line plus the 10px block ::after.
+        assert!(rect.height > 10.0 + 16.0 && rect.height < 10.0 + 16.0 * 1.2 + 2.0, "height {}", rect.height);
+        let runs = text_boxes(&tree);
+        let BoxContent::Text(c) = &runs[0].content else { unreachable!() };
+        assert!(c.owners.iter().all(|(_, n)| *n == p), "generated text belongs to its element");
+        assert_eq!(tree.hit_test(2.0, 2.0), Some(p));
+        // The generated block is a box with a generated id, but hits and rects map to the element.
+        assert!(tree.boxes.iter().any(|b| styles.is_pseudo(b.node)));
+        assert_eq!(tree.hit_test(2.0, rect.y + rect.height - 3.0), Some(p));
+        // An inline-block ::before gives the (otherwise empty) div a line, like any inline content.
+        let m = doc.find(|n| n.attr("id") == Some("m")).unwrap();
+        assert_eq!(tree.node_rect(m).unwrap().height, 19.0);
     }
 }

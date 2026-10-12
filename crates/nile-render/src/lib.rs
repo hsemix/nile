@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use nile_layout::{BoxContent, LayoutBox, LayoutTree, MenuBox, NodeId, Rect as LRect, ScrollOffsets, TextContent};
-use nile_style::{Appearance, BorderStyle, Color as CssColor, Edges, StyleMap};
+use nile_style::{Appearance, BorderStyle, Color as CssColor, Edges, Extent, Gradient, GradientKind, LinearDir, StopPos, StyleMap};
 use nile_text::{Affinity, Cursor, PositionedLayoutItem, Selection};
 use skia_safe::{
     font::Edging, Canvas, Color, Font, FontMgr, GlyphId, Paint, Point, RRect, Rect, Typeface,
@@ -127,7 +127,7 @@ impl Renderer {
     fn paint_box(&mut self, canvas: &Canvas, b: &LayoutBox, styles: &StyleMap) {
         let s = styles.get(b.node);
         paint_shadows(canvas, skia_rect(b.rect), &s.box_shadow, s.border_radius);
-        paint_decorated(canvas, skia_rect(b.rect), s.background, &Border { width: s.border_width, color: s.border_color, style: s.border_style }, s.border_radius);
+        paint_decorated(canvas, skia_rect(b.rect), s.background, s.background_image.as_ref(), &Border { width: s.border_width, color: s.border_color, style: s.border_style }, s.border_radius);
         paint_control_mark(canvas, s, b.rect);
     }
 
@@ -262,6 +262,94 @@ fn extract_collection_face(bytes: &[u8], index: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The Skia shader for `g` painted over `r`.
+fn gradient_shader(g: &Gradient, r: Rect) -> Option<skia_safe::Shader> {
+    use skia_safe::gradient::{interpolation::InPremul, Colors, Gradient as SkGradient, Interpolation};
+    let (w, h) = (r.width(), r.height());
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let resolve = |p: StopPos, whole: f32| match p {
+        StopPos::Px(px) => px,
+        StopPos::Fraction(f) => f * whole,
+    };
+    let (cx, cy) = (r.left + w / 2.0, r.top + h / 2.0);
+    // The gradient line's length in px, and its start/end in the box.
+    let (length, geometry) = match g.kind {
+        GradientKind::Linear(dir) => {
+            let (dx, dy) = match dir {
+                LinearDir::Angle(a) => (a.to_radians().sin(), -a.to_radians().cos()),
+                LinearDir::Corner(sx, sy) => {
+                    let (vx, vy) = (f32::from(sx) * h, f32::from(sy) * w);
+                    let n = vx.hypot(vy);
+                    (vx / n, vy / n)
+                }
+            };
+            let length = (w * dx).abs() + (h * dy).abs();
+            (length, Shape::Line { from: (cx - dx * length / 2.0, cy - dy * length / 2.0), dir: (dx, dy) })
+        }
+        GradientKind::Radial { circle, extent, at } => {
+            let (px, py) = (r.left + resolve(at.0, w), r.top + resolve(at.1, h));
+            let (l, t, rt, b) = (px - r.left, py - r.top, r.right - px, r.bottom - py);
+            let (near_x, near_y, far_x, far_y) = (l.min(rt), t.min(b), l.max(rt), t.max(b));
+            let (rx, ry) = match extent {
+                Extent::Radii(a, b) => (resolve(a, w), resolve(b, h)),
+                Extent::ClosestSide if circle => (near_x.min(near_y), near_x.min(near_y)),
+                Extent::ClosestSide => (near_x, near_y),
+                Extent::FarthestSide if circle => (far_x.max(far_y), far_x.max(far_y)),
+                Extent::FarthestSide => (far_x, far_y),
+                Extent::ClosestCorner if circle => {
+                    let d = near_x.hypot(near_y);
+                    (d, d)
+                }
+                Extent::ClosestCorner => (near_x * std::f32::consts::SQRT_2, near_y * std::f32::consts::SQRT_2),
+                Extent::FarthestCorner if circle => {
+                    let d = far_x.hypot(far_y);
+                    (d, d)
+                }
+                Extent::FarthestCorner => (far_x * std::f32::consts::SQRT_2, far_y * std::f32::consts::SQRT_2),
+            };
+            (rx, Shape::Radial { center: (px, py), rx: rx.max(0.01), ry: ry.max(0.01) })
+        }
+    };
+    let stops = g.resolved_stops(length);
+    let (first, last) = (stops.first()?.0, stops.last()?.0);
+    // A repeating gradient tiles the span between its first and last stop.
+    let (lo, hi) = if g.repeating && last > first { (first, last) } else { (0.0, 1.0) };
+    let colors: Vec<skia_safe::Color4f> = stops
+        .iter()
+        .map(|(_, c)| skia_safe::Color4f::new(f32::from(c.r) / 255.0, f32::from(c.g) / 255.0, f32::from(c.b) / 255.0, f32::from(c.a) / 255.0))
+        .collect();
+    let mut prev = f32::MIN;
+    let positions: Vec<f32> = stops
+        .iter()
+        .map(|(p, _)| {
+            prev = ((p - lo) / (hi - lo)).clamp(0.0, 1.0).max(prev);
+            prev
+        })
+        .collect();
+    let mode = if g.repeating && last > first { skia_safe::TileMode::Repeat } else { skia_safe::TileMode::Clamp };
+    let interpolation = Interpolation { in_premul: InPremul::Yes, ..Interpolation::default() };
+    let sk = SkGradient::new(Colors::new(&colors, Some(&positions), mode, None), interpolation);
+    match geometry {
+        Shape::Line { from, dir } => {
+            let a = (from.0 + dir.0 * length * lo, from.1 + dir.1 * length * lo);
+            let b = (from.0 + dir.0 * length * hi, from.1 + dir.1 * length * hi);
+            skia_safe::shaders::linear_gradient((a, b), &sk, None)
+        }
+        Shape::Radial { center, rx, ry } => {
+            // A unit circle scaled to the ellipse; the repeat span is `lo..hi` of the radius.
+            let m = skia_safe::Matrix::translate(center) * skia_safe::Matrix::scale((rx * (hi - lo), ry * (hi - lo)));
+            skia_safe::shaders::radial_gradient(((0.0, 0.0), 1.0), &sk, &m)
+        }
+    }
+}
+
+enum Shape {
+    Line { from: (f32, f32), dir: (f32, f32) },
+    Radial { center: (f32, f32), rx: f32, ry: f32 },
+}
+
 /// Outer `box-shadow`s: a blurred copy of the box outline, kept out from under the box.
 // TODO: `inset` shadows.
 fn paint_shadows(canvas: &Canvas, outer: Rect, shadows: &[nile_style::BoxShadow], radius: f32) {
@@ -292,11 +380,17 @@ struct Border {
 }
 
 /// Draw `bg` and a (per-side) border inside `outer`, with rounded corners.
-fn paint_decorated(canvas: &Canvas, outer: Rect, bg: Option<CssColor>, border: &Border, radius: f32) {
+fn paint_decorated(canvas: &Canvas, outer: Rect, bg: Option<CssColor>, image: Option<&Gradient>, border: &Border, radius: f32) {
     let (w, c, st) = (border.width, border.color, border.style);
     let outer_r = RRect::new_rect_xy(outer, radius, radius);
     if let Some(bg) = bg.filter(|c| c.a > 0) {
         canvas.draw_rrect(outer_r, &fill(bg));
+    }
+    if let Some(shader) = image.and_then(|g| gradient_shader(g, outer)) {
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_shader(shader);
+        canvas.draw_rrect(outer_r, &paint);
     }
     if !(w.top > 0.0 || w.right > 0.0 || w.bottom > 0.0 || w.left > 0.0) {
         return;
@@ -518,7 +612,7 @@ fn paint_inline_fragments(
             origin.x + f.x1,
             origin.y + f.bottom + d.padding.bottom + d.border.bottom,
         );
-        paint_decorated(canvas, rect, d.background, &Border { width: d.border, color: d.border_color, style: d.border_style }, d.radius);
+        paint_decorated(canvas, rect, d.background, None, &Border { width: d.border, color: d.border_color, style: d.border_style }, d.radius);
     }
 }
 

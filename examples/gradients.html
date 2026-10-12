@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<head>
+<style>
+  body { margin: 0; padding: 16px; font-family: sans-serif; font-size: 12px; background: #fff }
+  .grid { display: flex; flex-wrap: wrap; gap: 10px }
+  .g { width: 130px; height: 80px; border-radius: 8px; color: white; padding: 6px; box-sizing: border-box }
+  #a { background: linear-gradient(#2a7, #37e) }
+  #b { background: linear-gradient(to right, #e74, #eb2 40%, #2a7) }
+  #c { background: linear-gradient(45deg, #fff0, #000 ) , #2a7 }
+  #d { background: linear-gradient(to bottom right, #e74, #37e) }
+  #e { background: linear-gradient(90deg, red 0, red 30px, blue 30px, blue 60px, green 60px) }
+  #f { background: repeating-linear-gradient(45deg, #2a7 0 8px, #fff 8px 16px) ; color: #000 }
+  #g { background: radial-gradient(circle, #fff, #37e) }
+  #h { background: radial-gradient(ellipse at top left, #eb2, #e74 60%, #333) }
+  #i { background: radial-gradient(circle closest-side at 30% 70%, #2a7, #2a7 40%, #fff 41%) ; color: #000 }
+  #j { background: repeating-radial-gradient(circle at 50% 50%, #37e 0 6px, #fff 6px 12px); color: #000 }
+  #k { background: #2a7 linear-gradient(rgba(255,255,255,0.5), transparent) }
+  #l { background-image: linear-gradient(to right, #333, #999); border: 3px solid #e74 }
+</style>
+</head>
+<body>
+  <div class="grid">
+    <div class="g" id="a">top→bottom</div>
+    <div class="g" id="b">to right, 3 stops</div>
+    <div class="g" id="c">45deg over color</div>
+    <div class="g" id="d">to bottom right</div>
+    <div class="g" id="e">hard stops</div>
+    <div class="g" id="f">repeating stripes</div>
+    <div class="g" id="g">radial circle</div>
+    <div class="g" id="h">ellipse at corner</div>
+    <div class="g" id="i">closest-side</div>
+    <div class="g" id="j">repeating radial</div>
+    <div class="g" id="k">color + gradient</div>
+    <div class="g" id="l">with a border</div>
+  </div>
+</body>
+</html>

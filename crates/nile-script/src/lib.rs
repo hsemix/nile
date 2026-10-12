@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn selector_errors_throw() {
         let (host, _) = host("<p></p>");
-        host.run("try { document.querySelector('p::before') } catch (e) { console.log(String(e).includes('SyntaxError')) }")
+        host.run("try { document.querySelector('p::marker') } catch (e) { console.log(String(e).includes('SyntaxError')) }")
             .unwrap();
         assert_eq!(host.console_output(), vec!["true"]);
     }
