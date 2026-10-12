@@ -887,6 +887,36 @@ mod tests {
     }
 
     #[test]
+    fn select_and_option_properties() {
+        let (host, _) = host(
+            r#"<select id="s"><option value="r">Red</option><option disabled>Gone</option><option selected> Big   Blue </option></select>
+               <select id="d"><option disabled>x</option><option value="y">Why</option></select>"#,
+        );
+        host.run(
+            r#"
+            const s = $('#s'), d = $('#d');
+            console.log(s.options.length, s.length, s.selectedIndex, s.value, s.options[2].text, s.options[2].selected, s.options[0].selected);
+            s.value = 'r';
+            console.log(s.selectedIndex, s.options[0].selected, s.options[2].selected, s.options[2].hasAttribute('selected'), s.value);
+            s.options[2].selected = true;
+            console.log(s.selectedIndex, s.value);
+            s.selectedIndex = 0;
+            console.log(s.value, s.options[1].disabled, d.selectedIndex, d.value, $('#s').options[0].label);
+            s.value = 'nope';
+            console.log(s.value === 'r' || s.selectedIndex, document.createElement('p').options);
+            "#,
+        )
+        .unwrap();
+        let out = host.console_output();
+        assert_eq!(out[0], "3 3 2 Big Blue Big Blue true false");
+        assert_eq!(out[1], "0 true false false r");
+        assert_eq!(out[2], "2 Big Blue");
+        assert_eq!(out[3], "r true 1 y Red");
+        // An unknown value selects nothing; the first enabled option shows.
+        assert_eq!(out[4], "true undefined");
+    }
+
+    #[test]
     fn lifecycle_events_fire() {
         let (host, _) = host("<p></p>");
         host.run(

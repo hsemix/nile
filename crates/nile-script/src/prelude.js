@@ -489,19 +489,75 @@
   // `value` is stored in the `value` attribute (a simplification: there is no
   // separate "default value"). Elements without a native behavior have no
   // `value` (undefined), as in Sciter, but can be given one as an ordinary property.
-  const VALUE_TAGS = new Set(["input", "textarea", "button", "select", "option"]);
+  const VALUE_TAGS = new Set(["input", "textarea", "button"]);
+  const optValue = (o) => o.getAttribute("value") ?? o.text;
   Object.defineProperty(Element.prototype, "value", {
     configurable: true,
     get() {
-      if (!VALUE_TAGS.has(this.localName)) return undefined;
+      const t = this.localName;
+      if (t === "select") { const o = this.options[this.selectedIndex]; return o ? optValue(o) : ""; }
+      if (t === "option") return optValue(this);
+      if (!VALUE_TAGS.has(t)) return undefined;
       const v = this.getAttribute("value");
-      if (v === null && this.localName === "textarea") return this.textContent;
-      return v !== null ? v : this.localName === "input" && /^(checkbox|radio)$/.test(this.type) ? "on" : "";
+      if (v === null && t === "textarea") return this.textContent;
+      return v !== null ? v : t === "input" && /^(checkbox|radio)$/.test(this.type) ? "on" : "";
     },
     set(v) {
-      if (VALUE_TAGS.has(this.localName)) this.setAttribute("value", v);
+      const t = this.localName;
+      if (t === "select") this.selectedIndex = this.options.findIndex((o) => optValue(o) === String(v));
+      else if (t === "option" || VALUE_TAGS.has(t)) this.setAttribute("value", v);
       else Object.defineProperty(this, "value", { value: v, writable: true, configurable: true, enumerable: true });
     },
+  });
+
+  // <select> / <option>. The chosen option carries the `selected` state flag; a
+  // select with none flagged shows its first enabled option, as browsers do.
+  Object.defineProperty(Element.prototype, "options", {
+    configurable: true,
+    get() { return this.localName === "select" ? this.querySelectorAll("option") : undefined; },
+  });
+  Object.defineProperty(Element.prototype, "selectedIndex", {
+    configurable: true,
+    get() {
+      if (this.localName !== "select") return undefined;
+      const opts = this.options;
+      let i = opts.findIndex((o) => N.getState(o._id, "selected"));
+      if (i < 0) i = opts.findIndex((o) => !N.getState(o._id, "disabled"));
+      return i < 0 && opts.length ? 0 : i;
+    },
+    set(idx) {
+      if (this.localName !== "select") return;
+      this.options.forEach((o, i) => {
+        N.setState(o._id, "selected", i === idx);
+        if (i !== idx) o.removeAttribute("selected");
+      });
+    },
+  });
+  Object.defineProperty(Element.prototype, "selected", {
+    configurable: true,
+    get() {
+      if (this.localName !== "option") return undefined;
+      const s = this.closest("select");
+      return s ? s.options[s.selectedIndex] === this : N.getState(this._id, "selected");
+    },
+    set(v) {
+      if (this.localName !== "option") return;
+      const s = this.closest("select");
+      if (s && v) s.selectedIndex = s.options.indexOf(this);
+      else { N.setState(this._id, "selected", !!v); if (!v) this.removeAttribute("selected"); }
+    },
+  });
+  Object.defineProperty(Element.prototype, "text", {
+    configurable: true,
+    get() { return this.localName === "option" ? this.textContent.replace(/\s+/g, " ").trim() : undefined; },
+  });
+  Object.defineProperty(Element.prototype, "label", {
+    configurable: true,
+    get() { return this.localName === "option" ? this.getAttribute("label") || this.text : undefined; },
+  });
+  Object.defineProperty(Element.prototype, "length", {
+    configurable: true,
+    get() { return this.localName === "select" ? this.options.length : undefined; },
   });
   const reflect = (prop, attr, dflt = "") =>
     Object.defineProperty(Element.prototype, prop, {

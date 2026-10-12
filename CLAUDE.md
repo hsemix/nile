@@ -101,6 +101,12 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
   lives in the shared `View` so scripts can read/set it; the renderer highlights it
   from `Overlay::selection`. The clipboard is behind the shell's `Clipboard` trait
   (system via `arboard` with default features off; in-memory for headless/tests).
+- `<select>`: `<option>`s are `display: none` in the UA sheet; layout draws the
+  chosen label as the select's text and, when `LayoutOptions::menu` is set (from
+  the shell's `View::menu`), builds a `MenuBox` that the renderer paints last. The
+  shell owns open/highlight/choose (`Page::menu_*`, `select_key`, `choose_option`);
+  the choice is the option's `selected` state flag. Changing the menu or scrolling
+  invalidates the cached layout.
 - JSX is a source transform (`nile-script/src/jsx.rs`, a scanner, not a parser)
   applied to every script and module before QuickJS sees it; it returns `None`
   for non-JSX or malformed input so the engine reports the original error. Modules
@@ -124,8 +130,8 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
 
 ## Next up
 
-`<select>` (dropdown popup, keyboard, `value`/`selectedIndex`/`change`), then
-selecting page text (not just inputs), undo/redo in inputs, and word-wise caret
-movement. Also open: draggable scrollbars and keyboard scrolling,
-`white-space: pre*` whitespace handling, incremental restyle, the `cursor`
-property, `@env`/`@sciter` modules, symbol fallback check on Windows/Linux.
+Selecting page text (not just inputs) and undo/redo in inputs, then
+`<select multiple>`/listboxes and a scrollable, flipping drop-down. Also open:
+draggable scrollbars and keyboard scrolling, `white-space: pre*` whitespace
+handling, incremental restyle, the `cursor` property, `@env`/`@sciter` modules,
+symbol fallback check on Windows/Linux.

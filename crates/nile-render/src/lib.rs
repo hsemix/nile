@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use nile_layout::{BoxContent, LayoutBox, LayoutTree, NodeId, Rect as LRect, ScrollOffsets, TextContent};
+use nile_layout::{BoxContent, LayoutBox, LayoutTree, MenuBox, NodeId, Rect as LRect, ScrollOffsets, TextContent};
 use nile_style::{Appearance, Color as CssColor, Edges, StyleMap};
 use nile_text::{Affinity, Cursor, PositionedLayoutItem, Selection};
 use skia_safe::{
@@ -83,7 +83,35 @@ impl Renderer {
             canvas.restore();
             paint_scrollbars(canvas, container, offsets);
         }
+        if let Some(menu) = &tree.menu {
+            self.paint_menu(canvas, menu);
+        }
         canvas.restore();
+    }
+
+    /// The open `<select>` list: white panel, highlighted row, a mark on the chosen one.
+    fn paint_menu(&mut self, canvas: &Canvas, m: &MenuBox) {
+        let r = m.rect;
+        let panel = RRect::new_rect_xy(skia_rect(r), 3.0, 3.0);
+        canvas.draw_rrect(panel, &fill(CssColor::rgb(255, 255, 255)));
+        let mut border = fill(CssColor::rgb(118, 118, 118));
+        border.set_style(skia_safe::PaintStyle::Stroke);
+        border.set_stroke_width(1.0);
+        canvas.draw_rrect(RRect::new_rect_xy(Rect::from_xywh(r.x + 0.5, r.y + 0.5, r.width - 1.0, r.height - 1.0), 3.0, 3.0), &border);
+        for (i, item) in m.items.iter().enumerate() {
+            let top = r.y + 1.0 + m.row_height * i as f32;
+            let on = m.highlight == Some(i) && !item.disabled;
+            if on {
+                canvas.draw_rect(Rect::from_xywh(r.x + 1.0, top, r.width - 2.0, m.row_height), &fill(CssColor::rgb(29, 78, 216)));
+            }
+            let line_h = item.text.height();
+            let at = LRect { x: r.x + m.pad_x, y: top + (m.row_height - line_h) / 2.0, width: r.width, height: line_h };
+            // Text carries its own color; selected-row and disabled rows are tinted by an overlay.
+            self.paint_text_tinted(canvas, at, &item.text, if on { Some([255, 255, 255, 255]) } else if item.disabled { Some([150, 150, 150, 255]) } else { None });
+            if m.selected == Some(i) && !on {
+                canvas.draw_rect(Rect::from_xywh(r.x + 2.0, top + 2.0, 2.0, m.row_height - 4.0), &fill(CssColor::rgb(29, 78, 216)));
+            }
+        }
     }
 
     fn paint_box(&mut self, canvas: &Canvas, b: &LayoutBox, styles: &StyleMap) {
@@ -95,12 +123,29 @@ impl Renderer {
     }
 
     fn paint_text(&mut self, canvas: &Canvas, rect: LRect, content: &TextContent) {
-        let layout = &content.layout;
+        self.paint_layout(canvas, rect, &content.layout, Some(content), None);
+    }
+
+    /// Paint a bare text layout (menu rows), optionally overriding its color.
+    fn paint_text_tinted(&mut self, canvas: &Canvas, rect: LRect, layout: &nile_text::TextLayout, tint: Option<[u8; 4]>) {
+        self.paint_layout(canvas, rect, layout, None, tint);
+    }
+
+    fn paint_layout(
+        &mut self,
+        canvas: &Canvas,
+        rect: LRect,
+        layout: &nile_text::TextLayout,
+        content: Option<&TextContent>,
+        tint: Option<[u8; 4]>,
+    ) {
         let mut glyph_ids: Vec<GlyphId> = Vec::new();
         let mut positions: Vec<Point> = Vec::new();
 
         for line in layout.lines() {
-            paint_inline_fragments(canvas, rect, content, &line);
+            if let Some(content) = content {
+                paint_inline_fragments(canvas, rect, content, &line);
+            }
             for item in line.items() {
                 let PositionedLayoutItem::GlyphRun(glyph_run) = item else { continue };
                 let run = glyph_run.run();
@@ -128,7 +173,7 @@ impl Renderer {
                 }
 
                 let style = glyph_run.style();
-                let [r, g, b, a] = style.brush.color;
+                let [r, g, b, a] = tint.unwrap_or(style.brush.color);
                 let mut paint = Paint::default();
                 paint.set_anti_alias(true);
                 paint.set_color(Color::from_argb(a, r, g, b));
@@ -236,7 +281,8 @@ fn paint_decorated(
 
 /// The check or radio dot for `appearance: checkbox | radio` when checked.
 fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) {
-    if !s.checked {
+    // Checkbox and radio marks show only when checked; a select's chevron always does.
+    if !s.checked && s.appearance != Appearance::Select {
         return;
     }
     let mut paint = fill(s.color);
@@ -256,6 +302,18 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
         }
         Appearance::Radio => {
             canvas.draw_circle((r.x + r.width / 2.0, r.y + r.height / 2.0), r.width.min(r.height) * 0.24, &paint);
+        }
+        Appearance::Select => {
+            // A downward chevron in the right padding.
+            let (cx, cy) = (r.x + r.width - 13.0, r.y + r.height / 2.0);
+            let mut builder = skia_safe::PathBuilder::new();
+            builder.move_to((cx - 3.5, cy - 1.5)).line_to((cx, cy + 2.0)).line_to((cx + 3.5, cy - 1.5));
+            let path = builder.detach();
+            paint.set_style(skia_safe::PaintStyle::Stroke);
+            paint.set_stroke_width(1.6);
+            paint.set_stroke_cap(skia_safe::PaintCap::Round);
+            paint.set_stroke_join(skia_safe::PaintJoin::Round);
+            canvas.draw_path(&path, &paint);
         }
         Appearance::None => {}
     }

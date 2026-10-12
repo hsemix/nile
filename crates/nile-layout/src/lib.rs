@@ -113,8 +113,80 @@ fn intersect(a: Option<Rect>, b: Rect) -> Rect {
 pub struct LayoutTree {
     pub boxes: Vec<LayoutBox>,
     pub content_height: f32,
+    /// The open `<select>` drop-down, painted above everything else.
+    pub menu: Option<MenuBox>,
     /// Element boxes by node, for `node_rect`.
     index: std::collections::HashMap<NodeId, usize>,
+}
+
+/// Ask for a `<select>`'s drop-down to be laid out under it.
+#[derive(Debug, Clone, Copy)]
+pub struct MenuRequest {
+    pub select: NodeId,
+    /// The row under the pointer or keyboard cursor.
+    pub highlight: Option<usize>,
+}
+
+/// Inputs to layout beyond the document and styles.
+#[derive(Default)]
+pub struct LayoutOptions<'a> {
+    pub menu: Option<MenuRequest>,
+    /// Scroll offsets, so the menu opens under where its select actually paints.
+    pub offsets: Option<&'a ScrollOffsets>,
+}
+
+pub struct MenuItem {
+    pub text: TextLayout,
+    pub disabled: bool,
+}
+
+/// An open `<select>` list in document coordinates.
+pub struct MenuBox {
+    pub rect: Rect,
+    pub row_height: f32,
+    pub pad_x: f32,
+    pub items: Vec<MenuItem>,
+    pub selected: Option<usize>,
+    pub highlight: Option<usize>,
+}
+
+impl MenuBox {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.rect.x && y >= self.rect.y && x < self.rect.x + self.rect.width && y < self.rect.y + self.rect.height
+    }
+
+    /// The row under a point in the menu, if any.
+    pub fn row_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !self.contains(x, y) {
+            return None;
+        }
+        let i = ((y - self.rect.y - 1.0) / self.row_height).floor();
+        (i >= 0.0 && (i as usize) < self.items.len()).then_some(i as usize)
+    }
+}
+
+/// The `<option>` elements of a `<select>`, in document order.
+pub fn select_options(doc: &Document, select: NodeId) -> Vec<NodeId> {
+    doc.descendants(select).into_iter().filter(|n| doc.node(*n).tag() == Some("option")).collect()
+}
+
+/// An option's visible text: its `label`, else its text with whitespace collapsed.
+pub fn option_label(doc: &Document, option: NodeId) -> String {
+    match doc.node(option).attr("label") {
+        Some(l) if !l.is_empty() => l.to_string(),
+        _ => collapse_whitespace(&doc.text_content(option)).trim().to_string(),
+    }
+}
+
+/// Index of the selected option: the first marked `selected`, else the first
+/// enabled one (a single-choice select always has something chosen).
+pub fn selected_index(doc: &Document, select: NodeId) -> Option<usize> {
+    let options = select_options(doc, select);
+    options
+        .iter()
+        .position(|o| doc.has_state(*o, "selected"))
+        .or_else(|| options.iter().position(|o| !doc.has_state(*o, "disabled")))
+        .or((!options.is_empty()).then_some(0))
 }
 
 /// An `inline-block` inside a text run: its Taffy subtree (sized already, not
@@ -384,6 +456,17 @@ pub fn layout(
     viewport_width: f32,
     viewport_height: f32,
 ) -> LayoutTree {
+    layout_with(doc, styles, text, viewport_width, viewport_height, &LayoutOptions::default())
+}
+
+pub fn layout_with(
+    doc: &Document,
+    styles: &StyleMap,
+    text: &mut TextEngine,
+    viewport_width: f32,
+    viewport_height: f32,
+    options: &LayoutOptions,
+) -> LayoutTree {
     let mut tree: TaffyTree<NodeCtx> = TaffyTree::new();
 
     let html = doc.find(|n| n.tag() == Some("html")).unwrap_or(Document::ROOT);
@@ -413,8 +496,11 @@ pub fn layout(
         .filter(|(_, b)| matches!(b.content, BoxContent::Element))
         .map(|(i, b)| (b.node, i))
         .collect();
-    let mut tree = LayoutTree { boxes, content_height, index };
+    let mut tree = LayoutTree { boxes, content_height, menu: None, index };
     tree.compute_scroll_boxes(styles);
+    if let Some(req) = options.menu {
+        tree.menu = build_menu(doc, styles, text, &tree, req, options.offsets);
+    }
     tree
 }
 
@@ -460,7 +546,12 @@ fn build(
             } else {
                 build_children(doc, styles, text, tree, node.children.as_slice(), style)
             };
-            let n = tree.new_with_children(taffy_style(style), &children).ok()?;
+            let mut ts = taffy_style(style);
+            if node.tag() == Some("select") && style.width == Length::Auto {
+                // Wide enough for the longest option, whichever is showing.
+                ts.min_size.width = LengthPercentageAuto::length(widest_option(doc, style, text, id));
+            }
+            let n = tree.new_with_children(ts, &children).ok()?;
             tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
             Some(n)
         }
@@ -470,6 +561,7 @@ fn build(
 /// `<input>` types whose `value` is drawn as a line of text.
 fn is_value_control(node: &nile_dom::Node) -> bool {
     node.tag() == Some("textarea")
+        || node.tag() == Some("select")
         || node.tag() == Some("input")
         && !matches!(node.attr("type").map(str::to_ascii_lowercase).as_deref(), Some("checkbox" | "radio" | "hidden" | "file" | "image"))
 }
@@ -495,6 +587,10 @@ pub fn control_value(doc: &Document, id: NodeId) -> String {
 /// a place to sit.
 fn control_display(doc: &Document, id: NodeId) -> (String, bool) {
     let node = doc.node(id);
+    if node.tag() == Some("select") {
+        let label = selected_index(doc, id).map(|i| option_label(doc, select_options(doc, id)[i])).unwrap_or_default();
+        return (if label.is_empty() { "\u{200b}".into() } else { label }, false);
+    }
     let multiline = node.tag() == Some("textarea");
     let value = control_value(doc, id);
     if value.is_empty() {
@@ -531,6 +627,64 @@ pub fn caret_char(doc: &Document, node: NodeId, display_byte: usize) -> usize {
         return (display_byte / '\u{2022}'.len_utf8()).min(value.chars().count());
     }
     value.char_indices().take_while(|(i, _)| *i < display_byte).count()
+}
+
+/// Width of the longest option's text, so a select doesn't resize as the choice changes.
+fn widest_option(doc: &Document, style: &ComputedStyle, text: &mut TextEngine, select: NodeId) -> f32 {
+    let ts = text_style(style);
+    select_options(doc, select)
+        .into_iter()
+        .map(|o| {
+            let mut l = text.shape(&option_label(doc, o), &ts, 1.0);
+            break_lines(&mut l, None, Alignment::Start);
+            l.full_width()
+        })
+        .fold(0.0, f32::max)
+        .ceil()
+}
+
+/// The drop-down list for `req.select`, below its box.
+fn build_menu(
+    doc: &Document,
+    styles: &StyleMap,
+    text: &mut TextEngine,
+    tree: &LayoutTree,
+    req: MenuRequest,
+    offsets: Option<&ScrollOffsets>,
+) -> Option<MenuBox> {
+    let style = styles.get(req.select);
+    let rect = match offsets {
+        Some(o) => tree.node_rect_scrolled(req.select, o)?,
+        None => tree.node_rect(req.select)?,
+    };
+    let ts = text_style(style);
+    let items: Vec<MenuItem> = select_options(doc, req.select)
+        .into_iter()
+        .map(|o| {
+            let mut l = text.shape(&option_label(doc, o), &ts, 1.0);
+            break_lines(&mut l, None, Alignment::Start);
+            MenuItem { text: l, disabled: doc.has_state(o, "disabled") }
+        })
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    let pad_x = 8.0;
+    let widest = items.iter().map(|i| i.text.full_width()).fold(0.0, f32::max);
+    let row_height = (style.font_size * style.line_height + 6.0).ceil();
+    Some(MenuBox {
+        rect: Rect {
+            x: rect.x,
+            y: rect.y + rect.height,
+            width: rect.width.max((widest + 2.0 * pad_x + 2.0).ceil()),
+            height: row_height * items.len() as f32 + 2.0,
+        },
+        row_height,
+        pad_x,
+        selected: selected_index(doc, req.select),
+        highlight: req.highlight,
+        items,
+    })
 }
 
 /// The single text leaf inside an input.
@@ -1183,6 +1337,37 @@ second</textarea><textarea id="e"></textarea></body>"#,
         assert_eq!(tree.move_caret_vertically(id("t"), 0, -1), None);
         let rect = tree.node_rect(id("e")).unwrap();
         assert_eq!((rect.width, rect.height), (210.0, 68.0), "UA size plus padding and border");
+    }
+
+    #[test]
+    fn select_shows_its_choice_sizes_to_the_longest_option_and_opens_a_menu() {
+        let doc = Document::parse(
+            r#"<body style="margin:0"><select id="s"><option>Red</option><option selected>A much longer option</option><option disabled>Blue</option></select>
+               <select id="e"></select></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let id = |s: &str| doc.find(|n| n.attr("id") == Some(s)).unwrap();
+        assert_eq!(selected_index(&doc, id("s")), Some(1));
+        assert_eq!(option_label(&doc, select_options(&doc, id("s"))[2]), "Blue");
+        assert_eq!(selected_index(&doc, id("e")), None);
+
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 800.0, 400.0);
+        let (s, e) = (tree.node_rect(id("s")).unwrap(), tree.node_rect(id("e")).unwrap());
+        assert!(s.width > 100.0, "wide enough for the longest option: {s:?}");
+        assert!(e.height > 16.0, "an empty select still has a line");
+        assert!(tree.menu.is_none());
+
+        let opts = LayoutOptions { menu: Some(MenuRequest { select: id("s"), highlight: Some(0) }), offsets: None };
+        let tree = layout_with(&doc, &styles, &mut text, 800.0, 400.0, &opts);
+        let m = tree.menu.as_ref().unwrap();
+        assert_eq!((m.rect.x, m.rect.y), (s.x, s.y + s.height), "opens right under the select");
+        assert_eq!(m.items.len(), 3);
+        assert!(m.items[2].disabled && m.selected == Some(1) && m.highlight == Some(0));
+        let mid = |row: usize| m.rect.y + 1.0 + m.row_height * (row as f32 + 0.5);
+        assert_eq!(m.row_at(m.rect.x + 5.0, mid(1)), Some(1));
+        assert_eq!(m.row_at(m.rect.x + 5.0, mid(2)), Some(2));
+        assert_eq!(m.row_at(m.rect.x - 5.0, mid(1)), None);
     }
 
     #[test]
