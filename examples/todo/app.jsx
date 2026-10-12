@@ -8,7 +8,7 @@ const store = createStore([
 
 // A function component: called as Todo(props, children).
 const Todo = ({ item, index }) => (
-  <li class={{ todo: true, done: item.done }} data-index={index}>
+  <li class={{ todo: true, done: item.done }} data-index={index} key={index}>
     <span class="box">{item.done ? 'x' : ''}</span>
     <span class="label">{item.text}</span>
   </li>
@@ -21,7 +21,7 @@ function render() {
 
 // Sciter-style delegation: one handler for every current and future <li>.
 $('#list').on('click', 'li.todo', function (evt, li) {
-  store.toggle(+li.attributes['data-index']);
+  store.toggle(+li.getAttribute('data-index'));
 });
 
 $('#add').on('click', () => {

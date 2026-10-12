@@ -1,8 +1,9 @@
 //! JSX to plain JavaScript.
 //!
 //! `<div class="a" onclick={f}>Hi {name}</div>` becomes
-//! `JSX("div", {"class": "a", "onclick": f}, "Hi ", name)`; `<>..</>` becomes
-//! `JSX(JSX.Fragment, null, ..)`. The rest of the source is copied through
+//! `JSX("div", {"class": "a", "onclick": f}, ["Hi ", name])` (Sciter's shape:
+//! tag, attributes or `null`, children array or `null`); `<>..</>` becomes
+//! `JSX(JSX.Fragment, null, [..])`. The rest of the source is copied through
 //! untouched, newlines included (JSX that spans lines is followed by the same
 //! number of newlines, so error line numbers stay right).
 //!
@@ -381,13 +382,8 @@ fn only_comments(e: &str) -> bool {
 }
 
 fn call(tag: &str, props: &str, kids: &[String]) -> String {
-    let mut s = format!("JSX({tag}, {props}");
-    for k in kids {
-        s.push_str(", ");
-        s.push_str(k);
-    }
-    s.push(')');
-    s
+    let kids = if kids.is_empty() { "null".to_string() } else { format!("[{}]", kids.join(", ")) };
+    format!("JSX({tag}, {props}, {kids})")
 }
 
 /// JSX text whitespace rules: lines are trimmed, blank lines dropped, and the
@@ -479,42 +475,42 @@ mod tests {
 
     #[test]
     fn elements_attributes_and_children() {
-        assert_eq!(t(r#"const a = <p class="x" hidden>hi</p>;"#), r#"const a = JSX("p", {"class": "x", "hidden": true}, "hi");"#);
-        assert_eq!(t("x = <br/>"), r#"x = JSX("br", null)"#);
+        assert_eq!(t(r#"const a = <p class="x" hidden>hi</p>;"#), r#"const a = JSX("p", {"class": "x", "hidden": true}, ["hi"]);"#);
+        assert_eq!(t("x = <br/>"), r#"x = JSX("br", null, null)"#);
         assert_eq!(
             t("render(<ul><li id={id}>{n + 1}</li><Item a={1}/></ul>)"),
-            r#"render(JSX("ul", null, JSX("li", {"id": id}, n + 1), JSX(Item, {"a": 1})))"#
+            r#"render(JSX("ul", null, [JSX("li", {"id": id}, [n + 1]), JSX(Item, {"a": 1}, null)]))"#
         );
     }
 
     #[test]
     fn fragments_spread_and_member_tags() {
-        assert_eq!(t("f(<><a/>text</>)"), r#"f(JSX(JSX.Fragment, null, JSX("a", null), "text"))"#);
-        assert_eq!(t("x = <div {...p} b={2}/>"), r#"x = JSX("div", Object.assign({}, p, {"b": 2}))"#);
-        assert_eq!(t("x = <ui.Panel/>"), r#"x = JSX(ui.Panel, null)"#);
+        assert_eq!(t("f(<><a/>text</>)"), r#"f(JSX(JSX.Fragment, null, [JSX("a", null, null), "text"]))"#);
+        assert_eq!(t("x = <div {...p} b={2}/>"), r#"x = JSX("div", Object.assign({}, p, {"b": 2}), null)"#);
+        assert_eq!(t("x = <ui.Panel/>"), r#"x = JSX(ui.Panel, null, null)"#);
     }
 
     #[test]
     fn text_whitespace_follows_jsx_rules() {
         let out = t("x = (\n  <p>\n    Hello,\n    world &amp; co\n  </p>\n)");
-        assert!(out.contains(r#"JSX("p", null, "Hello, world & co")"#), "{out}");
+        assert!(out.contains(r#"JSX("p", null, ["Hello, world & co"])"#), "{out}");
         // Lines are preserved.
         assert_eq!(out.matches('\n').count(), 5);
-        assert_eq!(t("x = <b> a  b </b>"), "x = JSX(\"b\", null, \" a  b \")");
+        assert_eq!(t("x = <b> a  b </b>"), "x = JSX(\"b\", null, [\" a  b \"])");
     }
 
     #[test]
     fn nested_expressions_templates_and_arrows() {
         assert_eq!(
             t("items.map((i) => <li key={i}>{`#${i}`}</li>)"),
-            r#"items.map((i) => JSX("li", {"key": i}, `#${i}`))"#
+            r#"items.map((i) => JSX("li", {"key": i}, [`#${i}`]))"#
         );
         assert_eq!(
             t("x = <a>{cond ? <b/> : <i/>}</a>"),
-            r#"x = JSX("a", null, cond ? JSX("b", null) : JSX("i", null))"#
+            r#"x = JSX("a", null, [cond ? JSX("b", null, null) : JSX("i", null, null)])"#
         );
-        assert_eq!(t("x = <a>{/* note */}ok</a>"), r#"x = JSX("a", null, "ok")"#);
-        assert_eq!(t("x = `${<b/>}`"), r#"x = `${JSX("b", null)}`"#);
+        assert_eq!(t("x = <a>{/* note */}ok</a>"), r#"x = JSX("a", null, ["ok"])"#);
+        assert_eq!(t("x = `${<b/>}`"), r#"x = `${JSX("b", null, null)}`"#);
     }
 
     #[test]

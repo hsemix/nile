@@ -255,6 +255,14 @@ fn install_natives(
             d.borrow_mut().detach(n);
         }
     }));
+    native!("getState", with_doc!(d => move |id: i32, name: String| -> bool {
+        node(id).is_some_and(|n| d.borrow().has_state(n, &name))
+    }));
+    native!("setState", with_doc!(d => move |id: i32, name: String, on: bool| {
+        if let Some(n) = node(id) {
+            d.borrow_mut().set_state(n, &name, on);
+        }
+    }));
     native!("byId", with_doc!(d => move |id: String| -> i32 {
         let d = d.borrow();
         id_out(d.descendants(Document::ROOT).into_iter().find(|n| d.node(*n).attr("id") == Some(id.as_str())))
@@ -683,45 +691,123 @@ mod tests {
     }
 
     #[test]
-    fn sciter_style_helpers() {
-        let (host, _) = host(
-            r#"<ul id="l"><li class="a"><b>1</b></li><li class="a">2</li></ul><input id="i" type="checkbox">"#,
-        );
+    fn jsx_compiles_to_vnodes_like_sciter() {
+        let (host, _) = host("");
+        host.run(
+            r#"
+            const v = <h1 id="hw">Hello</h1>;
+            console.log(Array.isArray(v), v[0], JSON.stringify(v[1]), JSON.stringify(v[2]), JSON.stringify(<br/>));
+            "#,
+        )
+        .unwrap();
+        assert_eq!(host.console_output(), vec![r#"true h1 {"id":"hw"} ["Hello"] ["br",null,null]"#]);
+    }
+
+    #[test]
+    fn sciter_selectors_and_delegation() {
+        let (host, _) = host(r#"<ul id="l"><li class="a"><b>1</b></li><li class="a">2</li></ul>"#);
         host.run(
             r#"
             const l = $('#l');
-            console.log($$('li').length, l.$$('.a').length, l.$('b').textContent, l.children[1].index);
+            console.log($$('li').length, l.$$('.a').length, l.$('b').textContent, l.children[1].elementIndex);
 
+            // this = the element handler is attached to; second arg = matched descendant.
             const seen = [];
-            l.on('click', 'li', function (evt, target) { seen.push(this.textContent + '/' + (target === this)); });
-            $$('li')[0].$('b').click();      // bubbles from <b>, delegated to the li
-            l.click();                        // not an li: ignored
-            const handler = () => seen.push('direct');
-            l.on('click mousedown', handler);
-            l.click(); l.off('click', handler); l.click();
+            l.on('click', 'li', function (evt, li) { seen.push(this.id + ':' + li.textContent + ':' + (li === evt.target.closest('li'))); });
+            $$('li')[0].$('b').click();     // bubbles from <b>, delegated to the li
+            l.click();                       // not inside an li: ignored
+
+            // namespaces, off by name / namespace / function, once, capture
+            const hits = [];
+            const h = () => hits.push('h');
+            l.on('click.one', h).on('click.two', () => hits.push('two')).once('click', () => hits.push('once'));
+            l.click(); l.click();
+            l.off('.two'); l.click();
+            l.off(h); l.click();
+            l.off('click'); l.click();
+            const order = [];
+            l.on('^click', () => order.push('capture'));
+            l.on('click', () => order.push('bubble'));
+            $$('li')[1].click();
             console.log(seen.join(','));
-
-            const i = $('#i');
-            i.state.checked = true; i.attributes.title = 'hi';
-            console.log(i.state.checked, i.hasAttribute('checked'), i.attributes.title, 'title' in i.attributes,
-                        Object.keys(i.attributes).join(','), i.state.hover);
-            delete i.attributes.title;
-            i.state.checked = false;
-            console.log(i.getAttributeNames().join(','));
-
-            l.content(<li>only</li>, ' text');
-            l.prepend(<li>first</li>);
-            l.insert(<li>mid</li>, 1);
-            console.log(l.innerHTML);
+            console.log(hits.join(','));
+            console.log(order.join(','));
             "#,
         )
         .unwrap();
         let out = host.console_output();
         assert_eq!(out[0], "2 2 1 1");
-        assert_eq!(out[1], "1/true,direct");
-        assert_eq!(out[2], "true true hi true id,type,checked,title false");
-        assert_eq!(out[3], "id,type");
-        assert_eq!(out[4], "<li>first</li><li>mid</li><li>only</li> text");
+        assert_eq!(out[1], "l:1:true");
+        // 1st click: h,two,once; 2nd: h,two; after off('.two'): h; after off(h): nothing; then off('click').
+        assert_eq!(out[2], "h,two,once,h,two,h");
+        assert_eq!(out[3], "capture,bubble");
+    }
+
+    #[test]
+    fn element_state_flags_and_attributes() {
+        let (host, _) = host(
+            r#"<style>#i:checked { color: red } </style><input id="i" type="checkbox" title="t"><p id="p"></p>"#,
+        );
+        host.run(
+            r#"
+            const i = $('#i');
+            console.log(i.state.checked, i.state.disabled, i.state.hover, 'checked' in i.state);
+            i.state.checked = true;
+            console.log(i.state.checked, i.hasAttribute('checked'), i.matches(':checked'), $$('input:checked').length);
+            i.state.checked = false;
+            console.log($$(':checked').length);
+            const names = [...i.attributes].map((a) => a.name + '=' + a.value).join(',');
+            i.attributes.title.value = 'new';
+            console.log(names, i.getAttribute('title'), i.attributes.length, i.attributes.type.value, i.attributes.nope);
+            console.log(i.value, $('#p').nodeIndex, $('#p').insertAfter(document.createElement('hr'), $('#p')).tagName, $('#p').insert);
+            "#,
+        )
+        .unwrap();
+        let out = host.console_output();
+        assert_eq!(out[0], "false false false true");
+        assert_eq!(out[1], "true false true 1");
+        assert_eq!(out[2], "0");
+        assert_eq!(out[3], "id=i,type=checkbox,title=t new 3 checkbox undefined");
+        assert_eq!(out[4], "undefined 1 HR undefined");
+    }
+
+    #[test]
+    fn content_prepend_and_patch() {
+        let (host, doc) = host(r#"<div id="root"><p id="keep" class="old" title="gone">old</p>stray</div>"#);
+        host.run(
+            r#"
+            const root = $('#root');
+            const keep = $('#keep');
+            const ids = [];
+            root.patch(
+              <div>
+                <p id="keep" class="new" onclick={() => ids.push('clicked')}>fresh</p>
+                <ul><li key="a">A</li><li key="b">B</li></ul>
+                {['x', 'y']}
+              </div>
+            );
+            console.log(keep === $('#keep'), keep.className, keep.hasAttribute('title'), root.innerHTML);
+            keep.click();
+            const a = $('li');
+            // Re-patch with the items swapped: keyed DOM is reused, not rebuilt.
+            root.patch(<div><p id="keep" class="new">fresh</p><ul><li key="b">B</li><li key="a">A</li></ul></div>);
+            console.log(ids.join(), $('li') !== a, $$('li')[1] === a, root.innerHTML);
+            root.prepend(<hr/>, 'text');
+            console.log(root.firstChild.tagName, root.childNodes[1].data, root.children.length);
+            root.content(<i>only</i>);
+            console.log(root.innerHTML);
+            "#,
+        )
+        .unwrap();
+        let _ = doc;
+        let out = host.console_output();
+        assert_eq!(
+            out[0],
+            r#"true new false <p id="keep" class="new">fresh</p><ul><li>A</li><li>B</li></ul>xy"#
+        );
+        assert_eq!(out[1], r#"clicked true true <p id="keep" class="new">fresh</p><ul><li>B</li><li>A</li></ul>"#);
+        assert_eq!(out[2], "HR text 3");
+        assert_eq!(out[3], "<i>only</i>");
     }
 
     #[test]

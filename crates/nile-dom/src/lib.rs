@@ -44,6 +44,10 @@ impl Node {
     }
 }
 
+/// Flags scripts can set on elements, matched by the same-named pseudo-classes.
+pub const STATE_NAMES: &[&str] =
+    &["checked", "disabled", "readonly", "expanded", "collapsed", "current", "selected", "invalid", "busy"];
+
 #[derive(Debug, Default)]
 pub struct Document {
     pub nodes: Vec<Node>,
@@ -51,6 +55,8 @@ pub struct Document {
     // TODO: detached nodes stay in `nodes` forever; compact or free-list them
     // if scripts that create lots of short-lived nodes become common.
     pub version: u64,
+    /// Runtime state flags (Sciter's `Element.state`), as bits of `STATE_NAMES`.
+    states: std::collections::HashMap<NodeId, u32>,
 }
 
 impl Document {
@@ -164,6 +170,28 @@ impl Document {
                     _ => None,
                 })
                 .collect(),
+        }
+    }
+
+    /// Whether a runtime state flag is on. `checked`, `disabled`, `readonly` and
+    /// `selected` are also on when the HTML attribute is present, as in browsers.
+    pub fn has_state(&self, id: NodeId, name: &str) -> bool {
+        let Some(bit) = STATE_NAMES.iter().position(|n| *n == name) else { return false };
+        self.states.get(&id).is_some_and(|f| f & (1 << bit) != 0)
+            || (matches!(name, "checked" | "disabled" | "readonly" | "selected") && self.node(id).attr(name).is_some())
+    }
+
+    pub fn set_state(&mut self, id: NodeId, name: &str, on: bool) {
+        let Some(bit) = STATE_NAMES.iter().position(|n| *n == name) else { return };
+        let flags = self.states.entry(id).or_default();
+        let before = *flags;
+        if on {
+            *flags |= 1 << bit;
+        } else {
+            *flags &= !(1 << bit);
+        }
+        if *flags != before {
+            self.version += 1;
         }
     }
 
@@ -412,6 +440,19 @@ mod tests {
                 ScriptSource::Inline("b()".into())
             ]
         );
+    }
+
+    #[test]
+    fn state_flags() {
+        let mut doc = Document::parse(r#"<input id="a" disabled><input id="b">"#);
+        let a = doc.find(|n| n.attr("id") == Some("a")).unwrap();
+        let b = doc.find(|n| n.attr("id") == Some("b")).unwrap();
+        assert!(doc.has_state(a, "disabled") && !doc.has_state(b, "disabled"));
+        let v = doc.version;
+        doc.set_state(b, "checked", true);
+        assert!(doc.has_state(b, "checked") && doc.version > v);
+        doc.set_state(b, "checked", false);
+        assert!(!doc.has_state(b, "checked") && !doc.has_state(b, "nonsense"));
     }
 
     #[test]

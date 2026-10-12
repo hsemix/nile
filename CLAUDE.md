@@ -78,6 +78,10 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
   normalise in `prelude.js`.
 - Boxes are `content-box` unless `box-sizing: border-box` (Taffy's own default
   is border-box, so `taffy_style` sets it explicitly).
+- Sciter helpers in `prelude.js` follow docs.sciter.com (verified Oct 2026):
+  `on()` handlers get `(evt, matched)` with `this` = the attached element; JSX
+  returns vnode arrays that `append`/`content`/`patch` render. Check the docs
+  before adding more, don't write Sciter API shapes from memory.
 - JSX is a source transform (`nile-script/src/jsx.rs`, a scanner, not a parser)
   applied to every script and module before QuickJS sees it; it returns `None`
   for non-JSX or malformed input so the engine reports the original error. Modules
@@ -101,9 +105,8 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
 
 ## Next up
 
-Sciter compatibility pass (README roadmap #2). The helpers added so far (`$`,
-`on`/`off`, `state`, `attributes`, JSX semantics) were written from memory of
-Sciter.JS: read Sciter's docs and fix any shape that differs, then add the
-`@env`/`@sciter`/`@sys` modules, `Element.value`, reactor-style updates and
-`this://` URLs. Also open: font fallback for symbol glyphs, Tab focus order,
-element-level scrolling, incremental restyle.
+Font fallback for symbol glyphs (`✓` renders as a missing-glyph box: Parley
+isn't picking a symbols font for it), then form controls / Sciter behaviors
+(`Element.value`, text input, checkbox) which also give `state` flags real
+meaning. Other open items: Tab focus order, element-level scrolling,
+incremental restyle, `@env`/`@sciter` modules (README roadmap #2).

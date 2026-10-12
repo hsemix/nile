@@ -62,6 +62,8 @@ pub enum PseudoClass {
     Hover,
     Active,
     Focus,
+    /// A runtime flag from [`nile_dom::STATE_NAMES`], e.g. `:checked`.
+    State(&'static str),
 }
 
 impl ToCss for PseudoClass {
@@ -70,6 +72,10 @@ impl ToCss for PseudoClass {
             PseudoClass::Hover => ":hover",
             PseudoClass::Active => ":active",
             PseudoClass::Focus => ":focus",
+            PseudoClass::State(name) => {
+                dest.write_char(':')?;
+                return dest.write_str(name);
+            }
         })
     }
 }
@@ -134,7 +140,10 @@ impl<'i> Parser<'i> for NileParser {
             "hover" => Ok(PseudoClass::Hover),
             "active" => Ok(PseudoClass::Active),
             "focus" => Ok(PseudoClass::Focus),
-            _ => Err(ParseError::custom(SelectorParseErrorKind::UnsupportedPseudoClassOrElement)),
+            _ => match nile_dom::STATE_NAMES.iter().find(|s| s.eq_ignore_ascii_case(&name)) {
+                Some(state) => Ok(PseudoClass::State(state)),
+                None => Err(ParseError::custom(SelectorParseErrorKind::UnsupportedPseudoClassOrElement)),
+            },
         }
     }
 }
@@ -279,6 +288,7 @@ impl Element for ElementRef<'_> {
             PseudoClass::Hover => self.contains(self.state.hover),
             PseudoClass::Active => self.contains(self.state.active),
             PseudoClass::Focus => self.state.focus == Some(self.id),
+            PseudoClass::State(name) => self.doc.has_state(self.id, name),
         }
     }
 

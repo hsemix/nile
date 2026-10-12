@@ -60,13 +60,17 @@ cargo test --workspace
   events, `DOMContentLoaded`/`load`, timers, `requestAnimationFrame`, promises, `<script src>` (see
   `examples/scripting.html`). Layout queries: `getBoundingClientRect`, `offset*`/`client*`, `getComputedStyle`
   (common properties), `innerWidth/Height`, `scrollTo`/`scrollY`/`scrollIntoView` (see `examples/measure.html`).
-- **Modules and JSX:** `<script type="module">` and `import` of relative files (`./x.js`, `../y.jsx`); JSX in
-  any script compiles to `JSX(tag, props, ...children)`, which builds DOM directly (function components are
-  called as `Component(props, children)`; override `globalThis.JSX` to render differently). See
-  `examples/todo/`.
-- **Sciter-style helpers:** `$()` / `$$()` (also `el.$`, `el.$$`), `el.on("click mousedown", [selector], handler)`
-  with delegation (`handler.call(target, evt, target)`) and `el.off`, `el.state` (`hover`, `active`, `focus`;
-  `disabled`, `checked`, ... map to attributes), `el.attributes`, `el.content()`, `el.insert()`, `el.index`.
+- **Modules and JSX:** `<script type="module">` and `import` of relative files (`./x.js`, `../y.jsx`). JSX in any
+  script compiles like Sciter's: `<h1 id="a">Hi</h1>` becomes `JSX("h1", {id: "a"}, ["Hi"])`, which returns a
+  vnode array `[tag, attrs, children]`. `append`/`prepend`/`content` render vnodes (strings, nodes and arrays
+  too), `patch(vnode, onlyChildren)` reconciles existing DOM, and function components are called as
+  `Component(props, kids, parent)`. Replace `globalThis.JSX` to change what JSX means. See `examples/todo/`.
+- **Sciter-style helpers** (checked against docs.sciter.com): `$()`/`$$()` (also `el.$`, `el.$$`),
+  `el.on("click.ns ^keydown", [selector], handler)` where `handler(evt, matched)` runs with `this` = the element
+  it is attached to, `el.once()`, `el.off(name | ".ns" | handler)`, `el.state` flags (`hover`/`active`/`focus`
+  from interaction; `checked`, `disabled`, `readonly`, `expanded`, `collapsed`, `current`, `selected`, `invalid`,
+  `busy` are runtime flags matched by the same-named `:pseudo-classes`), `elementIndex`, `nodeIndex`,
+  `insertAfter`.
 - **Pointer interaction:** hit testing (down to the inline element under the pointer), `:hover`, `:active` and
   click-to-focus on links and form controls, restyled live (see `examples/interact.html`).
 - **Inline content:** mixed text, `<br>`, inline padding/border/background/radius and `inline-block` (with
@@ -79,10 +83,11 @@ cargo test --workspace
 - **Inline layout is partial.** Shrink-to-fit `inline-block` uses max-content (it won't narrow to fit a
   line), inline margins are ignored, a wrapped inline's border/radius isn't sliced at the break, only the
   innermost decorated inline is painted, and block children of an inline element don't split the run.
-- JS gaps: `fetch`, bare/`@sciter`/`@env`-style module specifiers (only relative and absolute paths), JSX
-  `key`/`ref` semantics beyond skipping `key` and calling `ref`, `window.location`, `devicePixelRatio` (always 1), element-level scrolling
-  (`scrollTop` only works on the page), `offsetParent` (approximated by the parent). The Sciter extensions above are a
-  subset written from memory of Sciter.JS, not checked against its docs: verify shapes before relying on them.
+- JS gaps: `fetch`, bare/`@sciter`/`@env`-style module specifiers (only relative and absolute paths),
+  `window.location`, `devicePixelRatio` (always 1), element-level scrolling (`scrollTop` only works on the
+  page), `offsetParent` (approximated by the parent). From Sciter: class components, `componentUpdate`,
+  `onGlobalEvent`, `Element.value` (no native behaviors yet), `this://` URLs, and JSX shortcuts like `.class`;
+  `patch` is simplified (children match by key, id, then tag).
 - `border-radius` takes one value (no per-corner radii); `:has()`, `::before/::after` and `:visited` aren't supported.
 - Sibling and `:nth-child` matching scans child lists, so very wide lists restyle slowly.
 - `opacity` is parsed but not painted (needs stacking contexts in the paint list).
@@ -93,8 +98,8 @@ cargo test --workspace
 
 1. **Tab order + incremental updates** — Tab focus order, the `cursor` property, and restyling /
    relaying out only what a state change affects (today every change restyles the whole page).
-2. **More Sciter compatibility** — check the helpers above against Sciter.JS's docs, then add `@env`/`@sciter`
-   modules, `Element.value`, `Element.componentUpdate`/reactor-style updates, `this://` URLs.
+2. **More Sciter compatibility** — `@env`/`@sciter`/`@sys` modules, behaviors (`Element.value`, form
+   controls), class components and `componentUpdate`, `this://` URLs.
 3. **Stacking contexts + GPU** — paint tree with opacity, transforms, clipping,
    overflow scrolling; Skia on Metal (macOS), D3D (Windows), Vulkan/GL (Linux).
 4. **Embedding API** — a C ABI (`cbindgen`) so Go, C#, Python, etc. can host it.

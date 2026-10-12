@@ -754,6 +754,25 @@ mod tests {
     }
 
     #[test]
+    fn state_flag_pseudo_classes() {
+        let mut doc = Document::parse(
+            r#"<style>input:checked { color: red } input:disabled { color: blue } li:not(.x):expanded { color: red }</style>
+               <input id="a" disabled><input id="b"><input id="c" checked><ul><li id="d">x</li></ul>"#,
+        );
+        let id = |d: &Document, s: &str| d.find(|n| n.attr("id") == Some(s)).unwrap();
+        let st = compute_styles(&doc);
+        assert_eq!(color_of(&doc, &st, "a"), BLUE); // from the attribute
+        assert_eq!(color_of(&doc, &st, "b"), Color::BLACK);
+        assert_eq!(color_of(&doc, &st, "c"), RED);
+        let (b, d) = (id(&doc, "b"), id(&doc, "d"));
+        doc.set_state(b, "checked", true);
+        doc.set_state(d, "expanded", true);
+        let st = compute_styles(&doc);
+        assert_eq!(color_of(&doc, &st, "b"), RED);
+        assert_eq!(color_of(&doc, &st, "d"), RED);
+    }
+
+    #[test]
     fn query_selects_in_document_order() {
         let doc = Document::parse(r#"<ul id="u"><li class="a">1</li><li>2</li><li class="a">3</li></ul><p class="a">x</p>"#);
         let ul = doc.find(|n| n.tag() == Some("ul")).unwrap();
