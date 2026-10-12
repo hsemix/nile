@@ -5,14 +5,14 @@
 //!        [--width 900] [--height 640] [--scale 2]
 //!        [--hover X,Y] [--press X,Y] [--click X,Y]   simulate the pointer (logical px)
 //!        [--wheel X,Y,DY]              scroll at a point (negative DY scrolls content up)
-//!        [--type TEXT]                 type into the focused input ({Backspace}, {ArrowLeft}, ... for keys)
+//!        [--type TEXT]                 type into the focused input ({Backspace}, {Shift+ArrowLeft}, {Cmd+a}, ... for keys)
 //!        [--wait MS]                   let timers run this long before the snapshot
 
 use std::{cell::RefCell, num::NonZeroU32, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 
 use nile_dom::{Document, NodeId, ScriptSource};
 use nile_layout::{LayoutTree, ScrollOffsets};
-use nile_render::Renderer;
+use nile_render::{Overlay, Renderer};
 use nile_script::{Environment, ScriptHost, UiEvent};
 use nile_style::{compute_styles_with, InteractionState, StyleMap};
 use nile_text::TextEngine;
@@ -25,6 +25,49 @@ use winit::{
     keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowId},
 };
+
+/// Text clipboard. The system one in the window; an in-memory one for headless
+/// runs and tests, so they never touch the user's clipboard.
+trait Clipboard {
+    fn text(&mut self) -> Option<String>;
+    fn set_text(&mut self, text: &str);
+}
+
+#[derive(Default)]
+struct MemoryClipboard(Option<String>);
+
+impl Clipboard for MemoryClipboard {
+    fn text(&mut self) -> Option<String> {
+        self.0.clone()
+    }
+    fn set_text(&mut self, text: &str) {
+        self.0 = Some(text.to_string());
+    }
+}
+
+/// The OS clipboard, opened on first use (it can fail, e.g. without a display).
+#[derive(Default)]
+struct SystemClipboard(Option<arboard::Clipboard>);
+
+impl SystemClipboard {
+    fn get(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.0.is_none() {
+            self.0 = arboard::Clipboard::new().ok();
+        }
+        self.0.as_mut()
+    }
+}
+
+impl Clipboard for SystemClipboard {
+    fn text(&mut self) -> Option<String> {
+        self.get()?.get_text().ok()
+    }
+    fn set_text(&mut self, text: &str) {
+        if let Some(c) = self.get() {
+            let _ = c.set_text(text.to_string());
+        }
+    }
+}
 
 /// Half the caret's blink period.
 const CARET_BLINK: Duration = Duration::from_millis(530);
@@ -49,6 +92,12 @@ struct View {
     /// Elements scrolled since the page last looked, to fire `scroll` events.
     scrolled: Vec<NodeId>,
     interaction: InteractionState,
+    /// Selection in the focused text input, in characters of its value: the fixed
+    /// end and the moving end (the caret).
+    anchor: usize,
+    caret: usize,
+    /// Selections scripts set on inputs that don't have focus yet.
+    pending_sel: std::collections::HashMap<NodeId, (usize, usize)>,
     /// Focus moves made by scripts, so the page can fire `blur`/`focus` for them.
     focus_changes: Vec<(Option<NodeId>, Option<NodeId>)>,
 }
@@ -86,6 +135,15 @@ impl View {
         self.scrolled.push(node);
         self.scroll_dirty = true;
         true
+    }
+
+    /// Selection for an input that just got focus: a range a script set earlier,
+    /// else the caret at the end of its value.
+    fn select_for_focus(&mut self, node: NodeId) {
+        let len = nile_layout::control_value(&self.doc.borrow(), node).chars().count();
+        let (a, c) = self.pending_sel.remove(&node).unwrap_or((len, len));
+        self.anchor = a.min(len);
+        self.caret = c.min(len);
     }
 
     fn set_viewport(&mut self, width: f32, height: f32) {
@@ -154,11 +212,39 @@ impl Environment for Env {
         self.0.borrow_mut().set_element_scroll(node, x, y);
     }
 
+    fn selection(&self, node: NodeId) -> (usize, usize) {
+        let mut v = self.0.borrow_mut();
+        v.sync();
+        let len = nile_layout::control_value(&v.doc.borrow(), node).chars().count();
+        let (a, c) = if v.interaction.focus == Some(node) {
+            (v.anchor, v.caret)
+        } else {
+            v.pending_sel.get(&node).copied().unwrap_or((len, len))
+        };
+        (a.min(c).min(len), a.max(c).min(len))
+    }
+
+    fn set_selection(&self, node: NodeId, start: usize, end: usize) {
+        let mut v = self.0.borrow_mut();
+        let len = nile_layout::control_value(&v.doc.borrow(), node).chars().count();
+        let (a, c) = (start.min(end).min(len), start.max(end).min(len));
+        if v.interaction.focus == Some(node) {
+            v.anchor = a;
+            v.caret = c;
+            v.scroll_dirty = true;
+        } else {
+            v.pending_sel.insert(node, (a, c));
+        }
+    }
+
     fn set_focus(&self, node: Option<NodeId>) {
         let mut v = self.0.borrow_mut();
         if v.interaction.focus != node {
             let old = v.interaction.focus;
             v.interaction.focus = node;
+            if let Some(n) = node {
+                v.select_for_focus(n);
+            }
             v.focus_changes.push((old, node));
             v.restyle();
         }
@@ -177,8 +263,13 @@ struct Page {
     /// Element the primary button went down on, for deriving `click`.
     pressed: Option<NodeId>,
     scripts: Option<ScriptHost>,
-    /// Caret position (in characters of `value`) in the focused text input.
-    caret: usize,
+    /// Modifier keys currently held (for shift-click etc.).
+    mods: ModifiersState,
+    /// Text input a mouse drag is selecting in.
+    drag: Option<NodeId>,
+    /// Time, position and count of the last primary click, for double/triple-click.
+    last_click: Option<(Instant, (f32, f32), u32)>,
+    clipboard: Box<dyn Clipboard>,
     /// Value when the focused input got focus, to decide whether `change` fires.
     value_at_focus: Option<String>,
     /// Blink phase of the caret and when it flips next.
@@ -205,6 +296,9 @@ impl Page {
             scroll_dirty: false,
             scroll_offsets: ScrollOffsets::new(),
             scrolled: Vec::new(),
+            anchor: 0,
+            caret: 0,
+            pending_sel: std::collections::HashMap::new(),
             interaction,
             focus_changes: Vec::new(),
         }));
@@ -267,7 +361,10 @@ impl Page {
             pointer: None,
             pressed: None,
             scripts,
-            caret: 0,
+            mods: ModifiersState::default(),
+            drag: None,
+            last_click: None,
+            clipboard: Box::new(MemoryClipboard::default()),
             value_at_focus: None,
             caret_visible: true,
             blink_at: Instant::now() + CARET_BLINK,
@@ -327,10 +424,24 @@ impl Page {
         }
         self.show_caret();
         if let Some(n) = new {
-            self.caret = self.value_of(n).chars().count();
             self.value_at_focus = self.is_text_input(n).then(|| self.value_of(n));
             self.emit(n, UiEvent::Plain("focus"));
         }
+    }
+
+    /// Selection anchor and caret (characters of the focused input's value).
+    fn caret(&self) -> usize {
+        self.view.borrow().caret
+    }
+
+    fn anchor(&self) -> usize {
+        self.view.borrow().anchor
+    }
+
+    fn set_sel(&mut self, anchor: usize, caret: usize) {
+        let mut v = self.view.borrow_mut();
+        v.anchor = anchor;
+        v.caret = caret;
     }
 
     fn interaction(&self) -> InteractionState {
@@ -401,7 +512,7 @@ impl Page {
     /// Scroll the focused input/textarea so its caret is visible.
     fn reveal_caret(&mut self) {
         let Some(f) = self.interaction().focus.filter(|f| self.is_text_input(*f)) else { return };
-        let at = nile_layout::caret_byte(&self.doc.borrow(), f, self.caret);
+        let at = nile_layout::caret_byte(&self.doc.borrow(), f, self.caret());
         let mut v = self.view.borrow_mut();
         v.sync();
         let tree = v.layout();
@@ -469,6 +580,15 @@ impl Page {
     fn pointer_moved(&mut self, x: f32, y: f32) -> bool {
         self.pointer = Some((x, y));
         let mut changed = self.refresh_hover();
+        // Dragging inside a text input extends its selection.
+        if let Some(f) = self.drag {
+            if let Some(c) = self.char_at_pointer(f) {
+                changed |= c != self.caret();
+                let a = self.anchor();
+                self.set_sel(a, c);
+                self.reveal_caret();
+            }
+        }
         if let Some(t) = self.interaction().hover {
             changed |= self.emit(t, UiEvent::Mouse { kind: "mousemove", x, y, button: 0 }).1;
         }
@@ -478,6 +598,49 @@ impl Page {
     fn pointer_left(&mut self) -> bool {
         self.pointer = None;
         self.refresh_hover()
+    }
+
+    /// Count consecutive clicks close in time and place (1, 2, 3).
+    fn register_click(&mut self) -> u32 {
+        let now = Instant::now();
+        let pos = self.pointer.unwrap_or_default();
+        let count = match self.last_click {
+            Some((t, (x, y), n))
+                if now.duration_since(t) < Duration::from_millis(500)
+                    && (x - pos.0).abs() < 4.0
+                    && (y - pos.1).abs() < 4.0 =>
+            {
+                (n + 1).min(3)
+            }
+            _ => 1,
+        };
+        self.last_click = Some((now, pos, count));
+        count
+    }
+
+    /// The character index in input `f`'s value nearest the pointer.
+    fn char_at_pointer(&mut self, f: NodeId) -> Option<usize> {
+        let (x, y) = self.pointer?;
+        let at = {
+            let mut v = self.view.borrow_mut();
+            let scroll = v.scroll_y;
+            let offsets = v.scroll_offsets.clone();
+            v.layout().text_index_at_scrolled(f, x, y + scroll, &offsets)?
+        };
+        Some(nile_layout::caret_char(&self.doc.borrow(), f, at))
+    }
+
+    /// The word under the pointer, as a character range of `f`'s value.
+    fn word_at_pointer(&mut self, f: NodeId) -> Option<std::ops::Range<usize>> {
+        let (x, y) = self.pointer?;
+        let range = {
+            let mut v = self.view.borrow_mut();
+            let scroll = v.scroll_y;
+            let offsets = v.scroll_offsets.clone();
+            v.layout().word_range_at(f, x, y + scroll, &offsets)?
+        };
+        let doc = self.doc.borrow();
+        Some(nile_layout::caret_char(&doc, f, range.start)..nile_layout::caret_char(&doc, f, range.end))
     }
 
     fn mouse_event(&self, kind: &'static str) -> UiEvent {
@@ -500,18 +663,30 @@ impl Page {
             ..self.interaction()
         };
         changed |= self.set_interaction(next);
-        // Clicking inside a text input puts the caret there.
-        if let (Some(f), Some((x, y))) = (self.interaction().focus.filter(|f| self.is_text_input(*f)), self.pointer) {
-            let at = {
-                let mut v = self.view.borrow_mut();
-                let scroll = v.scroll_y;
-                let offsets = v.scroll_offsets.clone();
-                v.layout().text_index_at_scrolled(f, x, y + scroll, &offsets)
-            };
-            if let Some(at) = at {
-                let caret = nile_layout::caret_char(&self.doc.borrow(), f, at);
-                changed |= caret != self.caret;
-                self.caret = caret;
+        // Clicking inside a text input places the caret; shift extends the selection,
+        // a double-click selects a word and a triple-click everything.
+        if let Some(f) = self.interaction().focus.filter(|f| self.is_text_input(*f)) {
+            let clicks = self.register_click();
+            if let Some(c) = self.char_at_pointer(f) {
+                let len = self.value_of(f).chars().count();
+                let before = (self.anchor(), self.caret());
+                match clicks {
+                    1 if self.mods.shift_key() => {
+                        let a = self.anchor();
+                        self.set_sel(a, c);
+                        self.drag = Some(f);
+                    }
+                    1 => {
+                        self.set_sel(c, c);
+                        self.drag = Some(f);
+                    }
+                    2 => {
+                        let word = self.word_at_pointer(f).unwrap_or(c..c);
+                        self.set_sel(word.start, word.end);
+                    }
+                    _ => self.set_sel(0, len),
+                }
+                changed |= before != (self.anchor(), self.caret());
             }
         }
         self.show_caret();
@@ -521,6 +696,7 @@ impl Page {
     /// Primary button up: `mouseup`, then `click` on the common ancestor of the
     /// pressed and released elements.
     fn release(&mut self) -> bool {
+        self.drag = None;
         let mut changed = false;
         let target = self.interaction().hover;
         if let Some(t) = target {
@@ -617,7 +793,13 @@ impl Page {
             (Some(i), false) => (i + order.len() - 1) % order.len(),
         };
         let state = InteractionState { focus: Some(order[next]), ..self.interaction() };
-        self.set_interaction(state)
+        let changed = self.set_interaction(state);
+        // Tabbing into a text input selects its contents, as browsers do.
+        if self.is_text_input(order[next]) {
+            let len = self.value_of(order[next]).chars().count();
+            self.set_sel(0, len);
+        }
+        changed
     }
 
     /// Default action for a key the page didn't cancel: Tab moves focus,
@@ -769,51 +951,81 @@ impl Page {
         true
     }
 
-    /// Edit the focused text input for a key press. True if the value or
-    /// caret changed (so the page needs repainting).
+    /// Edit the focused text input for a key press: typing, deleting, caret and
+    /// selection movement, select-all, copy/cut/paste. True if the page needs repainting.
     fn edit_key(&mut self, key: &str, mods: ModifiersState) -> bool {
         let Some(focus) = self.interaction().focus.filter(|f| self.is_text_input(*f)) else { return false };
-        if self.is_disabled(focus) || self.doc.borrow().node(focus).attr("readonly").is_some() {
-            return false;
-        }
+        let readonly = self.is_disabled(focus) || self.doc.borrow().node(focus).attr("readonly").is_some();
         let multiline = self.is_textarea(focus);
+        let (command, shift) = (mods.control_key() || mods.super_key(), mods.shift_key());
         let mut chars: Vec<char> = self.value_of(focus).chars().collect();
-        let caret = self.caret.min(chars.len());
-        let mut new_caret = caret;
-        let mut edited = false;
+        let len = chars.len();
+        let (anchor, caret) = (self.anchor().min(len), self.caret().min(len));
+        let (lo, hi) = (anchor.min(caret), anchor.max(caret));
+        let selected = |chars: &[char]| chars[lo..hi].iter().collect::<String>();
+
+        // Either move the caret (extending the selection with shift)...
+        let mut target: Option<usize> = None;
+        // ...or replace chars[from..to] with some text.
+        let mut edit: Option<(usize, usize, String)> = None;
         match key {
-            "Backspace" if caret > 0 => {
-                chars.remove(caret - 1);
-                new_caret = caret - 1;
-                edited = true;
+            k if command && k.eq_ignore_ascii_case("a") => {
+                self.set_sel(0, len);
+                return true;
             }
-            "Delete" if caret < chars.len() => {
-                chars.remove(caret);
-                edited = true;
+            k if command && k.eq_ignore_ascii_case("c") => {
+                if lo != hi {
+                    let text = selected(&chars);
+                    self.clipboard.set_text(&text);
+                }
+                return false;
             }
-            "ArrowLeft" => new_caret = caret.saturating_sub(1),
-            "ArrowRight" => new_caret = (caret + 1).min(chars.len()),
+            k if command && k.eq_ignore_ascii_case("x") => {
+                if lo != hi && !readonly {
+                    let text = selected(&chars);
+                    self.clipboard.set_text(&text);
+                    edit = Some((lo, hi, String::new()));
+                }
+            }
+            k if command && k.eq_ignore_ascii_case("v") => {
+                if let (false, Some(text)) = (readonly, self.clipboard.text()) {
+                    let text = if multiline { text.replace("\r\n", "\n") } else { text.replace("\r\n", " ").replace(['\r', '\n'], " ") };
+                    edit = Some((lo, hi, text));
+                }
+            }
+            "Backspace" if !readonly => {
+                if lo != hi {
+                    edit = Some((lo, hi, String::new()));
+                } else if caret > 0 {
+                    edit = Some((caret - 1, caret, String::new()));
+                }
+            }
+            "Delete" if !readonly => {
+                if lo != hi {
+                    edit = Some((lo, hi, String::new()));
+                } else if caret < len {
+                    edit = Some((caret, caret + 1, String::new()));
+                }
+            }
+            "ArrowLeft" => target = Some(if !shift && lo != hi { lo } else { caret.saturating_sub(1) }),
+            "ArrowRight" => target = Some(if !shift && lo != hi { hi } else { (caret + 1).min(len) }),
             // Multi-line: Home/End go to the line's ends (hard breaks only).
-            "Home" => new_caret = chars[..caret].iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1),
-            "End" => new_caret = chars[caret..].iter().position(|c| *c == '\n').map_or(chars.len(), |i| caret + i),
+            "Home" => target = Some(chars[..caret].iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1)),
+            "End" => target = Some(chars[caret..].iter().position(|c| *c == '\n').map_or(len, |i| caret + i)),
             "ArrowUp" | "ArrowDown" if multiline => {
                 let up = key == "ArrowUp";
-                let target = {
+                let moved = {
                     let at = nile_layout::caret_byte(&self.doc.borrow(), focus, caret);
                     self.view.borrow_mut().layout().move_caret_vertically(focus, at, if up { -1 } else { 1 })
                 };
-                new_caret = match target {
+                target = Some(match moved {
                     Some(b) => nile_layout::caret_char(&self.doc.borrow(), focus, b),
                     // Past the first or last line: go to the start or end.
                     None if up => 0,
-                    None => chars.len(),
-                };
+                    None => len,
+                });
             }
-            "Enter" if multiline => {
-                chars.insert(caret, '\n');
-                new_caret = caret + 1;
-                edited = true;
-            }
+            "Enter" if multiline && !readonly => edit = Some((lo, hi, "\n".into())),
             "Enter" => {
                 // Commit: fire `change` if the value moved since focus.
                 if self.value_at_focus.as_ref().is_some_and(|v| *v != self.value_of(focus)) {
@@ -822,28 +1034,28 @@ impl Page {
                 }
                 return false;
             }
-            k if k.chars().count() == 1 && !mods.control_key() && !mods.super_key() => {
+            k if !readonly && !command && k.chars().count() == 1 => {
                 let c = k.chars().next().unwrap();
                 if !c.is_control() {
-                    chars.insert(caret, c);
-                    new_caret = caret + 1;
-                    edited = true;
+                    edit = Some((lo, hi, c.to_string()));
                 }
             }
             _ => return false,
         }
-        if edited {
-            let value: String = chars.iter().collect();
-            self.doc.borrow_mut().set_attr(focus, "value", &value);
-            self.caret = new_caret;
-            self.sync();
-            self.emit(focus, UiEvent::Plain("input"));
-            true
-        } else {
-            let moved = new_caret != self.caret;
-            self.caret = new_caret;
-            moved
+        if let Some(t) = target {
+            let new_anchor = if shift { anchor } else { t };
+            self.set_sel(new_anchor, t);
+            return (new_anchor, t) != (anchor, caret);
         }
+        let Some((from, to, text)) = edit else { return false };
+        let inserted = text.chars().count();
+        chars.splice(from..to, text.chars());
+        let value: String = chars.iter().collect();
+        self.doc.borrow_mut().set_attr(focus, "value", &value);
+        self.set_sel(from + inserted, from + inserted);
+        self.sync();
+        self.emit(focus, UiEvent::Plain("input"));
+        true
     }
 
     /// Caret to draw: the focused text input and the caret's byte offset in its displayed text.
@@ -853,7 +1065,19 @@ impl Page {
             return None;
         }
         let doc = self.doc.borrow();
-        Some((focus, nile_layout::caret_byte(&doc, focus, self.caret)))
+        Some((focus, nile_layout::caret_byte(&doc, focus, self.caret())))
+    }
+
+    /// The focused input's selected range as byte offsets in its displayed text.
+    fn selection_for_paint(&self) -> Option<(NodeId, usize, usize)> {
+        let focus = self.interaction().focus.filter(|f| self.is_text_input(*f))?;
+        let len = self.value_of(focus).chars().count();
+        let (a, c) = (self.anchor().min(len), self.caret().min(len));
+        if a == c {
+            return None;
+        }
+        let doc = self.doc.borrow();
+        Some((focus, nile_layout::caret_byte(&doc, focus, a.min(c)), nile_layout::caret_byte(&doc, focus, a.max(c))))
     }
 
     fn common_ancestor(&self, a: NodeId, b: NodeId) -> Option<NodeId> {
@@ -898,7 +1122,15 @@ impl Page {
             return false;
         }
         let (old_focus, new_focus) = (current.focus, next.focus);
-        self.view.borrow_mut().interaction = next;
+        {
+            let mut v = self.view.borrow_mut();
+            v.interaction = next;
+            if old_focus != new_focus {
+                if let Some(n) = new_focus {
+                    v.select_for_focus(n);
+                }
+            }
+        }
         self.restyle();
         if old_focus != new_focus {
             self.focus_moved(old_focus, new_focus);
@@ -934,6 +1166,7 @@ impl Page {
         self.layout(lw, lh);
         let bg = self.canvas_background();
         let caret = self.caret_for_paint();
+        let selection = self.selection_for_paint();
         let mut view = self.view.borrow_mut();
         let max_scroll = (view.layout().content_height - lh).max(0.0);
         view.scroll_y = view.scroll_y.clamp(0.0, max_scroll);
@@ -945,7 +1178,12 @@ impl Page {
         canvas.save();
         canvas.scale((scale, scale));
         let tree = &view.layout.as_ref().expect("laid out above").2;
-        self.renderer.paint(canvas, tree, &view.styles, scroll, caret, &view.scroll_offsets);
+        self.renderer.paint(
+            canvas,
+            tree,
+            &view.styles,
+            &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection },
+        );
         canvas.restore();
     }
 }
@@ -1008,12 +1246,25 @@ fn render_png(page: &mut Page, snap: Snapshot) {
                 }
             };
             rest = tail;
-            let key = if key == "Space" { " ".to_string() } else { key };
-            let (proceed, _) = page.key("keydown", key.clone(), ModifiersState::default());
-            if proceed {
-                page.default_key(&key, ModifiersState::default());
+            // `{Shift+ArrowRight}`, `{Cmd+a}`, `{Ctrl+Shift+End}`: modifiers before the key.
+            let mut parts: Vec<&str> = key.split('+').collect();
+            let name = parts.pop().unwrap_or("");
+            let key = if name == "Space" { " ".to_string() } else { name.to_string() };
+            let mut mods = ModifiersState::default();
+            for m in parts {
+                match m.to_ascii_lowercase().as_str() {
+                    "shift" => mods |= ModifiersState::SHIFT,
+                    "ctrl" | "control" => mods |= ModifiersState::CONTROL,
+                    "alt" => mods |= ModifiersState::ALT,
+                    "cmd" | "super" | "meta" => mods |= ModifiersState::SUPER,
+                    _ => {}
+                }
             }
-            page.key("keyup", key, ModifiersState::default());
+            let (proceed, _) = page.key("keydown", key.clone(), mods);
+            if proceed {
+                page.default_key(&key, mods);
+            }
+            page.key("keyup", key, mods);
         }
     }
     let (pw, ph) = ((width as f32 * scale) as u32, (height as f32 * scale) as u32);
@@ -1122,7 +1373,10 @@ impl ApplicationHandler for App {
                 self.page.wheel(dx, dy);
                 window.request_redraw();
             }
-            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::ModifiersChanged(m) => {
+                self.mods = m.state();
+                self.page.mods = self.mods;
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 let Some(key) = dom_key(&event.logical_key) else { return };
                 let pressed = event.state == ElementState::Pressed;
@@ -1199,6 +1453,9 @@ fn main() {
     };
 
     let mut page = Page::load(file, (width as f32, height as f32), 0.0);
+    if png.is_none() {
+        page.clipboard = Box::new(SystemClipboard::default());
+    }
     if let Some(out) = png {
         render_png(&mut page, Snapshot { out, width, height, scale, pointer, typed, wait_ms });
         return;
@@ -1288,7 +1545,7 @@ mod tests {
         p.pointer_moved(x + 60.0, y); // inside the input, right of the text: caret goes to the end
         p.press();
         p.release();
-        assert_eq!(p.caret, 2);
+        assert_eq!(p.caret(), 2);
         key(&mut p, "c");
         key(&mut p, "q"); // prevented by the page
         key(&mut p, "ArrowLeft");
@@ -1319,7 +1576,7 @@ mod tests {
         // Focus calls made while scripts load are applied once the page syncs.
         p.sync();
         assert_eq!(p.interaction().focus.map(|f| p.doc.borrow().node(f).attr("id").map(str::to_string)), Some(Some("a".into())));
-        assert_eq!(p.caret, 2);
+        assert_eq!(p.caret(), 2);
         assert!(log(&p).contains(&"a".to_string()), "{:?}", log(&p));
         let _ = std::fs::remove_file(path);
     }
@@ -1385,7 +1642,7 @@ cd</textarea>
         // The click lands at the middle of the box, below the text: caret goes to the end.
         assert_eq!(p.value_of(p.interaction().focus.unwrap()), "ab\ncd");
         key(&mut p, "ArrowUp"); // up from the second line keeps the column
-        assert!(p.caret <= 2, "caret on the first line, got {}", p.caret);
+        assert!(p.caret() <= 2, "caret on the first line, got {}", p.caret());
         key(&mut p, "End");
         key(&mut p, "Enter"); // newline after "ab"
         key(&mut p, "X");
@@ -1460,6 +1717,134 @@ cd</textarea>
             p.default_key("ArrowUp", ModifiersState::default());
         }
         assert_eq!(offset(&p, "t").1, 0.0, "back at the top");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Press a key (keydown + default action) with modifiers.
+    fn press_key(p: &mut Page, k: &str, mods: ModifiersState) {
+        let (proceed, _) = p.key("keydown", k.to_string(), mods);
+        if proceed {
+            p.default_key(k, mods);
+        }
+    }
+
+    fn val(p: &Page, id: &str) -> String {
+        let n = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+        p.value_of(n)
+    }
+
+    #[test]
+    fn selection_with_keyboard_and_typing_over_it() {
+        let (mut p, path) = page(r#"<body style="margin:0"><input id="t" value="hello world"></body>"#, "sel-keys");
+        let none = ModifiersState::default();
+        click(&mut p, "t"); // caret at the end (click is right of the text)
+        press_key(&mut p, "Home", none);
+        for _ in 0..5 {
+            press_key(&mut p, "ArrowRight", ModifiersState::SHIFT);
+        }
+        assert_eq!((p.anchor(), p.caret()), (0, 5));
+        assert!(p.selection_for_paint().is_some());
+        press_key(&mut p, "ArrowRight", none); // collapses to the end of the selection
+        assert_eq!((p.anchor(), p.caret()), (5, 5));
+        press_key(&mut p, "End", ModifiersState::SHIFT);
+        assert_eq!((p.anchor(), p.caret()), (5, 11));
+        press_key(&mut p, "X", none); // typing replaces the selection
+        assert_eq!(val(&p, "t"), "helloX");
+        press_key(&mut p, "ArrowLeft", ModifiersState::SHIFT);
+        press_key(&mut p, "Backspace", none); // deletes just the selection
+        assert_eq!(val(&p, "t"), "hello");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn select_all_copy_cut_and_paste() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><input id="t" value="abc def"><textarea id="m"></textarea>
+               <script>$('#t').addEventListener('input', () => console.log('input:' + $('#t').value));</script></body>"#,
+            "clipboard",
+        );
+        let cmd = ModifiersState::SUPER;
+        click(&mut p, "t");
+        press_key(&mut p, "a", cmd);
+        assert_eq!((p.anchor(), p.caret()), (0, 7));
+        press_key(&mut p, "c", cmd);
+        assert_eq!(p.clipboard.text().as_deref(), Some("abc def"));
+        press_key(&mut p, "Home", ModifiersState::default());
+        press_key(&mut p, "ArrowRight", ModifiersState::SHIFT);
+        press_key(&mut p, "ArrowRight", ModifiersState::SHIFT);
+        press_key(&mut p, "ArrowRight", ModifiersState::SHIFT);
+        press_key(&mut p, "x", cmd); // cut "abc"
+        assert_eq!(val(&p, "t"), " def");
+        assert_eq!(p.clipboard.text().as_deref(), Some("abc"));
+        press_key(&mut p, "End", ModifiersState::default());
+        press_key(&mut p, "v", cmd);
+        assert_eq!(val(&p, "t"), " defabc");
+        // Single-line inputs flatten pasted newlines; textareas keep them.
+        p.clipboard.set_text("l1\r\nl2");
+        press_key(&mut p, "v", cmd);
+        assert_eq!(val(&p, "t"), " defabcl1 l2");
+        click(&mut p, "m");
+        press_key(&mut p, "v", cmd);
+        assert_eq!(val(&p, "m"), "l1\nl2");
+        assert!(log(&p).iter().filter(|l| l.starts_with("input:")).count() >= 3);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mouse_selection_drag_double_and_triple_click() {
+        let (mut p, path) = page(r#"<body style="margin:0"><input id="t" value="one two three" style="width:300px"></body>"#, "sel-mouse");
+        let r = {
+            let n = p.doc.borrow().find(|n| n.attr("id") == Some("t")).unwrap();
+            p.view.borrow_mut().layout().node_rect(n).unwrap()
+        };
+        let y = r.y + r.height / 2.0;
+        // Drag from the left edge of the text to the right: selects a prefix.
+        p.pointer_moved(r.x + 6.0, y);
+        p.press();
+        p.pointer_moved(r.x + 40.0, y);
+        p.release();
+        let (a, c) = (p.anchor(), p.caret());
+        assert!(a == 0 && c > 2 && c < 8, "dragged selection {a}..{c}");
+        // Double-click selects the word under the pointer (a new click far enough away).
+        p.last_click = None;
+        p.pointer_moved(r.x + 38.0, y);
+        p.press();
+        p.release();
+        p.press();
+        p.release();
+        assert_eq!(val(&p, "t")[p.anchor()..p.caret()].trim(), "two", "word at {}..{}", p.anchor(), p.caret());
+        // Triple-click selects everything.
+        p.press();
+        p.release();
+        assert_eq!((p.anchor(), p.caret()), (0, 13));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn script_selection_api_and_tab_selects_all() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><input id="a" value="abcdef"><input id="b" value="xyz">
+               <script>
+                 const a = $('#a'), b = $('#b');
+                 b.setSelectionRange(1, 2);              // before b has focus
+                 console.log(a.selectionStart, a.selectionEnd);   // unfocused: collapsed at the end
+                 a.focus();
+                 a.setSelectionRange(2, 4);
+                 console.log(a.selectionStart, a.selectionEnd);
+                 a.select();
+                 console.log(a.selectionStart, a.selectionEnd, document.createElement('p').selectionStart);
+                 b.focus();
+                 console.log(b.selectionStart, b.selectionEnd);   // the pending range applied on focus
+               </script></body>"#,
+            "sel-js",
+        );
+        p.sync();
+        assert_eq!(log(&p), ["6 6", "2 4", "0 6 null", "1 2"]);
+        // Tab into an input selects its contents.
+        p.default_key("Tab", ModifiersState::default());
+        assert_eq!((p.anchor(), p.caret()), (0, 6), "wrapped to the first input, all selected");
+        p.default_key("Tab", ModifiersState::default());
+        assert_eq!((p.anchor(), p.caret()), (0, 3), "then the second");
         let _ = std::fs::remove_file(path);
     }
 }

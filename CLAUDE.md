@@ -48,6 +48,7 @@ cargo run -p nile-shell -- examples/measure.html --png out.png
 cargo run -p nile-shell -- examples/todo/index.html --png out.png --click 60,128   # modules + JSX
 cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --type "Ada{Backspace}x"
 cargo run -p nile-shell -- examples/scrolling.html --png out.png --wheel 100,100,-60
+cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --type "Ada{Home}{Shift+End}{Cmd+c}"
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings          # CI enforces this
 ```
@@ -96,7 +97,10 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
   An `<input>`'s text is synthesized in layout (`build_control_text`), the
   renderer draws check/radio marks from `appearance` + `checked` and the caret
   from Parley's `Cursor`. `value` is the `value` attribute; `checked`/`disabled`
-  are `Document` state flags.
+  are `Document` state flags. The selection (`anchor`, `caret` in chars of `value`)
+  lives in the shared `View` so scripts can read/set it; the renderer highlights it
+  from `Overlay::selection`. The clipboard is behind the shell's `Clipboard` trait
+  (system via `arboard` with default features off; in-memory for headless/tests).
 - JSX is a source transform (`nile-script/src/jsx.rs`, a scanner, not a parser)
   applied to every script and module before QuickJS sees it; it returns `None`
   for non-JSX or malformed input so the engine reports the original error. Modules
@@ -120,8 +124,8 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
 
 ## Next up
 
-Text selection (shift+arrows, drag, double-click word, select-all) with
-copy/cut/paste in inputs and textareas, then `<select>`. Also open: draggable
-scrollbars and keyboard scrolling, `white-space: pre*` whitespace handling,
-incremental restyle, the `cursor` property, `@env`/`@sciter` modules, symbol
-fallback check on Windows/Linux.
+`<select>` (dropdown popup, keyboard, `value`/`selectedIndex`/`change`), then
+selecting page text (not just inputs), undo/redo in inputs, and word-wise caret
+movement. Also open: draggable scrollbars and keyboard scrolling,
+`white-space: pre*` whitespace handling, incremental restyle, the `cursor`
+property, `@env`/`@sciter` modules, symbol fallback check on Windows/Linux.

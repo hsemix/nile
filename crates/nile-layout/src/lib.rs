@@ -21,7 +21,7 @@ use nile_style::{
     Align, Color, ComputedStyle, Display, Edges, FlexDirection, Length, OverflowKind, StyleMap, TextAlign,
 };
 use nile_text::{
-    break_lines, collapse_whitespace, Affinity, Alignment, Cluster, Cursor, InlineBoxSpec, PositionedLayoutItem, TextEngine,
+    break_lines, collapse_whitespace, Affinity, Alignment, Cluster, Cursor, InlineBoxSpec, Selection, PositionedLayoutItem, TextEngine,
     TextLayout, TextStyle,
 };
 use taffy::prelude::*;
@@ -215,6 +215,15 @@ impl LayoutTree {
         let BoxContent::Text(c) = &b.content else { return None };
         let p = self.placements(offsets)[i];
         Some(Cursor::from_point(&c.layout, x - p.dx - b.rect.x, y - p.dy - b.rect.y).index())
+    }
+
+    /// The word (byte range of `node`'s displayed text) under a point in painted
+    /// coordinates, for double-click selection.
+    pub fn word_range_at(&self, node: NodeId, x: f32, y: f32, offsets: &ScrollOffsets) -> Option<std::ops::Range<usize>> {
+        let (i, b) = self.text_box_of(node)?;
+        let BoxContent::Text(c) = &b.content else { return None };
+        let p = self.placements(offsets)[i];
+        Some(Selection::word_from_point(&c.layout, x - p.dx - b.rect.x, y - p.dy - b.rect.y).text_range())
     }
 
     fn text_box_of(&self, node: NodeId) -> Option<(usize, &LayoutBox)> {

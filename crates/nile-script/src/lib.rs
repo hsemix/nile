@@ -51,6 +51,9 @@ pub trait Environment {
     fn element_scroll(&self, node: NodeId) -> Option<[f32; 4]>;
     /// Scroll an element (clamped to its range); fires a `scroll` event if it moved.
     fn scroll_element_to(&self, node: NodeId, x: f32, y: f32);
+    /// `(start, end)` of an input's selection, in characters of its value.
+    fn selection(&self, node: NodeId) -> (usize, usize);
+    fn set_selection(&self, node: NodeId, start: usize, end: usize);
 }
 
 /// Resolves `./` and `../` imports against the importing module's file.
@@ -328,6 +331,21 @@ fn install_natives(
             }
         }
     });
+    native!("selection", {
+        let env = env.clone();
+        move |id: i32| -> Vec<f64> {
+            let (a, b) = node(id).map_or((0, 0), |n| env.selection(n));
+            vec![a as f64, b as f64]
+        }
+    });
+    native!("setSelection", {
+        let env = env.clone();
+        move |id: i32, start: f64, end: f64| {
+            if let Some(n) = node(id) {
+                env.set_selection(n, start.max(0.0) as usize, end.max(0.0) as usize);
+            }
+        }
+    });
     native!("now", move || start.elapsed().as_secs_f64() * 1000.0);
     native!("log", move |level: String, msg: String| {
         match level.as_str() {
@@ -500,6 +518,10 @@ mod tests {
             None
         }
         fn scroll_element_to(&self, _: NodeId, _: f32, _: f32) {}
+        fn selection(&self, _: NodeId) -> (usize, usize) {
+            (0, 0)
+        }
+        fn set_selection(&self, _: NodeId, _: usize, _: usize) {}
     }
 
     fn host(html: &str) -> (ScriptHost, Rc<RefCell<Document>>) {

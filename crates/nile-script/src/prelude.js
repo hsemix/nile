@@ -527,6 +527,24 @@
       },
     });
   }
+  // Selection in text controls, in characters of `value` (UTF-16 units in browsers; same for the BMP).
+  const TEXT_TAGS = new Set(["input", "textarea"]);
+  Object.defineProperty(Element.prototype, "selectionStart", {
+    configurable: true,
+    get() { return TEXT_TAGS.has(this.localName) ? N.selection(this._id)[0] : null; },
+    set(v) { if (TEXT_TAGS.has(this.localName)) N.setSelection(this._id, +v || 0, N.selection(this._id)[1]); },
+  });
+  Object.defineProperty(Element.prototype, "selectionEnd", {
+    configurable: true,
+    get() { return TEXT_TAGS.has(this.localName) ? N.selection(this._id)[1] : null; },
+    set(v) { if (TEXT_TAGS.has(this.localName)) N.setSelection(this._id, N.selection(this._id)[0], +v || 0); },
+  });
+  Element.prototype.setSelectionRange = function (start, end) {
+    if (TEXT_TAGS.has(this.localName)) N.setSelection(this._id, +start || 0, +end || 0);
+  };
+  Element.prototype.select = function () {
+    if (TEXT_TAGS.has(this.localName)) N.setSelection(this._id, 0, this.value.length);
+  };
   Element.prototype.focus = function () { N.focus(this._id); };
   Element.prototype.blur = function () { if (N.activeElement() === this._id) N.focus(-1); };
   Object.defineProperty(Document.prototype, "activeElement", { get() { const id = N.activeElement(); return id < 0 ? this.body : wrap(id); } });

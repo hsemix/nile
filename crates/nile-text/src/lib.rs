@@ -8,7 +8,9 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-pub use parley::{Affinity, Alignment, BoundingBox, Cluster, Cursor, Layout, Line, PositionedLayoutItem};
+pub use parley::{
+    Affinity, Alignment, BoundingBox, Cluster, Cursor, Layout, Line, PositionedLayoutItem, Selection,
+};
 use parley::{InlineBox, InlineBoxKind, VerticalAlign};
 use parley::{
     AlignmentOptions, FontContext, FontFamily, FontStyle, FontWeight, LayoutContext, LineHeight, StyleProperty,
