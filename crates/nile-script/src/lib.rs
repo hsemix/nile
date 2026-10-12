@@ -159,7 +159,12 @@ pub struct ScriptHost {
     context: Context,
     log: Arc<Mutex<Vec<String>>>,
     start: Instant,
+    host_fns: HostFns,
 }
+
+/// Functions the embedder exposes to scripts as `host.name(...)`: each takes the call's
+/// arguments as a JSON array and returns a JSON value (or an empty string for `undefined`).
+type HostFns = Rc<RefCell<std::collections::HashMap<String, Rc<dyn Fn(&str) -> String>>>>;
 
 fn node(id: i32) -> Option<NodeId> {
     usize::try_from(id).ok().map(NodeId)
@@ -175,6 +180,7 @@ fn install_natives(
     log: Arc<Mutex<Vec<String>>>,
     start: Instant,
     env: Rc<dyn Environment>,
+    host_fns: HostFns,
 ) -> rquickjs::Result<()> {
     let n = Object::new(ctx.clone())?;
 
@@ -404,6 +410,20 @@ fn install_natives(
         let env = env.clone();
         move || env.clear_selected_text()
     });
+    native!("hostCall", {
+        let host_fns = host_fns.clone();
+        move |ctx: Ctx<'_>, name: String, args: String| -> rquickjs::Result<String> {
+            // Clone the handle out first: the callee may register more functions.
+            let f = host_fns.borrow().get(&name).cloned();
+            match f {
+                Some(f) => Ok(f(&args)),
+                None => Err(Exception::throw_message(&ctx, &format!("host function '{name}' is not registered"))),
+            }
+        }
+    });
+    native!("hostHas", {
+        move |name: String| host_fns.borrow().contains_key(&name)
+    });
     native!("now", move || start.elapsed().as_secs_f64() * 1000.0);
     native!("log", move |level: String, msg: String| {
         match level.as_str() {
@@ -426,20 +446,51 @@ impl ScriptHost {
         let context = Context::full(&runtime)?;
         let log = Arc::new(Mutex::new(Vec::new()));
         let start = Instant::now();
+        let host_fns: HostFns = Rc::default();
 
         context.with(|ctx| -> rquickjs::Result<()> {
-            install_natives(&ctx, doc, log.clone(), start, env)?;
+            install_natives(&ctx, doc, log.clone(), start, env, host_fns.clone())?;
             ctx.eval::<(), _>(PRELUDE).catch(&ctx).map_err(|e| {
                 eprintln!("[js] prelude failed: {e}");
                 rquickjs::Error::Unknown
             })
         })?;
-        Ok(ScriptHost { runtime, context, log, start })
+        Ok(ScriptHost { runtime, context, log, start, host_fns })
     }
 
     /// Run promise jobs queued by the last call.
     fn drain_jobs(&self) {
         while matches!(self.runtime.execute_pending_job(), Ok(true)) {}
+    }
+
+    /// Make `f` callable from scripts as `host.<name>(...args)` (and `host.call(name, ...args)`).
+    /// `f` gets the arguments as a JSON array and returns a JSON value, or "" for `undefined`.
+    pub fn register_host_fn(&self, name: &str, f: impl Fn(&str) -> String + 'static) {
+        self.host_fns.borrow_mut().insert(name.to_string(), Rc::new(f));
+    }
+
+    /// Evaluate a script and return its value as text: strings as they are, `undefined` as "",
+    /// anything else as JSON.
+    pub fn eval(&self, source: &str) -> Result<String, String> {
+        let source = jsx::transform(source).unwrap_or_else(|| source.to_string());
+        let result = self.context.with(|ctx| {
+            let value: rquickjs::Value = ctx.eval(source).catch(&ctx).map_err(|e| e.to_string())?;
+            let show: Function = ctx.globals().get("__show").map_err(|e| e.to_string())?;
+            show.call::<_, String>((value,)).catch(&ctx).map_err(|e| e.to_string())
+        });
+        self.drain_jobs();
+        result
+    }
+
+    /// Call a global (or dotted, like `app.save`) function with a JSON array of arguments and
+    /// return its result as JSON ("" for `undefined`).
+    pub fn call(&self, name: &str, args_json: &str) -> Result<String, String> {
+        let result = self.context.with(|ctx| {
+            let invoke: Function = ctx.globals().get("__invoke").map_err(|e| e.to_string())?;
+            invoke.call::<_, String>((name, args_json)).catch(&ctx).map_err(|e| e.to_string())
+        });
+        self.drain_jobs();
+        result
     }
 
     /// Run a classic script. Errors are returned as readable strings.
@@ -590,6 +641,35 @@ mod tests {
     fn host(html: &str) -> (ScriptHost, Rc<RefCell<Document>>) {
         let doc = Rc::new(RefCell::new(Document::parse(html)));
         (ScriptHost::new(doc.clone(), Rc::new(Fake(RefCell::new(0.0)))).unwrap(), doc)
+    }
+
+    #[test]
+    fn host_functions_eval_and_call_round_trip_json() {
+        let (host, _) = host("");
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let log = seen.clone();
+        host.register_host_fn("add", move |args| {
+            log.borrow_mut().push(args.to_string());
+            let v: Vec<f64> = args.trim_matches(|c| c == '[' || c == ']').split(',').filter_map(|n| n.trim().parse().ok()).collect();
+            format!("{}", v.iter().sum::<f64>())
+        });
+        host.register_host_fn("nothing", |_| String::new());
+        assert_eq!(host.eval("host.add(1, 2, 3.5)").unwrap(), "6.5");
+        assert_eq!(host.eval("host.call('add', 4, 5)").unwrap(), "9");
+        assert_eq!(*seen.borrow(), ["[1,2,3.5]", "[4,5]"]);
+        assert_eq!(host.eval("host.nothing()").unwrap(), "", "empty result is undefined");
+        assert_eq!(host.eval("[host.has('add'), host.has('x')]").unwrap(), "[true,false]");
+        assert!(host.eval("host.missing(1)").unwrap_err().contains("not registered"));
+        // eval: strings raw, objects as JSON.
+        assert_eq!(host.eval("'hi'").unwrap(), "hi");
+        assert_eq!(host.eval("({a: [1, 2]})").unwrap(), r#"{"a":[1,2]}"#);
+        assert_eq!(host.eval("undefined").unwrap(), "");
+        assert!(host.eval("(").is_err());
+        // The host calls into the page.
+        host.run("globalThis.app = { greet(n, x) { return { hello: n, x }; } }; function twice(n) { return n * 2 }").unwrap();
+        assert_eq!(host.call("twice", "[21]").unwrap(), "42");
+        assert_eq!(host.call("app.greet", r#"["Ada", [1]]"#).unwrap(), r#"{"hello":"Ada","x":[1]}"#);
+        assert!(host.call("nope", "[]").unwrap_err().contains("not a function"));
     }
 
     #[test]

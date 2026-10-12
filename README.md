@@ -26,7 +26,34 @@ HTML ──html5ever──▶ DOM ──cascade──▶ computed styles ──T
 | `nile-layout` | Block + flex layout, text measurement | `taffy` |
 | `nile-render` | Backgrounds, borders, radii, glyphs | `skia-safe` |
 | `nile-script` | JS runtime (`console.log` for now) | `rquickjs` |
-| `nile-shell` | Native window, HiDPI, scrolling, headless PNG | `winit`, `softbuffer` |
+| `nile-engine` | The page without a window: input, forms, scrolling, painting into a buffer | |
+| `nile-shell` | The `nile` binary: native window around the engine, headless PNG | `winit`, `softbuffer` |
+| `nile-capi` | C library (`libnile`) and `nile.h` for embedding | `cbindgen` |
+
+## Embedding (C API)
+
+`cargo build -p nile-capi --release` produces `libnile` (a shared and a static library) and
+`crates/nile-capi/include/nile.h`. The host owns the window and the event loop: create a view
+(`nile_view_create_html` / `nile_view_create_file`), forward pointer, wheel and key events
+(`nile_pointer_move`, `nile_pointer_button`, `nile_wheel`, `nile_key`, `nile_text_input`), call
+`nile_view_tick` when its `next_ms` elapses, and draw with `nile_view_render` into your own
+BGRA buffer. The page talks back through `nile_view_take_window_command` (close, minimize,
+maximize, move, resize, fullscreen), `nile_view_title`, `nile_view_cursor`,
+`nile_view_window_config` (the `window-*` attributes) and `nile_view_caption_press` (frameless
+dragging). Scripts and host call each other: `nile_view_eval`, `nile_view_call`,
+`nile_view_register_function` (scripts see it as `host.name(...)`, JSON in and out) and
+`nile_view_take_console`. The clipboard is yours through `nile_view_set_clipboard`.
+Single-threaded; no panic crosses the boundary. See `examples/c/render.c` for a complete program
+that renders a page to an image:
+
+```sh
+cargo build -p nile-capi --release
+cc examples/c/render.c -Icrates/nile-capi/include -Ltarget/release -lnile -Wl,-rpath,$PWD/target/release -o render
+./render examples/hello.html out.ppm
+```
+
+Not in the C API yet: multiple mouse buttons, touch, IME composition, GPU surfaces (it paints
+into CPU memory), drag and drop, and a stable ABI version check beyond `nile_version()`.
 
 ## Running it
 
@@ -198,7 +225,7 @@ float, tables, transforms, transitions and animations, and opt-in page text sele
    re-cascades the whole page, ~7 ms for 4,500 nodes), and keeping the layout across changes to text
    `color` or to whether an element has a transform or is translucent. `NILE_TRACE=1` prints
    per-phase timings.
-2. **Embedding API** — a C ABI (`cbindgen`) so Go, C#, Python, etc. can host it.
+2. **Embedding API** (C ABI done; see above) — still to do: language bindings (Go, C#, Python), a GPU surface path, multi-button and touch input, IME.
 3. **Sciter compatibility** — `@env`/`@sciter`/`@sys` modules, class components and
    `componentUpdate`, `this://` URLs.
 4. **Stacking contexts + GPU** — real stacking contexts and `position: fixed`; Skia on Metal
