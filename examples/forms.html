@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<head>
+  <title>nile — form controls</title>
+  <style>
+    body { margin: 0; padding: 24px; font-family: sans-serif; color: #1f2933; background: #f4f1ea; font-size: 15px }
+    h1 { font-size: 20px; margin: 0 0 14px 0 }
+    .row { margin-bottom: 10px }
+    label { margin-right: 8px }
+    #out { margin-top: 14px; padding: 10px 12px; background: #ffffff; border: 1px solid #d6d3cb; border-radius: 6px; width: 380px; color: #374151; font-size: 13px }
+    button { background: #14532d; border-color: #14532d; color: #fefce8; border-radius: 6px; padding: 5px 14px }
+    button:hover { background: #166534 }
+  </style>
+</head>
+<body>
+  <h1>Form controls</h1>
+  <div class="row"><input id="name" placeholder="Your name" value=""> <input id="pw" type="password" value="secret"></div>
+  <div class="row"><label><input id="news" type="checkbox"> Subscribe</label> <label><input type="checkbox" checked> Remember me</label> <input type="checkbox" disabled></div>
+  <div class="row">
+    <label><input type="radio" name="size" value="s"> S</label>
+    <label><input type="radio" name="size" value="m" checked> M</label>
+    <label for="l"><input id="l" type="radio" name="size" value="l"> L</label>
+  </div>
+  <div class="row"><button id="go">Send</button> <input value="disabled" disabled></div>
+  <div id="out">…</div>
+  <script>
+    const out = $('#out');
+    const report = (what) => {
+      const size = $$('input[name=size]').find((r) => r.checked);
+      out.textContent = `${what}: name="${$('#name').value}", subscribe=${$('#news').checked}, size=${size && size.value}`;
+    };
+    document.addEventListener('input', () => report('input'));
+    document.addEventListener('change', (e) => report('change ' + e.target.type));
+    $('#go').on('click', () => report('submit'));
+    report('ready');
+  </script>
+</body>
+</html>

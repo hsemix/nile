@@ -4,6 +4,7 @@
 //!   nile page.html --png out.png        render headless
 //!        [--width 900] [--height 640] [--scale 2]
 //!        [--hover X,Y] [--press X,Y] [--click X,Y]   simulate the pointer (logical px)
+//!        [--type TEXT]                 type into the focused input ({Backspace}, {ArrowLeft}, ... for keys)
 //!        [--wait MS]                   let timers run this long before the snapshot
 
 use std::{cell::RefCell, num::NonZeroU32, path::PathBuf, rc::Rc, time::{Duration, Instant}};
@@ -40,6 +41,8 @@ struct View {
     /// A script moved the scroll position; the window needs repainting.
     scroll_dirty: bool,
     interaction: InteractionState,
+    /// Focus moves made by scripts, so the page can fire `blur`/`focus` for them.
+    focus_changes: Vec<(Option<NodeId>, Option<NodeId>)>,
 }
 
 impl View {
@@ -114,6 +117,16 @@ impl Environment for Env {
     fn interaction(&self) -> InteractionState {
         self.0.borrow().interaction
     }
+
+    fn set_focus(&self, node: Option<NodeId>) {
+        let mut v = self.0.borrow_mut();
+        if v.interaction.focus != node {
+            let old = v.interaction.focus;
+            v.interaction.focus = node;
+            v.focus_changes.push((old, node));
+            v.restyle();
+        }
+    }
 }
 
 /// One loaded document plus everything needed to paint and interact with it.
@@ -128,6 +141,10 @@ struct Page {
     /// Element the primary button went down on, for deriving `click`.
     pressed: Option<NodeId>,
     scripts: Option<ScriptHost>,
+    /// Caret position (in characters of `value`) in the focused text input.
+    caret: usize,
+    /// Value when the focused input got focus, to decide whether `change` fires.
+    value_at_focus: Option<String>,
 }
 
 impl Page {
@@ -148,6 +165,7 @@ impl Page {
             scroll_y,
             scroll_dirty: false,
             interaction,
+            focus_changes: Vec::new(),
         }));
 
         let scripts = match ScriptHost::new(doc.clone(), Rc::new(Env(view.clone()))) {
@@ -200,7 +218,17 @@ impl Page {
         // Scripts may have changed the document.
         view.borrow_mut().sync();
 
-        Page { path, doc, view, renderer: Renderer::new(), pointer: None, pressed: None, scripts }
+        Page {
+            path,
+            doc,
+            view,
+            renderer: Renderer::new(),
+            pointer: None,
+            pressed: None,
+            scripts,
+            caret: 0,
+            value_at_focus: None,
+        }
     }
 
     fn reload(&mut self) {
@@ -226,9 +254,32 @@ impl Page {
     /// Pick up DOM changes and script-driven scrolling. True if the page
     /// needs repainting.
     fn sync(&mut self) -> bool {
-        let mut v = self.view.borrow_mut();
-        let changed = v.sync();
-        std::mem::take(&mut v.scroll_dirty) | changed
+        let (changed, moves) = {
+            let mut v = self.view.borrow_mut();
+            let changed = v.sync();
+            (std::mem::take(&mut v.scroll_dirty) | changed, std::mem::take(&mut v.focus_changes))
+        };
+        let moved = !moves.is_empty();
+        for (old, new) in moves {
+            self.focus_moved(old, new);
+        }
+        changed | moved
+    }
+
+    /// Focus moved from `old` to `new`: end the old input's edit (firing
+    /// `change` if its value changed), start the new one, and fire `blur`/`focus`.
+    fn focus_moved(&mut self, old: Option<NodeId>, new: Option<NodeId>) {
+        if let Some(o) = old {
+            if self.value_at_focus.take().is_some_and(|v| v != self.value_of(o)) {
+                self.emit(o, UiEvent::Plain("change"));
+            }
+            self.emit(o, UiEvent::Plain("blur"));
+        }
+        if let Some(n) = new {
+            self.caret = self.value_of(n).chars().count();
+            self.value_at_focus = self.is_text_input(n).then(|| self.value_of(n));
+            self.emit(n, UiEvent::Plain("focus"));
+        }
     }
 
     fn interaction(&self) -> InteractionState {
@@ -332,7 +383,21 @@ impl Page {
             focus: target.and_then(|n| self.focusable(n)),
             ..self.interaction()
         };
-        changed | self.set_interaction(next)
+        changed |= self.set_interaction(next);
+        // Clicking inside a text input puts the caret there.
+        if let (Some(f), Some((x, y))) = (self.interaction().focus.filter(|f| self.is_text_input(*f)), self.pointer) {
+            let at = {
+                let mut v = self.view.borrow_mut();
+                let scroll = v.scroll_y;
+                v.layout().text_index_at(f, x, y + scroll)
+            };
+            if let Some(at) = at {
+                let caret = nile_layout::caret_char(&self.doc.borrow(), f, at);
+                changed |= caret != self.caret;
+                self.caret = caret;
+            }
+        }
+        changed
     }
 
     /// Primary button up: `mouseup`, then `click` on the common ancestor of the
@@ -345,11 +410,213 @@ impl Page {
         }
         if let (Some(down), Some(up)) = (self.pressed.take(), target) {
             if let Some(common) = self.common_ancestor(down, up) {
-                changed |= self.emit(common, self.mouse_event("click")).1;
+                let (proceed, c) = self.emit(common, self.mouse_event("click"));
+                changed |= c;
+                if proceed {
+                    changed |= self.click_default(common);
+                }
             }
         }
         let next = InteractionState { active: None, ..self.interaction() };
         changed | self.set_interaction(next)
+    }
+
+    fn value_of(&self, id: NodeId) -> String {
+        self.doc.borrow().node(id).attr("value").unwrap_or("").to_string()
+    }
+
+    fn is_text_input(&self, id: NodeId) -> bool {
+        let doc = self.doc.borrow();
+        let n = doc.node(id);
+        n.tag() == Some("input")
+            && !matches!(
+                n.attr("type").map(str::to_ascii_lowercase).as_deref(),
+                Some("checkbox" | "radio" | "hidden" | "file" | "image" | "button" | "submit" | "reset")
+            )
+    }
+
+    fn is_disabled(&self, id: NodeId) -> bool {
+        self.doc.borrow().has_state(id, "disabled")
+    }
+
+    /// Default action of a click on `target`: toggle a checkbox, select a
+    /// radio, or forward a `<label>` click to its control. True if the page changed.
+    fn click_default(&mut self, target: NodeId) -> bool {
+        // The nearest control or label at or above the click.
+        let found = {
+            let doc = self.doc.borrow();
+            let mut cur = Some(target);
+            let mut found = None;
+            while let Some(n) = cur {
+                let node = doc.node(n);
+                let ty = node.attr("type").map(str::to_ascii_lowercase);
+                match node.tag() {
+                    Some("input") if matches!(ty.as_deref(), Some("checkbox" | "radio")) => {
+                        found = Some((n, false));
+                        break;
+                    }
+                    Some("label") => {
+                        found = Some((n, true));
+                        break;
+                    }
+                    _ => {}
+                }
+                cur = node.parent;
+            }
+            found
+        };
+        let Some((n, is_label)) = found else { return false };
+        if is_label {
+            let control = {
+                let doc = self.doc.borrow();
+                match doc.node(n).attr("for") {
+                    Some(id) => doc.descendants(Document::ROOT).into_iter().find(|c| doc.node(*c).attr("id") == Some(id)),
+                    None => doc.descendants(n).into_iter().find(|c| doc.node(*c).tag() == Some("input")),
+                }
+            };
+            let Some(control) = control else { return false };
+            // A click on the control itself already toggled it.
+            let inside = {
+                let doc = self.doc.borrow();
+                let mut cur = Some(target);
+                let mut hit = false;
+                while let Some(c) = cur {
+                    if c == control {
+                        hit = true;
+                        break;
+                    }
+                    cur = doc.node(c).parent;
+                }
+                hit
+            };
+            if inside {
+                return false;
+            }
+            let (proceed, mut changed) = self.emit(control, self.mouse_event("click"));
+            if proceed {
+                changed |= self.click_default(control);
+            }
+            return changed;
+        }
+        if self.is_disabled(n) {
+            return false;
+        }
+        let (is_radio, was_checked, name) = {
+            let doc = self.doc.borrow();
+            let node = doc.node(n);
+            (
+                node.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("radio")),
+                doc.has_state(n, "checked"),
+                node.attr("name").map(str::to_string),
+            )
+        };
+        if is_radio {
+            if was_checked {
+                return false;
+            }
+            // Uncheck the rest of the group: same name under the same form (or the page).
+            let group: Vec<NodeId> = {
+                let doc = self.doc.borrow();
+                let form = {
+                    let mut cur = doc.node(n).parent;
+                    while let Some(p) = cur {
+                        if doc.node(p).tag() == Some("form") {
+                            break;
+                        }
+                        cur = doc.node(p).parent;
+                    }
+                    cur.unwrap_or(Document::ROOT)
+                };
+                match &name {
+                    Some(name) => doc
+                        .descendants(form)
+                        .into_iter()
+                        .filter(|c| *c != n && doc.node(*c).tag() == Some("input") && doc.node(*c).attr("name") == Some(name.as_str()))
+                        .collect(),
+                    None => Vec::new(),
+                }
+            };
+            let mut doc = self.doc.borrow_mut();
+            for other in group {
+                doc.set_state(other, "checked", false);
+                doc.remove_attr(other, "checked");
+            }
+            doc.set_state(n, "checked", true);
+        } else {
+            let mut doc = self.doc.borrow_mut();
+            doc.set_state(n, "checked", !was_checked);
+            if was_checked {
+                doc.remove_attr(n, "checked");
+            }
+        }
+        self.sync();
+        self.emit(n, UiEvent::Plain("input"));
+        self.emit(n, UiEvent::Plain("change"));
+        true
+    }
+
+    /// Edit the focused text input for a key press. True if the value or
+    /// caret changed (so the page needs repainting).
+    fn edit_key(&mut self, key: &str, mods: ModifiersState) -> bool {
+        let Some(focus) = self.interaction().focus.filter(|f| self.is_text_input(*f)) else { return false };
+        if self.is_disabled(focus) || self.doc.borrow().node(focus).attr("readonly").is_some() {
+            return false;
+        }
+        let mut chars: Vec<char> = self.value_of(focus).chars().collect();
+        let caret = self.caret.min(chars.len());
+        let mut new_caret = caret;
+        let mut edited = false;
+        match key {
+            "Backspace" if caret > 0 => {
+                chars.remove(caret - 1);
+                new_caret = caret - 1;
+                edited = true;
+            }
+            "Delete" if caret < chars.len() => {
+                chars.remove(caret);
+                edited = true;
+            }
+            "ArrowLeft" => new_caret = caret.saturating_sub(1),
+            "ArrowRight" => new_caret = (caret + 1).min(chars.len()),
+            "Home" => new_caret = 0,
+            "End" => new_caret = chars.len(),
+            "Enter" => {
+                // Commit: fire `change` if the value moved since focus.
+                if self.value_at_focus.as_ref().is_some_and(|v| *v != self.value_of(focus)) {
+                    self.value_at_focus = Some(self.value_of(focus));
+                    return self.emit(focus, UiEvent::Plain("change")).1 | true;
+                }
+                return false;
+            }
+            k if k.chars().count() == 1 && !mods.control_key() && !mods.super_key() => {
+                let c = k.chars().next().unwrap();
+                if !c.is_control() {
+                    chars.insert(caret, c);
+                    new_caret = caret + 1;
+                    edited = true;
+                }
+            }
+            _ => return false,
+        }
+        if edited {
+            let value: String = chars.iter().collect();
+            self.doc.borrow_mut().set_attr(focus, "value", &value);
+            self.caret = new_caret;
+            self.sync();
+            self.emit(focus, UiEvent::Plain("input"));
+            true
+        } else {
+            let moved = new_caret != self.caret;
+            self.caret = new_caret;
+            moved
+        }
+    }
+
+    /// Caret to draw: the focused text input and the caret's byte offset in its displayed text.
+    fn caret_for_paint(&self) -> Option<(NodeId, usize)> {
+        let focus = self.interaction().focus.filter(|f| self.is_text_input(*f))?;
+        let doc = self.doc.borrow();
+        Some((focus, nile_layout::caret_byte(&doc, focus, self.caret)))
     }
 
     fn common_ancestor(&self, a: NodeId, b: NodeId) -> Option<NodeId> {
@@ -397,12 +664,7 @@ impl Page {
         self.view.borrow_mut().interaction = next;
         self.restyle();
         if old_focus != new_focus {
-            if let Some(o) = old_focus {
-                self.emit(o, UiEvent::Plain("blur"));
-            }
-            if let Some(n) = new_focus {
-                self.emit(n, UiEvent::Plain("focus"));
-            }
+            self.focus_moved(old_focus, new_focus);
         }
         true
     }
@@ -434,6 +696,7 @@ impl Page {
         let (lw, lh) = (width as f32 / scale, height as f32 / scale);
         self.layout(lw, lh);
         let bg = self.canvas_background();
+        let caret = self.caret_for_paint();
         let mut view = self.view.borrow_mut();
         let max_scroll = (view.layout().content_height - lh).max(0.0);
         view.scroll_y = view.scroll_y.clamp(0.0, max_scroll);
@@ -445,7 +708,7 @@ impl Page {
         canvas.save();
         canvas.scale((scale, scale));
         let tree = &view.layout.as_ref().expect("laid out above").2;
-        self.renderer.paint(canvas, tree, &view.styles, scroll);
+        self.renderer.paint(canvas, tree, &view.styles, scroll, caret);
         canvas.restore();
     }
 }
@@ -459,15 +722,20 @@ struct Pointer {
     release: bool,
 }
 
-fn render_png(
-    page: &mut Page,
-    out: &str,
+/// Options for a headless render.
+struct Snapshot {
+    out: String,
     width: u32,
     height: u32,
     scale: f32,
     pointer: Option<Pointer>,
+    typed: Option<String>,
     wait_ms: u64,
-) {
+}
+
+fn render_png(page: &mut Page, snap: Snapshot) {
+    let Snapshot { out, width, height, scale, pointer, typed, wait_ms } = snap;
+    let out = out.as_str();
     // Let timers run (animations, setTimeout) before the snapshot.
     let deadline = Instant::now() + Duration::from_millis(wait_ms);
     while Instant::now() < deadline {
@@ -485,6 +753,25 @@ fn render_png(
         }
         if p.release {
             page.release();
+        }
+    }
+    if let Some(text) = typed {
+        let mut rest = text.as_str();
+        while !rest.is_empty() {
+            let (key, tail) = match rest.strip_prefix('{').and_then(|r| r.split_once('}')) {
+                Some((name, tail)) => (name.to_string(), tail),
+                None => {
+                    let c = rest.chars().next().unwrap();
+                    (c.to_string(), &rest[c.len_utf8()..])
+                }
+            };
+            rest = tail;
+            let key = if key == "Space" { " ".to_string() } else { key };
+            let (proceed, _) = page.key("keydown", key.clone(), ModifiersState::default());
+            if proceed {
+                page.edit_key(&key, ModifiersState::default());
+            }
+            page.key("keyup", key, ModifiersState::default());
         }
     }
     let (pw, ph) = ((width as f32 * scale) as u32, (height as f32 * scale) as u32);
@@ -600,10 +887,11 @@ impl ApplicationHandler for App {
                 // F5 or Ctrl/Cmd+R reloads, unless the page handled the key.
                 let reload = key == "F5"
                     || (key.eq_ignore_ascii_case("r") && (self.mods.control_key() || self.mods.super_key()));
+                let edited = pressed && proceed && !reload && self.page.edit_key(&key, self.mods);
                 if pressed && proceed && reload {
                     self.page.reload();
                     window.request_redraw();
-                } else if changed {
+                } else if changed || edited {
                     window.request_redraw();
                 }
             }
@@ -635,6 +923,7 @@ fn main() {
     let mut png = None;
     let mut pointer = None;
     let mut wait_ms = 0u64;
+    let mut typed = None;
     let (mut width, mut height, mut scale) = (900u32, 640u32, 1.0f32);
 
     while let Some(arg) = args.next() {
@@ -651,23 +940,140 @@ fn main() {
                     pointer = Some(Pointer { x, y, press: arg != "--hover", release: arg == "--click" });
                 }
             }
+            "--type" => typed = args.next(),
             "--wait" => wait_ms = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--scale" => scale = args.next().and_then(|v| v.parse().ok()).unwrap_or(scale),
             _ => file = Some(PathBuf::from(arg)),
         }
     }
     let Some(file) = file else {
-        eprintln!("usage: nile <file.html> [--png out.png] [--width N] [--height N] [--scale N] [--hover X,Y] [--press X,Y] [--click X,Y] [--wait MS]");
+        eprintln!("usage: nile <file.html> [--png out.png] [--width N] [--height N] [--scale N] [--hover X,Y] [--press X,Y] [--click X,Y] [--type TEXT] [--wait MS]");
         std::process::exit(2);
     };
 
     let mut page = Page::load(file, (width as f32, height as f32), 0.0);
     if let Some(out) = png {
-        render_png(&mut page, &out, width, height, scale, pointer, wait_ms);
+        render_png(&mut page, Snapshot { out, width, height, scale, pointer, typed, wait_ms });
         return;
     }
 
     let event_loop = EventLoop::new().expect("event loop");
     let mut app = App { page, window: None, surface: None, mods: ModifiersState::default() };
     event_loop.run_app(&mut app).expect("run app");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A page loaded from a temp file, laid out at 600x300.
+    fn page(html: &str, name: &str) -> (Page, PathBuf) {
+        let path = std::env::temp_dir().join(format!("nile-shell-{}-{name}.html", std::process::id()));
+        std::fs::write(&path, html).unwrap();
+        let mut p = Page::load(path.clone(), (600.0, 300.0), 0.0);
+        p.layout(600.0, 300.0);
+        (p, path)
+    }
+
+    fn center(p: &Page, id: &str) -> (f32, f32) {
+        let node = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+        let r = p.view.borrow_mut().layout().node_rect(node).unwrap();
+        (r.x + r.width / 2.0, r.y + r.height / 2.0)
+    }
+
+    fn click(p: &mut Page, id: &str) {
+        let (x, y) = center(p, id);
+        p.pointer_moved(x, y);
+        p.press();
+        p.release();
+    }
+
+    fn log(p: &Page) -> Vec<String> {
+        p.scripts.as_ref().unwrap().console_output()
+    }
+
+    #[test]
+    fn checkbox_radio_and_label_clicks() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><input id="c" type="checkbox"><label id="lab" for="c">Check</label>
+               <input id="r1" type="radio" name="g" checked><input id="r2" type="radio" name="g"><input id="off" type="checkbox" disabled>
+               <script>
+                 for (const t of ['input', 'change']) document.addEventListener(t, (e) => console.log(t + ':' + e.target.id));
+               </script></body>"#,
+            "clicks",
+        );
+        let checked = |p: &Page, id: &str| {
+            let n = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+            p.doc.borrow().has_state(n, "checked")
+        };
+        click(&mut p, "c");
+        assert!(checked(&p, "c"));
+        click(&mut p, "lab"); // forwarded to the checkbox: toggles it back
+        assert!(!checked(&p, "c"));
+        click(&mut p, "r2");
+        assert!(checked(&p, "r2") && !checked(&p, "r1"));
+        click(&mut p, "r2"); // already selected: no event
+        click(&mut p, "off");
+        assert!(!checked(&p, "off"));
+        assert_eq!(log(&p), ["input:c", "change:c", "input:c", "change:c", "input:r2", "change:r2"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn typing_edits_value_and_fires_events() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><input id="t" value="ab"><input id="u">
+               <script>
+                 const t = document.getElementById('t');
+                 t.addEventListener('input', () => console.log('input:' + t.value));
+                 t.addEventListener('change', () => console.log('change:' + t.value));
+                 t.addEventListener('keydown', (e) => { if (e.key === 'q') e.preventDefault(); });
+               </script></body>"#,
+            "typing",
+        );
+        let key = |p: &mut Page, k: &str| {
+            let (proceed, _) = p.key("keydown", k.to_string(), ModifiersState::default());
+            if proceed {
+                p.edit_key(k, ModifiersState::default());
+            }
+        };
+        let (x, y) = center(&p, "t");
+        p.pointer_moved(x + 60.0, y); // inside the input, right of the text: caret goes to the end
+        p.press();
+        p.release();
+        assert_eq!(p.caret, 2);
+        key(&mut p, "c");
+        key(&mut p, "q"); // prevented by the page
+        key(&mut p, "ArrowLeft");
+        key(&mut p, "Backspace");
+        key(&mut p, "Home");
+        key(&mut p, "Delete");
+        assert_eq!(p.value_of(p.interaction().focus.unwrap()), "c");
+        key(&mut p, "Enter");
+        // Moving focus away fires `change` only if the value changed since the last commit.
+        click(&mut p, "u");
+        assert_eq!(log(&p), ["input:abc", "input:ac", "input:c", "change:c"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn script_focus_moves_the_caret_target() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><input id="a" value="xy"><input id="b" value="z">
+               <script>
+                 $('#a').addEventListener('focus', () => console.log('focus a'));
+                 $('#a').addEventListener('blur', () => console.log('blur a'));
+                 $('#b').focus();
+                 $('#a').focus();
+                 console.log(document.activeElement.id);
+               </script></body>"#,
+            "focus",
+        );
+        // Focus calls made while scripts load are applied once the page syncs.
+        p.sync();
+        assert_eq!(p.interaction().focus.map(|f| p.doc.borrow().node(f).attr("id").map(str::to_string)), Some(Some("a".into())));
+        assert_eq!(p.caret, 2);
+        assert!(log(&p).contains(&"a".to_string()), "{:?}", log(&p));
+        let _ = std::fs::remove_file(path);
+    }
 }

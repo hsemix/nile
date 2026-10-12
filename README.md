@@ -41,6 +41,7 @@ cargo run -p nile-shell -- examples/interact.html --png out.png --hover 40,40   
 cargo run -p nile-shell -- examples/scripting.html --png out.png --click 60,80 --wait 400   # click, run timers
 cargo run -p nile-shell -- examples/measure.html --png out.png                              # layout queries from JS
 cargo run -p nile-shell -- examples/todo/index.html --png out.png --click 60,128          # modules + JSX + Sciter helpers
+cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --type "Ada{Backspace}x"   # form controls
 cargo test --workspace
 ```
 
@@ -71,6 +72,10 @@ cargo test --workspace
   from interaction; `checked`, `disabled`, `readonly`, `expanded`, `collapsed`, `current`, `selected`, `invalid`,
   `busy` are runtime flags matched by the same-named `:pseudo-classes`), `elementIndex`, `nodeIndex`,
   `insertAfter`.
+- **Form controls:** `<input>` (text, password, placeholder, `value`), checkboxes and radio groups (including
+  `<label>` clicks), `<button>`, disabled states, a caret with click-to-place, typing, Backspace/Delete/arrows/
+  Home/End, and `input`/`change`/`focus`/`blur` events. In JS: `value`, `checked`, `disabled`, `type`, `name`,
+  `placeholder`, `focus()`, `blur()`, `document.activeElement` (see `examples/forms.html`).
 - **Pointer interaction:** hit testing (down to the inline element under the pointer), `:hover`, `:active` and
   click-to-focus on links and form controls, restyled live (see `examples/interact.html`).
 - **Inline content:** mixed text, `<br>`, inline padding/border/background/radius and `inline-block` (with
@@ -79,10 +84,16 @@ cargo test --workspace
 
 ## Known gaps (deliberate, for now)
 
-- Symbol glyphs such as `✓` render as a missing-glyph box: font fallback isn't picking a symbols font.
+- Font fallback: system fallback covers scripts (CJK, ...) but not every symbol block, so Dingbats (`✓`) and
+  `⚠`-range symbols name Apple Symbols / Zapf Dingbats / Segoe UI Symbol / Noto Sans Symbols explicitly. Only
+  checked on macOS; other symbol blocks may still show a missing-glyph box.
 - **Inline layout is partial.** Shrink-to-fit `inline-block` uses max-content (it won't narrow to fit a
   line), inline margins are ignored, a wrapped inline's border/radius isn't sliced at the break, only the
   innermost decorated inline is painted, and block children of an inline element don't split the run.
+- Form gaps: no text selection, clipboard, undo or IME; no `<textarea>`, `<select>`, `<form>` submit or
+  validation; text inputs don't scroll/clip long values (they spill past the box); the caret doesn't blink;
+  `value` lives in the `value` attribute (no separate default value). Sciter's `Element.value` for other
+  behaviors isn't there.
 - JS gaps: `fetch`, bare/`@sciter`/`@env`-style module specifiers (only relative and absolute paths),
   `window.location`, `devicePixelRatio` (always 1), element-level scrolling (`scrollTop` only works on the
   page), `offsetParent` (approximated by the parent). From Sciter: class components, `componentUpdate`,
@@ -98,8 +109,8 @@ cargo test --workspace
 
 1. **Tab order + incremental updates** — Tab focus order, the `cursor` property, and restyling /
    relaying out only what a state change affects (today every change restyles the whole page).
-2. **More Sciter compatibility** — `@env`/`@sciter`/`@sys` modules, behaviors (`Element.value`, form
-   controls), class components and `componentUpdate`, `this://` URLs.
+2. **More controls + Sciter compatibility** — `<textarea>`, `<select>`, text selection/clipboard, `@env`/
+   `@sciter`/`@sys` modules, class components and `componentUpdate`, `this://` URLs.
 3. **Stacking contexts + GPU** — paint tree with opacity, transforms, clipping,
    overflow scrolling; Skia on Metal (macOS), D3D (Windows), Vulkan/GL (Linux).
 4. **Embedding API** — a C ABI (`cbindgen`) so Go, C#, Python, etc. can host it.

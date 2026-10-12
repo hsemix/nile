@@ -6,9 +6,9 @@
 
 use std::collections::HashMap;
 
-use nile_layout::{BoxContent, LayoutBox, LayoutTree, Rect as LRect, TextContent};
-use nile_style::{Color as CssColor, Edges, StyleMap};
-use nile_text::PositionedLayoutItem;
+use nile_layout::{BoxContent, LayoutBox, LayoutTree, NodeId, Rect as LRect, TextContent};
+use nile_style::{Appearance, Color as CssColor, Edges, StyleMap};
+use nile_text::{Affinity, Cursor, PositionedLayoutItem};
 use skia_safe::{
     font::Edging, Canvas, Color, Font, FontMgr, GlyphId, Paint, Point, RRect, Rect, Typeface,
 };
@@ -30,14 +30,27 @@ impl Renderer {
         Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new() }
     }
 
-    /// Paint the whole tree. `scroll_y` is in logical pixels.
-    pub fn paint(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, scroll_y: f32) {
+    /// Paint the whole tree. `scroll_y` is in logical pixels. `caret` is the
+    /// input being edited and the caret's byte offset in its displayed text.
+    pub fn paint(
+        &mut self,
+        canvas: &Canvas,
+        tree: &LayoutTree,
+        styles: &StyleMap,
+        scroll_y: f32,
+        caret: Option<(NodeId, usize)>,
+    ) {
         canvas.save();
         canvas.translate((0.0, -scroll_y));
         for b in &tree.boxes {
             match &b.content {
                 BoxContent::Element => self.paint_box(canvas, b, styles),
-                BoxContent::Text(content) => self.paint_text(canvas, b.rect, content),
+                BoxContent::Text(content) => {
+                    self.paint_text(canvas, b.rect, content);
+                    if let Some((_, at)) = caret.filter(|(n, _)| content.owners.iter().any(|(_, o)| o == n)) {
+                        paint_caret(canvas, b.rect, content, at, styles.get(b.node).color);
+                    }
+                }
             }
         }
         canvas.restore();
@@ -46,6 +59,7 @@ impl Renderer {
     fn paint_box(&mut self, canvas: &Canvas, b: &LayoutBox, styles: &StyleMap) {
         let s = styles.get(b.node);
         paint_decorated(canvas, skia_rect(b.rect), s.background, s.border_width, s.border_color, s.border_radius);
+        paint_control_mark(canvas, s, b.rect);
         // TODO: opacity needs a save_layer around the element's whole subtree,
         // which needs the paint list to keep tree structure (stacking contexts).
     }
@@ -188,6 +202,40 @@ fn paint_decorated(
         let inner = RRect::new_rect_xy(inner_rect, inner_radius, inner_radius);
         canvas.draw_drrect(outer_r, inner, &fill(border_color));
     }
+}
+
+/// The check or radio dot for `appearance: checkbox | radio` when checked.
+fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) {
+    if !s.checked {
+        return;
+    }
+    let mut paint = fill(s.color);
+    match s.appearance {
+        Appearance::Checkbox => {
+            let mut builder = skia_safe::PathBuilder::new();
+            builder
+                .move_to((r.x + r.width * 0.24, r.y + r.height * 0.53))
+                .line_to((r.x + r.width * 0.43, r.y + r.height * 0.72))
+                .line_to((r.x + r.width * 0.78, r.y + r.height * 0.30));
+            let path = builder.detach();
+            paint.set_style(skia_safe::PaintStyle::Stroke);
+            paint.set_stroke_width((r.width * 0.16).max(1.5));
+            paint.set_stroke_cap(skia_safe::PaintCap::Round);
+            paint.set_stroke_join(skia_safe::PaintJoin::Round);
+            canvas.draw_path(&path, &paint);
+        }
+        Appearance::Radio => {
+            canvas.draw_circle((r.x + r.width / 2.0, r.y + r.height / 2.0), r.width.min(r.height) * 0.24, &paint);
+        }
+        Appearance::None => {}
+    }
+}
+
+/// A 1px caret at byte offset `at` of a text run.
+fn paint_caret(canvas: &Canvas, origin: LRect, content: &TextContent, at: usize, color: CssColor) {
+    let g = Cursor::from_byte_index(&content.layout, at, Affinity::Downstream).geometry(&content.layout, 1.0);
+    let rect = Rect::from_ltrb(origin.x + g.x0 as f32, origin.y + g.y0 as f32, origin.x + g.x1 as f32, origin.y + g.y1 as f32);
+    canvas.draw_rect(rect, &fill(color));
 }
 
 /// One line's piece of a decorated inline element.

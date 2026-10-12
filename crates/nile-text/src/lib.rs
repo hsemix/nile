@@ -8,7 +8,7 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-pub use parley::{Alignment, Cluster, Layout, Line, PositionedLayoutItem};
+pub use parley::{Affinity, Alignment, BoundingBox, Cluster, Cursor, Layout, Line, PositionedLayoutItem};
 use parley::{InlineBox, InlineBoxKind, VerticalAlign};
 use parley::{
     AlignmentOptions, FontContext, FontFamily, FontStyle, FontWeight, LayoutContext, LineHeight, StyleProperty,
@@ -137,6 +137,18 @@ impl TextEngine {
             b.push(StyleProperty::Underline(s.underline), range.clone());
             b.push(StyleProperty::Strikethrough(s.line_through), range.clone());
         }
+        // Symbol characters the system fallback misses get named fallback fonts.
+        for (i, c) in text.char_indices().filter(|(_, c)| is_symbol_gap(*c)) {
+            let family = spans
+                .iter()
+                .rev()
+                .find(|(r, _)| r.contains(&i))
+                .map_or(&base.font_family, |(_, s)| &s.font_family);
+            b.push(
+                StyleProperty::FontFamily(FontFamily::Source(Cow::Owned(with_symbol_fallbacks(family)))),
+                i..i + c.len_utf8(),
+            );
+        }
         for bx in boxes {
             b.push_inline_box(InlineBox {
                 id: bx.id,
@@ -150,6 +162,22 @@ impl TextEngine {
         }
         b.build(text)
     }
+}
+
+/// System fallback finds fonts per script (CJK, Arabic, ...) but not for some
+/// symbol blocks, so characters in them get these fonts named explicitly; ones
+/// that aren't installed are skipped. Other symbols (`★`, `→`, ...) keep the
+/// system's choice, which looks better where it works.
+const SYMBOL_FALLBACKS: &str =
+    "Apple Symbols, Zapf Dingbats, Segoe UI Symbol, Noto Sans Symbols 2, Noto Sans Symbols, DejaVu Sans";
+
+/// The end of Miscellaneous Symbols (`⚠ ⚡ ⛔ ...`) through Dingbats (`✓ ✔ ✗ ✂ ...`).
+fn is_symbol_gap(c: char) -> bool {
+    matches!(c as u32, 0x26A0..=0x27BF)
+}
+
+fn with_symbol_fallbacks(family: &str) -> String {
+    format!("{family}, {SYMBOL_FALLBACKS}")
 }
 
 fn brush(s: &TextStyle) -> TextBrush {
@@ -213,6 +241,12 @@ mod tests {
         let one_line = layout.height();
         break_lines(&mut layout, Some(80.0), Alignment::Start);
         assert!(layout.height() > one_line * 2.0, "text should wrap onto several lines");
+    }
+
+    #[test]
+    fn symbol_gap_covers_dingbats_not_arrows() {
+        assert!(is_symbol_gap('✓') && is_symbol_gap('⚠'));
+        assert!(!is_symbol_gap('→') && !is_symbol_gap('a') && !is_symbol_gap('★'));
     }
 
     #[test]

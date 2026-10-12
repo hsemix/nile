@@ -45,6 +45,8 @@ pub trait Environment {
     fn scroll_to(&self, y: f32);
     /// Hover/active/focus, for `:hover` etc. in selectors scripts evaluate.
     fn interaction(&self) -> InteractionState;
+    /// Move keyboard focus (`el.focus()` / `el.blur()`).
+    fn set_focus(&self, node: Option<NodeId>);
 }
 
 /// Resolves `./` and `../` imports against the importing module's file.
@@ -302,6 +304,14 @@ fn install_natives(
         let env = env.clone();
         move |y: f32| env.scroll_to(y)
     });
+    native!("focus", {
+        let env = env.clone();
+        move |id: i32| env.set_focus(node(id))
+    });
+    native!("activeElement", {
+        let env = env.clone();
+        move || -> i32 { id_out(env.interaction().focus) }
+    });
     native!("now", move || start.elapsed().as_secs_f64() * 1000.0);
     native!("log", move |level: String, msg: String| {
         match level.as_str() {
@@ -469,6 +479,7 @@ mod tests {
         fn interaction(&self) -> InteractionState {
             InteractionState::default()
         }
+        fn set_focus(&self, _: Option<NodeId>) {}
     }
 
     fn host(html: &str) -> (ScriptHost, Rc<RefCell<Document>>) {
@@ -768,7 +779,7 @@ mod tests {
         assert_eq!(out[1], "true false true 1");
         assert_eq!(out[2], "0");
         assert_eq!(out[3], "id=i,type=checkbox,title=t new 3 checkbox undefined");
-        assert_eq!(out[4], "undefined 1 HR undefined");
+        assert_eq!(out[4], "on 1 HR undefined");
     }
 
     #[test]
@@ -808,6 +819,29 @@ mod tests {
         assert_eq!(out[1], r#"clicked true true <p id="keep" class="new">fresh</p><ul><li>B</li><li>A</li></ul>"#);
         assert_eq!(out[2], "HR text 3");
         assert_eq!(out[3], "<i>only</i>");
+    }
+
+    #[test]
+    fn form_control_properties() {
+        let (host, _) = host(
+            r#"<input id="t" value="hi" placeholder="p"><input id="c" type="checkbox" value="v"><input id="d" disabled><button id="b">x</button><div id="div"></div>"#,
+        );
+        host.run(
+            r#"
+            const t = $('#t'), c = $('#c'), d = $('#d');
+            console.log(t.value, t.placeholder, t.type, c.type, c.checked, d.disabled, $('#b').disabled, $('#div').value);
+            t.value = 'new'; c.checked = true; d.disabled = false; $('#b').disabled = true; t.name = 'n';
+            console.log(t.getAttribute('value'), c.checked, c.state.checked, d.disabled, d.hasAttribute('disabled'), $('#b').disabled, t.name);
+            c.checked = false;
+            const div = $('#div'); div.value = 5;
+            console.log(c.checked, div.value, document.activeElement === null || document.activeElement === document.body);
+            "#,
+        )
+        .unwrap();
+        let out = host.console_output();
+        assert_eq!(out[0], "hi p text checkbox false true false undefined");
+        assert_eq!(out[1], "new true true false false true n");
+        assert_eq!(out[2], "false 5 true");
     }
 
     #[test]

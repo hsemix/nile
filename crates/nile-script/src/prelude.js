@@ -469,6 +469,51 @@
     queueMicrotask: (f) => { Promise.resolve().then(f).catch(report); },
   });
 
+  // ---- form controls -------------------------------------------------------
+  // `value` is stored in the `value` attribute (a simplification: there is no
+  // separate "default value"). Elements without a native behavior have no
+  // `value` (undefined), as in Sciter, but can be given one as an ordinary property.
+  const VALUE_TAGS = new Set(["input", "textarea", "button", "select", "option"]);
+  Object.defineProperty(Element.prototype, "value", {
+    configurable: true,
+    get() {
+      if (!VALUE_TAGS.has(this.localName)) return undefined;
+      const v = this.getAttribute("value");
+      return v !== null ? v : this.localName === "input" && /^(checkbox|radio)$/.test(this.type) ? "on" : "";
+    },
+    set(v) {
+      if (VALUE_TAGS.has(this.localName)) this.setAttribute("value", v);
+      else Object.defineProperty(this, "value", { value: v, writable: true, configurable: true, enumerable: true });
+    },
+  });
+  const reflect = (prop, attr, dflt = "") =>
+    Object.defineProperty(Element.prototype, prop, {
+      configurable: true,
+      get() { return this.getAttribute(attr) ?? dflt; },
+      set(v) { this.setAttribute(attr, v); },
+    });
+  reflect("placeholder", "placeholder");
+  reflect("name", "name");
+  Object.defineProperty(Element.prototype, "type", {
+    configurable: true,
+    get() { const t = this.getAttribute("type"); return t !== null ? t.toLowerCase() : this.localName === "input" ? "text" : this.localName === "button" ? "submit" : ""; },
+    set(v) { this.setAttribute("type", v); },
+  });
+  // `checked` / `disabled` are runtime state flags; clearing also drops the HTML attribute.
+  for (const flag of ["checked", "disabled"]) {
+    Object.defineProperty(Element.prototype, flag, {
+      configurable: true,
+      get() { return N.getState(this._id, flag); },
+      set(v) {
+        N.setState(this._id, flag, !!v);
+        if (!v) this.removeAttribute(flag);
+      },
+    });
+  }
+  Element.prototype.focus = function () { N.focus(this._id); };
+  Element.prototype.blur = function () { if (N.activeElement() === this._id) N.focus(-1); };
+  Object.defineProperty(Document.prototype, "activeElement", { get() { const id = N.activeElement(); return id < 0 ? this.body : wrap(id); } });
+
   // ---- JSX ---------------------------------------------------------------
   // `<div class="a">hi</div>` compiles to JSX("div", {class: "a"}, ["hi"]).
   // Like Sciter, the default returns a vnode array that append/content/patch
