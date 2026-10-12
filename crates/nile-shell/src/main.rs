@@ -8,14 +8,17 @@
 //!        [--type TEXT]                 type into the focused input ({Backspace}, {Shift+ArrowLeft}, {Cmd+a}, ... for keys)
 //!        [--wait MS]                   let timers run this long before the snapshot
 
+mod window;
+
 use std::{cell::RefCell, num::NonZeroU32, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 
 use nile_dom::{Document, NodeId, ScriptSource};
 use nile_layout::{TextPoint, FileImages, LayoutOptions, LayoutTree, MenuRequest, ScrollOffsets};
 use nile_render::{Overlay, Renderer};
-use nile_script::{Environment, ScriptHost, UiEvent};
+use nile_script::{Environment, ScriptHost, UiEvent, WindowCommand};
 use nile_style::{compute_styles_in, Animator, InteractionState, StyleMap};
 use nile_text::TextEngine;
+use window::{Frame, InitialState, Resizable, Role, WindowConfig};
 use skia_safe::{surfaces, AlphaType, Color, ColorType, EncodedImageFormat, ImageInfo};
 use winit::{
     application::ApplicationHandler,
@@ -112,6 +115,13 @@ struct View {
     pending_sel: std::collections::HashMap<NodeId, (usize, usize)>,
     /// Focus moves made by scripts, so the page can fire `blur`/`focus` for them.
     focus_changes: Vec<(Option<NodeId>, Option<NodeId>)>,
+    /// Window actions scripts and `role="window-*"` elements asked for; the window loop applies them.
+    window_requests: Vec<WindowCommand>,
+    /// The viewport changed since `resize` last fired.
+    resized: bool,
+    /// Where the window is: `[screenX, screenY, outerWidth, outerHeight, fullscreen]`, kept
+    /// current by the window loop. `None` in headless runs.
+    window_rect: Option<[f32; 5]>,
 }
 
 /// A selection over the page's text, valid for one version of the document.
@@ -261,6 +271,8 @@ impl View {
 
     fn set_viewport(&mut self, width: f32, height: f32) {
         let changed = self.viewport != (width, height);
+        // The first layout isn't a resize; later ones are.
+        self.resized |= changed && self.viewport.0 > 0.0;
         self.viewport = (width, height);
         if changed && self.styles.uses_viewport {
             self.restyle();
@@ -350,6 +362,15 @@ impl Environment for Env {
 
     fn clear_selected_text(&self) {
         self.0.borrow_mut().page_sel = None;
+    }
+
+    fn window_command(&self, cmd: WindowCommand) {
+        self.0.borrow_mut().window_requests.push(cmd);
+    }
+
+    fn window_rect(&self) -> [f32; 5] {
+        let v = self.0.borrow();
+        v.window_rect.unwrap_or([0.0, 0.0, v.viewport.0, v.viewport.1, 0.0])
     }
 
     fn set_selection(&self, node: NodeId, start: usize, end: usize) {
@@ -506,6 +527,9 @@ impl Page {
             page_sel: None,
             images: FileImages::new(path.parent().map(PathBuf::from).unwrap_or_default()),
             focus_changes: Vec::new(),
+            window_requests: Vec::new(),
+            resized: false,
+            window_rect: None,
         }));
         view.borrow_mut().adopt(styles);
 
@@ -673,6 +697,9 @@ impl Page {
     /// Run due timers. Returns whether the page changed and when to wake next.
     fn run_timers(&mut self) -> (bool, Option<Duration>) {
         let Some(host) = &self.scripts else { return (false, None) };
+        if std::mem::take(&mut self.view.borrow_mut().resized) {
+            host.fire_window_event("resize");
+        }
         let next = host.tick();
         (self.sync(), next)
     }
@@ -904,6 +931,31 @@ impl Page {
             }
             id = n.parent?;
         }
+    }
+
+    /// The window icon named by `window-icon`: a picture file next to the page.
+    fn window_icon(&self, src: &str) -> Option<winit::window::Icon> {
+        let bytes = std::fs::read(self.path.parent()?.join(src)).ok()?;
+        let img = skia_safe::Image::from_encoded(skia_safe::Data::new_copy(&bytes))?;
+        let (w, h) = (img.width(), img.height());
+        let info = ImageInfo::new((w, h), ColorType::RGBA8888, AlphaType::Unpremul, None);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        img.read_pixels(&info, &mut rgba, w as usize * 4, (0, 0), skia_safe::image::CachingHint::Allow).then_some(())?;
+        winit::window::Icon::from_rgba(rgba, w as u32, h as u32).ok()
+    }
+
+    /// A press on a `role="window-caption"` element: drag the window, or on a double click
+    /// toggle maximize. Returns true when the window loop should start the system drag.
+    fn caption_press(&mut self) -> bool {
+        let Some(hover) = self.interaction().hover else { return false };
+        if window::role_at(&self.doc.borrow(), hover).map(|r| r.1) != Some(Role::Caption) {
+            return false;
+        }
+        if self.register_click() == 2 {
+            self.view.borrow_mut().window_requests.push(WindowCommand::ToggleMaximize);
+            return false;
+        }
+        true
     }
 
     /// The pointer shape for what's under the pointer: a pressed scrollbar thumb or an open
@@ -1690,6 +1742,18 @@ impl Page {
     /// Default action of a click on `target`: toggle a checkbox, select a
     /// radio, or forward a `<label>` click to its control. True if the page changed.
     fn click_default(&mut self, target: NodeId) -> bool {
+        // Elements acting as window buttons.
+        let role = window::role_at(&self.doc.borrow(), target).map(|r| r.1);
+        let cmd = match role {
+            Some(Role::Minimize) => Some(WindowCommand::Minimize),
+            Some(Role::Maximize) => Some(WindowCommand::ToggleMaximize),
+            Some(Role::Close) => Some(WindowCommand::Close),
+            _ => None,
+        };
+        if let Some(cmd) = cmd {
+            self.view.borrow_mut().window_requests.push(cmd);
+            return false;
+        }
         // The nearest control or label at or above the click.
         let found = {
             let doc = self.doc.borrow();
@@ -2082,7 +2146,10 @@ impl Page {
             .filter_map(|tag| self.doc.borrow().find(|n| n.tag() == Some(tag)))
             .find_map(|id| self.view.borrow().styles.get(id).background)
             .map(|c| Color::from_argb(255, c.r, c.g, c.b))
-            .unwrap_or(Color::WHITE)
+            .unwrap_or_else(|| {
+                // A `window-frame: transparent` window shows the desktop where the page has no background.
+                if WindowConfig::from_document(&self.doc.borrow()).frame == Frame::Transparent { Color::TRANSPARENT } else { Color::WHITE }
+            })
     }
 
     /// Paint into a BGRA pixel buffer of `width`×`height` physical pixels.
@@ -2244,17 +2311,83 @@ struct App {
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     mods: ModifiersState,
     /// The pointer shape last given to the window.
-    cursor: nile_style::Cursor,
+    cursor: Option<nile_style::Cursor>,
+    close_requested: bool,
+    config: WindowConfig,
+    /// The title last given to the window.
+    title: String,
+    /// Which window edge a frameless window's pointer is over, if any.
+    edge: Option<(i8, i8)>,
 }
 
 impl App {
+    /// Apply window actions the page asked for, follow `document.title`, and tell scripts where
+    /// the window is.
+    fn sync_window(&mut self) {
+        let Some(window) = self.window.clone() else { return };
+        let requests = std::mem::take(&mut self.page.view.borrow_mut().window_requests);
+        for cmd in requests {
+            match cmd {
+                WindowCommand::Close => self.close_requested = true,
+                WindowCommand::Minimize => window.set_minimized(true),
+                WindowCommand::Maximize => window.set_maximized(true),
+                WindowCommand::Restore => {
+                    window.set_fullscreen(None);
+                    window.set_minimized(false);
+                    window.set_maximized(false);
+                }
+                WindowCommand::ToggleMaximize => {
+                    if self.config.maximizable && self.config.resizable != Resizable::No {
+                        window.set_maximized(!window.is_maximized());
+                    }
+                }
+                WindowCommand::Fullscreen(on) => {
+                    window.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
+                }
+                WindowCommand::MoveTo(x, y) => window.set_outer_position(winit::dpi::LogicalPosition::new(x, y)),
+                WindowCommand::ResizeTo(w, h) => {
+                    let _ = window.request_inner_size(LogicalSize::new(w.max(1.0), h.max(1.0)));
+                }
+            }
+        }
+        let title = window::current_title(&self.page.doc.borrow(), &self.config);
+        if title != self.title {
+            window.set_title(&title);
+            self.title = title;
+        }
+        let scale = window.scale_factor();
+        let pos = window.outer_position().map(|p| p.to_logical::<f32>(scale)).unwrap_or_default();
+        let outer = window.outer_size().to_logical::<f32>(scale);
+        self.page.view.borrow_mut().window_rect =
+            Some([pos.x, pos.y, outer.width, outer.height, f32::from(window.fullscreen().is_some())]);
+    }
+
+    /// For a frameless, resizable window: the margin in which the edges resize it.
+    fn resize_margin(&self) -> Option<f32> {
+        match (self.config.frameless(), self.config.resizable) {
+            (true, Resizable::Yes) => Some(6.0),
+            (true, Resizable::Margin(m)) => Some(m),
+            _ => None,
+        }
+    }
+
     /// Show the CSS `cursor` of whatever is under the pointer.
     fn sync_cursor(&mut self) {
-        let want = self.page.cursor();
-        if want == self.cursor {
+        if let (Some(edge), Some(w)) = (self.edge, &self.window) {
+            w.set_cursor(match edge {
+                (-1, -1) | (1, 1) => CursorIcon::NwseResize,
+                (1, -1) | (-1, 1) => CursorIcon::NeswResize,
+                (0, _) => CursorIcon::NsResize,
+                _ => CursorIcon::EwResize,
+            });
+            self.cursor = None;
             return;
         }
-        self.cursor = want;
+        let want = self.page.cursor();
+        if self.cursor == Some(want) {
+            return;
+        }
+        self.cursor = Some(want);
         let Some(w) = &self.window else { return };
         use nile_style::Cursor as C;
         w.set_cursor_visible(want != C::None);
@@ -2291,26 +2424,73 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let title = {
-            let doc = self.page.doc.borrow();
-            doc.find(|n| n.tag() == Some("title"))
-                .map(|t| doc.text_content(t).trim().to_string())
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| "nile".into())
-        };
-
-        let attrs = Window::default_attributes()
-            .with_title(title)
-            .with_inner_size(LogicalSize::new(900.0, 640.0));
+        let config = WindowConfig::from_document(&self.page.doc.borrow());
+        let desktop = event_loop
+            .primary_monitor()
+            .map(|m| {
+                let sz = m.size().to_logical::<f32>(m.scale_factor());
+                (sz.width, sz.height)
+            })
+            .unwrap_or((1440.0, 900.0));
+        let (w, h) = config.inner_size(desktop);
+        let mut attrs = Window::default_attributes()
+            .with_title(config.title.clone())
+            .with_inner_size(LogicalSize::new(w, h))
+            .with_resizable(config.resizable != Resizable::No)
+            .with_decorations(!config.frameless())
+            .with_transparent(config.frame == Frame::Transparent)
+            .with_visible(config.state != InitialState::Hidden)
+            .with_maximized(config.state == InitialState::Maximized)
+            .with_enabled_buttons({
+                let mut b = winit::window::WindowButtons::CLOSE;
+                if config.minimizable {
+                    b |= winit::window::WindowButtons::MINIMIZE;
+                }
+                if config.maximizable && config.resizable != Resizable::No {
+                    b |= winit::window::WindowButtons::MAXIMIZE;
+                }
+                b
+            });
+        if let (Some(min_w), Some(min_h)) = (config.min_width, config.min_height) {
+            attrs = attrs.with_min_inner_size(LogicalSize::new(min_w, min_h));
+        } else if config.min_width.is_some() || config.min_height.is_some() {
+            attrs = attrs.with_min_inner_size(LogicalSize::new(config.min_width.unwrap_or(0.0), config.min_height.unwrap_or(0.0)));
+        }
+        if config.max_width.is_some() || config.max_height.is_some() {
+            attrs = attrs.with_max_inner_size(LogicalSize::new(config.max_width.unwrap_or(f32::MAX / 4.0), config.max_height.unwrap_or(f32::MAX / 4.0)));
+        }
+        #[cfg(target_os = "macos")]
+        if config.frame == Frame::Extended {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs = attrs.with_titlebar_transparent(true).with_title_hidden(true).with_fullsize_content_view(true);
+        }
+        if let Some(icon) = config.icon.as_deref().and_then(|i| self.page.window_icon(i)) {
+            attrs = attrs.with_window_icon(Some(icon));
+        }
         let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
+        if let Some((x, y)) = config.position((w, h), desktop) {
+            window.set_outer_position(winit::dpi::LogicalPosition::new(x, y));
+        }
+        match config.state {
+            InitialState::Minimized => window.set_minimized(true),
+            InitialState::Fullscreen => window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None))),
+            _ => {}
+        }
+        self.title = config.title.clone();
+        self.config = config;
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
         let surface = softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
         self.surface = Some(surface);
         self.window = Some(window);
+        self.sync_window();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let (changed, next) = self.page.tick();
+        self.sync_window();
+        if self.close_requested {
+            event_loop.exit();
+        }
         if changed {
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -2324,7 +2504,11 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         self.handle_window_event(event_loop, id, event);
+        self.sync_window();
         self.sync_cursor();
+        if self.close_requested {
+            event_loop.exit();
+        }
     }
 }
 
@@ -2336,6 +2520,17 @@ impl App {
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => window.request_redraw(),
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = window.scale_factor();
+                // A frameless window's edges resize it before the page sees the pointer.
+                self.edge = self.resize_margin().and_then(|m| {
+                    let inner = window.inner_size().to_logical::<f32>(scale);
+                    window::edge_at((position.x / scale) as f32, (position.y / scale) as f32, (inner.width, inner.height), m)
+                });
+                if self.edge.is_some() {
+                    if self.page.pointer_left() {
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 if self.page.pointer_moved((position.x / scale) as f32, (position.y / scale) as f32) {
                     window.request_redraw();
                 }
@@ -2346,6 +2541,24 @@ impl App {
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                if let (Some(edge), ElementState::Pressed) = (self.edge, state) {
+                    use winit::window::ResizeDirection as D;
+                    let _ = window.drag_resize_window(match edge {
+                        (-1, -1) => D::NorthWest,
+                        (1, -1) => D::NorthEast,
+                        (-1, 1) => D::SouthWest,
+                        (1, 1) => D::SouthEast,
+                        (0, -1) => D::North,
+                        (0, 1) => D::South,
+                        (-1, _) => D::West,
+                        _ => D::East,
+                    });
+                    return;
+                }
+                if state == ElementState::Pressed && self.page.caption_press() {
+                    let _ = window.drag_window();
+                    return;
+                }
                 let changed = match state {
                     ElementState::Pressed => self.page.press(),
                     ElementState::Released => self.page.release(),
@@ -2464,7 +2677,7 @@ fn main() {
     }
 
     let event_loop = EventLoop::new().expect("event loop");
-    let mut app = App { page, window: None, surface: None, mods: ModifiersState::default(), cursor: nile_style::Cursor::Auto };
+    let mut app = App { page, window: None, surface: None, mods: ModifiersState::default(), cursor: None, close_requested: false, config: WindowConfig::default(), title: String::new(), edge: None };
     event_loop.run_app(&mut app).expect("run app");
 }
 
@@ -3252,6 +3465,43 @@ cd</textarea>
         assert_eq!(at(&mut p, "i"), Cursor::Text);
         assert_eq!(at(&mut p, "s"), Cursor::Grab, "inherited by children");
         assert_eq!(at(&mut p, "d"), Cursor::Auto);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn window_roles_and_script_calls_queue_window_commands() {
+        let (mut p, path) = page(
+            r#"<html window-frame="solid"><body style="margin:0">
+                 <div id="bar" role="window-caption" style="height:30px"><span id="t">Title</span>
+                   <button id="min" role="window-minimize">_</button><button id="max" role="window-maximize">o</button>
+                   <button id="x" role="window-close">x</button><button id="plain">p</button></div>
+                 <script>
+                   $('#plain').addEventListener('click', () => { document.title = 'Renamed'; window.moveTo(10, 20); window.resizeTo(500, 400); window.close(); });
+                 </script></body></html>"#,
+            "window-roles",
+        );
+        let take = |p: &Page| std::mem::take(&mut p.view.borrow_mut().window_requests);
+        click(&mut p, "min");
+        click(&mut p, "max");
+        click(&mut p, "x");
+        assert_eq!(take(&p), [WindowCommand::Minimize, WindowCommand::ToggleMaximize, WindowCommand::Close]);
+        // Pressing the caption starts a drag; a quick second press toggles maximize; buttons don't drag.
+        let (x, y) = center(&p, "t");
+        p.pointer_moved(x, y);
+        assert!(p.caption_press(), "first press drags");
+        assert!(!p.caption_press(), "second press maximizes instead");
+        assert_eq!(take(&p), [WindowCommand::ToggleMaximize]);
+        let (x, y) = center(&p, "plain");
+        p.pointer_moved(x, y);
+        assert!(!p.caption_press(), "a button in the caption keeps its click");
+        click(&mut p, "plain");
+        assert_eq!(
+            take(&p),
+            [WindowCommand::MoveTo(10.0, 20.0), WindowCommand::ResizeTo(500.0, 400.0), WindowCommand::Close]
+        );
+        let doc = p.doc.borrow();
+        assert_eq!(window::current_title(&doc, &WindowConfig::from_document(&doc)), "Renamed");
+        drop(doc);
         let _ = std::fs::remove_file(path);
     }
 }

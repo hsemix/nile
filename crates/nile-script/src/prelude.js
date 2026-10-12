@@ -464,6 +464,18 @@
     get body() { return wrap(N.bodyEl()); }
     get head() { return wrap(N.headEl()); }
     get defaultView() { return g; }
+    // The window title: the text of <title>, which the host shows in the title bar.
+    get title() {
+      const t = this.querySelector("title");
+      return t ? t.textContent.replace(/\s+/g, " ").trim() : "";
+    }
+    set title(v) {
+      let t = this.querySelector("title");
+      if (!t) { t = this.createElement("title"); (this.head || this.documentElement).appendChild(t); }
+      t.textContent = String(v);
+    }
+    get fullscreenElement() { return N.windowRect()[4] ? this.documentElement : null; }
+    exitFullscreen() { N.windowCommand("fullscreen", 0, 0); return Promise.resolve(); }
     getElementById(id) { return wrap(N.byId(String(id))); }
     createElement(tag) { return wrap(N.createElement(String(tag))); }
     createTextNode(s) { return wrap(N.createText(String(s))); }
@@ -741,6 +753,25 @@
     pageXOffset: { value: 0 },
     devicePixelRatio: { value: 1 },
   });
+  // The host window (desktop, so these really move and resize it).
+  const wr = (i) => N.windowRect()[i];
+  Object.defineProperties(g, {
+    screenX: { get: () => wr(0) },
+    screenY: { get: () => wr(1) },
+    screenLeft: { get: () => wr(0) },
+    screenTop: { get: () => wr(1) },
+    outerWidth: { get: () => wr(2) },
+    outerHeight: { get: () => wr(3) },
+  });
+  Object.assign(g, {
+    close: () => N.windowCommand("close", 0, 0),
+    moveTo: (x, y) => N.windowCommand("moveTo", +x || 0, +y || 0),
+    moveBy: (dx, dy) => N.windowCommand("moveTo", wr(0) + (+dx || 0), wr(1) + (+dy || 0)),
+    // Sizes are the page area, so resizing by N changes the viewport by N.
+    resizeTo: (w, h) => N.windowCommand("resizeTo", +w || 0, +h || 0),
+    resizeBy: (dw, dh) => N.windowCommand("resizeTo", N.viewport()[0] + (+dw || 0), N.viewport()[1] + (+dh || 0)),
+  });
+  Element.prototype.requestFullscreen = function () { N.windowCommand("fullscreen", 1, 0); return Promise.resolve(); };
   const scrollArg = (a, b) => (typeof a === "object" && a !== null ? a.top : b);
   Object.assign(g, {
     scrollTo: (a, b) => { const y = scrollArg(a, b); if (y !== undefined) N.scrollTo(+y || 0); },
@@ -805,6 +836,7 @@
       return dispatch(target, ev);
     },
   });
+  Object.defineProperty(g, "__windowEvent", { value(kind) { dispatch(g, new Event(kind)); } });
   Object.defineProperty(g, "__lifecycle", {
     value() {
       readyState = "interactive";

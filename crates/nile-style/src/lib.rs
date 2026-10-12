@@ -629,7 +629,22 @@ td, th { display: table-cell; padding: 1px; vertical-align: middle }
 th { font-weight: bold; text-align: center }
 caption { display: table-caption; text-align: center }
 col, colgroup { display: none }
-span, a, b, strong, em, i, u, s, del, br, label { display: inline }
+article, aside, address, blockquote, figure, figcaption, details, summary, fieldset, legend, dl, dt, dd, ol, pre,
+  h4, h5, h6, hgroup, menu { display: block }
+span, a, b, strong, em, i, u, s, del, br, label, code, kbd, samp, var, tt, small, big, sub, sup, mark, abbr, cite, q,
+  dfn, time, ins, font, bdi, bdo, data, output { display: inline }
+code, kbd, samp, tt, pre { font-family: monospace }
+small, sub, sup { font-size: 0.83em }
+big { font-size: 1.17em }
+mark { background: #ffff00; color: #000000 }
+ins { text-decoration: underline }
+cite, dfn, var { font-style: italic }
+h4 { font-weight: bold; margin: 1.33em 0 }
+h5 { font-size: 0.83em; font-weight: bold; margin: 1.67em 0 }
+h6 { font-size: 0.67em; font-weight: bold; margin: 2.33em 0 }
+blockquote { margin: 1em 40px }
+dd { margin-left: 40px }
+pre { margin: 1em 0 }
 form { display: block }
 body { margin: 8px }
 h1 { font-size: 2em; font-weight: bold; margin: 0.67em 0 }
@@ -645,6 +660,7 @@ a[href] { cursor: pointer }
 input, textarea { cursor: text }
 button, select, input[type=checkbox], input[type=radio], input[type=button], input[type=submit] { cursor: default }
 :disabled { cursor: not-allowed }
+button { text-align: center }
 button, input { display: inline-block; font-size: 13px; color: #000000; padding: 3px 8px;
   border: 1px solid #767676; border-radius: 3px; background: #efefef }
 input { background: #ffffff; width: 160px; min-height: 16px; margin: 2px; overflow: hidden }

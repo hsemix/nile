@@ -111,6 +111,16 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
   focus order (`tabindex` respected), and `input`/`change`/`focus`/`blur` events. Undo/redo (Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z, Ctrl+Y; typing and Backspace runs group into one step), word-wise
   movement and deletion (Alt or Ctrl+arrows/Backspace/Delete, Cmd+arrows/Backspace on macOS), and keyboard scrolling
   outside text inputs (arrows, Page Up/Down, Space, Home/End on the focused or hovered scroller, then the page).
+  **Window** (`examples/window.html`): the root `<html>` element configures the native window as in Sciter
+  (docs.sciter.com/docs/HTML/html-window): `window-title`, `window-width`/`-height` (px or % of the desktop),
+  `window-min-*`/`-max-*`, `window-resizable` (`true`, `false` or an edge margin like `6px`),
+  `window-minimizable`/`-maximizable`, `window-state` (`shown`, `minimized`, `maximized`, `full-screen`, `hidden`),
+  `window-alignment` (1-9 on the numeric keypad's layout, 5 = centre), `window-icon`, and `window-frame`
+  (`default`/`standard`, `extended` (macOS: content under the title bar), `solid`/`solid-with-shadow` (no system frame),
+  `transparent`). With no system frame, elements with `role="window-caption"` drag the window (double-click
+  maximizes) and `role="window-minimize"`/`window-maximize`/`window-close` are the buttons; the edges resize it.
+  Scripts get `document.title` (set and get), `window.close()`, `moveTo/moveBy/resizeTo/resizeBy`,
+  `screenX/Y`, `outerWidth/Height` and `element.requestFullscreen()`/`document.exitFullscreen()`.
   Page text selection (off by default, like a desktop UI: opt in with `user-select: text`/`all`, a `selectable` attribute, or Sciter's `behavior: htmlarea`; `text-selection-background-color` sets the highlight): drag, double-click (word), triple-click (run), Shift+click, Ctrl/Cmd+A and Ctrl/Cmd+C, with `window.getSelection().toString()`. Text selection in inputs and
   textareas: Shift+arrows/Home/End, drag, Shift+click, double-click (word), triple-click (all), Ctrl/Cmd+A, and
   copy/cut/paste through the system clipboard; Tab selects an input's contents. In JS: `selectionStart`,
@@ -148,6 +158,9 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
 - **Inline layout is partial.** Shrink-to-fit `inline-block` uses max-content (it won't narrow to fit a
   line), inline margins are ignored, a wrapped inline's border/radius isn't sliced at the break, only the
   innermost decorated inline is painted, and block children of an inline element don't split the run.
+- Window gaps: no multiple windows, dialogs or `Window.this`-style script API (I couldn't verify Sciter's shape
+  from its docs), no `window-material`/`window-corners`, `solid-with-shadow` has no shadow, and `transparent` shows the
+  desktop only where the platform's surface supports alpha (softbuffer doesn't expose an alpha mode).
 - Selection gaps: page text selection works across runs in paint order (so `z-index` reordering can scramble the
   selection order), can't start inside a link or control, has no keyboard (Shift+arrows), and ignores `user-select: none` on a span inside a selectable block (it applies per paragraph/run); `text-selection-color` isn't painted; `Range`/
   `Selection` objects beyond `toString()`/`removeAllRanges()` are missing. Form gaps: no IME or drag-and-drop; no `<form>` submit or validation; `<select>` has no `<optgroup>` labels, list boxes have no drag-selection, focus ring or
@@ -191,6 +204,7 @@ float, tables, transforms, transitions and animations, and opt-in page text sele
 4. **Stacking contexts + GPU** — real stacking contexts and `position: fixed`; Skia on Metal
    (macOS), D3D (Windows), Vulkan/GL (Linux) instead of the CPU raster path.
 5. **Accessibility and input** — `accesskit`, IME.
+   (Window configuration, frameless windows and window chrome roles are done.)
 6. **CSS and control polish** — `white-space: pre*`, `:has()`, `transitionend`/`animationend`,
    3D transforms, `inset` shadows, text wrapping around floats line by line, `table-layout: fixed`,
    `<optgroup>`, list-box drag selection. The known gaps above list the rest.
