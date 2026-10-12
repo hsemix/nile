@@ -11,7 +11,7 @@
 use std::{cell::RefCell, num::NonZeroU32, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 
 use nile_dom::{Document, NodeId, ScriptSource};
-use nile_layout::{LayoutOptions, LayoutTree, MenuRequest, ScrollOffsets};
+use nile_layout::{FileImages, LayoutOptions, LayoutTree, MenuRequest, ScrollOffsets};
 use nile_render::{Overlay, Renderer};
 use nile_script::{Environment, ScriptHost, UiEvent};
 use nile_style::{compute_styles_in, InteractionState, StyleMap};
@@ -92,6 +92,8 @@ struct View {
     /// Elements scrolled since the page last looked, to fire `scroll` events.
     scrolled: Vec<NodeId>,
     interaction: InteractionState,
+    /// Where `<img>` and `url()` backgrounds are read from: the page's folder.
+    images: FileImages,
     /// The open `<select>` drop-down and its highlighted row.
     menu: Option<MenuRequest>,
     /// Selection in the focused text input, in characters of its value: the fixed
@@ -171,7 +173,7 @@ impl View {
         let (width, height) = self.viewport;
         let stale = !matches!(&self.layout, Some((w, h, _)) if *w == width && *h == height);
         if stale {
-            let options = LayoutOptions { menu: self.menu, offsets: Some(&self.scroll_offsets) };
+            let options = LayoutOptions { menu: self.menu, offsets: Some(&self.scroll_offsets), images: Some(&self.images) };
             let tree = nile_layout::layout_with(&self.doc.borrow(), &self.styles, &mut self.text, width, height, &options);
             self.layout = Some((width, height, tree));
         }
@@ -318,6 +320,7 @@ impl Page {
             caret: 0,
             pending_sel: std::collections::HashMap::new(),
             interaction,
+            images: FileImages::new(path.parent().map(PathBuf::from).unwrap_or_default()),
             focus_changes: Vec::new(),
         }));
 

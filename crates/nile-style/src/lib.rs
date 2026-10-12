@@ -9,6 +9,7 @@
 
 mod colors;
 mod gradient;
+mod grid;
 mod parse;
 mod selector;
 
@@ -21,6 +22,7 @@ use selectors::context::{
     SelectorCaches,
 };
 use selectors::matching::matches_selector;
+pub use grid::{area_lines, Breadth, GridAutoFlow, GridLine, GridPlace, Track, TrackItem, TrackRepeat};
 pub use gradient::{ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
 pub use parse::{Declaration, Rule, Stylesheet, Value};
 use parse::Cx;
@@ -85,6 +87,16 @@ pub enum BorderStyle {
     Dotted,
 }
 
+/// `background-size`. `None` in `Explicit` is `auto` for that axis.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum BgSize {
+    #[default]
+    Auto,
+    Cover,
+    Contain,
+    Explicit(Option<StopPos>, Option<StopPos>),
+}
+
 /// One `box-shadow` layer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoxShadow {
@@ -94,6 +106,24 @@ pub struct BoxShadow {
     pub spread: f32,
     pub color: Color,
     pub inset: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Float {
+    #[default]
+    None,
+    Left,
+    Right,
+}
+
+/// Which floats a box moves below (`clear`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Clear {
+    #[default]
+    None,
+    Left,
+    Right,
+    Both,
 }
 
 /// `position`. `Fixed` is laid out like `Absolute` (against the parent, scrolling with the page).
@@ -130,6 +160,7 @@ pub enum Display {
     /// A block container laid out as one atomic box inside an inline run.
     InlineBlock,
     Flex,
+    Grid,
     None,
 }
 
@@ -196,6 +227,8 @@ pub struct ComputedStyle {
     pub max_height: Length,
     pub margin: Edges<Length>,
     pub position: Position,
+    pub float: Float,
+    pub clear: Clear,
     /// `z-index`; `None` is `auto`.
     pub z_index: Option<i32>,
     /// `top`, `right`, `bottom`, `left`.
@@ -220,12 +253,37 @@ pub struct ComputedStyle {
     pub flex_basis: Length,
     pub justify_content: Align,
     pub align_items: Align,
-    pub gap: f32,
+    pub row_gap: f32,
+    pub column_gap: f32,
+    pub align_self: Align,
+    pub align_content: Align,
+
+    // Grid
+    pub justify_items: Align,
+    pub justify_self: Align,
+    pub grid_template_columns: Vec<TrackItem>,
+    pub grid_template_rows: Vec<TrackItem>,
+    pub grid_auto_columns: Vec<Track>,
+    pub grid_auto_rows: Vec<Track>,
+    pub grid_auto_flow: GridAutoFlow,
+    pub grid_column: GridPlace,
+    pub grid_row: GridPlace,
+    /// `grid-template-areas`: the area name of each cell, by row.
+    pub grid_areas: Vec<Vec<String>>,
+    /// `grid-area: <name>` of an item.
+    pub grid_area_name: Option<String>,
 
     // Paint
     pub background: Option<Color>,
     /// The first gradient of `background` / `background-image`, painted over the color.
     pub background_image: Option<Gradient>,
+    /// `background-image: url(...)`, as written.
+    pub background_url: Option<String>,
+    pub background_size: BgSize,
+    /// Where the image sits in the box: (x, y), a fraction of the free space or px.
+    pub background_position: (StopPos, StopPos),
+    /// Whether the image tiles horizontally, vertically.
+    pub background_repeat: (bool, bool),
     /// Resolved per-side border colors (top, right, bottom, left).
     pub border_color: Edges<Color>,
     /// What the author set: `None` follows `color` (CSS `currentColor`, the initial value).
@@ -268,6 +326,8 @@ impl Default for ComputedStyle {
             max_height: Length::Auto,
             margin: Edges::all(Length::Px(0.0)),
             position: Position::Static,
+            float: Float::None,
+            clear: Clear::None,
             z_index: None,
             inset: Edges::all(Length::Auto),
             padding: Edges::all(0.0),
@@ -284,9 +344,27 @@ impl Default for ComputedStyle {
             flex_basis: Length::Auto,
             justify_content: Align::Normal,
             align_items: Align::Normal,
-            gap: 0.0,
+            row_gap: 0.0,
+            column_gap: 0.0,
+            align_self: Align::Normal,
+            align_content: Align::Normal,
+            justify_items: Align::Normal,
+            justify_self: Align::Normal,
+            grid_template_columns: Vec::new(),
+            grid_template_rows: Vec::new(),
+            grid_auto_columns: Vec::new(),
+            grid_auto_rows: Vec::new(),
+            grid_auto_flow: GridAutoFlow::default(),
+            grid_column: GridPlace::default(),
+            grid_row: GridPlace::default(),
+            grid_areas: Vec::new(),
+            grid_area_name: None,
             background: None,
             background_image: None,
+            background_url: None,
+            background_size: BgSize::Auto,
+            background_position: (StopPos::Fraction(0.0), StopPos::Fraction(0.0)),
+            background_repeat: (true, true),
             border_color: Edges::all(Color::BLACK),
             border_color_set: Edges::all(None),
             border_style: Edges::all(BorderStyle::None),
@@ -340,6 +418,7 @@ impl ComputedStyle {
                 Display::Inline => "inline",
                 Display::InlineBlock => "inline-block",
                 Display::Flex => "flex",
+                Display::Grid => "grid",
                 Display::None => "none",
             }
             .into(),
@@ -419,7 +498,8 @@ impl ComputedStyle {
             .into(),
             "flex-grow" => self.flex_grow.to_string(),
             "flex-shrink" => self.flex_shrink.to_string(),
-            "gap" => px(self.gap),
+            "gap" | "row-gap" => px(self.row_gap),
+            "column-gap" => px(self.column_gap),
             _ => return None,
         })
     }
@@ -451,6 +531,7 @@ pub(crate) const ROOT_FONT_SIZE: f32 = 16.0;
 
 const UA_STYLESHEET: &str = r#"
 head, script, style, title, meta, link, option, optgroup { display: none }
+img { display: inline-block }
 html, body, div, p, h1, h2, h3, section, header, footer, main, nav, ul, li { display: block }
 span, a, b, strong, em, i, u, s, del, br, label { display: inline }
 form { display: block }
@@ -828,6 +909,68 @@ fn substitute(text: &str, vars: &BTreeMap<String, String>, depth: u32) -> Option
     Some(out)
 }
 
+fn stop_len(v: &Value, fs: f32) -> Option<StopPos> {
+    match length(v, fs)? {
+        Length::Px(p) => Some(StopPos::Px(p)),
+        Length::Percent(p) => Some(StopPos::Fraction(p)),
+        _ => None,
+    }
+}
+
+/// `background-position`: one or two keywords/lengths.
+fn bg_position(v: &[Value], fs: f32) -> Option<(StopPos, StopPos)> {
+    let half = StopPos::Fraction(0.5);
+    let (mut x, mut y) = (None, None);
+    let mut free = Vec::new();
+    for item in v {
+        match item.ident() {
+            Some("left") => x = Some(StopPos::Fraction(0.0)),
+            Some("right") => x = Some(StopPos::Fraction(1.0)),
+            Some("top") => y = Some(StopPos::Fraction(0.0)),
+            Some("bottom") => y = Some(StopPos::Fraction(1.0)),
+            Some("center") => free.push(half),
+            Some(_) => return None,
+            None => free.push(stop_len(item, fs)?),
+        }
+    }
+    if v.is_empty() || v.len() > 2 {
+        return None;
+    }
+    let mut free = free.into_iter();
+    let x = x.or_else(|| free.next()).unwrap_or(half);
+    let y = y.or_else(|| free.next()).unwrap_or(half);
+    Some((x, y))
+}
+
+fn bg_size(v: &[Value], fs: f32) -> Option<BgSize> {
+    let part = |x: &Value| -> Option<Option<StopPos>> {
+        if x.ident() == Some("auto") {
+            Some(None)
+        } else {
+            stop_len(x, fs).map(Some)
+        }
+    };
+    match v {
+        [x] if x.ident() == Some("cover") => Some(BgSize::Cover),
+        [x] if x.ident() == Some("contain") => Some(BgSize::Contain),
+        [w] => Some(BgSize::Explicit(part(w)?, None)),
+        [w, h] => Some(BgSize::Explicit(part(w)?, part(h)?)),
+        _ => None,
+    }
+}
+
+fn bg_repeat(v: &[Value]) -> Option<(bool, bool)> {
+    let words: Vec<&str> = v.iter().filter_map(Value::ident).filter(|i| i.contains("repeat")).collect();
+    match words.as_slice() {
+        ["repeat"] => Some((true, true)),
+        ["no-repeat"] => Some((false, false)),
+        ["repeat-x"] => Some((true, false)),
+        ["repeat-y"] => Some((false, true)),
+        [x, y] => Some((*x != "no-repeat", *y != "no-repeat")),
+        _ => None,
+    }
+}
+
 fn color_of(x: &Value, current: Color) -> Option<Color> {
     x.color().or_else(|| (x.ident() == Some("currentcolor")).then_some(current))
 }
@@ -856,7 +999,7 @@ fn border_style(v: &Value) -> Option<BorderStyle> {
     })
 }
 
-fn length(v: &Value, font_size: f32) -> Option<Length> {
+pub(crate) fn length(v: &Value, font_size: f32) -> Option<Length> {
     Some(match v {
         Value::Px(px) => Length::Px(*px),
         Value::Number(n) if *n == 0.0 => Length::Px(0.0),
@@ -871,7 +1014,7 @@ fn length(v: &Value, font_size: f32) -> Option<Length> {
     })
 }
 
-fn px(v: &Value, font_size: f32) -> Option<f32> {
+pub(crate) fn px(v: &Value, font_size: f32) -> Option<f32> {
     match length(v, font_size)? {
         Length::Px(p) => Some(p),
         _ => None,
@@ -889,7 +1032,7 @@ fn edges<T: Copy>(vals: &[T]) -> Option<Edges<T>> {
     })
 }
 
-fn align(v: &Value) -> Option<Align> {
+pub(crate) fn align(v: &Value) -> Option<Align> {
     Some(match v.ident()? {
         "flex-start" | "start" => Align::Start,
         "flex-end" | "end" => Align::End,
@@ -928,6 +1071,7 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 Some("inline") => Display::Inline,
                 Some("inline-block") => Display::InlineBlock,
                 Some("flex") | Some("inline-flex") => Display::Flex,
+                Some("grid") | Some("inline-grid") => Display::Grid,
                 Some("none") => Display::None,
                 _ => return,
             }
@@ -988,6 +1132,23 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 Some("relative" | "sticky") => Position::Relative,
                 Some("absolute") => Position::Absolute,
                 Some("fixed") => Position::Fixed,
+                _ => return,
+            }
+        }
+        "float" => {
+            s.float = match first.and_then(Value::ident) {
+                Some("left" | "inline-start") => Float::Left,
+                Some("right" | "inline-end") => Float::Right,
+                Some("none") => Float::None,
+                _ => return,
+            }
+        }
+        "clear" => {
+            s.clear = match first.and_then(Value::ident) {
+                Some("left") => Clear::Left,
+                Some("right") => Clear::Right,
+                Some("both") => Clear::Both,
+                Some("none") => Clear::None,
                 _ => return,
             }
         }
@@ -1097,6 +1258,40 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                     Value::Gradient(g) => Some((**g).clone()),
                     _ => None,
                 });
+                s.background_url = v.iter().find_map(|x| match x {
+                    Value::Url(u) => Some(u.clone()),
+                    _ => None,
+                });
+            }
+            if d.name == "background" {
+                // `<position> [/ <size>] <repeat>`, in any order around the image and color.
+                let (before, after) = match v.iter().position(|x| *x == Value::Slash) {
+                    Some(i) => (&v[..i], &v[i + 1..]),
+                    None => (&v[..], &v[..0]),
+                };
+                let pos_vals: Vec<Value> = before
+                    .iter()
+                    .filter(|x| matches!(x, Value::Percent(_) | Value::Px(_) | Value::Em(_) | Value::Rem(_)) || matches!(x.ident(), Some("left" | "right" | "top" | "bottom" | "center")))
+                    .cloned()
+                    .collect();
+                s.background_position = bg_position(&pos_vals, fs).unwrap_or((StopPos::Fraction(0.0), StopPos::Fraction(0.0)));
+                s.background_size = bg_size(after, fs).unwrap_or(BgSize::Auto);
+                s.background_repeat = bg_repeat(before).unwrap_or((true, true));
+            }
+        }
+        "background-position" => {
+            if let Some(p) = bg_position(v, fs) {
+                s.background_position = p;
+            }
+        }
+        "background-size" => {
+            if let Some(z) = bg_size(v, fs) {
+                s.background_size = z;
+            }
+        }
+        "background-repeat" => {
+            if let Some(r) = bg_repeat(v) {
+                s.background_repeat = r;
             }
         }
         "box-shadow" => {
@@ -1241,8 +1436,10 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         },
         "justify-content" => s.justify_content = first.and_then(align).unwrap_or(s.justify_content),
         "align-items" => s.align_items = first.and_then(align).unwrap_or(s.align_items),
-        "gap" => s.gap = p(first).unwrap_or(s.gap),
-        _ => {} // Unsupported properties are ignored, like a browser would.
+        _ => {
+            // Grid and gap properties; anything else is unsupported and ignored, like a browser would.
+            grid::apply(s, &d.name, v, fs);
+        }
     }
 }
 
@@ -1571,5 +1768,56 @@ mod tests {
         assert!(style_of(&doc, &styles, "c").background_image.is_none()); // needs two stops
         assert!(style_of(&doc, &styles, "d").background_image.is_none());
         assert_eq!(style_of(&doc, &styles, "e").background_image.unwrap().kind, GradientKind::Linear(LinearDir::Angle(90.0)));
+    }
+
+    #[test]
+    fn grid_properties_parse() {
+        let doc = Document::parse(
+            r#"<div id="a" style="display: grid; grid-template-columns: 100px repeat(2, minmax(10px, 1fr)) auto; grid-auto-flow: column dense; gap: 4px 8px; grid-template-areas: 'a b' 'c c'"></div>
+               <div id="b" style="grid-column: 2 / span 3; grid-row: span 2; align-self: center; grid-area: hero"></div>
+               <div id="c" style="grid-area: 1 / 2 / 3 / 4; place-items: center end"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let a = style_of(&doc, &styles, "a");
+        assert_eq!(a.display, Display::Grid);
+        let fixed = |p: f32| Track { min: Breadth::Px(p), max: Breadth::Px(p) };
+        assert_eq!(
+            a.grid_template_columns,
+            vec![
+                TrackItem::Track(fixed(100.0)),
+                TrackItem::Repeat(TrackRepeat::Count(2), vec![Track { min: Breadth::Px(10.0), max: Breadth::Fr(1.0) }]),
+                TrackItem::Track(Track { min: Breadth::Auto, max: Breadth::Auto }),
+            ]
+        );
+        assert_eq!(a.grid_auto_flow, GridAutoFlow { column: true, dense: true });
+        assert_eq!((a.row_gap, a.column_gap), (4.0, 8.0));
+        assert_eq!(a.grid_areas, vec![vec!["a", "b"], vec!["c", "c"]]);
+        let b = style_of(&doc, &styles, "b");
+        assert_eq!(b.grid_column, GridPlace { start: GridLine::Line(2), end: GridLine::Span(3) });
+        assert_eq!(b.grid_row.start, GridLine::Span(2));
+        assert_eq!((b.align_self, b.grid_area_name.as_deref()), (Align::Center, Some("hero")));
+        let c = style_of(&doc, &styles, "c");
+        assert_eq!(c.grid_row, GridPlace { start: GridLine::Line(1), end: GridLine::Line(3) });
+        assert_eq!(c.grid_column, GridPlace { start: GridLine::Line(2), end: GridLine::Line(4) });
+        assert_eq!((c.align_items, c.justify_items), (Align::Center, Align::End));
+    }
+
+    #[test]
+    fn background_image_properties() {
+        let doc = Document::parse(
+            r#"<div id="a" style="background: #fff url('a b.png') no-repeat right 10px / 50% auto"></div>
+               <div id="b" style="background-image: url(x.png); background-size: cover; background-position: center top; background-repeat: repeat-x"></div>
+               <div id="c" style="background-image: url(x.png); background: red"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let a = style_of(&doc, &styles, "a");
+        assert_eq!(a.background_url.as_deref(), Some("a b.png"));
+        assert_eq!(a.background_repeat, (false, false));
+        assert_eq!(a.background_position, (StopPos::Fraction(1.0), StopPos::Px(10.0)));
+        assert_eq!(a.background_size, BgSize::Explicit(Some(StopPos::Fraction(0.5)), None));
+        let b = style_of(&doc, &styles, "b");
+        assert_eq!((b.background_size, b.background_repeat), (BgSize::Cover, (true, false)));
+        assert_eq!(b.background_position, (StopPos::Fraction(0.5), StopPos::Fraction(0.0)));
+        assert!(style_of(&doc, &styles, "c").background_url.is_none()); // the shorthand reset it
     }
 }

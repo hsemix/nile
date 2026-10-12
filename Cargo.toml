@@ -27,3 +27,5 @@ rquickjs = { version = "0.14", features = ["loader"] }
 winit = "0.30"
 softbuffer = "0.4"
 arboard = { version = "3.6", default-features = false }
+imagesize = "0.13"
+base64 = "0.22"

@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 
-use nile_layout::{BoxContent, LayoutBox, LayoutTree, MenuBox, NodeId, Rect as LRect, ScrollOffsets, TextContent};
-use nile_style::{Appearance, BorderStyle, Color as CssColor, Edges, Extent, Gradient, GradientKind, LinearDir, StopPos, StyleMap};
+use nile_layout::{ImageData, BoxContent, LayoutBox, LayoutTree, MenuBox, NodeId, Rect as LRect, ScrollOffsets, TextContent};
+use nile_style::{BgSize, Appearance, BorderStyle, Color as CssColor, Edges, Extent, Gradient, GradientKind, LinearDir, StopPos, StyleMap};
 use nile_text::{Affinity, Cursor, PositionedLayoutItem, Selection};
 use skia_safe::{
     font::Edging, Canvas, Color, Font, FontMgr, GlyphId, Paint, Point, RRect, Rect, Typeface,
@@ -31,6 +31,8 @@ pub struct Renderer {
     font_mgr: FontMgr,
     /// Skia typefaces keyed by (Parley font blob id, collection index).
     typefaces: HashMap<(u64, u32), Option<Typeface>>,
+    /// Decoded pictures by `ImageData::id`; `None` where decoding failed.
+    pictures: HashMap<u64, Option<skia_safe::Image>>,
 }
 
 impl Default for Renderer {
@@ -41,7 +43,7 @@ impl Default for Renderer {
 
 impl Renderer {
     pub fn new() -> Self {
-        Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new() }
+        Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new(), pictures: HashMap::new() }
     }
 
     /// Paint the whole tree.
@@ -127,8 +129,90 @@ impl Renderer {
     fn paint_box(&mut self, canvas: &Canvas, b: &LayoutBox, styles: &StyleMap) {
         let s = styles.get(b.node);
         paint_shadows(canvas, skia_rect(b.rect), &s.box_shadow, s.border_radius);
-        paint_decorated(canvas, skia_rect(b.rect), s.background, s.background_image.as_ref(), &Border { width: s.border_width, color: s.border_color, style: s.border_style }, s.border_radius);
+        let photo = b.bg_image.as_ref().and_then(|data| self.background_shader(data, s, b.rect));
+        let border = Border { width: s.border_width, color: s.border_color, style: s.border_style };
+        paint_decorated(canvas, skia_rect(b.rect), s.background, s.background_image.as_ref(), photo, &border, s.border_radius);
+        if let Some(data) = &b.image {
+            self.paint_picture(canvas, data, s, b.rect);
+        }
         paint_control_mark(canvas, s, b.rect);
+    }
+
+    fn picture(&mut self, data: &ImageData) -> Option<skia_safe::Image> {
+        self.pictures
+            .entry(data.id)
+            .or_insert_with(|| skia_safe::Image::from_encoded(skia_safe::Data::new_copy(&data.bytes)))
+            .clone()
+    }
+
+    /// An `<img>`'s picture, stretched over its content box.
+    fn paint_picture(&mut self, canvas: &Canvas, data: &ImageData, s: &nile_style::ComputedStyle, r: LRect) {
+        let Some(img) = self.picture(data) else { return };
+        let (b, p) = (s.border_width, s.padding);
+        let dest = Rect::from_ltrb(r.x + b.left + p.left, r.y + b.top + p.top, r.x + r.width - b.right - p.right, r.y + r.height - b.bottom - p.bottom);
+        if dest.width() <= 0.0 || dest.height() <= 0.0 {
+            return;
+        }
+        let radius = (s.border_radius - b.top.max(b.left) - p.top.max(p.left)).max(0.0);
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        canvas.save();
+        if s.border_radius > 0.0 {
+            canvas.clip_rrect(RRect::new_rect_xy(dest, radius, radius), skia_safe::ClipOp::Intersect, true);
+        }
+        let sampling = skia_safe::SamplingOptions::new(skia_safe::FilterMode::Linear, skia_safe::MipmapMode::Linear);
+        canvas.draw_image_rect_with_sampling_options(&img, None, dest, sampling, &paint);
+        canvas.restore();
+    }
+
+    /// A shader that paints `data` as `background-image: url()` over the box `r`.
+    fn background_shader(&mut self, data: &ImageData, s: &nile_style::ComputedStyle, r: LRect) -> Option<skia_safe::Shader> {
+        let img = self.picture(data)?;
+        let b = s.border_width;
+        // The image is placed in the padding box.
+        let (ax, ay) = (r.x + b.left, r.y + b.top);
+        let (aw, ah) = (r.width - b.left - b.right, r.height - b.top - b.bottom);
+        let (iw, ih) = (data.width as f32, data.height as f32);
+        if aw <= 0.0 || ah <= 0.0 || iw <= 0.0 || ih <= 0.0 {
+            return None;
+        }
+        let len = |p: StopPos, whole: f32| match p {
+            StopPos::Px(px) => px,
+            StopPos::Fraction(f) => f * whole,
+        };
+        let (tw, th) = match s.background_size {
+            BgSize::Auto => (iw, ih),
+            BgSize::Cover => {
+                let k = (aw / iw).max(ah / ih);
+                (iw * k, ih * k)
+            }
+            BgSize::Contain => {
+                let k = (aw / iw).min(ah / ih);
+                (iw * k, ih * k)
+            }
+            BgSize::Explicit(w, h) => match (w.map(|w| len(w, aw)), h.map(|h| len(h, ah))) {
+                (Some(w), Some(h)) => (w, h),
+                (Some(w), None) => (w, w * ih / iw),
+                (None, Some(h)) => (h * iw / ih, h),
+                (None, None) => (iw, ih),
+            },
+        };
+        if tw <= 0.0 || th <= 0.0 {
+            return None;
+        }
+        let (px, py) = s.background_position;
+        let ox = ax + match px {
+            StopPos::Px(v) => v,
+            StopPos::Fraction(f) => (aw - tw) * f,
+        };
+        let oy = ay + match py {
+            StopPos::Px(v) => v,
+            StopPos::Fraction(f) => (ah - th) * f,
+        };
+        let m = skia_safe::Matrix::translate((ox, oy)) * skia_safe::Matrix::scale((tw / iw, th / ih));
+        let mode = |repeat: bool| if repeat { skia_safe::TileMode::Repeat } else { skia_safe::TileMode::Decal };
+        let sampling = skia_safe::SamplingOptions::new(skia_safe::FilterMode::Linear, skia_safe::MipmapMode::Linear);
+        img.to_shader((mode(s.background_repeat.0), mode(s.background_repeat.1)), sampling, &m)
     }
 
     fn paint_text(&mut self, canvas: &Canvas, rect: LRect, content: &TextContent) {
@@ -380,13 +464,27 @@ struct Border {
 }
 
 /// Draw `bg` and a (per-side) border inside `outer`, with rounded corners.
-fn paint_decorated(canvas: &Canvas, outer: Rect, bg: Option<CssColor>, image: Option<&Gradient>, border: &Border, radius: f32) {
+fn paint_decorated(
+    canvas: &Canvas,
+    outer: Rect,
+    bg: Option<CssColor>,
+    image: Option<&Gradient>,
+    photo: Option<skia_safe::Shader>,
+    border: &Border,
+    radius: f32,
+) {
     let (w, c, st) = (border.width, border.color, border.style);
     let outer_r = RRect::new_rect_xy(outer, radius, radius);
     if let Some(bg) = bg.filter(|c| c.a > 0) {
         canvas.draw_rrect(outer_r, &fill(bg));
     }
     if let Some(shader) = image.and_then(|g| gradient_shader(g, outer)) {
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_shader(shader);
+        canvas.draw_rrect(outer_r, &paint);
+    }
+    if let Some(shader) = photo {
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         paint.set_shader(shader);
@@ -612,7 +710,7 @@ fn paint_inline_fragments(
             origin.x + f.x1,
             origin.y + f.bottom + d.padding.bottom + d.border.bottom,
         );
-        paint_decorated(canvas, rect, d.background, None, &Border { width: d.border, color: d.border_color, style: d.border_style }, d.radius);
+        paint_decorated(canvas, rect, d.background, None, None, &Border { width: d.border, color: d.border_color, style: d.border_style }, d.radius);
     }
 }
 

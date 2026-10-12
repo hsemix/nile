@@ -37,6 +37,23 @@ pub enum Value {
     /// An angle in degrees.
     Angle(f32),
     Gradient(Box<Gradient>),
+    /// A `fr` track size.
+    Fr(f32),
+    /// `url(...)`.
+    Url(String),
+    /// A top-level `/` (grid lines).
+    Slash,
+    /// `minmax(min, max)`, and `fit-content(x)` as `minmax(auto, x)`.
+    Minmax(Box<(Value, Value)>),
+    /// `repeat(count, tracks...)`.
+    Repeat(Box<(RepeatKind, Vec<Value>)>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RepeatKind {
+    Count(u16),
+    AutoFill,
+    AutoFit,
 }
 
 impl Value {
@@ -336,6 +353,7 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
                     "em" => Value::Em(value),
                     "rem" => Value::Rem(value),
                     "pt" => Value::Px(value * 4.0 / 3.0),
+                    "fr" => Value::Fr(value),
                     "deg" => Value::Angle(value),
                     "turn" => Value::Angle(value * 360.0),
                     "rad" => Value::Angle(value.to_degrees()),
@@ -348,6 +366,8 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
             }
         }
         Token::Comma => Value::Comma,
+        Token::UnquotedUrl(ref u) => Value::Url(u.to_string()),
+        Token::Delim('/') => Value::Slash,
         Token::Ident(ref s) => Value::Ident(s.to_ascii_lowercase()),
         Token::QuotedString(ref s) => Value::Str(s.to_string()),
         Token::Hash(ref h) | Token::IDHash(ref h) => match hex_color(h) {
@@ -374,6 +394,34 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
                         Some(g) => Value::Gradient(Box::new(g)),
                         None => return Ok(None),
                     }
+                }
+                "minmax" | "fit-content" => {
+                    let args = p.parse_nested_block(|p| gradient_items(p, cx))?;
+                    let flat: Vec<&Vec<Value>> = args.iter().collect();
+                    match (name.as_str(), flat.as_slice()) {
+                        ("minmax", [a, b]) if a.len() == 1 && b.len() == 1 => Value::Minmax(Box::new((a[0].clone(), b[0].clone()))),
+                        ("fit-content", [a]) if a.len() == 1 => Value::Minmax(Box::new((Value::Ident("auto".into()), a[0].clone()))),
+                        _ => return Ok(None),
+                    }
+                }
+                "repeat" => {
+                    let args = p.parse_nested_block(|p| gradient_items(p, cx))?;
+                    let Some((count, rest)) = args.split_first() else { return Ok(None) };
+                    let kind = match count.as_slice() {
+                        [Value::Number(n)] if n.fract() == 0.0 && *n >= 1.0 => RepeatKind::Count(*n as u16),
+                        [Value::Ident(i)] if i == "auto-fill" => RepeatKind::AutoFill,
+                        [Value::Ident(i)] if i == "auto-fit" => RepeatKind::AutoFit,
+                        _ => return Ok(None),
+                    };
+                    let tracks: Vec<Value> = rest.iter().flatten().cloned().collect();
+                    if tracks.is_empty() {
+                        return Ok(None);
+                    }
+                    Value::Repeat(Box::new((kind, tracks)))
+                }
+                "url" => {
+                    let url = p.parse_nested_block(|p| Ok::<_, ParseError<()>>(p.expect_string()?.to_string()))?;
+                    Value::Url(url)
                 }
                 "attr" => {
                     let name = p.parse_nested_block(|p| Ok::<_, ParseError<()>>(p.expect_ident()?.to_string()))?;
