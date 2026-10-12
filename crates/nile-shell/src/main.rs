@@ -11,7 +11,7 @@
 use std::{cell::RefCell, num::NonZeroU32, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 
 use nile_dom::{Document, NodeId, ScriptSource};
-use nile_layout::{LayoutTree, ScrollOffsets};
+use nile_layout::{LayoutOptions, LayoutTree, MenuRequest, ScrollOffsets};
 use nile_render::{Overlay, Renderer};
 use nile_script::{Environment, ScriptHost, UiEvent};
 use nile_style::{compute_styles_with, InteractionState, StyleMap};
@@ -92,6 +92,8 @@ struct View {
     /// Elements scrolled since the page last looked, to fire `scroll` events.
     scrolled: Vec<NodeId>,
     interaction: InteractionState,
+    /// The open `<select>` drop-down and its highlighted row.
+    menu: Option<MenuRequest>,
     /// Selection in the focused text input, in characters of its value: the fixed
     /// end and the moving end (the caret).
     anchor: usize,
@@ -134,6 +136,9 @@ impl View {
         self.scroll_offsets.insert(node, new);
         self.scrolled.push(node);
         self.scroll_dirty = true;
+        // The drop-down is positioned for the old scroll position.
+        self.menu = None;
+        self.layout = None;
         true
     }
 
@@ -146,6 +151,13 @@ impl View {
         self.caret = c.min(len);
     }
 
+    /// Open, move or close the `<select>` drop-down.
+    fn set_menu(&mut self, menu: Option<MenuRequest>) {
+        self.menu = menu;
+        self.layout = None;
+        self.scroll_dirty = true;
+    }
+
     fn set_viewport(&mut self, width: f32, height: f32) {
         self.viewport = (width, height);
     }
@@ -155,7 +167,8 @@ impl View {
         let (width, height) = self.viewport;
         let stale = !matches!(&self.layout, Some((w, h, _)) if *w == width && *h == height);
         if stale {
-            let tree = nile_layout::layout(&self.doc.borrow(), &self.styles, &mut self.text, width, height);
+            let options = LayoutOptions { menu: self.menu, offsets: Some(&self.scroll_offsets) };
+            let tree = nile_layout::layout_with(&self.doc.borrow(), &self.styles, &mut self.text, width, height, &options);
             self.layout = Some((width, height, tree));
         }
         &self.layout.as_ref().unwrap().2
@@ -296,6 +309,7 @@ impl Page {
             scroll_dirty: false,
             scroll_offsets: ScrollOffsets::new(),
             scrolled: Vec::new(),
+            menu: None,
             anchor: 0,
             caret: 0,
             pending_sel: std::collections::HashMap::new(),
@@ -422,6 +436,9 @@ impl Page {
             }
             self.emit(o, UiEvent::Plain("blur"));
         }
+        if self.view.borrow().menu.is_some_and(|m| Some(m.select) != new) {
+            self.close_menu();
+        }
         self.show_caret();
         if let Some(n) = new {
             self.value_at_focus = self.is_text_input(n).then(|| self.value_of(n));
@@ -478,6 +495,7 @@ impl Page {
     /// i.e. `dy > 0` is wheel-up): the innermost `overflow: auto | scroll` ancestor
     /// that can still move that way takes it, else the page does.
     fn wheel(&mut self, dx: f32, dy: f32) {
+        self.close_menu();
         let target = self.pointer.and_then(|(x, y)| self.hit_test(x, y));
         let mut cur = target;
         while let Some(n) = cur {
@@ -579,6 +597,10 @@ impl Page {
 
     fn pointer_moved(&mut self, x: f32, y: f32) -> bool {
         self.pointer = Some((x, y));
+        // With a drop-down open the pointer belongs to it.
+        if self.view.borrow().menu.is_some() {
+            return self.menu_hover(x, y);
+        }
         let mut changed = self.refresh_hover();
         // Dragging inside a text input extends its selection.
         if let Some(f) = self.drag {
@@ -651,6 +673,10 @@ impl Page {
     /// Primary button down: the hovered element becomes active and focus moves
     /// to its nearest focusable ancestor (or is cleared).
     fn press(&mut self) -> bool {
+        // While a drop-down is open the click is decided on release.
+        if self.view.borrow().menu.is_some() {
+            return false;
+        }
         let target = self.interaction().hover;
         self.pressed = target;
         let mut changed = false;
@@ -697,6 +723,9 @@ impl Page {
     /// pressed and released elements.
     fn release(&mut self) -> bool {
         self.drag = None;
+        if self.view.borrow().menu.is_some() {
+            return self.menu_release();
+        }
         let mut changed = false;
         let target = self.interaction().hover;
         if let Some(t) = target {
@@ -805,11 +834,216 @@ impl Page {
     /// Default action for a key the page didn't cancel: Tab moves focus,
     /// anything else edits the focused text input.
     fn default_key(&mut self, key: &str, mods: ModifiersState) -> bool {
-        let changed = if key == "Tab" { self.focus_next(!mods.shift_key()) } else { self.edit_key(key, mods) };
+        let changed = if self.view.borrow().menu.is_some() {
+            self.menu_key(key)
+        } else if key == "Tab" {
+            self.focus_next(!mods.shift_key())
+        } else if self.interaction().focus.is_some_and(|f| self.is_select(f)) {
+            self.select_key(key, mods)
+        } else {
+            self.edit_key(key, mods)
+        };
         if changed {
             self.show_caret();
         }
         changed
+    }
+
+    fn is_select(&self, id: NodeId) -> bool {
+        self.doc.borrow().node(id).tag() == Some("select")
+    }
+
+    /// The nearest `<select>` at or above `id`.
+    fn select_at_or_above(&self, id: NodeId) -> Option<NodeId> {
+        let doc = self.doc.borrow();
+        let mut cur = Some(id);
+        while let Some(n) = cur {
+            if doc.node(n).tag() == Some("select") {
+                return Some(n);
+            }
+            cur = doc.node(n).parent;
+        }
+        None
+    }
+
+    fn open_menu(&mut self, select: NodeId) {
+        let selected = nile_layout::selected_index(&self.doc.borrow(), select);
+        self.view.borrow_mut().set_menu(Some(MenuRequest { select, highlight: selected }));
+    }
+
+    fn close_menu(&mut self) {
+        if self.view.borrow().menu.is_some() {
+            self.view.borrow_mut().set_menu(None);
+        }
+    }
+
+    /// Options of the open menu's select as (node, disabled).
+    fn menu_options(&self) -> Vec<(NodeId, bool)> {
+        let Some(m) = self.view.borrow().menu else { return Vec::new() };
+        let doc = self.doc.borrow();
+        nile_layout::select_options(&doc, m.select).into_iter().map(|o| (o, doc.has_state(o, "disabled"))).collect()
+    }
+
+    /// The menu row at a viewport point, if the point is inside the menu.
+    fn menu_row_at(&mut self, x: f32, y: f32) -> Option<Option<usize>> {
+        let mut v = self.view.borrow_mut();
+        let y = y + v.scroll_y;
+        let menu = v.layout().menu.as_ref()?;
+        menu.contains(x, y).then(|| menu.row_at(x, y))
+    }
+
+    fn set_highlight(&mut self, row: Option<usize>) -> bool {
+        let mut v = self.view.borrow_mut();
+        match v.menu {
+            Some(m) if m.highlight != row => {
+                v.set_menu(Some(MenuRequest { highlight: row, ..m }));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Pointer over the open menu: highlight the enabled row under it.
+    fn menu_hover(&mut self, x: f32, y: f32) -> bool {
+        let options = self.menu_options();
+        match self.menu_row_at(x, y) {
+            Some(Some(row)) if !options.get(row).is_some_and(|o| o.1) => self.set_highlight(Some(row)),
+            _ => false,
+        }
+    }
+
+    /// Button released with the menu open: pick the row under the pointer, or close.
+    fn menu_release(&mut self) -> bool {
+        let Some(select) = self.view.borrow().menu.map(|m| m.select) else { return false };
+        let (x, y) = self.pointer.unwrap_or_default();
+        let options = self.menu_options();
+        match self.menu_row_at(x, y) {
+            Some(Some(row)) if !options.get(row).is_some_and(|o| o.1) => {
+                self.choose_option(select, row);
+            }
+            // On a disabled row: stay open.
+            Some(_) => return false,
+            None => self.close_menu(),
+        }
+        true
+    }
+
+    /// Make option `index` of `select` the choice, firing `input` and `change` if it differs.
+    fn choose_option(&mut self, select: NodeId, index: usize) {
+        let before = nile_layout::selected_index(&self.doc.borrow(), select);
+        {
+            let mut doc = self.doc.borrow_mut();
+            for (i, o) in nile_layout::select_options(&doc, select).into_iter().enumerate() {
+                doc.set_state(o, "selected", i == index);
+                if i != index {
+                    doc.remove_attr(o, "selected");
+                }
+            }
+        }
+        self.close_menu();
+        self.sync();
+        if before != Some(index) {
+            self.emit(select, UiEvent::Plain("input"));
+            self.emit(select, UiEvent::Plain("change"));
+        }
+    }
+
+    /// Next enabled option from `from` in direction `dir`, stopping at the ends.
+    fn step_option(&self, from: Option<usize>, dir: i32, options: &[(NodeId, bool)]) -> Option<usize> {
+        let mut i = from.map_or(if dir > 0 { -1 } else { options.len() as i32 }, |f| f as i32);
+        loop {
+            i += dir;
+            if i < 0 || i >= options.len() as i32 {
+                return from;
+            }
+            if !options[i as usize].1 {
+                return Some(i as usize);
+            }
+        }
+    }
+
+    /// First enabled option after `from` whose label starts with `c` (type-ahead).
+    fn find_option_starting(&self, select: NodeId, from: Option<usize>, c: char) -> Option<usize> {
+        let doc = self.doc.borrow();
+        let options = nile_layout::select_options(&doc, select);
+        let n = options.len();
+        (1..=n).map(|k| (from.map_or(0, |f| f + k)) % n.max(1)).find(|&i| {
+            !doc.has_state(options[i], "disabled")
+                && nile_layout::option_label(&doc, options[i]).chars().next().is_some_and(|f| f.eq_ignore_ascii_case(&c))
+        })
+    }
+
+    /// Keys while the drop-down is open.
+    fn menu_key(&mut self, key: &str) -> bool {
+        let Some(m) = self.view.borrow().menu else { return false };
+        let options = self.menu_options();
+        match key {
+            "ArrowDown" | "ArrowUp" => {
+                let next = self.step_option(m.highlight, if key == "ArrowDown" { 1 } else { -1 }, &options);
+                self.set_highlight(next)
+            }
+            "Home" => {
+                let first = self.step_option(None, 1, &options);
+                self.set_highlight(first)
+            }
+            "End" => {
+                let last = self.step_option(None, -1, &options);
+                self.set_highlight(last)
+            }
+            "Enter" | " " => {
+                if let Some(row) = m.highlight {
+                    self.choose_option(m.select, row);
+                }
+                true
+            }
+            "Escape" | "Tab" => {
+                self.close_menu();
+                true
+            }
+            k if k.chars().count() == 1 => match self.find_option_starting(m.select, m.highlight, k.chars().next().unwrap()) {
+                Some(i) => self.set_highlight(Some(i)),
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Keys on a focused, closed `<select>`: arrows change the choice, space/Enter open it.
+    fn select_key(&mut self, key: &str, mods: ModifiersState) -> bool {
+        let Some(select) = self.interaction().focus.filter(|f| self.is_select(*f)) else { return false };
+        if self.is_disabled(select) {
+            return false;
+        }
+        let options: Vec<(NodeId, bool)> = {
+            let doc = self.doc.borrow();
+            nile_layout::select_options(&doc, select).into_iter().map(|o| (o, doc.has_state(o, "disabled"))).collect()
+        };
+        let current = nile_layout::selected_index(&self.doc.borrow(), select);
+        let target = match key {
+            "ArrowDown" if mods.alt_key() => {
+                self.open_menu(select);
+                return true;
+            }
+            " " | "Enter" => {
+                self.open_menu(select);
+                return true;
+            }
+            "ArrowDown" => self.step_option(current, 1, &options),
+            "ArrowUp" => self.step_option(current, -1, &options),
+            "Home" => self.step_option(None, 1, &options),
+            "End" => self.step_option(None, -1, &options),
+            k if k.chars().count() == 1 && !mods.control_key() && !mods.super_key() => {
+                self.find_option_starting(select, current, k.chars().next().unwrap())
+            }
+            _ => return false,
+        };
+        match target {
+            Some(i) if Some(i) != current => {
+                self.choose_option(select, i);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn value_of(&self, id: NodeId) -> String {
@@ -861,6 +1095,14 @@ impl Page {
             }
             found
         };
+        // A click on a <select> opens its drop-down.
+        if let Some(select) = self.select_at_or_above(target) {
+            if !self.is_disabled(select) {
+                self.open_menu(select);
+                return true;
+            }
+            return false;
+        }
         let Some((n, is_label)) = found else { return false };
         if is_label {
             let control = {
@@ -1845,6 +2087,89 @@ cd</textarea>
         assert_eq!((p.anchor(), p.caret()), (0, 6), "wrapped to the first input, all selected");
         p.default_key("Tab", ModifiersState::default());
         assert_eq!((p.anchor(), p.caret()), (0, 3), "then the second");
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn sel_index(p: &Page, id: &str) -> usize {
+        let n = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+        nile_layout::selected_index(&p.doc.borrow(), n).unwrap()
+    }
+
+    /// Viewport point at the middle of row `row` of the open menu.
+    fn row_point(p: &mut Page, row: usize) -> (f32, f32) {
+        let mut v = p.view.borrow_mut();
+        let m = v.layout().menu.as_ref().expect("menu is open");
+        (m.rect.x + 10.0, m.rect.y + 1.0 + m.row_height * (row as f32 + 0.5))
+    }
+
+    const SELECT_PAGE: &str = r#"<body style="margin:0"><select id="s"><option value="r">Red</option><option value="g" disabled>Green</option><option value="b">Blue</option><option value="y">Yellow</option></select><p id="below">below</p>
+        <script>
+          for (const t of ['input', 'change']) $('#s').addEventListener(t, () => console.log(t + ':' + $('#s').value));
+        </script></body>"#;
+
+    #[test]
+    fn select_opens_chooses_with_the_mouse_and_closes() {
+        let (mut p, path) = page(SELECT_PAGE, "select-mouse");
+        click(&mut p, "s");
+        assert!(p.view.borrow().menu.is_some(), "click opens the drop-down");
+        assert_eq!(p.view.borrow().menu.unwrap().highlight, Some(0));
+        // Hovering a row highlights it; a disabled row doesn't take it.
+        let (x, y) = row_point(&mut p, 2);
+        p.pointer_moved(x, y);
+        assert_eq!(p.view.borrow().menu.unwrap().highlight, Some(2));
+        let (x, y) = row_point(&mut p, 1);
+        p.pointer_moved(x, y);
+        assert_eq!(p.view.borrow().menu.unwrap().highlight, Some(2), "disabled row can't be highlighted");
+        p.press();
+        p.release();
+        assert!(p.view.borrow().menu.is_some(), "releasing on a disabled row keeps it open");
+        // Choose Blue.
+        let (x, y) = row_point(&mut p, 2);
+        p.pointer_moved(x, y);
+        p.press();
+        p.release();
+        assert!(p.view.borrow().menu.is_none());
+        assert_eq!(sel_index(&p, "s"), 2);
+        // Opening and clicking outside closes without changing anything.
+        click(&mut p, "s");
+        let (bx, by) = center(&p, "below");
+        p.pointer_moved(bx + 200.0, by + 100.0);
+        p.press();
+        p.release();
+        assert!(p.view.borrow().menu.is_none());
+        assert_eq!(sel_index(&p, "s"), 2);
+        assert_eq!(log(&p), ["input:b", "change:b"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn select_keyboard_navigation() {
+        let (mut p, path) = page(SELECT_PAGE, "select-keys");
+        let none = ModifiersState::default();
+        click(&mut p, "s"); // open
+        press_key(&mut p, "ArrowDown", none); // skips the disabled Green
+        assert_eq!(p.view.borrow().menu.unwrap().highlight, Some(2));
+        press_key(&mut p, "End", none);
+        assert_eq!(p.view.borrow().menu.unwrap().highlight, Some(3));
+        press_key(&mut p, "ArrowDown", none); // stays at the end
+        assert_eq!(p.view.borrow().menu.unwrap().highlight, Some(3));
+        press_key(&mut p, "Escape", none);
+        assert!(p.view.borrow().menu.is_none());
+        assert_eq!(sel_index(&p, "s"), 0, "escape keeps the choice");
+        // Closed: arrows change the choice directly, with events.
+        press_key(&mut p, "ArrowDown", none);
+        assert_eq!(sel_index(&p, "s"), 2);
+        press_key(&mut p, "y", none); // type-ahead
+        assert_eq!(sel_index(&p, "s"), 3);
+        press_key(&mut p, "ArrowDown", none);
+        assert_eq!(sel_index(&p, "s"), 3, "no wrap at the end");
+        press_key(&mut p, " ", none); // opens
+        assert!(p.view.borrow().menu.is_some());
+        press_key(&mut p, "Home", none);
+        press_key(&mut p, "Enter", none); // choose Red
+        assert!(p.view.borrow().menu.is_none());
+        assert_eq!(sel_index(&p, "s"), 0);
+        assert_eq!(log(&p), ["input:b", "change:b", "input:y", "change:y", "input:r", "change:r"]);
         let _ = std::fs::remove_file(path);
     }
 }

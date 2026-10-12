@@ -85,7 +85,10 @@ cargo test --workspace
   focus order (`tabindex` respected), and `input`/`change`/`focus`/`blur` events. Text selection in inputs and
   textareas: Shift+arrows/Home/End, drag, Shift+click, double-click (word), triple-click (all), Ctrl/Cmd+A, and
   copy/cut/paste through the system clipboard; Tab selects an input's contents. In JS: `selectionStart`,
-  `selectionEnd`, `setSelectionRange()`, `select()`. In JS: `value`, `checked`, `disabled`, `type`, `name`,
+  `selectionEnd`, `setSelectionRange()`, `select()`. `<select>` with `<option>`s: a drop-down that opens on click,
+  Space/Enter or Alt+Down, with mouse hover, arrows/Home/End, type-ahead, Escape, disabled options, and `input`/
+  `change` events; sized to its longest option. In JS: `value`, `selectedIndex`, `options`, `option.selected`/
+  `text`/`label`/`value`, `length`. In JS: `value`, `checked`, `disabled`, `type`, `name`,
   `placeholder`, `focus()`, `blur()`, `document.activeElement` (see `examples/forms.html`).
 - **Pointer interaction:** hit testing (down to the inline element under the pointer), `:hover`, `:active` and
   click-to-focus on links and form controls, restyled live (see `examples/interact.html`).
@@ -102,7 +105,8 @@ cargo test --workspace
   line), inline margins are ignored, a wrapped inline's border/radius isn't sliced at the break, only the
   innermost decorated inline is painted, and block children of an inline element don't split the run.
 - Form gaps: selection works only inside inputs/textareas (no selecting page text); no undo/redo, word-wise
-  movement (Alt/Ctrl+arrows), IME or drag-and-drop; no `<select>`, `<form>` submit or validation; Home/End in a
+  movement (Alt/Ctrl+arrows), IME or drag-and-drop; no `<form>` submit or validation; `<select>` is single-choice only (no `multiple`, `size`, `<optgroup>` labels), its
+  list doesn't scroll or flip above the select near the bottom edge, and it closes when the page scrolls; Home/End in a
   `<textarea>` use hard line breaks only; `selectionStart/End` count characters, not UTF-16 units; `value` lives
   in the `value` attribute (no separate default value). Sciter's `Element.value` for other behaviors isn't there.
 - Scrollbars are overlay indicators only: no dragging or track clicks, no `scrollbar-*` styling, no keyboard
@@ -123,7 +127,7 @@ cargo test --workspace
 
 1. **Incremental updates** — the `cursor` property, and restyling /
    relaying out only what a state change affects (today every change restyles the whole page).
-2. **More controls + Sciter compatibility** — `<select>`, selecting page text, undo, draggable scrollbars and keyboard scrolling, `@env`/`@sciter`/`@sys` modules, class components and `componentUpdate`, `this://` URLs.
+2. **More controls + Sciter compatibility** — selecting page text, undo, `<select multiple>`, draggable scrollbars and keyboard scrolling, `@env`/`@sciter`/`@sys` modules, class components and `componentUpdate`, `this://` URLs.
 3. **Stacking contexts + GPU** — paint tree with opacity, transforms, clipping,
    overflow scrolling; Skia on Metal (macOS), D3D (Windows), Vulkan/GL (Linux).
 4. **Embedding API** — a C ABI (`cbindgen`) so Go, C#, Python, etc. can host it.

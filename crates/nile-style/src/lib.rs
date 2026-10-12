@@ -91,6 +91,8 @@ pub enum Appearance {
     None,
     Checkbox,
     Radio,
+    /// A `<select>` drop-down: draws its chevron.
+    Select,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -271,6 +273,7 @@ impl ComputedStyle {
                 Appearance::None => "none",
                 Appearance::Checkbox => "checkbox",
                 Appearance::Radio => "radio",
+                Appearance::Select => "select",
             }
             .into(),
             "box-sizing" => if self.border_box { "border-box" } else { "content-box" }.into(),
@@ -354,7 +357,7 @@ impl ComputedStyle {
 const ROOT_FONT_SIZE: f32 = 16.0;
 
 const UA_STYLESHEET: &str = r#"
-head, script, style, title, meta, link { display: none }
+head, script, style, title, meta, link, option, optgroup { display: none }
 html, body, div, p, h1, h2, h3, section, header, footer, main, nav, ul, li { display: block }
 span, a, b, strong, em, i, u, s, del, br, label { display: inline }
 form { display: block }
@@ -373,8 +376,10 @@ button, input { display: inline-block; font-size: 13px; color: #000000; padding:
 input { background: #ffffff; width: 160px; min-height: 16px; margin: 2px; overflow: hidden }
 textarea { display: inline-block; font-size: 13px; color: #000000; padding: 3px 4px; border: 1px solid #767676;
   border-radius: 3px; background: #ffffff; width: 200px; height: 60px; margin: 2px; overflow: auto }
-input:focus, textarea:focus { border-color: #1d4ed8 }
-button:disabled, input:disabled, textarea:disabled { color: #8a8a8a; background: #f0f0f0; border-color: #c4c4c4 }
+select { display: inline-block; font-size: 13px; color: #000000; padding: 3px 26px 3px 8px; border: 1px solid #767676;
+  border-radius: 3px; background: #ffffff; min-height: 16px; margin: 2px; overflow: hidden; appearance: select }
+input:focus, textarea:focus, select:focus { border-color: #1d4ed8 }
+button:disabled, input:disabled, textarea:disabled, select:disabled { color: #8a8a8a; background: #f0f0f0; border-color: #c4c4c4 }
 input[type=checkbox], input[type=radio] { width: 13px; height: 13px; min-height: 0; padding: 0;
   margin: 3px 4px; background: #ffffff; appearance: checkbox }
 input[type=radio] { border-radius: 7px; appearance: radio }
@@ -580,6 +585,7 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
             s.appearance = match first.and_then(Value::ident) {
                 Some("checkbox") => Appearance::Checkbox,
                 Some("radio") => Appearance::Radio,
+                Some("select" | "menulist") => Appearance::Select,
                 Some("none") | Some("auto") => Appearance::None,
                 _ => return,
             }

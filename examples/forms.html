@@ -21,7 +21,8 @@
     <label><input type="radio" name="size" value="m" checked> M</label>
     <label for="l"><input id="l" type="radio" name="size" value="l"> L</label>
   </div>
-  <div class="row"><button id="go">Send</button> <input value="disabled" disabled></div>
+  <div class="row"><button id="go">Send</button> <input value="disabled" disabled>
+    <select id="color"><option value="r">Red</option><option value="g">Green</option><option value="b" selected>Blue</option><option disabled>Mauve (n/a)</option><option value="y">Yellow</option></select></div>
   <div class="row"><textarea id="bio" placeholder="A few words about you"></textarea>
     <textarea id="notes" style="width: 150px">Line one
 Line two
@@ -33,7 +34,7 @@ Line five</textarea></div>
     const out = $('#out');
     const report = (what) => {
       const size = $$('input[name=size]').find((r) => r.checked);
-      out.textContent = `${what}: name="${$('#name').value}", subscribe=${$('#news').checked}, size=${size && size.value}`;
+      out.textContent = `${what}: name="${$('#name').value}", subscribe=${$('#news').checked}, size=${size && size.value}, color=${$('#color').value}`;
     };
     document.addEventListener('input', () => report('input'));
     document.addEventListener('change', (e) => report('change ' + e.target.type));
