@@ -1,0 +1,45 @@
+<!doctype html>
+<html window-frame="solid" window-width="640" window-height="420" window-min-width="360"
+      window-min-height="240" window-alignment="5" window-resizable="6px"
+      window-title="Frameless window">
+<meta charset="utf-8">
+<style>
+  html { background: #0f172a }
+  body { margin: 0; font-family: sans-serif; color: #e2e8f0; display: flex; flex-direction: column; height: 100vh }
+  .bar { display: flex; align-items: center; height: 36px; background: #1e293b; padding-left: 12px; flex: none }
+  .bar .title { flex: 1; font-size: 13px; color: #94a3b8 }
+  .bar button { width: 46px; height: 36px; border: 0; border-radius: 0; background: transparent; color: #cbd5e1; padding: 0; font-size: 14px }
+  .bar button:hover { background: #334155 }
+  .bar button.close:hover { background: #dc2626; color: white }
+  main { padding: 20px; flex: 1 }
+  code { background: #1e293b; padding: 2px 6px; border-radius: 4px }
+  .row { margin: 10px 0 }
+  button.act { background: #2563eb; color: white; border: 0; padding: 6px 12px }
+</style>
+<body>
+  <div class="bar" role="window-caption">
+    <span class="title">Frameless window &mdash; drag here, double-click to maximize</span>
+    <button role="window-minimize">&#x2013;</button>
+    <button role="window-maximize">&#x25A1;</button>
+    <button role="window-close" class="close">&#x2715;</button>
+  </div>
+  <main>
+    <div class="row">The page draws its own title bar. Elements with <code>role="window-caption"</code> drag the
+      window, and <code>window-minimize</code> / <code>window-maximize</code> / <code>window-close</code> are the buttons.</div>
+    <div class="row">Window edges resize it (<code>window-resizable="6px"</code>).</div>
+    <div class="row">
+      <button class="act" id="rename">document.title = "Renamed"</button>
+      <button class="act" id="full">Fullscreen</button>
+      <button class="act" id="move">moveBy(40, 40)</button>
+    </div>
+    <div class="row" id="info"></div>
+  </main>
+  <script>
+    $("#rename").on("click", () => { document.title = "Renamed " + Date.now() % 1000; });
+    $("#full").on("click", () => { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); });
+    $("#move").on("click", () => window.moveBy(40, 40));
+    const info = () => { $("#info").textContent = `inner ${innerWidth}x${innerHeight}, outer ${outerWidth}x${outerHeight}`; };
+    info(); window.addEventListener("resize", info);
+  </script>
+</body>
+</html>

@@ -1094,6 +1094,14 @@ fn build(
                 let extra = if list_rows(doc, id).is_some() { 22.0 } else { 0.0 };
                 ts.min_size.width = LengthPercentageAuto::length(widest_option(doc, style, text, id) + extra);
             }
+            // A button's label sits in the middle of its box, however tall the page makes it.
+            let children = if node.tag() == Some("button") && !children.is_empty() {
+                ts.display = taffy::Display::Flex;
+                ts.flex_direction = taffy::FlexDirection::Column;
+                vec![anonymous_aligned(tree, &children, true)?]
+            } else {
+                children
+            };
             let n = tree.new_with_children(ts, &children).ok()?;
             tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
             hand_off_absolute(style, n)
@@ -1102,6 +1110,23 @@ fn build(
 }
 
 /// `<input>` types whose `value` is drawn as a line of text.
+/// An anonymous box around `children` for a column-flex parent: auto margins push it to the
+/// middle (or, without `middle`, the bottom) of the parent's height. Anonymous nodes have no
+/// `NodeCtx`, which `flatten` skips over while still laying out their children.
+fn anonymous_aligned(tree: &mut TaffyTree<NodeCtx>, children: &[taffy::NodeId], middle: bool) -> Option<taffy::NodeId> {
+    let auto = LengthPercentageAuto::auto();
+    let zero = LengthPercentageAuto::length(0.0);
+    let style = Style {
+        display: taffy::Display::Flex,
+        flex_direction: taffy::FlexDirection::Column,
+        margin: taffy::Rect { top: auto, bottom: if middle { auto } else { zero }, left: zero, right: zero },
+        flex_shrink: 0.0,
+        size: Size { width: Dimension::percent(1.0), height: Dimension::auto() },
+        ..Default::default()
+    };
+    tree.new_with_children(style, children).ok()
+}
+
 /// A table laid out as a grid: columns and rows are auto-sized tracks, each cell is a grid
 /// item spanning `colspan` x `rowspan` tracks, and each `<tr>` is an empty item behind its
 /// cells so row backgrounds and borders still paint.
@@ -1228,21 +1253,7 @@ fn build_table(
         // middle or bottom by auto margins on a wrapper inside a column flex cell.
         if matches!(v, VerticalAlign::Middle | VerticalAlign::Bottom) {
             let inner = tree.children(n).ok()?;
-            let auto = LengthPercentageAuto::auto();
-            let wrapper = Style {
-                display: taffy::Display::Flex,
-                flex_direction: taffy::FlexDirection::Column,
-                margin: taffy::Rect {
-                    top: auto,
-                    bottom: if v == VerticalAlign::Middle { auto } else { LengthPercentageAuto::length(0.0) },
-                    left: LengthPercentageAuto::length(0.0),
-                    right: LengthPercentageAuto::length(0.0),
-                },
-                flex_shrink: 0.0,
-                size: Size { width: Dimension::percent(1.0), height: Dimension::auto() },
-                ..Default::default()
-            };
-            let wrapper = tree.new_with_children(wrapper, &inner).ok()?;
+            let wrapper = anonymous_aligned(tree, &inner, v == VerticalAlign::Middle)?;
             tree.set_children(n, &[wrapper]).ok()?;
             st.display = taffy::Display::Flex;
             st.flex_direction = taffy::FlexDirection::Column;
@@ -2843,5 +2854,17 @@ second</textarea><textarea id="e"></textarea></body>"#,
         assert_eq!(b.x, a.x + a.width - 1.0, "neighbouring borders share a pixel");
         assert_eq!(c.y, b.y + b.height - 1.0);
         assert_eq!(a.height, b.height + c.height - 1.0, "a row-spanning cell fills both rows");
+    }
+
+    #[test]
+    fn button_labels_are_centred_in_a_taller_box() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><button id="b" style="width:100px;height:60px;padding:0;border:0;margin:0"><span id="s">Hi</span></button></body>"#,
+        );
+        let (b, s) = (rect_of(&doc, &t, "b"), rect_of(&doc, &t, "s"));
+        let text = t.boxes.iter().rfind(|x| matches!(x.content, BoxContent::Text(_))).unwrap().rect;
+        let (above, below) = (text.y - b.y, b.y + b.height - (text.y + text.height));
+        assert!((above - below).abs() <= 1.0 && above > 10.0, "label centred vertically: {above} vs {below}");
+        assert!(text.x >= b.x && s.width > 0.0);
     }
 }

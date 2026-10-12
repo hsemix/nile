@@ -30,6 +30,22 @@ mod jsx;
 
 const PRELUDE: &str = include_str!("prelude.js");
 
+/// Something a script asks the host window to do.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WindowCommand {
+    Close,
+    Minimize,
+    Maximize,
+    /// Back from maximized, minimized or full screen.
+    Restore,
+    ToggleMaximize,
+    Fullscreen(bool),
+    /// Outer position in screen pixels.
+    MoveTo(f32, f32),
+    /// Inner size in CSS px.
+    ResizeTo(f32, f32),
+}
+
 /// What scripts can ask of the embedder: layout results and the viewport.
 /// Implementations must bring styles/layout up to date with the document
 /// before answering, since scripts expect to read what they just wrote.
@@ -59,6 +75,13 @@ pub trait Environment {
         String::new()
     }
     fn clear_selected_text(&self) {}
+    /// Close, move, resize, ... the host window. Embedders without a window ignore it.
+    fn window_command(&self, _cmd: WindowCommand) {}
+    /// Window `[screenX, screenY, outerWidth, outerHeight, fullscreen (0/1)]`.
+    fn window_rect(&self) -> [f32; 5] {
+        let (w, h) = self.viewport();
+        [0.0, 0.0, w, h, 0.0]
+    }
 }
 
 /// Resolves `./` and `../` imports against the importing module's file.
@@ -308,6 +331,28 @@ fn install_natives(
             vec![w, h]
         }
     });
+    native!("windowCommand", {
+        let env = env.clone();
+        move |name: String, a: f64, b: f64| {
+            let (a, b) = (a as f32, b as f32);
+            let cmd = match name.as_str() {
+                "close" => WindowCommand::Close,
+                "minimize" => WindowCommand::Minimize,
+                "maximize" => WindowCommand::Maximize,
+                "restore" => WindowCommand::Restore,
+                "toggleMaximize" => WindowCommand::ToggleMaximize,
+                "fullscreen" => WindowCommand::Fullscreen(a != 0.0),
+                "moveTo" => WindowCommand::MoveTo(a, b),
+                "resizeTo" => WindowCommand::ResizeTo(a, b),
+                _ => return,
+            };
+            env.window_command(cmd);
+        }
+    });
+    native!("windowRect", {
+        let env = env.clone();
+        move || -> Vec<f32> { env.window_rect().to_vec() }
+    });
     native!("scrollY", {
         let env = env.clone();
         move || -> f32 { env.scroll_y() }
@@ -427,6 +472,11 @@ impl ScriptHost {
     /// Fire `DOMContentLoaded` on the document, then `load` on the window.
     pub fn fire_load(&self) {
         self.call_global("__lifecycle", |_, f| f.call::<_, ()>(()));
+    }
+
+    /// Fire an event such as `resize` at the window.
+    pub fn fire_window_event(&self, kind: &str) {
+        self.call_global("__windowEvent", |_, f| f.call::<_, ()>((kind,)));
     }
 
     /// Dispatch `event` at `target` with capture and bubble phases. Returns
