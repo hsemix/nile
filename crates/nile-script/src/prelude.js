@@ -819,6 +819,35 @@
     },
   });
 
+  // ---- the embedder ------------------------------------------------------
+  // `host.name(...args)` calls a function the embedding application registered; arguments and
+  // result travel as JSON. `host.has(name)` tells whether one exists.
+  const hostCall = (name, args) => {
+    const r = N.hostCall(String(name), JSON.stringify(args));
+    return r === "" ? undefined : JSON.parse(r);
+  };
+  g.host = new Proxy({}, {
+    get: (_, k) => {
+      if (typeof k === "symbol") return undefined;
+      if (k === "call") return (name, ...args) => hostCall(name, args);
+      if (k === "has") return (name) => N.hostHas(String(name));
+      return (...args) => hostCall(k, args);
+    },
+  });
+  Object.defineProperty(g, "__show", {
+    value: (v) => (typeof v === "string" ? v : v === undefined ? "" : (() => { try { return JSON.stringify(v) ?? ""; } catch { return String(v); } })()),
+  });
+  Object.defineProperty(g, "__invoke", {
+    value(name, argsJson) {
+      const parts = String(name).split(".");
+      const fn = parts.reduce((o, k) => (o == null ? undefined : o[k]), g);
+      if (typeof fn !== "function") throw new Error(`${name} is not a function`);
+      const owner = parts.length > 1 ? parts.slice(0, -1).reduce((o, k) => o[k], g) : g;
+      const r = fn.apply(owner, JSON.parse(argsJson || "[]"));
+      return r === undefined ? "" : JSON.stringify(r) ?? "";
+    },
+  });
+
   // ---- entry points for the host -----------------------------------------
   const MOUSE = new Set(["click", "dblclick", "mousedown", "mouseup", "mousemove", "mouseover", "mouseout", "contextmenu"]);
   const KEY = new Set(["keydown", "keyup"]);

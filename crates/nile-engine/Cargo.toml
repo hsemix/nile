@@ -1,0 +1,19 @@
+[package]
+name = "nile-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The OS clipboard (`arboard`). Off for embedders that supply their own clipboard.
+system-clipboard = ["dep:arboard"]
+
+[dependencies]
+nile-dom.workspace = true
+nile-style.workspace = true
+nile-text.workspace = true
+nile-layout.workspace = true
+nile-render.workspace = true
+nile-script.workspace = true
+skia-safe.workspace = true
+arboard = { workspace = true, optional = true }
