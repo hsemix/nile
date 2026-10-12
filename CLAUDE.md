@@ -46,6 +46,7 @@ cargo run -p nile-shell -- examples/interact.html --png out.png --hover 40,40   
 cargo run -p nile-shell -- examples/scripting.html --png out.png --click 60,80 --wait 400
 cargo run -p nile-shell -- examples/measure.html --png out.png
 cargo run -p nile-shell -- examples/todo/index.html --png out.png --click 60,128   # modules + JSX
+cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --type "Ada{Backspace}x"
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings          # CI enforces this
 ```
@@ -82,6 +83,12 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
   `on()` handlers get `(evt, matched)` with `this` = the attached element; JSX
   returns vnode arrays that `append`/`content`/`patch` render. Check the docs
   before adding more, don't write Sciter API shapes from memory.
+- Form controls: `Page` in the shell owns default actions (`click_default`:
+  checkbox/radio/label) and text editing (`edit_key`, `caret` in chars of `value`).
+  An `<input>`'s text is synthesized in layout (`build_control_text`), the
+  renderer draws check/radio marks from `appearance` + `checked` and the caret
+  from Parley's `Cursor`. `value` is the `value` attribute; `checked`/`disabled`
+  are `Document` state flags.
 - JSX is a source transform (`nile-script/src/jsx.rs`, a scanner, not a parser)
   applied to every script and module before QuickJS sees it; it returns `None`
   for non-JSX or malformed input so the engine reports the original error. Modules
@@ -105,8 +112,8 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
 
 ## Next up
 
-Font fallback for symbol glyphs (`✓` renders as a missing-glyph box: Parley
-isn't picking a symbols font for it), then form controls / Sciter behaviors
-(`Element.value`, text input, checkbox) which also give `state` flags real
-meaning. Other open items: Tab focus order, element-level scrolling,
-incremental restyle, `@env`/`@sciter` modules (README roadmap #2).
+More controls (README roadmap #2): `<textarea>` (multi-line, wrapping, vertical
+caret movement), `<select>`, text selection with shift/drag, clipboard, and
+clipping/scrolling of long input values. Other open items: Tab focus order,
+caret blink, element-level scrolling, incremental restyle, `@env`/`@sciter`
+modules, symbol fallback check on Windows/Linux.

@@ -15,12 +15,13 @@
 
 use std::ops::Range;
 
-use nile_dom::{Document, NodeId, NodeKind};
+pub use nile_dom::NodeId;
+use nile_dom::{Document, NodeKind};
 use nile_style::{
     Align, Color, ComputedStyle, Display, Edges, FlexDirection, Length, StyleMap, TextAlign,
 };
 use nile_text::{
-    break_lines, collapse_whitespace, Alignment, Cluster, InlineBoxSpec, PositionedLayoutItem, TextEngine,
+    break_lines, collapse_whitespace, Alignment, Cluster, Cursor, InlineBoxSpec, PositionedLayoutItem, TextEngine,
     TextLayout, TextStyle,
 };
 use taffy::prelude::*;
@@ -82,6 +83,17 @@ struct InlineKid {
 }
 
 impl LayoutTree {
+    /// Byte offset into the text of `node` (an input) nearest to a point in
+    /// document coordinates, for placing a caret by clicking.
+    pub fn text_index_at(&self, node: NodeId, x: f32, y: f32) -> Option<usize> {
+        let b = self.boxes.iter().find(|b| match &b.content {
+            BoxContent::Text(c) => c.owners.iter().any(|(_, n)| *n == node),
+            _ => false,
+        })?;
+        let BoxContent::Text(c) = &b.content else { return None };
+        Some(Cursor::from_point(&c.layout, x - b.rect.x, y - b.rect.y).index())
+    }
+
     /// Border box of `node` in document coordinates. Block-level elements have
     /// a box; an inline element's rect is the union of its text runs (without
     /// padding). `None` if it generated nothing (e.g. `display: none`, or empty).
@@ -151,6 +163,8 @@ enum NodeCtx {
         kids: Vec<InlineKid>,
         decos: Vec<InlineDeco>,
         owners: Vec<(Range<usize>, NodeId)>,
+        /// Never wrap (single-line text inputs).
+        nowrap: bool,
     },
 }
 
@@ -160,7 +174,9 @@ fn measure_node(
     style: &Style,
 ) -> taffy::LayoutOutput {
     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |known, available| match ctx {
-        Some(NodeCtx::Text { layout, align, .. }) => measure_text(layout, *align, known, available),
+        Some(NodeCtx::Text { layout, align, nowrap, .. }) => {
+            measure_text(layout, *align, known, available, *nowrap)
+        }
         _ => Size::ZERO,
     })
 }
@@ -209,12 +225,14 @@ fn measure_text(
     align: Alignment,
     known: Size<Option<f32>>,
     available: Size<AvailableSpace>,
+    nowrap: bool,
 ) -> Size<f32> {
     let max_width = known.width.or(match available.width {
         AvailableSpace::Definite(w) => Some(w),
         AvailableSpace::MinContent => Some(0.0),
         AvailableSpace::MaxContent => None,
     });
+    let max_width = if nowrap { None } else { max_width };
     break_lines(layout, max_width, align);
     Size {
         width: known.width.unwrap_or_else(|| layout.width()),
@@ -239,12 +257,94 @@ fn build(
             if style.display == Display::None {
                 return None;
             }
-            let children = build_children(doc, styles, text, tree, node.children.as_slice(), style);
+            let children = if is_value_control(node) {
+                build_control_text(doc, styles, text, tree, id).into_iter().collect()
+            } else {
+                build_children(doc, styles, text, tree, node.children.as_slice(), style)
+            };
             let n = tree.new_with_children(taffy_style(style), &children).ok()?;
             tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
             Some(n)
         }
     }
+}
+
+/// `<input>` types whose `value` is drawn as a line of text.
+fn is_value_control(node: &nile_dom::Node) -> bool {
+    node.tag() == Some("input")
+        && !matches!(node.attr("type").map(str::to_ascii_lowercase).as_deref(), Some("checkbox" | "radio" | "hidden" | "file" | "image"))
+}
+
+fn is_password(node: &nile_dom::Node) -> bool {
+    node.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("password"))
+}
+
+/// The text shown for an input: its value (bullets for passwords), else the
+/// placeholder. A zero-width space stands in for empty text so the line keeps
+/// its height and the caret has a place to sit.
+fn control_display(node: &nile_dom::Node) -> (String, bool) {
+    let value = node.attr("value").unwrap_or("");
+    if value.is_empty() {
+        let ph = node.attr("placeholder").unwrap_or("");
+        return (if ph.is_empty() { "\u{200b}".into() } else { ph.replace('\n', " ") }, !ph.is_empty());
+    }
+    if is_password(node) {
+        ("\u{2022}".repeat(value.chars().count()), false)
+    } else {
+        (value.replace('\n', " "), false)
+    }
+}
+
+/// Byte offset in an input's displayed text of character `char_idx` of its value.
+pub fn caret_byte(doc: &Document, node: NodeId, char_idx: usize) -> usize {
+    let n = doc.node(node);
+    let value = n.attr("value").unwrap_or("");
+    if is_password(n) {
+        return char_idx.min(value.chars().count()) * '\u{2022}'.len_utf8();
+    }
+    value.char_indices().nth(char_idx).map_or(value.len(), |(i, _)| i)
+}
+
+/// Inverse of [`caret_byte`].
+pub fn caret_char(doc: &Document, node: NodeId, display_byte: usize) -> usize {
+    let n = doc.node(node);
+    let value = n.attr("value").unwrap_or("");
+    if is_password(n) {
+        return (display_byte / '\u{2022}'.len_utf8()).min(value.chars().count());
+    }
+    value.char_indices().take_while(|(i, _)| *i < display_byte).count()
+}
+
+/// The single text leaf inside an input.
+fn build_control_text(
+    doc: &Document,
+    styles: &StyleMap,
+    text: &mut TextEngine,
+    tree: &mut TaffyTree<NodeCtx>,
+    id: NodeId,
+) -> Option<taffy::NodeId> {
+    let node = doc.node(id);
+    let style = styles.get(id);
+    let (display, is_placeholder) = control_display(node);
+    let mut ts = text_style(style);
+    if is_placeholder {
+        ts.color = [117, 117, 117, 255];
+    }
+    let shaped = text.shape(&display, &ts, 1.0);
+    let owners = vec![(0..display.len(), id)];
+    tree.new_leaf_with_context(
+        Style::default(),
+        NodeCtx::Text {
+            node: id,
+            layout: Box::new(shaped),
+            align: alignment(style.text_align),
+            kids: Vec::new(),
+            decos: Vec::new(),
+            owners,
+            nowrap: true,
+        },
+    )
+    .ok()
 }
 
 /// Build a container's children. In a block container, consecutive inline
@@ -505,6 +605,7 @@ fn build_inline_run(
             kids,
             decos: inline.decos,
             owners: inline.owners,
+            nowrap: false,
         },
     )
     .ok()
@@ -538,12 +639,12 @@ fn flatten(
         Some(NodeCtx::Element(id)) => {
             out.push(LayoutBox { node: *id, rect, content: BoxContent::Element })
         }
-        Some(NodeCtx::Text { node, layout, align, kids, decos, owners }) => {
+        Some(NodeCtx::Text { node, layout, align, kids, decos, owners, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
             // Taffy rounds box sizes to whole pixels, which can shave a
             // fraction off the measured width and force a spurious wrap, so
             // allow one pixel of slack.
-            break_lines(layout, Some(rect.width + 1.0), *align);
+            break_lines(layout, if *nowrap { None } else { Some(rect.width + 1.0) }, *align);
             let layout = (**layout).clone();
             let kids = kids.clone();
             let decos = decos.clone();
@@ -780,6 +881,38 @@ mod tests {
         assert!(s.x >= 10.0 && b.x > s.x && b.x + b.width <= s.x + s.width + 0.5, "{s:?} {b:?}");
         assert!(b.height > 10.0 && b.y >= 10.0);
         assert_eq!(tree.node_rect(id("none")), None);
+    }
+
+    #[test]
+    fn text_inputs_show_value_or_placeholder_without_wrapping() {
+        let doc = Document::parse(
+            r#"<body style="margin:0"><input id="a" value="hello world, a long value that must not wrap" style="width:60px">
+               <input id="b" placeholder="Name"><input id="c" type="password" value="abc"><input id="d"></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 800.0, 100.0);
+        let id = |s: &str| doc.find(|n| n.attr("id") == Some(s)).unwrap();
+        let text_of = |n: NodeId| {
+            tree.boxes.iter().find(|b| b.node == n && matches!(b.content, BoxContent::Text(_))).unwrap()
+        };
+        let a = text_of(id("a"));
+        let BoxContent::Text(c) = &a.content else { unreachable!() };
+        assert_eq!(c.layout.lines().count(), 1, "long value stays on one line");
+        // The empty input still has a line's height; placeholder is its text.
+        let d = tree.node_rect(id("d")).unwrap();
+        assert!(d.height > 16.0, "{d:?}");
+        let b = text_of(id("b"));
+        let BoxContent::Text(c) = &b.content else { unreachable!() };
+        assert_eq!(c.owners[0].1, id("b"));
+        // Caret mapping: passwords draw bullets (3 bytes each).
+        assert_eq!(caret_byte(&doc, id("c"), 2), 6);
+        assert_eq!(caret_char(&doc, id("c"), 6), 2);
+        assert_eq!(caret_byte(&doc, id("a"), 5), 5);
+        let a_rect = tree.node_rect(id("a")).unwrap();
+        let idx = tree.text_index_at(id("a"), a_rect.x + 1.0, a_rect.y + a_rect.height / 2.0).unwrap();
+        assert!(idx <= 1, "clicking the left edge puts the caret at the start, got {idx}");
+        assert!(tree.text_index_at(id("a"), a_rect.x + 500.0, a_rect.y + 8.0).unwrap() > 5);
     }
 
     #[test]

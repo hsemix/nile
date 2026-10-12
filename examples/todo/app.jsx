@@ -9,7 +9,7 @@ const store = createStore([
 // A function component: called as Todo(props, children).
 const Todo = ({ item, index }) => (
   <li class={{ todo: true, done: item.done }} data-index={index} key={index}>
-    <span class="box">{item.done ? 'x' : ''}</span>
+    <span class="box">{item.done ? '✓' : ''}</span>
     <span class="label">{item.text}</span>
   </li>
 );

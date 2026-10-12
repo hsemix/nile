@@ -75,6 +75,15 @@ pub enum Display {
     None,
 }
 
+/// Native-looking control drawn by the renderer (`appearance`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Appearance {
+    #[default]
+    None,
+    Checkbox,
+    Radio,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum FlexDirection {
     #[default]
@@ -121,6 +130,9 @@ pub struct ComputedStyle {
     pub border_width: Edges<f32>,
     /// `box-sizing: border-box` (the CSS default is `content-box`).
     pub border_box: bool,
+    pub appearance: Appearance,
+    /// The element's `checked` state flag (checkbox/radio marks), resolved at cascade time.
+    pub checked: bool,
 
     // Flex
     pub flex_direction: FlexDirection,
@@ -164,6 +176,8 @@ impl Default for ComputedStyle {
             padding: Edges::all(0.0),
             border_width: Edges::all(0.0),
             border_box: false,
+            appearance: Appearance::None,
+            checked: false,
             flex_direction: FlexDirection::Row,
             flex_wrap: false,
             flex_grow: 0.0,
@@ -214,6 +228,12 @@ impl ComputedStyle {
                 Display::InlineBlock => "inline-block",
                 Display::Flex => "flex",
                 Display::None => "none",
+            }
+            .into(),
+            "appearance" => match self.appearance {
+                Appearance::None => "none",
+                Appearance::Checkbox => "checkbox",
+                Appearance::Radio => "radio",
             }
             .into(),
             "box-sizing" => if self.border_box { "border-box" } else { "content-box" }.into(),
@@ -297,7 +317,8 @@ const ROOT_FONT_SIZE: f32 = 16.0;
 const UA_STYLESHEET: &str = r#"
 head, script, style, title, meta, link { display: none }
 html, body, div, p, h1, h2, h3, section, header, footer, main, nav, ul, li { display: block }
-span, a, b, strong, em, i, u, s, del, br { display: inline }
+span, a, b, strong, em, i, u, s, del, br, label { display: inline }
+form { display: block }
 body { margin: 8px }
 h1 { font-size: 2em; font-weight: bold; margin: 0.67em 0 }
 h2 { font-size: 1.5em; font-weight: bold; margin: 0.83em 0 }
@@ -308,6 +329,16 @@ em, i { font-style: italic }
 u, a { text-decoration: underline }
 s, del { text-decoration: line-through }
 a { color: #0000ee }
+button, input { display: inline-block; font-size: 13px; color: #000000; padding: 3px 8px;
+  border: 1px solid #767676; border-radius: 3px; background: #efefef }
+input { background: #ffffff; width: 160px; min-height: 16px; margin: 2px }
+input:focus { border-color: #1d4ed8 }
+button:disabled, input:disabled { color: #8a8a8a; background: #f0f0f0; border-color: #c4c4c4 }
+input[type=checkbox], input[type=radio] { width: 13px; height: 13px; min-height: 0; padding: 0;
+  margin: 3px 4px; background: #ffffff; appearance: checkbox }
+input[type=radio] { border-radius: 7px; appearance: radio }
+input[type=checkbox]:checked, input[type=radio]:checked { background: #1d4ed8; border-color: #1d4ed8; color: #ffffff }
+input[type=button], input[type=submit], input[type=reset] { width: auto; background: #efefef }
 "#;
 
 /// Computed styles for every node, indexed by `NodeId.0`.
@@ -407,6 +438,8 @@ fn cascade(
         let inline = node.attr("style").map(parse::parse_declarations).unwrap_or_default();
         decls.extend(inline.iter());
 
+        style.checked = doc.has_state(id, "checked");
+
         // font-size first, so `em` in everything else resolves against it.
         for d in decls.iter().filter(|d| d.name == "font-size") {
             apply(&mut style, d, parent.font_size);
@@ -481,6 +514,14 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 Some("inline-block") => Display::InlineBlock,
                 Some("flex") | Some("inline-flex") => Display::Flex,
                 Some("none") => Display::None,
+                _ => return,
+            }
+        }
+        "appearance" | "-webkit-appearance" => {
+            s.appearance = match first.and_then(Value::ident) {
+                Some("checkbox") => Appearance::Checkbox,
+                Some("radio") => Appearance::Radio,
+                Some("none") | Some("auto") => Appearance::None,
                 _ => return,
             }
         }
