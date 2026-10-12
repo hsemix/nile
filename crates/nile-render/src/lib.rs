@@ -79,6 +79,9 @@ impl Renderer {
                         open.push((b.subtree_end.max(i + 1), None));
                     }
                     self.paint_box(canvas, b, styles);
+                    if let Some(m) = tree.marker(b.node) {
+                        self.paint_marker(canvas, m, styles.get(b.node).color);
+                    }
                     if let Some(list) = tree.list_box(b.node) {
                         self.paint_list(canvas, b.rect, styles.get(b.node), list);
                     }
@@ -98,7 +101,7 @@ impl Renderer {
                     if let Some(&(_, from, to)) = page_selection.iter().find(|(run, ..)| *run == i) {
                         paint_selection(canvas, b.rect, content, from, to, highlight);
                     }
-                    self.paint_text(canvas, b.rect, content);
+                    self.paint_text(canvas, b.rect, content, styles);
                     if let Some((_, at)) = caret.filter(|(n, _)| content.owners.iter().any(|(_, o)| o == n)) {
                         paint_caret(canvas, b.rect, content, at, styles.get(b.node).color);
                     }
@@ -120,6 +123,40 @@ impl Renderer {
         }
     }
 
+    /// A list item's bullet or number.
+    fn paint_marker(&mut self, canvas: &Canvas, m: &nile_layout::ListMarker, color: CssColor) {
+        use nile_layout::MarkerKind;
+        let r = m.rect;
+        let mut paint = fill(color);
+        paint.set_anti_alias(true);
+        match &m.kind {
+            MarkerKind::Disclosure { open } => {
+                let mut path = skia_safe::PathBuilder::new();
+                if *open {
+                    path.move_to((r.x, r.y + r.height * 0.2)).line_to((r.x + r.width, r.y + r.height * 0.2)).line_to((r.x + r.width / 2.0, r.y + r.height * 0.85));
+                } else {
+                    path.move_to((r.x + r.width * 0.15, r.y)).line_to((r.x + r.width * 0.15, r.y + r.height)).line_to((r.x + r.width * 0.85, r.y + r.height / 2.0));
+                }
+                path.close();
+                canvas.draw_path(&path.detach(), &paint);
+            }
+            MarkerKind::Disc => {
+                canvas.draw_circle((r.x + r.width / 2.0, r.y + r.height / 2.0), r.width / 2.0, &paint);
+            }
+            MarkerKind::Circle => {
+                paint.set_style(skia_safe::PaintStyle::Stroke);
+                paint.set_stroke_width(1.0);
+                canvas.draw_circle((r.x + r.width / 2.0, r.y + r.height / 2.0), (r.width - 1.0) / 2.0, &paint);
+            }
+            MarkerKind::Square => {
+                canvas.draw_rect(Rect::from_xywh(r.x, r.y, r.width, r.height), &paint);
+            }
+            MarkerKind::Text(layout) => {
+                self.paint_text_tinted(canvas, LRect { x: r.x, y: r.y, width: r.width, height: r.height }, layout, Some([color.r, color.g, color.b, color.a]));
+            }
+        }
+    }
+
     /// The rows of a list-box `<select>`, clipped to its padding box.
     fn paint_list(&mut self, canvas: &Canvas, r: LRect, s: &nile_style::ComputedStyle, l: &nile_layout::ListBox) {
         let b = s.border_width;
@@ -135,7 +172,7 @@ impl Renderer {
             }
             let line_h = item.text.height();
             let at = LRect { x: r.x + b.left + l.pad_x, y: top + (l.row_height - line_h) / 2.0, width: r.width, height: line_h };
-            let tint = if item.selected { Some([255, 255, 255, 255]) } else if item.disabled { Some([150, 150, 150, 255]) } else { None };
+            let tint = if item.selected { Some([255, 255, 255, 255]) } else if item.disabled { Some([150, 150, 150, 255]) } else { Some([s.color.r, s.color.g, s.color.b, s.color.a]) };
             self.paint_text_tinted(canvas, at, &item.text, tint);
         }
         canvas.restore();
@@ -278,8 +315,8 @@ impl Renderer {
         img.to_shader((mode(s.background_repeat.0), mode(s.background_repeat.1)), sampling, &m)
     }
 
-    fn paint_text(&mut self, canvas: &Canvas, rect: LRect, content: &TextContent) {
-        self.paint_layout(canvas, rect, &content.layout, Some(content), None);
+    fn paint_text(&mut self, canvas: &Canvas, rect: LRect, content: &TextContent, styles: &StyleMap) {
+        self.paint_layout(canvas, rect, &content.layout, Some((content, styles)), None);
     }
 
     /// Paint a bare text layout (menu rows), optionally overriding its color.
@@ -292,18 +329,27 @@ impl Renderer {
         canvas: &Canvas,
         rect: LRect,
         layout: &nile_text::TextLayout,
-        content: Option<&TextContent>,
+        content: Option<(&TextContent, &StyleMap)>,
         tint: Option<[u8; 4]>,
     ) {
         let mut glyph_ids: Vec<GlyphId> = Vec::new();
         let mut positions: Vec<Point> = Vec::new();
 
+        // `text-overflow: ellipsis`: where the first line must stop to leave room for "…".
+        let ellipsis = content.filter(|(c, _)| c.ellipsis && layout.full_width() > rect.width + 0.5);
+        let mut truncated = false;
         for line in layout.lines() {
-            if let Some(content) = content {
+            if truncated {
+                break;
+            }
+            if let Some((content, _)) = content {
                 paint_inline_fragments(canvas, rect, content, &line);
             }
             for item in line.items() {
                 let PositionedLayoutItem::GlyphRun(glyph_run) = item else { continue };
+                if truncated {
+                    break;
+                }
                 let run = glyph_run.run();
                 let font_data = run.font();
                 let Some(typeface) = self.typeface(font_data.data.id(), font_data.index, font_data.data.data())
@@ -323,13 +369,33 @@ impl Renderer {
 
                 glyph_ids.clear();
                 positions.clear();
+                let mut cut: Option<(f32, f32)> = None;
+                let dots = font.unichar_to_glyph('\u{2026}' as i32);
+                let dots_w = font.measure_str("\u{2026}", None).0;
                 for g in glyph_run.positioned_glyphs() {
+                    if ellipsis.is_some() && dots != 0 && g.x + g.advance > rect.width - dots_w {
+                        cut = Some((g.x, g.y));
+                        break;
+                    }
                     glyph_ids.push(g.id as GlyphId);
                     positions.push(Point::new(g.x, g.y));
                 }
+                if let Some((x, y)) = cut {
+                    glyph_ids.push(dots);
+                    positions.push(Point::new(x, y));
+                    truncated = true;
+                }
 
                 let style = glyph_run.style();
-                let [r, g, b, a] = tint.unwrap_or(style.brush.color);
+                // The element's current color, so a color change needs no new text layout. Not for
+                // form control text (placeholders and such have their own) or generated content.
+                let live = content.filter(|(c, s)| !c.control && !s.has_generated()).and_then(|(c, s)| {
+                    let at = run.text_range().start;
+                    let owner = c.owners.iter().find(|(r, _)| r.contains(&at)).map(|(_, n)| *n)?;
+                    let col = s.get(owner).color;
+                    Some([col.r, col.g, col.b, col.a])
+                });
+                let [r, g, b, a] = tint.or(live).unwrap_or(style.brush.color);
                 let mut paint = Paint::default();
                 paint.set_anti_alias(true);
                 paint.set_color(Color::from_argb(a, r, g, b));
@@ -613,7 +679,7 @@ fn paint_decorated(
 /// The check or radio dot for `appearance: checkbox | radio` when checked.
 fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) {
     // Checkbox and radio marks show only when checked; a select's chevron always does.
-    if !s.checked && s.appearance != Appearance::Select {
+    if !s.checked && !matches!(s.appearance, Appearance::Select | Appearance::Progress | Appearance::Meter | Appearance::Range) {
         return;
     }
     let mut paint = fill(s.color);
@@ -645,6 +711,47 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
             paint.set_stroke_cap(skia_safe::PaintCap::Round);
             paint.set_stroke_join(skia_safe::PaintJoin::Round);
             canvas.draw_path(&path, &paint);
+        }
+        Appearance::Progress | Appearance::Meter => {
+            // A rounded trough with a filled part.
+            let bar = Rect::from_xywh(r.x, r.y + r.height * 0.15, r.width, r.height * 0.7);
+            let radius = bar.height() / 2.0;
+            let mut trough = fill(CssColor::rgb(230, 230, 230));
+            trough.set_anti_alias(true);
+            canvas.draw_rrect(RRect::new_rect_xy(bar, radius, radius), &trough);
+            if let Some(f) = s.control_fraction {
+                let color = if s.appearance == Appearance::Meter {
+                    if s.meter_warn { CssColor::rgb(245, 158, 11) } else { CssColor::rgb(22, 163, 74) }
+                } else {
+                    CssColor::rgb(37, 99, 235)
+                };
+                let mut paint = fill(color);
+                paint.set_anti_alias(true);
+                canvas.save();
+                canvas.clip_rrect(RRect::new_rect_xy(bar, radius, radius), skia_safe::ClipOp::Intersect, true);
+                canvas.draw_rect(Rect::from_xywh(bar.left, bar.top, bar.width() * f.clamp(0.0, 1.0), bar.height()), &paint);
+                canvas.restore();
+            }
+        }
+        Appearance::Range => {
+            let f = s.control_fraction.unwrap_or(0.5).clamp(0.0, 1.0);
+            let radius = (r.height / 2.0).min(8.0);
+            let x = r.x + radius + (r.width - 2.0 * radius) * f;
+            let cy = r.y + r.height / 2.0;
+            let track = Rect::from_xywh(r.x + radius, cy - 2.0, r.width - 2.0 * radius, 4.0);
+            let mut p = fill(CssColor::rgb(214, 214, 214));
+            p.set_anti_alias(true);
+            canvas.draw_rrect(RRect::new_rect_xy(track, 2.0, 2.0), &p);
+            let mut filled = fill(CssColor::rgb(37, 99, 235));
+            filled.set_anti_alias(true);
+            canvas.draw_rrect(RRect::new_rect_xy(Rect::from_ltrb(track.left, track.top, x, track.bottom), 2.0, 2.0), &filled);
+            let mut thumb = fill(CssColor::rgb(255, 255, 255));
+            thumb.set_anti_alias(true);
+            canvas.draw_circle((x, cy), radius - 1.0, &thumb);
+            thumb.set_style(skia_safe::PaintStyle::Stroke);
+            thumb.set_stroke_width(1.5);
+            thumb.set_color(Color::from_argb(255, 37, 99, 235));
+            canvas.draw_circle((x, cy), radius - 1.0, &thumb);
         }
         Appearance::None => {}
     }

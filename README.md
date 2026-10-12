@@ -6,6 +6,10 @@ ship inside a desktop app.
 
 *"nile" is a working title.*
 
+**New to Nile?** Start with the [usage guide](docs/guide/README.md) and
+[your first app](docs/guide/getting-started.md). The guide covers layout, scripting,
+controls, selection, custom menus, native windows, embedding and the snapshot CLI.
+
 ![milestone 1](docs/milestone-1.png)
 
 ## Status: milestone 1
@@ -25,7 +29,7 @@ HTML ──html5ever──▶ DOM ──cascade──▶ computed styles ──T
 | `nile-text` | Shaping, line breaking, font fallback | `parley` |
 | `nile-layout` | Block + flex layout, text measurement | `taffy` |
 | `nile-render` | Backgrounds, borders, radii, glyphs | `skia-safe` |
-| `nile-script` | JS runtime (`console.log` for now) | `rquickjs` |
+| `nile-script` | JS runtime, DOM bridge, events, modules and JSX | `rquickjs` |
 | `nile-engine` | The page without a window: input, forms, scrolling, painting into a buffer | |
 | `nile-shell` | The `nile` binary: native window around the engine, headless PNG | `winit`, `softbuffer` |
 | `nile-capi` | C library (`libnile`) and `nile.h` for embedding | `cbindgen` |
@@ -62,7 +66,7 @@ tools (`xcode-select --install`). The first build downloads prebuilt Skia
 binaries from GitHub (macOS arm64/x86_64, Windows, Linux).
 
 ```sh
-cargo run -p nile-shell -- examples/hello.html      # window: R reloads, wheel scrolls
+cargo run -p nile-shell -- examples/hello.html      # window: F5 or Ctrl/Cmd+R reloads, wheel scrolls
 cargo run -p nile-shell -- examples/hello.html --png out.png --scale 2
 cargo run -p nile-shell -- examples/interact.html --png out.png --hover 40,40   # simulate the pointer
 cargo run -p nile-shell -- examples/scripting.html --png out.png --click 60,80 --wait 400   # click, run timers
@@ -104,8 +108,8 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
 
 - **Selectors** (Servo's `selectors` crate): type, `.class`, `#id`, attributes (`[a]`, `[a^=b]`, ...), the
   descendant / `>` / `+` / `~` combinators, `:first-child`, `:last-child`, `:nth-child()`, `:not()`, `:is()`,
-  `:root`, `:empty`, and `:hover` / `:active` / `:focus` (driven by `InteractionState`; nothing sets it
-  until events land). Rules with unsupported selectors (`:visited`, `::first-line`, ...) are dropped.
+  `:root`, `:empty`, and `:hover` / `:active` / `:focus` (driven by pointer and focus events).
+  Rules with unsupported selectors (`:visited`, `::first-line`, ...) are dropped.
 - **Overflow and scrolling:** `overflow` / `overflow-x` / `overflow-y` (`hidden` clips to the padding box; `auto` and
   `scroll` also scroll with the wheel, with scroll chaining to the page, and draw overlay scrollbars). Hit testing,
   hover and `getBoundingClientRect` follow scrolled content; `scrollTop`/`scrollLeft`/`scrollWidth`/`scrollHeight`,
@@ -172,7 +176,7 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
   `text-transform`, `letter-spacing`, outer `box-shadow` (several, blurred, spread) and painted `opacity` (a layer
   over the whole subtree) and `position: relative|absolute` (against the nearest positioned ancestor) with `top/right/bottom/left/inset` and `z-index` (see
   `examples/position.html`) `linear-gradient`/`radial-gradient` and their `repeating-` forms as `background`
-  (`examples/gradients.html`), `transition` (any animatable property or `all`, with delay, `ease`/`linear`/`cubic-bezier()`/`steps()`; a change mid-transition continues from where it is) and `@keyframes` `animation` (iterations, `infinite`, direction, fill modes, delays; `examples/animations.html`) over opacity, colors, lengths, padding/border widths, radius, `transform` and more, `transform` (`translate`, `scale`, `rotate`, `skew`, `matrix`, with `transform-origin`; hit testing and `getBoundingClientRect` follow it; `examples/transforms.html`), `<img>` (PNG/JPEG/WebP/GIF from files next to the page or `data:` URLs; sized by CSS, `width`/`height` attributes or the picture) and `background-image: url()` with `background-size`/`-position`/`-repeat` (`examples/images.html`), `float`/`clear` (`examples/float.html`), `cursor` (pointer shapes, inherited; links, inputs and disabled controls have defaults), tables (`table`, row groups, `tr`, `td`/`th` with `colspan`/`rowspan`, `caption`, `border-spacing`, `border-collapse`, `vertical-align`/`valign`; `examples/tables.html`), `display: grid` (`grid-template-columns/rows` with `px`/`%`/`fr`/`auto`/`minmax()`/`repeat()` incl. `auto-fill`/`auto-fit`,
+  (`examples/gradients.html`), `transition` (any animatable property or `all`, with delay, `ease`/`linear`/`cubic-bezier()`/`steps()`; a change mid-transition continues from where it is) and `@keyframes` `animation` (iterations, `infinite`, direction, fill modes, delays; `examples/animations.html`) over opacity, colors, lengths, padding/border widths, radius, `transform` and more, `transform` (`translate`, `scale`, `rotate`, `skew`, `matrix`, with `transform-origin`; hit testing and `getBoundingClientRect` follow it; `examples/transforms.html`), `<img>` (PNG/JPEG/WebP/GIF from files next to the page or `data:` URLs; sized by CSS, `width`/`height` attributes or the picture) and `background-image: url()` with `background-size`/`-position`/`-repeat` (`examples/images.html`), `float`/`clear` (`examples/float.html`), `white-space` (`normal`, `nowrap`, `pre`, `pre-wrap`, `pre-line`, with tab stops), lists (`ul`/`ol`/`li` bullets and counters, `list-style-type` incl. `decimal`, `lower-alpha`, `upper-roman`, `start`/`reversed`/`value`), `:has()`, `text-overflow: ellipsis`, `<hr>`, `<fieldset>`, `<details>`/`<summary>` (click toggles, `toggle` event), `<progress>`, `<meter>`, `<input type=range>` (drag, arrows, Home/End; `input`/`change`), `cursor` (pointer shapes, inherited; links, inputs and disabled controls have defaults), tables (`table`, row groups, `tr`, `td`/`th` with `colspan`/`rowspan`, `caption`, `border-spacing`, `border-collapse`, `vertical-align`/`valign`; `examples/tables.html`), `display: grid` (`grid-template-columns/rows` with `px`/`%`/`fr`/`auto`/`minmax()`/`repeat()` incl. `auto-fill`/`auto-fit`,
   `grid-auto-*`, `grid-column/row` with spans and line numbers, `grid-template-areas` + `grid-area`, `row-gap`/`column-gap`,
   `justify-items`/`justify-self`/`align-self`/`align-content`/`place-*`; `examples/grid.html`), and `::before`/`::after` with `content` (strings, `attr()`, quotes; any `display`, including
   inline-block and absolute; `examples/pseudo.html`) too. See `examples/css-compat.html` for a page that checks these.
@@ -195,19 +199,19 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
   `<textarea>` use hard line breaks only; `selectionStart/End` count characters, not UTF-16 units; `value` lives
   in the `value` attribute (no separate default value). Sciter's `Element.value` for other behaviors isn't there.
 - Scrollbars are thin overlay bars (draggable; clicking the track jumps there), with no `scrollbar-*` styling, no
-  hover/fade behavior and no arrow buttons; clipping ignores `border-radius`; `white-space: pre`/`pre-wrap` don't preserve
-  whitespace yet (`pre` just doesn't wrap).
+  hover/fade behavior and no arrow buttons; clipping ignores `border-radius`.
 - JS gaps: `fetch`, bare/`@sciter`/`@env`-style module specifiers (only relative and absolute paths),
-  `window.location`, `devicePixelRatio` (always 1), element-level scrolling (`scrollTop` only works on the
-  page), `offsetParent` (approximated by the parent). From Sciter: class components, `componentUpdate`,
+  `window.location`, `devicePixelRatio` (always 1), `offsetParent` (approximated by the parent).
+  From Sciter: class components, `componentUpdate`,
   `onGlobalEvent`, `Element.value` (no native behaviors yet), `this://` URLs, and JSX shortcuts like `.class`;
   `patch` is simplified (children match by key, id, then tag).
-- CSS gaps: tables are laid out as a grid, so there's no `table-layout: fixed`, percentage column widths, `<col>` widths, `caption-side`, row-group backgrounds or collapsed-border conflict resolution (each cell keeps its own borders and they overlap), and `display: table-*` on stray elements isn't wrapped in anonymous tables; `float`/`clear` work on boxes, but text next to a float keeps the narrowed width for the whole paragraph instead of widening below it; named grid lines, `grid-template` shorthand, `subgrid`, `counter()`/`url()` in `content`, other pseudo-elements (`::first-line`, `::placeholder`, ...) or `:has()`; `fixed` acts like `absolute` against the page (it scrolls), `sticky` like `relative`, an absolute box with `auto` insets sits at its containing block's corner when that isn't its parent (not at its static position), `z-index` only reorders siblings (no isolated stacking contexts, flex items ignore it); `inset` shadows, multiple background layers, `background-origin`/`-clip`/`-attachment`, `object-fit`, SVG, `<img>` alt text, remote (`http`) images, transforms,
-  transitions; `double`/`groove` borders draw solid; `calc()` percentages
+- CSS gaps: tables are laid out as a grid, so there's no `table-layout: fixed`, percentage column widths, `<col>` widths, `caption-side`, row-group backgrounds or collapsed-border conflict resolution (each cell keeps its own borders and they overlap), and `display: table-*` on stray elements isn't wrapped in anonymous tables; `float`/`clear` work on boxes, but text next to a float keeps the narrowed width for the whole paragraph instead of widening below it; named grid lines, `grid-template` shorthand, `subgrid`, `counter()`/`url()` in `content`, other pseudo-elements (`::first-line`, `::placeholder`, `::marker`, ...); `fixed` acts like `absolute` against the page (it scrolls), `sticky` like `relative`, an absolute box with `auto` insets sits at its containing block's corner when that isn't its parent (not at its static position), `z-index` only reorders siblings (no isolated stacking contexts, flex items ignore it); `inset` shadows, multiple background layers, `background-origin`/`-clip`/`-attachment`, `object-fit`, SVG, `<img>` alt text, remote (`http`) images,
+  3D transforms; `double`/`groove` borders draw solid; `calc()` percentages
   resolve against the parent's laid-out content size (heights only when the element sets its own height);
-  `@supports`/`@font-face`/`@keyframes` are skipped; `@media` has no `prefers-*` beyond light/no-preference and no
+  `@supports`/`@font-face` are skipped; `@media` has no `prefers-*` beyond light/no-preference and no
   `resolution`.
-- `border-radius` takes one value (no per-corner radii); `:has()` and `:visited` aren't supported.
+- `border-radius` takes one value (no per-corner radii); `:visited` isn't supported.
+- HTML gaps: `list-style-position: inside` and `list-style-image` (markers always hang outside; a `<summary>`'s triangle is inside), no `::marker` styling, `<sub>`/`<sup>` don't shift off the baseline (`vertical-align` only works on table cells), `<legend>` doesn't sit on the `<fieldset>` border, `<input type=date|color|number|file>` are plain text boxes, bare text inside a closed `<details>` stays visible, `text-overflow: ellipsis` is for a single clipped line only.
 - Sibling and `:nth-child` matching scans child lists, so very wide lists restyle slowly.
 - Variable-font axes aren't applied when drawing glyphs.
 - CPU rasterization (`softbuffer`) — fine for now, GPU comes later.
@@ -218,22 +222,23 @@ Done so far: the full pipeline (HTML, CSS, layout, Skia painting, QuickJS script
 text editing (undo/redo, selection, drop-downs, list boxes), scrolling, images, gradients, grid,
 float, tables, transforms, transitions and animations, and opt-in page text selection.
 
-1. **Incremental updates** (partly done) — the `cursor` property works, and a restyle that only
-   changes paint (backgrounds, borders colors, shadows, radius, transform amounts, opacity amounts)
-   keeps the laid-out boxes instead of relaying out, so hover effects and animations of those
-   properties skip layout. Still open: restyling only the affected elements (a hover still
-   re-cascades the whole page, ~7 ms for 4,500 nodes), and keeping the layout across changes to text
-   `color` or to whether an element has a transform or is translucent. `NILE_TRACE=1` prints
-   per-phase timings.
-2. **Embedding API** (C ABI done; see above) — still to do: language bindings (Go, C#, Python), a GPU surface path, multi-button and touch input, IME.
+1. **Incremental updates** (mostly done) — `cursor` works, and a restyle that only changes paint (text
+   and background colors, borders colors, shadows, radius, transform and opacity amounts) keeps the
+   laid-out boxes instead of relaying out, so hover effects and animations of those properties skip
+   layout. A pointer or focus change that no selector mentions (`:hover`, `:active`, `:focus`) skips
+   the restyle too. Still open: restyling only the affected elements (a hover on a page that does
+   have `:hover` rules re-cascades everything, ~7 ms for 4,500 nodes), and keeping the layout when
+   an element gains or loses a transform or opacity, when text color changes on pages with
+   `::before`/`::after`, or for inline elements' backgrounds. `NILE_TRACE=1` prints per-phase timings.
+2. **Embedding API** (C ABI done; see above) — still to do: a GPU surface path, multi-button and touch input, IME. Language bindings (Go, C#, Python) come last, once the engine covers nearly everything.
 3. **Sciter compatibility** — `@env`/`@sciter`/`@sys` modules, class components and
    `componentUpdate`, `this://` URLs.
 4. **Stacking contexts + GPU** — real stacking contexts and `position: fixed`; Skia on Metal
    (macOS), D3D (Windows), Vulkan/GL (Linux) instead of the CPU raster path.
 5. **Accessibility and input** — `accesskit`, IME.
    (Window configuration, frameless windows and window chrome roles are done.)
-6. **CSS and control polish** — `white-space: pre*`, `:has()`, `transitionend`/`animationend`,
-   3D transforms, `inset` shadows, text wrapping around floats line by line, `table-layout: fixed`,
+6. **CSS and control polish** — `transitionend`/`animationend`, `vertical-align` on inline boxes,
+   date/color/number/file inputs, `::marker`, 3D transforms, `inset` shadows, text wrapping around floats line by line, `table-layout: fixed`,
    `<optgroup>`, list-box drag selection. The known gaps above list the rest.
 
 ## License

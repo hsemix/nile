@@ -174,6 +174,8 @@ pub enum Display {
     InlineBlock,
     Flex,
     Grid,
+    /// `list-item`: a block with a marker (`<li>`).
+    ListItem,
     /// `table` and its parts; layout turns a table into a grid.
     Table,
     TableRowGroup,
@@ -201,6 +203,10 @@ pub enum Appearance {
     Radio,
     /// A `<select>` drop-down: draws its chevron.
     Select,
+    /// `<progress>`, `<meter>` and `<input type=range>`: a bar filled to `control_fraction`.
+    Progress,
+    Meter,
+    Range,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -210,6 +216,73 @@ pub enum FlexDirection {
     Column,
     RowReverse,
     ColumnReverse,
+}
+
+/// `list-style-type`: what a list item's marker looks like.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListStyleType {
+    #[default]
+    Disc,
+    Circle,
+    Square,
+    Decimal,
+    DecimalLeadingZero,
+    LowerAlpha,
+    UpperAlpha,
+    LowerRoman,
+    UpperRoman,
+    LowerGreek,
+    /// `<summary>`'s triangle, pointing right (closed) or down (open).
+    DisclosureClosed,
+    DisclosureOpen,
+    None,
+}
+
+impl ListStyleType {
+    fn parse(name: &str) -> Option<ListStyleType> {
+        Some(match name {
+            "disc" => ListStyleType::Disc,
+            "circle" => ListStyleType::Circle,
+            "square" => ListStyleType::Square,
+            "decimal" => ListStyleType::Decimal,
+            "decimal-leading-zero" => ListStyleType::DecimalLeadingZero,
+            "lower-alpha" | "lower-latin" => ListStyleType::LowerAlpha,
+            "upper-alpha" | "upper-latin" => ListStyleType::UpperAlpha,
+            "lower-roman" => ListStyleType::LowerRoman,
+            "upper-roman" => ListStyleType::UpperRoman,
+            "lower-greek" => ListStyleType::LowerGreek,
+            "disclosure-closed" => ListStyleType::DisclosureClosed,
+            "disclosure-open" => ListStyleType::DisclosureOpen,
+            "none" => ListStyleType::None,
+            _ => return None,
+        })
+    }
+}
+
+/// `white-space`: whether runs of spaces collapse, newlines break lines, and long lines wrap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WhiteSpace {
+    #[default]
+    Normal,
+    Nowrap,
+    Pre,
+    PreWrap,
+    PreLine,
+}
+
+impl WhiteSpace {
+    /// Lines may wrap at the box edge.
+    pub fn wraps(self) -> bool {
+        !matches!(self, WhiteSpace::Nowrap | WhiteSpace::Pre)
+    }
+    /// Runs of spaces and tabs are kept.
+    pub fn keeps_spaces(self) -> bool {
+        matches!(self, WhiteSpace::Pre | WhiteSpace::PreWrap)
+    }
+    /// A newline in the source is a line break.
+    pub fn keeps_newlines(self) -> bool {
+        !matches!(self, WhiteSpace::Normal | WhiteSpace::Nowrap)
+    }
 }
 
 /// The mouse pointer shape over an element.
@@ -297,6 +370,10 @@ pub struct ComputedStyle {
     pub overflow_y: OverflowKind,
     /// The element's `checked` state flag (checkbox/radio marks), resolved at cascade time.
     pub checked: bool,
+    /// How full a progress bar, meter or slider is (0..=1); `None` for an indeterminate progress.
+    pub control_fraction: Option<f32>,
+    /// A `<meter>` outside its low/high range, drawn in a warning color.
+    pub meter_warn: bool,
 
     // Flex
     pub flex_direction: FlexDirection,
@@ -366,9 +443,12 @@ pub struct ComputedStyle {
     pub font_family: String,
     pub line_height: f32,
     pub text_align: TextAlign,
-    /// `white-space: nowrap | pre`: inline content doesn't wrap.
-    // TODO: `pre` and `pre-wrap` should also preserve whitespace and newlines.
-    pub nowrap: bool,
+    /// `text-overflow: ellipsis` (not inherited).
+    pub text_ellipsis: bool,
+    /// `list-style-type`; inherited.
+    pub list_style_type: ListStyleType,
+    /// `white-space`; inherited.
+    pub white_space: WhiteSpace,
     pub italic: bool,
     pub underline: bool,
     pub line_through: bool,
@@ -405,6 +485,8 @@ impl Default for ComputedStyle {
             overflow_x: OverflowKind::Visible,
             overflow_y: OverflowKind::Visible,
             checked: false,
+            control_fraction: None,
+            meter_warn: false,
             flex_direction: FlexDirection::Row,
             flex_wrap: false,
             flex_grow: 0.0,
@@ -453,7 +535,9 @@ impl Default for ComputedStyle {
             font_family: "sans-serif".into(),
             line_height: 1.2,
             text_align: TextAlign::Start,
-            nowrap: false,
+            white_space: WhiteSpace::Normal,
+            list_style_type: ListStyleType::Disc,
+            text_ellipsis: false,
             italic: false,
             underline: false,
             line_through: false,
@@ -497,6 +581,7 @@ impl ComputedStyle {
                 Display::InlineBlock => "inline-block",
                 Display::Flex => "flex",
                 Display::Grid => "grid",
+                Display::ListItem => "list-item",
                 Display::Table => "table",
                 Display::TableRowGroup => "table-row-group",
                 Display::TableRow => "table-row",
@@ -523,6 +608,9 @@ impl ComputedStyle {
                 Appearance::Checkbox => "checkbox",
                 Appearance::Radio => "radio",
                 Appearance::Select => "select",
+                Appearance::Progress => "progress",
+                Appearance::Meter => "meter",
+                Appearance::Range => "range",
             }
             .into(),
             "box-sizing" => if self.border_box { "border-box" } else { "content-box" }.into(),
@@ -555,7 +643,14 @@ impl ComputedStyle {
             "font-size" => px(self.font_size),
             "font-weight" => (self.font_weight as i32).to_string(),
             "font-family" => self.font_family.clone(),
-            "white-space" => if self.nowrap { "nowrap" } else { "normal" }.into(),
+            "white-space" => match self.white_space {
+                WhiteSpace::Normal => "normal",
+                WhiteSpace::Nowrap => "nowrap",
+                WhiteSpace::Pre => "pre",
+                WhiteSpace::PreWrap => "pre-wrap",
+                WhiteSpace::PreLine => "pre-line",
+            }
+            .into(),
             "font-style" => if self.italic { "italic" } else { "normal" }.into(),
             "line-height" => px(self.line_height * self.font_size),
             "text-align" => match self.text_align {
@@ -596,7 +691,8 @@ impl ComputedStyle {
             font_family: parent.font_family.clone(),
             line_height: parent.line_height,
             text_align: parent.text_align,
-            nowrap: parent.nowrap,
+            white_space: parent.white_space,
+            list_style_type: parent.list_style_type,
             italic: parent.italic,
             // TODO: decorations aren't really inherited in CSS; they propagate
             // to inline descendants, which this approximates.
@@ -621,7 +717,14 @@ const UA_STYLESHEET: &str = r#"
 head, script, style, title, meta, link, option, optgroup { display: none }
 img { display: inline-block }
 [selectable] { user-select: text }
-html, body, div, p, h1, h2, h3, section, header, footer, main, nav, ul, li { display: block }
+html, body, div, p, h1, h2, h3, section, header, footer, main, nav, ul { display: block }
+li { display: list-item }
+ul, ol, menu { margin: 1em 0; padding-left: 40px }
+ul, menu { list-style-type: disc }
+ol { list-style-type: decimal }
+ul ul, ol ul, ul ol, ol ol { margin: 0 }
+ul ul, ol ul { list-style-type: circle }
+ul ul ul, ol ul ul, ul ol ul, ol ol ul { list-style-type: square }
 table { display: table; border-spacing: 2px; border-collapse: separate; box-sizing: border-box }
 thead, tbody, tfoot { display: table-row-group }
 tr { display: table-row }
@@ -644,7 +747,14 @@ h5 { font-size: 0.83em; font-weight: bold; margin: 1.67em 0 }
 h6 { font-size: 0.67em; font-weight: bold; margin: 2.33em 0 }
 blockquote { margin: 1em 40px }
 dd { margin-left: 40px }
-pre { margin: 1em 0 }
+pre { margin: 1em 0; white-space: pre }
+hr { display: block; height: 0; margin: 8px 0; border-top: 1px solid #9a9a9a; border-bottom: 1px solid #e5e5e5 }
+fieldset { margin: 0 2px; padding: 0.35em 0.75em 0.625em; border: 1px solid #c0c0c0 }
+legend { padding: 0 2px }
+summary { display: list-item; list-style-type: disclosure-closed; padding-left: 1.4em; cursor: pointer }
+details[open] > summary { list-style-type: disclosure-open }
+details:not([open]) > :not(summary) { display: none }
+textarea { white-space: pre-wrap }
 form { display: block }
 body { margin: 8px }
 h1 { font-size: 2em; font-weight: bold; margin: 0.67em 0 }
@@ -674,6 +784,9 @@ button:disabled, input:disabled, textarea:disabled, select:disabled { color: #8a
 input[type=checkbox], input[type=radio] { width: 13px; height: 13px; min-height: 0; padding: 0;
   margin: 3px 4px; background: #ffffff; appearance: checkbox }
 input[type=radio] { border-radius: 7px; appearance: radio }
+progress { display: inline-block; width: 160px; height: 16px; margin: 2px; border: 0; padding: 0; background: transparent; appearance: progress }
+meter { display: inline-block; width: 80px; height: 16px; margin: 2px; border: 0; padding: 0; background: transparent; appearance: meter }
+input[type=range] { width: 129px; height: 16px; min-height: 0; margin: 2px; padding: 0; border: 0; background: transparent; appearance: range }
 input[type=checkbox]:checked, input[type=radio]:checked { background: #1d4ed8; border-color: #1d4ed8; color: #ffffff }
 input[type=button], input[type=submit], input[type=reset] { width: auto; background: #efefef }
 "#;
@@ -684,11 +797,45 @@ pub struct StyleMap {
     pub styles: Vec<ComputedStyle>,
     /// Styles depend on the viewport size (`@media`, `vw`, ...): restyle when it changes.
     pub uses_viewport: bool,
+    /// Which pointer/focus states some rule's selector mentions. A change in a state nothing
+    /// mentions can't change any style.
+    pub state_deps: StateDeps,
     pseudo: HashMap<(NodeId, PseudoElement), NodeId>,
     origins: HashMap<NodeId, NodeId>,
     contents: HashMap<NodeId, String>,
     /// `@keyframes` by name.
     pub(crate) keyframes: HashMap<String, Vec<parse::Frame>>,
+}
+
+/// Which of `:hover`, `:active` and `:focus` appear in the stylesheets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StateDeps {
+    pub hover: bool,
+    pub active: bool,
+    pub focus: bool,
+}
+
+impl StateDeps {
+    fn of<'a>(sheets: impl Iterator<Item = &'a Stylesheet>) -> StateDeps {
+        use cssparser::ToCss;
+        let mut d = StateDeps::default();
+        for sheet in sheets {
+            for rule in &sheet.rules {
+                for sel in rule.selectors.slice() {
+                    let css = sel.to_css_string();
+                    d.hover |= css.contains(":hover");
+                    d.active |= css.contains(":active");
+                    d.focus |= css.contains(":focus");
+                }
+            }
+        }
+        d
+    }
+
+    /// Whether a change from `old` to `new` interaction state could restyle anything.
+    pub fn affected_by(&self, old: &InteractionState, new: &InteractionState) -> bool {
+        (self.hover && old.hover != new.hover) || (self.active && old.active != new.active) || (self.focus && old.focus != new.focus)
+    }
 }
 
 /// `::before`/`::after` boxes found while styling. Each gets an id past the end of the
@@ -705,16 +852,28 @@ impl ComputedStyle {
     /// not where it goes or how it is shaped: colors, shadows, radius, backgrounds, transforms
     /// and opacity. Laid-out boxes stay valid across such a change (see `LayoutTree::refresh_paint`).
     pub fn same_layout(&self, other: &ComputedStyle) -> bool {
+        self.same_layout_with(other, false)
+    }
+
+    /// [`same_layout`](Self::same_layout), optionally also treating the text `color` as a paint
+    /// property (the renderer reads it from the styles, not from the shaped text).
+    pub fn same_layout_with(&self, other: &ComputedStyle, color_is_paint: bool) -> bool {
         let mut a = self.clone();
-        a.background = other.background;
-        a.background_image = other.background_image.clone();
+        // Inline boxes' backgrounds and borders are drawn from copies baked into their text run.
+        if self.display != Display::Inline || other.display != Display::Inline {
+            a.background = other.background;
+            a.background_image = other.background_image.clone();
+            a.border_color = other.border_color;
+            a.border_color_set = other.border_color_set;
+            a.border_style = other.border_style;
+            a.border_radius = other.border_radius;
+        }
+        if color_is_paint {
+            a.color = other.color;
+        }
         a.background_size = other.background_size;
         a.background_position = other.background_position;
         a.background_repeat = other.background_repeat;
-        a.border_color = other.border_color;
-        a.border_color_set = other.border_color_set;
-        a.border_style = other.border_style;
-        a.border_radius = other.border_radius;
         a.box_shadow = other.box_shadow.clone();
         a.selection_bg = other.selection_bg;
         a.transitions = other.transitions.clone();
@@ -736,10 +895,18 @@ impl StyleMap {
     /// Whether every box would lay out as it did under `other`: same nodes and generated
     /// boxes, and only paint-level differences in the styles.
     pub fn same_layout(&self, other: &StyleMap) -> bool {
+        // Text color is read at paint time, except for generated (`::before`/`::after`) text,
+        // whose color the renderer can't tell apart from its element's.
+        let color_is_paint = !self.has_generated() && !other.has_generated();
         self.styles.len() == other.styles.len()
             && self.pseudo == other.pseudo
             && self.contents == other.contents
-            && self.styles.iter().zip(&other.styles).all(|(a, b)| a.same_layout(b))
+            && self.styles.iter().zip(&other.styles).all(|(a, b)| a.same_layout_with(b, color_is_paint))
+    }
+
+    /// The page has `::before`/`::after` boxes.
+    pub fn has_generated(&self) -> bool {
+        !self.pseudo.is_empty()
     }
 
     /// Some element has a `transition` or `animation`.
@@ -827,12 +994,14 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
         }
     }
     let has_pseudo = author.iter().any(|s| s.rules.iter().any(|r| r.selectors.slice().iter().any(|sel| sel.has_pseudo_element())));
+    let state_deps = StateDeps::of(author.iter().chain(std::iter::once(&ua)));
     let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo };
     let mut generated = Generated::default();
     cascade(&cx, &mut ctx, Document::ROOT, &root_style, &mut styles, &mut generated);
     StyleMap {
         styles,
         uses_viewport: uses_viewport.get(),
+        state_deps,
         pseudo: generated.pseudo,
         origins: generated.origins,
         contents: generated.contents,
@@ -1009,6 +1178,32 @@ fn pseudo_style(
     extra.contents.insert(new, content);
 }
 
+/// The fill of a `<progress>`, `<meter>` or `<input type=range>`, and whether a meter is out of
+/// its comfortable range.
+pub fn control_fraction(doc: &Document, id: NodeId) -> (Option<f32>, bool) {
+    let n = doc.node(id);
+    let num = |name: &str| n.attr(name).and_then(|v| v.trim().parse::<f32>().ok());
+    match n.tag() {
+        Some("progress") => {
+            let max = num("max").filter(|m| *m > 0.0).unwrap_or(1.0);
+            (num("value").map(|v| (v / max).clamp(0.0, 1.0)), false)
+        }
+        Some("meter") => {
+            let (min, max) = (num("min").unwrap_or(0.0), num("max").unwrap_or(1.0));
+            let v = num("value").unwrap_or(0.0).clamp(min, max.max(min));
+            let (low, high) = (num("low").unwrap_or(min), num("high").unwrap_or(max));
+            let frac = if max > min { (v - min) / (max - min) } else { 0.0 };
+            (Some(frac), v < low || v > high)
+        }
+        Some("input") if n.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("range")) => {
+            let (min, max) = (num("min").unwrap_or(0.0), num("max").unwrap_or(100.0));
+            let v = num("value").unwrap_or((min + max) / 2.0).clamp(min, max.max(min));
+            (Some(if max > min { (v - min) / (max - min) } else { 0.0 }), false)
+        }
+        _ => (None, false),
+    }
+}
+
 fn cascade(
     cx: &CascadeInput,
     ctx: &mut MatchingContext<NileImpl>,
@@ -1028,6 +1223,7 @@ fn cascade(
         let inline = node.attr("style").map(|css| parse::parse_declarations(css, &pcx)).unwrap_or_default();
         decls.extend(inline.iter());
         style.checked = doc.has_state(id, "checked");
+        (style.control_fraction, style.meter_warn) = control_fraction(doc, id);
         apply_declarations(&mut style, decls, parent.font_size, &pcx);
     }
 
@@ -1245,6 +1441,7 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 Some("inline-block") => Display::InlineBlock,
                 Some("flex") | Some("inline-flex") => Display::Flex,
                 Some("grid") | Some("inline-grid") => Display::Grid,
+                Some("list-item") => Display::ListItem,
                 Some("table" | "inline-table") => Display::Table,
                 Some("table-row-group" | "table-header-group" | "table-footer-group") => Display::TableRowGroup,
                 Some("table-row") => Display::TableRow,
@@ -1277,6 +1474,9 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 Some("checkbox") => Appearance::Checkbox,
                 Some("radio") => Appearance::Radio,
                 Some("select" | "menulist") => Appearance::Select,
+                Some("progress-bar" | "progress") => Appearance::Progress,
+                Some("meter") => Appearance::Meter,
+                Some("slider-horizontal" | "range") => Appearance::Range,
                 Some("none") | Some("auto") => Appearance::None,
                 _ => return,
             }
@@ -1563,10 +1763,29 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 None => return,
             }
         }
+        "text-overflow" => match first.and_then(Value::ident) {
+            Some("ellipsis") => s.text_ellipsis = true,
+            Some("clip") => s.text_ellipsis = false,
+            _ => {}
+        },
+        "list-style-type" => {
+            if let Some(t) = first.and_then(Value::ident).and_then(ListStyleType::parse) {
+                s.list_style_type = t;
+            }
+        }
+        // `list-style: <type> || <position> || <image>`: only the type is used.
+        "list-style" => {
+            if let Some(t) = v.iter().filter_map(Value::ident).find_map(ListStyleType::parse) {
+                s.list_style_type = t;
+            }
+        }
         "white-space" => {
-            s.nowrap = match first.and_then(Value::ident) {
-                Some("nowrap" | "pre") => true,
-                Some("normal" | "pre-wrap" | "pre-line") => false,
+            s.white_space = match first.and_then(Value::ident) {
+                Some("normal") => WhiteSpace::Normal,
+                Some("nowrap") => WhiteSpace::Nowrap,
+                Some("pre") => WhiteSpace::Pre,
+                Some("pre-wrap") => WhiteSpace::PreWrap,
+                Some("pre-line") => WhiteSpace::PreLine,
                 _ => return,
             }
         }
@@ -2152,5 +2371,41 @@ mod tests {
         let mut fainter = faded.clone();
         fainter.opacity = 0.2;
         assert!(faded.same_layout(&fainter), "but fading further doesn't");
+    }
+
+    #[test]
+    fn state_deps_find_the_pseudo_classes_rules_mention() {
+        let deps = |css: &str| compute_styles(&Document::parse(&format!("<style>{css}</style><p>x</p>"))).state_deps;
+        // The UA sheet already mentions :focus (input borders).
+        assert_eq!(deps("p { color: red }"), StateDeps { hover: false, active: false, focus: true });
+        assert!(deps("a:hover { color: red }").hover);
+        assert!(deps(".x:not(:hover) b { color: red }").hover);
+        assert!(deps("button:active { color: red }").active);
+        let d = StateDeps { hover: false, active: false, focus: true };
+        let (a, b) = (InteractionState::default(), InteractionState { hover: Some(NodeId(1)), ..Default::default() });
+        assert!(!d.affected_by(&a, &b), "a hover change is invisible to a sheet with no :hover");
+        assert!(d.affected_by(&a, &InteractionState { focus: Some(NodeId(1)), ..Default::default() }));
+    }
+
+    #[test]
+    fn has_selects_by_descendants_children_and_following_siblings() {
+        let doc = Document::parse(
+            r#"<style>
+                 .card:has(img) { color: red }
+                 .row:has(> input:checked) { color: blue }
+                 h2:has(+ p) { color: green }
+               </style>
+               <div id="a" class="card"><p><img></p></div><div id="b" class="card"><p>no</p></div>
+               <div id="c" class="row"><input type="checkbox" checked></div><div id="d" class="row"><input type="checkbox"></div>
+               <h2 id="e">t</h2><p>x</p><h2 id="f">t</h2><div>y</div>"#,
+        );
+        let s = compute_styles(&doc);
+        let color = |id: &str| s.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).color;
+        let default = color("b");
+        assert_eq!(color("a"), Color::rgb(255, 0, 0), ":has(descendant)");
+        assert_eq!(color("c"), Color::rgb(0, 0, 255), ":has(> child:state)");
+        assert_ne!(color("d"), Color::rgb(0, 0, 255));
+        assert_eq!(color("e"), Color::rgb(0, 128, 0), ":has(+ sibling)");
+        assert_eq!(color("f"), default);
     }
 }
