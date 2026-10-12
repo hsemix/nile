@@ -479,6 +479,7 @@
     get() {
       if (!VALUE_TAGS.has(this.localName)) return undefined;
       const v = this.getAttribute("value");
+      if (v === null && this.localName === "textarea") return this.textContent;
       return v !== null ? v : this.localName === "input" && /^(checkbox|radio)$/.test(this.type) ? "on" : "";
     },
     set(v) {

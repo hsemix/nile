@@ -51,6 +51,7 @@ cargo test --workspace
   descendant / `>` / `+` / `~` combinators, `:first-child`, `:last-child`, `:nth-child()`, `:not()`, `:is()`,
   `:root`, `:empty`, and `:hover` / `:active` / `:focus` (driven by `InteractionState`; nothing sets it
   until events land). Rules with unsupported selectors (pseudo-elements, `:visited`, ...) are dropped.
+- **Overflow:** `overflow: hidden | scroll | auto` clips a box's contents to its padding box (no scrolling yet).
 - **Properties:** `display` (block, inline, inline-block, flex, none), `box-sizing`, `width/height` + min/max, `margin`, `padding`,
   `border`, `border-radius`, `background(-color)`, `color`, `font-size/weight/family`,
   `line-height`, `text-align`, `font-style`, `text-decoration` (underline, line-through), `flex`, `flex-direction/wrap/grow/shrink/basis`,
@@ -72,9 +73,10 @@ cargo test --workspace
   from interaction; `checked`, `disabled`, `readonly`, `expanded`, `collapsed`, `current`, `selected`, `invalid`,
   `busy` are runtime flags matched by the same-named `:pseudo-classes`), `elementIndex`, `nodeIndex`,
   `insertAfter`.
-- **Form controls:** `<input>` (text, password, placeholder, `value`), checkboxes and radio groups (including
-  `<label>` clicks), `<button>`, disabled states, a caret with click-to-place, typing, Backspace/Delete/arrows/
-  Home/End, and `input`/`change`/`focus`/`blur` events. In JS: `value`, `checked`, `disabled`, `type`, `name`,
+- **Form controls:** `<input>` (text, password, placeholder, `value`), `<textarea>` (wrapping, newlines, Up/Down
+  by line), checkboxes and radio groups (including `<label>` clicks), `<button>`, disabled states, a blinking
+  caret with click-to-place that scrolls into view, typing, Backspace/Delete/arrows/Home/End, Tab and Shift+Tab
+  focus order (`tabindex` respected), and `input`/`change`/`focus`/`blur` events. In JS: `value`, `checked`, `disabled`, `type`, `name`,
   `placeholder`, `focus()`, `blur()`, `document.activeElement` (see `examples/forms.html`).
 - **Pointer interaction:** hit testing (down to the inline element under the pointer), `:hover`, `:active` and
   click-to-focus on links and form controls, restyled live (see `examples/interact.html`).
@@ -90,10 +92,10 @@ cargo test --workspace
 - **Inline layout is partial.** Shrink-to-fit `inline-block` uses max-content (it won't narrow to fit a
   line), inline margins are ignored, a wrapped inline's border/radius isn't sliced at the break, only the
   innermost decorated inline is painted, and block children of an inline element don't split the run.
-- Form gaps: no text selection, clipboard, undo or IME; no `<textarea>`, `<select>`, `<form>` submit or
-  validation; text inputs don't scroll/clip long values (they spill past the box); the caret doesn't blink;
-  `value` lives in the `value` attribute (no separate default value). Sciter's `Element.value` for other
-  behaviors isn't there.
+- Form gaps: no text selection, clipboard, undo or IME; no `<select>`, `<form>` submit or validation; Home/End in a
+  `<textarea>` use hard line breaks only; `value` lives in the `value` attribute (no separate default value).
+  Sciter's `Element.value` for other behaviors isn't there.
+- `overflow` only clips: there are no scrollbars or scrolling, and clipping ignores `border-radius`.
 - JS gaps: `fetch`, bare/`@sciter`/`@env`-style module specifiers (only relative and absolute paths),
   `window.location`, `devicePixelRatio` (always 1), element-level scrolling (`scrollTop` only works on the
   page), `offsetParent` (approximated by the parent). From Sciter: class components, `componentUpdate`,
@@ -107,10 +109,10 @@ cargo test --workspace
 
 ## Roadmap
 
-1. **Tab order + incremental updates** — Tab focus order, the `cursor` property, and restyling /
+1. **Incremental updates** — the `cursor` property, and restyling /
    relaying out only what a state change affects (today every change restyles the whole page).
-2. **More controls + Sciter compatibility** — `<textarea>`, `<select>`, text selection/clipboard, `@env`/
-   `@sciter`/`@sys` modules, class components and `componentUpdate`, `this://` URLs.
+2. **More controls + Sciter compatibility** — `<select>`, text selection/clipboard, element scrolling and
+   scrollbars, `@env`/`@sciter`/`@sys` modules, class components and `componentUpdate`, `this://` URLs.
 3. **Stacking contexts + GPU** — paint tree with opacity, transforms, clipping,
    overflow scrolling; Skia on Metal (macOS), D3D (Windows), Vulkan/GL (Linux).
 4. **Embedding API** — a C ABI (`cbindgen`) so Go, C#, Python, etc. can host it.

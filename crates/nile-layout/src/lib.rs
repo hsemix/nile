@@ -21,7 +21,7 @@ use nile_style::{
     Align, Color, ComputedStyle, Display, Edges, FlexDirection, Length, StyleMap, TextAlign,
 };
 use nile_text::{
-    break_lines, collapse_whitespace, Alignment, Cluster, Cursor, InlineBoxSpec, PositionedLayoutItem, TextEngine,
+    break_lines, collapse_whitespace, Affinity, Alignment, Cluster, Cursor, InlineBoxSpec, PositionedLayoutItem, TextEngine,
     TextLayout, TextStyle,
 };
 use taffy::prelude::*;
@@ -63,6 +63,9 @@ pub struct LayoutBox {
     /// Border box in absolute document coordinates (logical pixels).
     pub rect: Rect,
     pub content: BoxContent,
+    /// Index in `LayoutTree::boxes` just past this box's last descendant, so
+    /// painting can scope a clip to the subtree.
+    pub subtree_end: usize,
 }
 
 /// Boxes in paint order (pre-order DOM traversal).
@@ -92,6 +95,23 @@ impl LayoutTree {
         })?;
         let BoxContent::Text(c) = &b.content else { return None };
         Some(Cursor::from_point(&c.layout, x - b.rect.x, y - b.rect.y).index())
+    }
+
+    /// The caret one line up (`dir < 0`) or down from byte offset `at` of
+    /// `node`'s text, keeping its x position. `None` if there is no such line.
+    pub fn move_caret_vertically(&self, node: NodeId, at: usize, dir: i32) -> Option<usize> {
+        let b = self.boxes.iter().find(|b| match &b.content {
+            BoxContent::Text(c) => c.owners.iter().any(|(_, n)| *n == node),
+            _ => false,
+        })?;
+        let BoxContent::Text(c) = &b.content else { return None };
+        let g = Cursor::from_byte_index(&c.layout, at, Affinity::Downstream).geometry(&c.layout, 1.0);
+        let line = (g.y1 - g.y0) as f32;
+        let y = if dir < 0 { g.y0 as f32 - line / 2.0 } else { g.y1 as f32 + line / 2.0 };
+        if y < 0.0 || y > c.layout.height() {
+            return None;
+        }
+        Some(Cursor::from_point(&c.layout, g.x0 as f32, y).index())
     }
 
     /// Border box of `node` in document coordinates. Block-level elements have
@@ -271,7 +291,8 @@ fn build(
 
 /// `<input>` types whose `value` is drawn as a line of text.
 fn is_value_control(node: &nile_dom::Node) -> bool {
-    node.tag() == Some("input")
+    node.tag() == Some("textarea")
+        || node.tag() == Some("input")
         && !matches!(node.attr("type").map(str::to_ascii_lowercase).as_deref(), Some("checkbox" | "radio" | "hidden" | "file" | "image"))
 }
 
@@ -279,17 +300,36 @@ fn is_password(node: &nile_dom::Node) -> bool {
     node.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("password"))
 }
 
-/// The text shown for an input: its value (bullets for passwords), else the
-/// placeholder. A zero-width space stands in for empty text so the line keeps
-/// its height and the caret has a place to sit.
-fn control_display(node: &nile_dom::Node) -> (String, bool) {
-    let value = node.attr("value").unwrap_or("");
+/// The current value of a form control: the `value` attribute, or for a
+/// `<textarea>` without one its initial text content.
+pub fn control_value(doc: &Document, id: NodeId) -> String {
+    let n = doc.node(id);
+    match n.attr("value") {
+        Some(v) => v.to_string(),
+        None if n.tag() == Some("textarea") => doc.text_content(id),
+        None => String::new(),
+    }
+}
+
+/// The text shown for a control: its value (bullets for passwords), else the
+/// placeholder. A zero-width space stands in for empty text (and ends a value
+/// that ends in a newline) so the last line keeps its height and the caret has
+/// a place to sit.
+fn control_display(doc: &Document, id: NodeId) -> (String, bool) {
+    let node = doc.node(id);
+    let multiline = node.tag() == Some("textarea");
+    let value = control_value(doc, id);
     if value.is_empty() {
         let ph = node.attr("placeholder").unwrap_or("");
-        return (if ph.is_empty() { "\u{200b}".into() } else { ph.replace('\n', " ") }, !ph.is_empty());
+        let ph = if multiline { ph.to_string() } else { ph.replace('\n', " ") };
+        let is_placeholder = !ph.is_empty();
+        return (if is_placeholder { ph } else { "\u{200b}".into() }, is_placeholder);
     }
     if is_password(node) {
         ("\u{2022}".repeat(value.chars().count()), false)
+    } else if multiline {
+        let tail = if value.ends_with('\n') { "\u{200b}" } else { "" };
+        (format!("{value}{tail}"), false)
     } else {
         (value.replace('\n', " "), false)
     }
@@ -298,7 +338,7 @@ fn control_display(node: &nile_dom::Node) -> (String, bool) {
 /// Byte offset in an input's displayed text of character `char_idx` of its value.
 pub fn caret_byte(doc: &Document, node: NodeId, char_idx: usize) -> usize {
     let n = doc.node(node);
-    let value = n.attr("value").unwrap_or("");
+    let value = control_value(doc, node);
     if is_password(n) {
         return char_idx.min(value.chars().count()) * '\u{2022}'.len_utf8();
     }
@@ -308,7 +348,7 @@ pub fn caret_byte(doc: &Document, node: NodeId, char_idx: usize) -> usize {
 /// Inverse of [`caret_byte`].
 pub fn caret_char(doc: &Document, node: NodeId, display_byte: usize) -> usize {
     let n = doc.node(node);
-    let value = n.attr("value").unwrap_or("");
+    let value = control_value(doc, node);
     if is_password(n) {
         return (display_byte / '\u{2022}'.len_utf8()).min(value.chars().count());
     }
@@ -325,7 +365,7 @@ fn build_control_text(
 ) -> Option<taffy::NodeId> {
     let node = doc.node(id);
     let style = styles.get(id);
-    let (display, is_placeholder) = control_display(node);
+    let (display, is_placeholder) = control_display(doc, id);
     let mut ts = text_style(style);
     if is_placeholder {
         ts.color = [117, 117, 117, 255];
@@ -341,7 +381,7 @@ fn build_control_text(
             kids: Vec::new(),
             decos: Vec::new(),
             owners,
-            nowrap: true,
+            nowrap: node.tag() != Some("textarea"),
         },
     )
     .ok()
@@ -568,7 +608,8 @@ fn build_inline_run(
             )
             .ok()?;
             let size = tree.layout(n).ok()?.size;
-            let baseline = last_baseline(tree, n);
+            // A textarea sits on its bottom edge, not on its text.
+            let baseline = if doc.node(id).tag() == Some("textarea") { None } else { last_baseline(tree, n) };
             let m = styles.get(id).margin;
             let px = |l: Length| if let Length::Px(v) = l { v } else { 0.0 };
             kids.push(InlineKid { node: n, dx: px(m.left), dy: px(m.top) });
@@ -627,6 +668,7 @@ fn flatten(
     parent_y: f32,
     out: &mut Vec<LayoutBox>,
 ) {
+    let first = out.len();
     let l = *tree.layout(n).unwrap();
     let rect = Rect {
         x: parent_x + l.location.x,
@@ -637,7 +679,7 @@ fn flatten(
 
     match tree.get_node_context_mut(n) {
         Some(NodeCtx::Element(id)) => {
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0 })
         }
         Some(NodeCtx::Text { node, layout, align, kids, decos, owners, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
@@ -657,7 +699,12 @@ fn flatten(
                     _ => None,
                 })
                 .collect();
-            out.push(LayoutBox { node: *node, rect, content: BoxContent::Text(Box::new(TextContent { layout, decos, owners })) });
+            out.push(LayoutBox {
+                node: *node,
+                rect,
+                content: BoxContent::Text(Box::new(TextContent { layout, decos, owners })),
+                subtree_end: 0,
+            });
             for b in placed {
                 let kid = kids[b.id as usize];
                 flatten(tree, kid.node, rect.x + b.x + kid.dx, rect.y + b.y + kid.dy, out);
@@ -666,8 +713,13 @@ fn flatten(
         None => {}
     }
 
+    // Only a node that pushed its own box (at `first`) owns a subtree.
+    let pushed_self = matches!(out.get(first), Some(b) if b.subtree_end == 0);
     for child in tree.children(n).unwrap() {
         flatten(tree, child, rect.x, rect.y, out);
+    }
+    if pushed_self {
+        out[first].subtree_end = out.len();
     }
 }
 
@@ -763,6 +815,10 @@ fn taffy_style(s: &ComputedStyle) -> Style {
         },
         padding: rect_px(s.padding),
         border: rect_px(s.border_width),
+        overflow: taffy::Point {
+            x: if s.overflow_hidden { taffy::Overflow::Clip } else { taffy::Overflow::Visible },
+            y: if s.overflow_hidden { taffy::Overflow::Clip } else { taffy::Overflow::Visible },
+        },
         flex_direction: match s.flex_direction {
             FlexDirection::Row => taffy::FlexDirection::Row,
             FlexDirection::Column => taffy::FlexDirection::Column,
@@ -913,6 +969,33 @@ mod tests {
         let idx = tree.text_index_at(id("a"), a_rect.x + 1.0, a_rect.y + a_rect.height / 2.0).unwrap();
         assert!(idx <= 1, "clicking the left edge puts the caret at the start, got {idx}");
         assert!(tree.text_index_at(id("a"), a_rect.x + 500.0, a_rect.y + 8.0).unwrap() > 5);
+    }
+
+    #[test]
+    fn textareas_wrap_and_move_vertically() {
+        let doc = Document::parse(
+            r#"<body style="margin:0"><textarea id="t" style="width:80px; height:60px">one two three four five six
+second</textarea><textarea id="e"></textarea></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 800.0, 400.0);
+        let id = |s: &str| doc.find(|n| n.attr("id") == Some(s)).unwrap();
+        assert_eq!(control_value(&doc, id("t")).lines().count(), 2);
+        let tb = tree
+            .boxes
+            .iter()
+            .find(|b| matches!(&b.content, BoxContent::Text(c) if c.owners.iter().any(|(_, n)| *n == id("t"))))
+            .unwrap();
+        let BoxContent::Text(c) = &tb.content else { unreachable!() };
+        assert!(c.layout.lines().count() >= 3, "wraps and honours the newline: {}", c.layout.lines().count());
+        // Down from the start of line one lands later in the text; up returns.
+        let down = tree.move_caret_vertically(id("t"), 0, 1).unwrap();
+        assert!(down > 0);
+        assert_eq!(tree.move_caret_vertically(id("t"), down, -1), Some(0));
+        assert_eq!(tree.move_caret_vertically(id("t"), 0, -1), None);
+        let rect = tree.node_rect(id("e")).unwrap();
+        assert_eq!((rect.width, rect.height), (210.0, 68.0), "UA size plus padding and border");
     }
 
     #[test]

@@ -131,6 +131,9 @@ pub struct ComputedStyle {
     /// `box-sizing: border-box` (the CSS default is `content-box`).
     pub border_box: bool,
     pub appearance: Appearance,
+    /// `overflow: hidden | scroll | auto` on either axis: content is clipped to the padding box.
+    // TODO: scrolling; for now every non-visible overflow just clips.
+    pub overflow_hidden: bool,
     /// The element's `checked` state flag (checkbox/radio marks), resolved at cascade time.
     pub checked: bool,
 
@@ -177,6 +180,7 @@ impl Default for ComputedStyle {
             border_width: Edges::all(0.0),
             border_box: false,
             appearance: Appearance::None,
+            overflow_hidden: false,
             checked: false,
             flex_direction: FlexDirection::Row,
             flex_wrap: false,
@@ -230,6 +234,7 @@ impl ComputedStyle {
                 Display::None => "none",
             }
             .into(),
+            "overflow" => if self.overflow_hidden { "hidden" } else { "visible" }.into(),
             "appearance" => match self.appearance {
                 Appearance::None => "none",
                 Appearance::Checkbox => "checkbox",
@@ -331,9 +336,11 @@ s, del { text-decoration: line-through }
 a { color: #0000ee }
 button, input { display: inline-block; font-size: 13px; color: #000000; padding: 3px 8px;
   border: 1px solid #767676; border-radius: 3px; background: #efefef }
-input { background: #ffffff; width: 160px; min-height: 16px; margin: 2px }
-input:focus { border-color: #1d4ed8 }
-button:disabled, input:disabled { color: #8a8a8a; background: #f0f0f0; border-color: #c4c4c4 }
+input { background: #ffffff; width: 160px; min-height: 16px; margin: 2px; overflow: hidden }
+textarea { display: inline-block; font-size: 13px; color: #000000; padding: 3px 4px; border: 1px solid #767676;
+  border-radius: 3px; background: #ffffff; width: 200px; height: 60px; margin: 2px; overflow: hidden }
+input:focus, textarea:focus { border-color: #1d4ed8 }
+button:disabled, input:disabled, textarea:disabled { color: #8a8a8a; background: #f0f0f0; border-color: #c4c4c4 }
 input[type=checkbox], input[type=radio] { width: 13px; height: 13px; min-height: 0; padding: 0;
   margin: 3px 4px; background: #ffffff; appearance: checkbox }
 input[type=radio] { border-radius: 7px; appearance: radio }
@@ -514,6 +521,14 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 Some("inline-block") => Display::InlineBlock,
                 Some("flex") | Some("inline-flex") => Display::Flex,
                 Some("none") => Display::None,
+                _ => return,
+            }
+        }
+        "overflow" | "overflow-x" | "overflow-y" => {
+            // Either axis being non-visible clips (we clip both).
+            s.overflow_hidden = match first.and_then(Value::ident) {
+                Some("hidden" | "scroll" | "auto" | "clip") => true,
+                Some("visible") => false,
                 _ => return,
             }
         }

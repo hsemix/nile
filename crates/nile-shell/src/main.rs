@@ -25,6 +25,9 @@ use winit::{
     window::{Window, WindowId},
 };
 
+/// Half the caret's blink period.
+const CARET_BLINK: Duration = Duration::from_millis(530);
+
 /// Style, layout and scroll state. Shared (`Rc<RefCell<..>>`) between the page
 /// and the script host, so scripts can read layout results. Never hold a borrow
 /// across a call into scripts.
@@ -145,6 +148,9 @@ struct Page {
     caret: usize,
     /// Value when the focused input got focus, to decide whether `change` fires.
     value_at_focus: Option<String>,
+    /// Blink phase of the caret and when it flips next.
+    caret_visible: bool,
+    blink_at: Instant,
 }
 
 impl Page {
@@ -228,6 +234,8 @@ impl Page {
             scripts,
             caret: 0,
             value_at_focus: None,
+            caret_visible: true,
+            blink_at: Instant::now() + CARET_BLINK,
         }
     }
 
@@ -275,6 +283,7 @@ impl Page {
             }
             self.emit(o, UiEvent::Plain("blur"));
         }
+        self.show_caret();
         if let Some(n) = new {
             self.caret = self.value_of(n).chars().count();
             self.value_at_focus = self.is_text_input(n).then(|| self.value_of(n));
@@ -397,6 +406,7 @@ impl Page {
                 self.caret = caret;
             }
         }
+        self.show_caret();
         changed
     }
 
@@ -421,18 +431,113 @@ impl Page {
         changed | self.set_interaction(next)
     }
 
+    /// Make the caret visible and restart its blink (after typing, clicking, ...).
+    fn show_caret(&mut self) {
+        self.caret_visible = true;
+        self.blink_at = Instant::now() + CARET_BLINK;
+    }
+
+    /// Flip the caret when its blink is due. Returns whether the page changed
+    /// and when the next flip is due (only while a text input has focus).
+    fn blink(&mut self) -> (bool, Option<Duration>) {
+        let editing = self.interaction().focus.is_some_and(|f| self.is_text_input(f));
+        if !editing {
+            self.caret_visible = true;
+            return (false, None);
+        }
+        let now = Instant::now();
+        let mut changed = false;
+        if now >= self.blink_at {
+            self.caret_visible = !self.caret_visible;
+            self.blink_at = now + CARET_BLINK;
+            changed = true;
+        }
+        (changed, Some(self.blink_at.saturating_duration_since(now)))
+    }
+
+    /// Timers and caret blink together: whether to repaint, and when to wake next.
+    fn tick(&mut self) -> (bool, Option<Duration>) {
+        let (c1, n1) = self.run_timers();
+        let (c2, n2) = self.blink();
+        (c1 | c2, [n1, n2].into_iter().flatten().min())
+    }
+
+    /// Elements Tab visits: positive `tabindex` first (ascending), then the
+    /// rest in document order. Skips disabled, hidden and `tabindex="-1"`.
+    fn tab_order(&mut self) -> Vec<NodeId> {
+        let doc = self.doc.borrow();
+        let mut view = self.view.borrow_mut();
+        let tree = view.layout();
+        let mut positive: Vec<(i32, NodeId)> = Vec::new();
+        let mut rest = Vec::new();
+        for id in doc.descendants(Document::ROOT) {
+            let n = doc.node(id);
+            let natural = match n.tag() {
+                Some("a") => n.attr("href").is_some(),
+                Some("input") => n.attr("type").is_none_or(|t| !t.eq_ignore_ascii_case("hidden")),
+                Some("button" | "select" | "textarea") => true,
+                _ => false,
+            };
+            let tabindex = n.attr("tabindex").and_then(|t| t.trim().parse::<i32>().ok());
+            if tabindex.is_some_and(|t| t < 0) || !(natural || tabindex.is_some()) {
+                continue;
+            }
+            if doc.has_state(id, "disabled") || tree.node_rect(id).is_none() {
+                continue;
+            }
+            match tabindex {
+                Some(t) if t > 0 => positive.push((t, id)),
+                _ => rest.push(id),
+            }
+        }
+        positive.sort_by_key(|(t, _)| *t);
+        positive.into_iter().map(|(_, id)| id).chain(rest).collect()
+    }
+
+    /// Tab (or Shift+Tab) to the next focusable element, wrapping around.
+    fn focus_next(&mut self, forward: bool) -> bool {
+        let order = self.tab_order();
+        if order.is_empty() {
+            return false;
+        }
+        let at = self.interaction().focus.and_then(|f| order.iter().position(|n| *n == f));
+        let next = match (at, forward) {
+            (None, true) => 0,
+            (None, false) => order.len() - 1,
+            (Some(i), true) => (i + 1) % order.len(),
+            (Some(i), false) => (i + order.len() - 1) % order.len(),
+        };
+        let state = InteractionState { focus: Some(order[next]), ..self.interaction() };
+        self.set_interaction(state)
+    }
+
+    /// Default action for a key the page didn't cancel: Tab moves focus,
+    /// anything else edits the focused text input.
+    fn default_key(&mut self, key: &str, mods: ModifiersState) -> bool {
+        let changed = if key == "Tab" { self.focus_next(!mods.shift_key()) } else { self.edit_key(key, mods) };
+        if changed {
+            self.show_caret();
+        }
+        changed
+    }
+
     fn value_of(&self, id: NodeId) -> String {
-        self.doc.borrow().node(id).attr("value").unwrap_or("").to_string()
+        nile_layout::control_value(&self.doc.borrow(), id)
+    }
+
+    fn is_textarea(&self, id: NodeId) -> bool {
+        self.doc.borrow().node(id).tag() == Some("textarea")
     }
 
     fn is_text_input(&self, id: NodeId) -> bool {
         let doc = self.doc.borrow();
         let n = doc.node(id);
-        n.tag() == Some("input")
-            && !matches!(
-                n.attr("type").map(str::to_ascii_lowercase).as_deref(),
-                Some("checkbox" | "radio" | "hidden" | "file" | "image" | "button" | "submit" | "reset")
-            )
+        n.tag() == Some("textarea")
+            || n.tag() == Some("input")
+                && !matches!(
+                    n.attr("type").map(str::to_ascii_lowercase).as_deref(),
+                    Some("checkbox" | "radio" | "hidden" | "file" | "image" | "button" | "submit" | "reset")
+                )
     }
 
     fn is_disabled(&self, id: NodeId) -> bool {
@@ -562,6 +667,7 @@ impl Page {
         if self.is_disabled(focus) || self.doc.borrow().node(focus).attr("readonly").is_some() {
             return false;
         }
+        let multiline = self.is_textarea(focus);
         let mut chars: Vec<char> = self.value_of(focus).chars().collect();
         let caret = self.caret.min(chars.len());
         let mut new_caret = caret;
@@ -578,8 +684,27 @@ impl Page {
             }
             "ArrowLeft" => new_caret = caret.saturating_sub(1),
             "ArrowRight" => new_caret = (caret + 1).min(chars.len()),
-            "Home" => new_caret = 0,
-            "End" => new_caret = chars.len(),
+            // Multi-line: Home/End go to the line's ends (hard breaks only).
+            "Home" => new_caret = chars[..caret].iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1),
+            "End" => new_caret = chars[caret..].iter().position(|c| *c == '\n').map_or(chars.len(), |i| caret + i),
+            "ArrowUp" | "ArrowDown" if multiline => {
+                let up = key == "ArrowUp";
+                let target = {
+                    let at = nile_layout::caret_byte(&self.doc.borrow(), focus, caret);
+                    self.view.borrow_mut().layout().move_caret_vertically(focus, at, if up { -1 } else { 1 })
+                };
+                new_caret = match target {
+                    Some(b) => nile_layout::caret_char(&self.doc.borrow(), focus, b),
+                    // Past the first or last line: go to the start or end.
+                    None if up => 0,
+                    None => chars.len(),
+                };
+            }
+            "Enter" if multiline => {
+                chars.insert(caret, '\n');
+                new_caret = caret + 1;
+                edited = true;
+            }
             "Enter" => {
                 // Commit: fire `change` if the value moved since focus.
                 if self.value_at_focus.as_ref().is_some_and(|v| *v != self.value_of(focus)) {
@@ -615,6 +740,9 @@ impl Page {
     /// Caret to draw: the focused text input and the caret's byte offset in its displayed text.
     fn caret_for_paint(&self) -> Option<(NodeId, usize)> {
         let focus = self.interaction().focus.filter(|f| self.is_text_input(*f))?;
+        if !self.caret_visible {
+            return None;
+        }
         let doc = self.doc.borrow();
         Some((focus, nile_layout::caret_byte(&doc, focus, self.caret)))
     }
@@ -769,7 +897,7 @@ fn render_png(page: &mut Page, snap: Snapshot) {
             let key = if key == "Space" { " ".to_string() } else { key };
             let (proceed, _) = page.key("keydown", key.clone(), ModifiersState::default());
             if proceed {
-                page.edit_key(&key, ModifiersState::default());
+                page.default_key(&key, ModifiersState::default());
             }
             page.key("keyup", key, ModifiersState::default());
         }
@@ -831,7 +959,7 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let (changed, next) = self.page.run_timers();
+        let (changed, next) = self.page.tick();
         if changed {
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -887,7 +1015,7 @@ impl ApplicationHandler for App {
                 // F5 or Ctrl/Cmd+R reloads, unless the page handled the key.
                 let reload = key == "F5"
                     || (key.eq_ignore_ascii_case("r") && (self.mods.control_key() || self.mods.super_key()));
-                let edited = pressed && proceed && !reload && self.page.edit_key(&key, self.mods);
+                let edited = pressed && proceed && !reload && self.page.default_key(&key, self.mods);
                 if pressed && proceed && reload {
                     self.page.reload();
                     window.request_redraw();
@@ -1034,7 +1162,7 @@ mod tests {
         let key = |p: &mut Page, k: &str| {
             let (proceed, _) = p.key("keydown", k.to_string(), ModifiersState::default());
             if proceed {
-                p.edit_key(k, ModifiersState::default());
+                p.default_key(k, ModifiersState::default());
             }
         };
         let (x, y) = center(&p, "t");
@@ -1074,6 +1202,79 @@ mod tests {
         assert_eq!(p.interaction().focus.map(|f| p.doc.borrow().node(f).attr("id").map(str::to_string)), Some(Some("a".into())));
         assert_eq!(p.caret, 2);
         assert!(log(&p).contains(&"a".to_string()), "{:?}", log(&p));
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn focused_id(p: &Page) -> Option<String> {
+        p.interaction().focus.and_then(|f| p.doc.borrow().node(f).attr("id").map(str::to_string))
+    }
+
+    #[test]
+    fn tab_visits_focusable_elements_in_order() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><input id="a"><input id="off" disabled><a id="link" href="#">x</a><a id="plain">y</a>
+               <div id="ti" tabindex="0">t</div><div id="skip" tabindex="-1">s</div><input id="hid" type="hidden">
+               <button id="late" tabindex="2">b</button><button id="early" tabindex="1">c</button>
+               <div style="display:none"><input id="none"></div></body>"##,
+            "tab",
+        );
+        let mut seen = Vec::new();
+        for _ in 0..7 {
+            p.default_key("Tab", ModifiersState::default());
+            seen.push(focused_id(&p).unwrap());
+        }
+        // Positive tabindex first (ascending), then document order; wraps around.
+        assert_eq!(seen, ["early", "late", "a", "link", "ti", "early", "late"]);
+        let shift = ModifiersState::SHIFT;
+        p.default_key("Tab", shift);
+        assert_eq!(focused_id(&p).as_deref(), Some("early"));
+        p.default_key("Tab", shift);
+        assert_eq!(focused_id(&p).as_deref(), Some("ti"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn caret_blinks_only_while_editing() {
+        let (mut p, path) = page(r#"<body style="margin:0"><input id="t"><p id="x">x</p></body>"#, "blink");
+        assert_eq!(p.blink(), (false, None), "nothing focused: no blink timer");
+        click(&mut p, "t");
+        assert!(p.caret_visible);
+        assert!(p.caret_for_paint().is_some());
+        p.blink_at = Instant::now() - Duration::from_millis(1);
+        let (changed, next) = p.blink();
+        assert!(changed && !p.caret_visible && next.is_some());
+        assert!(p.caret_for_paint().is_none(), "caret hidden in the off phase");
+        p.default_key("a", ModifiersState::default());
+        assert!(p.caret_visible, "typing shows the caret again");
+        click(&mut p, "x");
+        assert_eq!(p.blink(), (false, None));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn textarea_editing_with_newlines_and_vertical_moves() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><textarea id="t" style="width:200px">ab
+cd</textarea>
+               <script>$('#t').addEventListener('input', () => console.log(JSON.stringify($('#t').value)));</script></body>"#,
+            "textarea",
+        );
+        let key = |p: &mut Page, k: &str| {
+            p.default_key(k, ModifiersState::default());
+        };
+        click(&mut p, "t");
+        // The click lands at the middle of the box, below the text: caret goes to the end.
+        assert_eq!(p.value_of(p.interaction().focus.unwrap()), "ab\ncd");
+        key(&mut p, "ArrowUp"); // up from the second line keeps the column
+        assert!(p.caret <= 2, "caret on the first line, got {}", p.caret);
+        key(&mut p, "End");
+        key(&mut p, "Enter"); // newline after "ab"
+        key(&mut p, "X");
+        key(&mut p, "ArrowDown");
+        key(&mut p, "ArrowDown");
+        key(&mut p, "ArrowDown"); // past the last line: end of text
+        key(&mut p, "Y");
+        assert_eq!(log(&p).last().map(String::as_str), Some("\"ab\\nX\\ncdY\""));
         let _ = std::fs::remove_file(path);
     }
 }

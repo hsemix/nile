@@ -42,16 +42,45 @@ impl Renderer {
     ) {
         canvas.save();
         canvas.translate((0.0, -scroll_y));
-        for b in &tree.boxes {
+        // `overflow: hidden` clips a box's subtree; each clip ends where its subtree does.
+        let mut clips: Vec<usize> = Vec::new();
+        for (i, b) in tree.boxes.iter().enumerate() {
+            while clips.last().is_some_and(|end| i >= *end) {
+                canvas.restore();
+                clips.pop();
+            }
             match &b.content {
-                BoxContent::Element => self.paint_box(canvas, b, styles),
-                BoxContent::Text(content) => {
-                    self.paint_text(canvas, b.rect, content);
-                    if let Some((_, at)) = caret.filter(|(n, _)| content.owners.iter().any(|(_, o)| o == n)) {
-                        paint_caret(canvas, b.rect, content, at, styles.get(b.node).color);
+                BoxContent::Element => {
+                    self.paint_box(canvas, b, styles);
+                    let s = styles.get(b.node);
+                    if s.overflow_hidden && b.subtree_end > i + 1 {
+                        let w = s.border_width;
+                        let r = b.rect;
+                        canvas.save();
+                        canvas.clip_rect(
+                            Rect::from_ltrb(r.x + w.left, r.y + w.top, r.x + r.width - w.right, r.y + r.height - w.bottom),
+                            None,
+                            true,
+                        );
+                        clips.push(b.subtree_end);
                     }
                 }
+                BoxContent::Text(content) => {
+                    let caret_here = caret.filter(|(n, _)| content.owners.iter().any(|(_, o)| o == n));
+                    // Keep the caret in view by scrolling the text left inside its input.
+                    let (sx, sy) = caret_here.map_or((0.0, 0.0), |(n, at)| caret_scroll(tree, styles, n, content, at));
+                    canvas.save();
+                    canvas.translate((-sx, -sy));
+                    self.paint_text(canvas, b.rect, content);
+                    if let Some((_, at)) = caret_here {
+                        paint_caret(canvas, b.rect, content, at, styles.get(b.node).color);
+                    }
+                    canvas.restore();
+                }
             }
+        }
+        for _ in clips {
+            canvas.restore();
         }
         canvas.restore();
     }
@@ -229,6 +258,16 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
         }
         Appearance::None => {}
     }
+}
+
+/// How far to scroll an input's text (left, up) so the caret at `at` stays inside its content box.
+fn caret_scroll(tree: &LayoutTree, styles: &StyleMap, input: NodeId, content: &TextContent, at: usize) -> (f32, f32) {
+    let Some(rect) = tree.node_rect(input) else { return (0.0, 0.0) };
+    let s = styles.get(input);
+    let inner_w = rect.width - s.border_width.left - s.border_width.right - s.padding.left - s.padding.right;
+    let inner_h = rect.height - s.border_width.top - s.border_width.bottom - s.padding.top - s.padding.bottom;
+    let g = Cursor::from_byte_index(&content.layout, at, Affinity::Downstream).geometry(&content.layout, 1.0);
+    ((g.x0 as f32 + 1.0 - inner_w).max(0.0), (g.y1 as f32 - inner_h).max(0.0))
 }
 
 /// A 1px caret at byte offset `at` of a text run.

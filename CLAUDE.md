@@ -83,6 +83,9 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
   `on()` handlers get `(evt, matched)` with `this` = the attached element; JSX
   returns vnode arrays that `append`/`content`/`patch` render. Check the docs
   before adding more, don't write Sciter API shapes from memory.
+- `overflow: hidden` clips via `LayoutBox::subtree_end` (the flat paint list needs
+  to know where a box's descendants end): the renderer saves a clip when it paints
+  such a box and restores at `subtree_end`.
 - Form controls: `Page` in the shell owns default actions (`click_default`:
   checkbox/radio/label) and text editing (`edit_key`, `caret` in chars of `value`).
   An `<input>`'s text is synthesized in layout (`build_control_text`), the
@@ -112,8 +115,7 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
 
 ## Next up
 
-More controls (README roadmap #2): `<textarea>` (multi-line, wrapping, vertical
-caret movement), `<select>`, text selection with shift/drag, clipboard, and
-clipping/scrolling of long input values. Other open items: Tab focus order,
-caret blink, element-level scrolling, incremental restyle, `@env`/`@sciter`
-modules, symbol fallback check on Windows/Linux.
+Element scrolling (`overflow: auto|scroll` with wheel scrolling, scrollbars, JS
+`scrollTop` on elements) and text selection (shift/drag, copy/paste), then
+`<select>`. Also open: incremental restyle, the `cursor` property, `@env`/
+`@sciter` modules, symbol fallback check on Windows/Linux.
