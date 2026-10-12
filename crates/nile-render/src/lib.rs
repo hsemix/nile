@@ -6,12 +6,26 @@
 
 use std::collections::HashMap;
 
-use nile_layout::{BoxContent, LayoutBox, LayoutTree, NodeId, Rect as LRect, TextContent};
+use nile_layout::{BoxContent, LayoutBox, LayoutTree, NodeId, Rect as LRect, ScrollOffsets, TextContent};
 use nile_style::{Appearance, Color as CssColor, Edges, StyleMap};
-use nile_text::{Affinity, Cursor, PositionedLayoutItem};
+use nile_text::{Affinity, Cursor, PositionedLayoutItem, Selection};
 use skia_safe::{
     font::Edging, Canvas, Color, Font, FontMgr, GlyphId, Paint, Point, RRect, Rect, Typeface,
 };
+
+/// What to draw on top of the page content for one frame.
+#[derive(Clone, Copy)]
+pub struct Overlay<'a> {
+    /// Page scroll in logical pixels.
+    pub scroll_y: f32,
+    /// Scroll offsets of `overflow` elements.
+    pub offsets: &'a ScrollOffsets,
+    /// The input being edited and the caret's byte offset in its displayed text
+    /// (`None` while the caret is in the off phase of its blink).
+    pub caret: Option<(NodeId, usize)>,
+    /// The input with a selection and the selected byte range of its displayed text.
+    pub selection: Option<(NodeId, usize, usize)>,
+}
 
 pub struct Renderer {
     font_mgr: FontMgr,
@@ -30,28 +44,44 @@ impl Renderer {
         Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new() }
     }
 
-    /// Paint the whole tree. `scroll_y` is in logical pixels. `caret` is the
-    /// input being edited and the caret's byte offset in its displayed text.
-    pub fn paint(
-        &mut self,
-        canvas: &Canvas,
-        tree: &LayoutTree,
-        styles: &StyleMap,
-        scroll_y: f32,
-        caret: Option<(NodeId, usize)>,
-    ) {
+    /// Paint the whole tree.
+    pub fn paint(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, overlay: &Overlay) {
+        let Overlay { scroll_y, offsets, caret, selection } = *overlay;
         canvas.save();
         canvas.translate((0.0, -scroll_y));
-        for b in &tree.boxes {
+        // An `overflow` box clips and scrolls its subtree; each ends where the subtree does.
+        let mut open: Vec<(usize, &LayoutBox)> = Vec::new();
+        for (i, b) in tree.boxes.iter().enumerate() {
+            while open.last().is_some_and(|(end, _)| i >= *end) {
+                let (_, container) = open.pop().expect("checked above");
+                canvas.restore();
+                paint_scrollbars(canvas, container, offsets);
+            }
             match &b.content {
-                BoxContent::Element => self.paint_box(canvas, b, styles),
+                BoxContent::Element => {
+                    self.paint_box(canvas, b, styles);
+                    if let Some(sb) = &b.scroll {
+                        let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
+                        canvas.save();
+                        canvas.clip_rect(skia_rect(sb.clip), None, true);
+                        canvas.translate((-ox, -oy));
+                        open.push((b.subtree_end, b));
+                    }
+                }
                 BoxContent::Text(content) => {
+                    if let Some((_, from, to)) = selection.filter(|(n, ..)| content.owners.iter().any(|(_, o)| o == n)) {
+                        paint_selection(canvas, b.rect, content, from, to);
+                    }
                     self.paint_text(canvas, b.rect, content);
                     if let Some((_, at)) = caret.filter(|(n, _)| content.owners.iter().any(|(_, o)| o == n)) {
                         paint_caret(canvas, b.rect, content, at, styles.get(b.node).color);
                     }
                 }
             }
+        }
+        while let Some((_, container)) = open.pop() {
+            canvas.restore();
+            paint_scrollbars(canvas, container, offsets);
         }
         canvas.restore();
     }
@@ -228,6 +258,51 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
             canvas.draw_circle((r.x + r.width / 2.0, r.y + r.height / 2.0), r.width.min(r.height) * 0.24, &paint);
         }
         Appearance::None => {}
+    }
+}
+
+/// Thin overlay scrollbars for an `overflow: auto | scroll` box that has more to show.
+fn paint_scrollbars(canvas: &Canvas, b: &LayoutBox, offsets: &ScrollOffsets) {
+    let Some(sb) = &b.scroll else { return };
+    let (max_x, max_y) = sb.max_offset();
+    let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(Color::from_argb(110, 0, 0, 0));
+    const THICK: f32 = 6.0;
+    const EDGE: f32 = 2.0;
+    let c = sb.clip;
+    if sb.wheel_y && max_y > 0.0 {
+        let len = (c.height * c.height / sb.content_height).clamp(16.0, c.height);
+        let top = c.y + (c.height - len) * (oy / max_y).clamp(0.0, 1.0);
+        let r = Rect::from_xywh(c.x + c.width - THICK - EDGE, top, THICK, len);
+        canvas.draw_round_rect(r, THICK / 2.0, THICK / 2.0, &paint);
+    }
+    if sb.wheel_x && max_x > 0.0 {
+        let len = (c.width * c.width / sb.content_width).clamp(16.0, c.width);
+        let left = c.x + (c.width - len) * (ox / max_x).clamp(0.0, 1.0);
+        let r = Rect::from_xywh(left, c.y + c.height - THICK - EDGE, len, THICK);
+        canvas.draw_round_rect(r, THICK / 2.0, THICK / 2.0, &paint);
+    }
+}
+
+/// Highlight bytes `from..to` of a text run.
+fn paint_selection(canvas: &Canvas, origin: LRect, content: &TextContent, from: usize, to: usize) {
+    let layout = &content.layout;
+    let sel = Selection::new(
+        Cursor::from_byte_index(layout, from, Affinity::Downstream),
+        Cursor::from_byte_index(layout, to, Affinity::Upstream),
+    );
+    let mut paint = Paint::default();
+    paint.set_color(Color::from_argb(90, 59, 130, 246));
+    for (r, _) in sel.geometry(layout) {
+        let rect = Rect::from_ltrb(
+            origin.x + r.x0 as f32,
+            origin.y + r.y0 as f32,
+            origin.x + r.x1 as f32,
+            origin.y + r.y1 as f32,
+        );
+        canvas.draw_rect(rect, &paint);
     }
 }
 
