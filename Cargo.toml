@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+nile-dom = { path = "crates/nile-dom" }
+nile-style = { path = "crates/nile-style" }
+nile-text = { path = "crates/nile-text" }
+nile-layout = { path = "crates/nile-layout" }
+nile-render = { path = "crates/nile-render" }
+nile-script = { path = "crates/nile-script" }
+
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
+cssparser = "0.38"
+selectors = "0.41"
+precomputed-hash = "0.1"
+taffy = "0.14"
+parley = "0.12"
+skia-safe = "0.93"
+rquickjs = "0.14"
+winit = "0.30"
+softbuffer = "0.4"

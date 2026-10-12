@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+  <title>nile — layout queries</title>
+  <style>
+    body { margin: 0; padding: 24px; font-family: sans-serif; color: #1f2933; background: #f4f1ea }
+    .box { margin-bottom: 12px; padding: 12px 16px; background: #ffffff; border: 2px solid #14532d; border-radius: 8px; color: #14532d }
+    .wide { width: 420px }
+    .info { font-size: 13px; color: #6b7280; margin-top: 4px }
+    #grow { background: #ecfccb }
+  </style>
+</head>
+<body>
+  <div class="box">Natural width box<div class="info"></div></div>
+  <div class="box wide">Fixed 420px content box (padding and border add to it)<div class="info"></div></div>
+  <div class="box" id="grow">Resized by a script<div class="info"></div></div>
+  <p>Some text with an <em id="inline">emphasised phrase</em> inside. <span id="inline-info"></span></p>
+  <script src="measure.js"></script>
+</body>
+</html>

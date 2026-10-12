@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+  <title>nile — milestone 1</title>
+  <style>
+    body { margin: 0; background: #f4f1ea; font-family: sans-serif; color: #1f2933 }
+    .header { background: #14532d; color: #fefce8; padding: 24px 32px }
+    .title { margin: 0 }
+    .tagline { color: #bbf7d0; margin-top: 4px }
+    .row { display: flex; gap: 16px; padding: 24px 32px }
+    .card { flex: 1; background: #ffffff; border: 1px solid #d6d3cb; border-radius: 12px; padding: 16px }
+    .card-title { font-size: 18px; margin: 0 0 8px 0 }
+    .muted { color: #6b7280; font-size: 14px; line-height: 1.5 }
+    .bar { display: flex; justify-content: space-between; align-items: center; margin: 0 32px; padding: 12px 16px; background: #fde68a; border-radius: 8px }
+    .pill { background: #14532d; color: #fefce8; padding: 4px 12px; border-radius: 999px; font-size: 13px }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1 class="title">Hello from nile</h1>
+    <div class="tagline">HTML → style → Taffy → Parley → Skia, no webview.</div>
+  </div>
+
+  <div class="row">
+    <div class="card">
+      <h2 class="card-title">Layout</h2>
+      <div class="muted">Flexbox and block layout come from Taffy. These three cards share the row with flex: 1 and a 16px gap.</div>
+    </div>
+    <div class="card">
+      <h2 class="card-title">Text</h2>
+      <div class="muted">Parley shapes and wraps this paragraph, with system font fallback on macOS, Windows and Linux.</div>
+    </div>
+    <div class="card" style="border: 2px solid #14532d">
+      <h2 class="card-title" style="text-align: center">Inline style</h2>
+      <div class="muted" style="text-align: center">This card's border and centered text come from style attributes.</div>
+    </div>
+  </div>
+
+  <div class="bar">
+    <div>QuickJS is running — check the terminal for console output.</div>
+    <div class="pill">milestone 1</div>
+  </div>
+
+  <script>
+    const parts = ["dom", "style", "layout", "text", "render", "script"];
+    console.log("nile script host up; crates:", parts.join(", "));
+  </script>
+</body>
+</html>

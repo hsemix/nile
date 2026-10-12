@@ -1,0 +1,11 @@
+[package]
+name = "nile-layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nile-dom.workspace = true
+nile-style.workspace = true
+nile-text.workspace = true
+taffy.workspace = true

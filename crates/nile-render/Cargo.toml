@@ -1,0 +1,11 @@
+[package]
+name = "nile-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nile-style.workspace = true
+nile-text.workspace = true
+nile-layout.workspace = true
+skia-safe.workspace = true

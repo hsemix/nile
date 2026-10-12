@@ -1,0 +1,11 @@
+[package]
+name = "nile-style"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nile-dom.workspace = true
+cssparser.workspace = true
+selectors.workspace = true
+precomputed-hash.workspace = true

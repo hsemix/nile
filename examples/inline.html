@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+  <style>
+    body { margin: 0; padding: 24px; font-family: sans-serif; color: #1f2933; background: #f4f1ea }
+    p { margin: 0 0 12px 0; width: 420px }
+    .hot { color: #b91c1c; font-weight: bold }
+    .big { font-size: 24px }
+    .small { font-size: 11px; color: #6b7280 }
+    .center { text-align: center }
+    .mark { background: #fde68a }
+    .chip { display: inline-block; background: #14532d; color: #fefce8; padding: 2px 10px; border-radius: 999px; font-size: 13px; margin: 0 2px }
+  </style>
+</head>
+<body>
+  <p>Hello <b>world</b>, this paragraph mixes <span class="hot">red bold</span> text, a <span class="big">bigger</span> word and a <span class="small">small note</span> on a single wrapped flow.</p>
+  <p class="center">Centered   text with <b>bold</b>   and   extra   spaces collapsed.</p>
+  <div style="width: 420px">Block text before<div style="color:#14532d">a nested block</div>and text after, with <a>an anchor</a>.</div>
+  <p>Some <em>italic</em>, <u>underlined</u>, <s>struck</s> and <span class="mark">highlighted <b>bold</b> text</span> here,<br>with a <a>link</a> after a line break.</p>
+  <p>Inline-blocks flow with text: tags <span class="chip">rust</span><span class="chip">html</span> <span class="chip" style="background:#b91c1c">css</span> and a box <span style="display:inline-block; width:40px; height:28px; background:#fde68a; border:2px solid #14532d"></span> mid-sentence.</p>
+  <p>Padded inline elements: a <a style="padding: 2px 8px; border: 1px solid #0000ee; border-radius: 4px">bordered link</a> and a <span class="mark" style="padding: 3px 10px; border-radius: 10px">highlighted pill that is long enough to wrap onto a second line of this paragraph</span> end.</p>
+  <p>Baseline: <span class="chip" style="font-size:12px">small</span> text <span style="display:inline-block; background:#e5e7eb; padding:6px 10px; font-size:20px">two<br>lines</span> after.</p>
+</body>
+</html>

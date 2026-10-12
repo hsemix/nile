@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+<head>
+  <title>nile — scripting</title>
+  <style>
+    body { margin: 0; padding: 24px; font-family: sans-serif; color: #1f2933; background: #f4f1ea }
+    h1 { font-size: 22px; margin: 0 0 12px 0 }
+    .btn { display: inline-block; padding: 8px 16px; background: #14532d; color: #fefce8; border-radius: 8px; margin-right: 8px }
+    .btn:hover { background: #166534 }
+    .btn:active { background: #052e16 }
+    #count { font-weight: bold; color: #b91c1c }
+    ul { margin: 16px 0; padding: 0; width: 320px }
+    li { padding: 6px 10px; background: #ffffff; border: 1px solid #d6d3cb; margin-bottom: -1px }
+    li.new { background: #ecfccb }
+    li.done { color: #9ca3af }
+    #bar { height: 10px; width: 0px; background: #14532d; border-radius: 5px }
+    #track { width: 320px; background: #e5e7eb; border-radius: 5px }
+  </style>
+</head>
+<body>
+  <h1>Clicks: <span id="count">0</span></h1>
+  <div>
+    <div class="btn" id="add">Add item</div>
+    <div class="btn" id="toggle">Toggle last</div>
+  </div>
+  <ul id="list"><li>First item</li></ul>
+  <div id="track"><div id="bar"></div></div>
+
+  <script>
+    let clicks = 0;
+    const list = document.getElementById('list');
+    const count = document.getElementById('count');
+
+    // Event delegation: one listener on the buttons' parent.
+    document.body.addEventListener('click', (e) => {
+      const btn = e.target.closest('.btn');
+      if (!btn) return;
+      count.textContent = ++clicks;
+      if (btn.id === 'add') {
+        const li = document.createElement('li');
+        li.className = 'new';
+        li.innerHTML = 'Item <b>' + (list.children.length + 1) + '</b>';
+        list.appendChild(li);
+      } else {
+        list.lastElementChild.classList.toggle('done');
+      }
+    });
+
+    // Timers: grow a progress bar, then stop.
+    let w = 0;
+    const timer = setInterval(() => {
+      w += 20;
+      document.getElementById('bar').style.width = Math.min(w, 320) + 'px';
+      if (w >= 320) clearInterval(timer);
+    }, 20);
+
+    document.addEventListener('DOMContentLoaded', () => console.log('ready:', list.children.length, 'item(s)'));
+    console.log('selector test:', document.querySelectorAll('li, .btn').length);
+  </script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head>
+  <style>
+    body { margin: 0; padding: 24px; font-family: sans-serif; color: #1f2933; background: #f4f1ea }
+    .list { width: 360px; margin-bottom: 16px }
+    .list > li { padding: 8px 12px; background: #ffffff; border: 1px solid #d6d3cb }
+    .list > li + li { border-top-width: 0 }
+    .list > li:first-child { border-radius: 8px 8px 0 0; font-weight: bold }
+    .list > li:last-child { border-radius: 0 0 8px 8px }
+    .list > li:nth-child(even) { background: #ecfccb }
+    .list li.done { color: #6b7280 }
+    .list li:not(.done) span { color: #b91c1c }
+    .card p { margin: 0 0 6px 0 }
+    .card p:first-child { color: #14532d; font-size: 18px }
+    .card a[href^="https"] { color: #14532d }
+    .card a[href^="mailto"] { color: #b91c1c }
+    .card em ~ b { background: #fde68a; padding: 0 4px }
+    .card:hover { background: #fefce8 }
+  </style>
+</head>
+<body>
+  <ul class="list">
+    <li>Combinators (first child, bold)</li>
+    <li class="done">Child + adjacent sibling (done)</li>
+    <li>Pending <span>(red span via :not)</span></li>
+    <li class="done">nth-child(even) tint (done)</li>
+    <li>Last child, rounded bottom</li>
+  </ul>
+  <div class="card">
+    <p>First paragraph is green and larger</p>
+    <p>Links: <a href="https://example.com">https</a>, <a href="mailto:a@b.c">mailto</a>, <a href="/rel">relative</a>.</p>
+    <p><em>General sibling:</em> the <b>bold after em</b> gets a highlight.</p>
+  </div>
+</body>
+</html>

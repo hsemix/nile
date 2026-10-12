@@ -1,0 +1,20 @@
+[package]
+name = "nile-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nile"
+path = "src/main.rs"
+
+[dependencies]
+nile-dom.workspace = true
+nile-style.workspace = true
+nile-text.workspace = true
+nile-layout.workspace = true
+nile-render.workspace = true
+nile-script.workspace = true
+skia-safe.workspace = true
+winit.workspace = true
+softbuffer.workspace = true

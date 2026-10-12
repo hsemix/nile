@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+  <style>
+    body { margin: 0; padding: 24px; font-family: sans-serif; color: #1f2933; background: #f4f1ea }
+    .row { display: flex; gap: 12px; margin-bottom: 20px }
+    .btn { padding: 10px 18px; background: #14532d; color: #fefce8; border-radius: 8px }
+    .btn:hover { background: #166534; border: 2px solid #86efac; padding: 8px 16px }
+    .btn:active { background: #052e16 }
+    .card { width: 220px; padding: 12px; background: #ffffff; border: 1px solid #d6d3cb; border-radius: 8px }
+    .card:hover { border-color: #14532d; background: #f0fdf4 }
+    .card:hover .hint { color: #14532d; font-weight: bold }
+    .hint { color: #6b7280; font-size: 13px }
+    a { padding: 1px 4px }
+    a:hover { background: #fde68a }
+    a:focus { border: 2px solid #1d4ed8; border-radius: 4px }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <div class="btn">Hover me</div>
+    <div class="btn">Press me</div>
+  </div>
+  <div class="row">
+    <div class="card">Card one<div class="hint">turns green on hover</div></div>
+    <div class="card">Card two<div class="hint">so does this hint</div></div>
+  </div>
+  <p>Links: <a href="#a">first link</a> and <a href="#b">second link</a>, tab-able via click focus.</p>
+</body>
+</html>
