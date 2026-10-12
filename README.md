@@ -52,7 +52,7 @@ cargo test --workspace
 - **Selectors** (Servo's `selectors` crate): type, `.class`, `#id`, attributes (`[a]`, `[a^=b]`, ...), the
   descendant / `>` / `+` / `~` combinators, `:first-child`, `:last-child`, `:nth-child()`, `:not()`, `:is()`,
   `:root`, `:empty`, and `:hover` / `:active` / `:focus` (driven by `InteractionState`; nothing sets it
-  until events land). Rules with unsupported selectors (pseudo-elements, `:visited`, ...) are dropped.
+  until events land). Rules with unsupported selectors (`:visited`, `::first-line`, ...) are dropped.
 - **Overflow and scrolling:** `overflow` / `overflow-x` / `overflow-y` (`hidden` clips to the padding box; `auto` and
   `scroll` also scroll with the wheel, with scroll chaining to the page, and draw overlay scrollbars). Hit testing,
   hover and `getBoundingClientRect` follow scrolled content; `scrollTop`/`scrollLeft`/`scrollWidth`/`scrollHeight`,
@@ -94,7 +94,17 @@ cargo test --workspace
   click-to-focus on links and form controls, restyled live (see `examples/interact.html`).
 - **Inline content:** mixed text, `<br>`, inline padding/border/background/radius and `inline-block` (with
   baseline) wrap as one flow (see `examples/inline.html`, `examples/selectors.html`).
-- **Units:** `px`, `em`, `rem`, `%`, `pt`. **Colors:** hex, `rgb()/rgba()`, basic names.
+- **Cascade and values:** `!important`, custom properties with `var(--x, fallback)` (inherited, can reference each
+  other), `@media` (width/height features incl. range syntax, `orientation`, `screen`, `and`/`not`/commas; re-evaluated
+  when the window resizes). `calc()` (including `100% - 20px`, resolved in layout), `min()`, `max()`, `clamp()` with absolute units.
+  **Units:** `px`, `em`, `rem`, `%`, `pt`, `vw`, `vh`, `vmin`, `vmax`, `cm`, `mm`, `in`, `pc`. **Colors:** hex (3/4/6/8
+  digits), `rgb()/rgba()` (legacy and `r g b / a` syntax), `hsl()/hsla()`, all CSS named colors, `transparent`,
+  `currentColor` (borders follow `color` by default). Borders: per-side width, color and style (`solid`, `dashed`, `dotted`) with mitred corners.
+  `text-transform`, `letter-spacing`, outer `box-shadow` (several, blurred, spread) and painted `opacity` (a layer
+  over the whole subtree) and `position: relative|absolute` (against the nearest positioned ancestor) with `top/right/bottom/left/inset` and `z-index` (see
+  `examples/position.html`) `linear-gradient`/`radial-gradient` and their `repeating-` forms as `background`
+  (`examples/gradients.html`), and `::before`/`::after` with `content` (strings, `attr()`, quotes; any `display`, including
+  inline-block and absolute; `examples/pseudo.html`) too. See `examples/css-compat.html` for a page that checks these.
 
 ## Known gaps (deliberate, for now)
 
@@ -117,9 +127,13 @@ cargo test --workspace
   page), `offsetParent` (approximated by the parent). From Sciter: class components, `componentUpdate`,
   `onGlobalEvent`, `Element.value` (no native behaviors yet), `this://` URLs, and JSX shortcuts like `.class`;
   `patch` is simplified (children match by key, id, then tag).
-- `border-radius` takes one value (no per-corner radii); `:has()`, `::before/::after` and `:visited` aren't supported.
+- CSS gaps: no `grid`, `float`, tables, `counter()`/`url()` in `content`, other pseudo-elements (`::first-line`, `::placeholder`, ...) or `:has()`; `fixed` acts like `absolute` against the page (it scrolls), `sticky` like `relative`, an absolute box with `auto` insets sits at its containing block's corner when that isn't its parent (not at its static position), `z-index` only reorders siblings (no isolated stacking contexts, flex items ignore it); `inset` shadows, multiple background layers, `background-size`/`-position`/`-repeat`, images, transforms,
+  transitions; `double`/`groove` borders draw solid; `calc()` percentages
+  resolve against the parent's laid-out content size (heights only when the element sets its own height);
+  `@supports`/`@font-face`/`@keyframes` are skipped; `@media` has no `prefers-*` beyond light/no-preference and no
+  `resolution`.
+- `border-radius` takes one value (no per-corner radii); `:has()` and `:visited` aren't supported.
 - Sibling and `:nth-child` matching scans child lists, so very wide lists restyle slowly.
-- `opacity` is parsed but not painted (needs stacking contexts in the paint list).
 - Variable-font axes aren't applied when drawing glyphs.
 - CPU rasterization (`softbuffer`) — fine for now, GPU comes later.
 

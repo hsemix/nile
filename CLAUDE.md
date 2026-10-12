@@ -128,9 +128,18 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
   NBSP advance (`TextEngine::nbsp_ratio`), not Parley inline boxes: Parley always
   allows a wrap after an inline box, which strands the spacer from its word.
 
+- Style values: `parse.rs` evaluates `@media` and `vw`/`vh` at parse time against the viewport
+  (`compute_styles_in`; `StyleMap::uses_viewport` tells the shell to restyle on resize). Custom
+  properties and `var()` keep the source text in `Declaration::raw` and are resolved per element in
+  the cascade (`substitute`). `!important` is a stable sort of the collected declarations.
+  `examples/css-compat.html` is the visual conformance page; green = works. `calc()` mixing `%` and
+  `px` becomes `Length::Calc` and is resolved by `resolve_calcs` in layout after a first pass (Taffy's
+  own calc hook is a stub in `TaffyTree`). Absolute boxes are re-parented in the Taffy tree to their nearest positioned ancestor (`with_containing_block`/`hand_off_absolute`, thread-locals in `nile-layout`; the root is the fallback), and `flatten` sorts siblings into paint order by `z-index` (`paint_layer`). Gradients are `Value::Gradient` -> `ComputedStyle::background_image` (stops resolved by `Gradient::resolved_stops`); the renderer's `gradient_shader` builds the Skia shader. `::before`/`::after` are "generated boxes": the cascade (`pseudo_style`, matched in `ForStatelessPseudoElement` mode) appends their styles to `StyleMap::styles` under ids past the document's nodes, with `StyleMap::{pseudo, origin, content, is_pseudo}`. Layout's `kids()` puts them around an element's children; `hit_test` and text owners map back to the element, and `node_rect`/the index skip them. Never call `doc.node()` on a box id without checking `styles.is_pseudo`. `opacity < 1` wraps the element's paint-list range `[i, subtree_end)` in a `save_layer_alpha`. Borders are per side (`border_color`, `border_style`,
+  `border_width`); `border_color_set` holds what the author set, `None` = currentColor.
+
 ## Next up
 
-Selecting page text (not just inputs) and undo/redo in inputs, then
+CSS compatibility next: proper stacking contexts, real `position: fixed`, static positions for auto insets, `grid`, `:has()`, `inset` shadows. Also: selecting page text (not just inputs) and undo/redo in inputs, then
 `<select multiple>`/listboxes and a scrollable, flipping drop-down. Also open:
 draggable scrollbars and keyboard scrolling, `white-space: pre*` whitespace
 handling, incremental restyle, the `cursor` property, `@env`/`@sciter` modules,

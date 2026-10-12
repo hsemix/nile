@@ -7,17 +7,24 @@
 //! - a small user-agent stylesheet
 //! - inheritance of text properties
 
+mod colors;
+mod gradient;
 mod parse;
 mod selector;
 
 use nile_dom::{Document, NodeId, NodeKind};
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 use selectors::context::{
     MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, QuirksMode,
     SelectorCaches,
 };
 use selectors::matching::matches_selector;
+pub use gradient::{ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
 pub use parse::{Declaration, Rule, Stylesheet, Value};
-pub use selector::{ElementRef, InteractionState, NileImpl, PseudoClass, Query};
+use parse::Cx;
+pub use selector::{ElementRef, InteractionState, NileImpl, PseudoClass, PseudoElement, Query};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Color {
@@ -48,6 +55,9 @@ pub enum Length {
     Auto,
     Px(f32),
     Percent(f32),
+    /// `calc()` mixing a length and a percentage: `px + pct * basis` (`pct` is a fraction).
+    /// Layout resolves it once the containing block's size is known.
+    Calc { px: f32, pct: f32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -62,6 +72,54 @@ impl<T: Copy> Edges<T> {
     pub fn all(v: T) -> Self {
         Edges { top: v, right: v, bottom: v, left: v }
     }
+}
+
+/// Border line style. `none`/`hidden` give the side a zero width whatever its
+/// `border-width`; `double`, `groove` and the like draw solid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BorderStyle {
+    #[default]
+    None,
+    Solid,
+    Dashed,
+    Dotted,
+}
+
+/// One `box-shadow` layer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxShadow {
+    pub dx: f32,
+    pub dy: f32,
+    pub blur: f32,
+    pub spread: f32,
+    pub color: Color,
+    pub inset: bool,
+}
+
+/// `position`. `Fixed` is laid out like `Absolute` (against the parent, scrolling with the page).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Position {
+    #[default]
+    Static,
+    Relative,
+    Absolute,
+    Fixed,
+}
+
+impl Position {
+    /// Taken out of the normal flow.
+    pub fn out_of_flow(self) -> bool {
+        matches!(self, Position::Absolute | Position::Fixed)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextTransform {
+    #[default]
+    None,
+    Uppercase,
+    Lowercase,
+    Capitalize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -137,6 +195,11 @@ pub struct ComputedStyle {
     pub max_width: Length,
     pub max_height: Length,
     pub margin: Edges<Length>,
+    pub position: Position,
+    /// `z-index`; `None` is `auto`.
+    pub z_index: Option<i32>,
+    /// `top`, `right`, `bottom`, `left`.
+    pub inset: Edges<Length>,
     pub padding: Edges<f32>,
     pub border_width: Edges<f32>,
     /// `box-sizing: border-box` (the CSS default is `content-box`).
@@ -161,9 +224,17 @@ pub struct ComputedStyle {
 
     // Paint
     pub background: Option<Color>,
-    pub border_color: Color,
+    /// The first gradient of `background` / `background-image`, painted over the color.
+    pub background_image: Option<Gradient>,
+    /// Resolved per-side border colors (top, right, bottom, left).
+    pub border_color: Edges<Color>,
+    /// What the author set: `None` follows `color` (CSS `currentColor`, the initial value).
+    pub border_color_set: Edges<Option<Color>>,
+    pub border_style: Edges<BorderStyle>,
     pub border_radius: f32,
     pub opacity: f32,
+    /// Outer shadows, first = topmost. `inset` ones are parsed but not painted yet.
+    pub box_shadow: Vec<BoxShadow>,
 
     // Text (inherited)
     pub color: Color,
@@ -178,6 +249,11 @@ pub struct ComputedStyle {
     pub italic: bool,
     pub underline: bool,
     pub line_through: bool,
+    pub text_transform: TextTransform,
+    /// Extra space after each character, in px.
+    pub letter_spacing: f32,
+    /// Custom properties (`--name`), inherited. Values are source text, resolved on use.
+    pub vars: Rc<BTreeMap<String, String>>,
 }
 
 impl Default for ComputedStyle {
@@ -191,6 +267,9 @@ impl Default for ComputedStyle {
             max_width: Length::Auto,
             max_height: Length::Auto,
             margin: Edges::all(Length::Px(0.0)),
+            position: Position::Static,
+            z_index: None,
+            inset: Edges::all(Length::Auto),
             padding: Edges::all(0.0),
             border_width: Edges::all(0.0),
             border_box: false,
@@ -207,9 +286,13 @@ impl Default for ComputedStyle {
             align_items: Align::Normal,
             gap: 0.0,
             background: None,
-            border_color: Color::BLACK,
+            background_image: None,
+            border_color: Edges::all(Color::BLACK),
+            border_color_set: Edges::all(None),
+            border_style: Edges::all(BorderStyle::None),
             border_radius: 0.0,
             opacity: 1.0,
+            box_shadow: Vec::new(),
             color: Color::BLACK,
             font_size: 16.0,
             font_weight: 400.0,
@@ -220,6 +303,9 @@ impl Default for ComputedStyle {
             italic: false,
             underline: false,
             line_through: false,
+            text_transform: TextTransform::None,
+            letter_spacing: 0.0,
+            vars: Rc::default(),
         }
     }
 }
@@ -239,6 +325,7 @@ impl ComputedStyle {
             Length::Auto => "auto".to_string(),
             Length::Px(v) => px(v),
             Length::Percent(p) => format!("{}%", (p * 10000.0).round() / 100.0),
+            Length::Calc { px: v, pct } => format!("calc({}% + {})", (pct * 10000.0).round() / 100.0, px(v)),
         };
         let color = |c: Color| {
             if c.a == 255 {
@@ -295,7 +382,10 @@ impl ComputedStyle {
             "border-right-width" => px(self.border_width.right),
             "border-bottom-width" => px(self.border_width.bottom),
             "border-left-width" => px(self.border_width.left),
-            "border-color" | "border-top-color" => color(self.border_color),
+            "border-color" | "border-top-color" => color(self.border_color.top),
+            "border-right-color" => color(self.border_color.right),
+            "border-bottom-color" => color(self.border_color.bottom),
+            "border-left-color" => color(self.border_color.left),
             "border-radius" => px(self.border_radius),
             "background-color" => color(self.background.unwrap_or(Color::TRANSPARENT)),
             "color" => color(self.color),
@@ -349,12 +439,15 @@ impl ComputedStyle {
             // to inline descendants, which this approximates.
             underline: parent.underline,
             line_through: parent.line_through,
+            text_transform: parent.text_transform,
+            letter_spacing: parent.letter_spacing,
+            vars: parent.vars.clone(),
             ..Default::default()
         }
     }
 }
 
-const ROOT_FONT_SIZE: f32 = 16.0;
+pub(crate) const ROOT_FONT_SIZE: f32 = 16.0;
 
 const UA_STYLESHEET: &str = r#"
 head, script, style, title, meta, link, option, optgroup { display: none }
@@ -390,9 +483,48 @@ input[type=button], input[type=submit], input[type=reset] { width: auto; backgro
 /// Computed styles for every node, indexed by `NodeId.0`.
 pub struct StyleMap {
     pub styles: Vec<ComputedStyle>,
+    /// Styles depend on the viewport size (`@media`, `vw`, ...): restyle when it changes.
+    pub uses_viewport: bool,
+    pseudo: HashMap<(NodeId, PseudoElement), NodeId>,
+    origins: HashMap<NodeId, NodeId>,
+    contents: HashMap<NodeId, String>,
+}
+
+/// `::before`/`::after` boxes found while styling. Each gets an id past the end of the
+/// document's nodes, with a style in [`StyleMap::styles`] like any element.
+#[derive(Default)]
+struct Generated {
+    pseudo: HashMap<(NodeId, PseudoElement), NodeId>,
+    origins: HashMap<NodeId, NodeId>,
+    contents: HashMap<NodeId, String>,
 }
 
 impl StyleMap {
+    /// The generated `::before` / `::after` box of `element`, if it has one.
+    pub fn pseudo(&self, element: NodeId, kind: PseudoElement) -> Option<NodeId> {
+        self.pseudo.get(&(element, kind)).copied()
+    }
+
+    /// True for ids of generated boxes (they have no node in the document).
+    pub fn is_pseudo(&self, id: NodeId) -> bool {
+        self.origins.contains_key(&id)
+    }
+
+    /// The element a generated box belongs to; any other id maps to itself.
+    pub fn origin(&self, id: NodeId) -> NodeId {
+        self.origins.get(&id).copied().unwrap_or(id)
+    }
+
+    /// The text a generated box contains.
+    pub fn content(&self, id: NodeId) -> &str {
+        self.contents.get(&id).map_or("", String::as_str)
+    }
+
+    /// Generated ids and the elements they belong to.
+    pub fn origins(&self) -> &HashMap<NodeId, NodeId> {
+        &self.origins
+    }
+
     pub fn get(&self, id: NodeId) -> &ComputedStyle {
         &self.styles[id.0]
     }
@@ -405,6 +537,12 @@ pub fn compute_styles(doc: &Document) -> StyleMap {
 /// Like [`compute_styles`], with `:hover` / `:active` / `:focus` resolved
 /// against `state`.
 pub fn compute_styles_with(doc: &Document, state: &InteractionState) -> StyleMap {
+    compute_styles_in(doc, state, (800.0, 600.0))
+}
+
+/// Like [`compute_styles_with`], with `@media` queries and `vw`/`vh` units resolved
+/// against a `viewport` of the given size in px.
+pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f32, f32)) -> StyleMap {
     let ua = Stylesheet::parse(UA_STYLESHEET);
     let author: Vec<Stylesheet> = doc
         .nodes
@@ -419,7 +557,7 @@ pub fn compute_styles_with(doc: &Document, state: &InteractionState) -> StyleMap
                     _ => None,
                 })
                 .collect();
-            Stylesheet::parse(&css)
+            Stylesheet::parse_with(&css, viewport)
         })
         .collect();
 
@@ -434,9 +572,18 @@ pub fn compute_styles_with(doc: &Document, state: &InteractionState) -> StyleMap
         NeedsSelectorFlags::No,
         MatchingForInvalidation::No,
     );
-    let cx = CascadeInput { doc, state, ua: &ua, author: &author };
-    cascade(&cx, &mut ctx, Document::ROOT, &root_style, &mut styles);
-    StyleMap { styles }
+    let uses_viewport = Cell::new(author.iter().any(|s| s.uses_viewport));
+    let has_pseudo = author.iter().any(|s| s.rules.iter().any(|r| r.selectors.slice().iter().any(|sel| sel.has_pseudo_element())));
+    let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo };
+    let mut generated = Generated::default();
+    cascade(&cx, &mut ctx, Document::ROOT, &root_style, &mut styles, &mut generated);
+    StyleMap {
+        styles,
+        uses_viewport: uses_viewport.get(),
+        pseudo: generated.pseudo,
+        origins: generated.origins,
+        contents: generated.contents,
+    }
 }
 
 struct CascadeInput<'a> {
@@ -444,6 +591,168 @@ struct CascadeInput<'a> {
     state: &'a InteractionState,
     ua: &'a Stylesheet,
     author: &'a [Stylesheet],
+    viewport: (f32, f32),
+    uses_viewport: &'a Cell<bool>,
+    /// Some stylesheet has a `::before`/`::after` rule.
+    has_pseudo: bool,
+}
+
+/// Declarations from `sheets` matching `el`, in cascade order (specificity, then source
+/// order, per origin). With `pseudo`, the selectors that end in that pseudo-element
+/// are matched instead of the element's own rules.
+fn matching_decls<'a>(
+    cx: &'a CascadeInput,
+    el: &ElementRef,
+    ctx: &mut MatchingContext<NileImpl>,
+    pseudo: bool,
+) -> Vec<&'a Declaration> {
+    let mut decls = Vec::new();
+    for sheet in std::iter::once(cx.ua).chain(cx.author.iter()) {
+        let mut matched: Vec<(u32, usize, &Rule)> = sheet
+            .rules
+            .iter()
+            .enumerate()
+            .filter_map(|(i, rule)| {
+                rule.selectors
+                    .slice()
+                    .iter()
+                    .filter(|s| s.has_pseudo_element() == pseudo && matches_selector(s, 0, None, el, ctx))
+                    .map(|s| s.specificity())
+                    .max()
+                    .map(|spec| (spec, i, rule))
+            })
+            .collect();
+        matched.sort_by_key(|(spec, i, _)| (*spec, *i));
+        decls.extend(matched.iter().flat_map(|(_, _, r)| r.declarations.iter()));
+    }
+    decls
+}
+
+/// Applies `decls` to `style` (already inheriting from its parent): `!important` last,
+/// custom properties and `var()` resolved, borders finalised. Returns the declarations
+/// as applied, so callers can read properties that aren't part of `ComputedStyle`.
+fn apply_declarations(
+    style: &mut ComputedStyle,
+    mut decls: Vec<&Declaration>,
+    parent_font_size: f32,
+    pcx: &Cx,
+) -> Vec<Declaration> {
+    // `!important` declarations win over normal ones from any origin, keeping
+    // their relative order (the sort is stable).
+    decls.sort_by_key(|d| d.important);
+
+    // Custom properties first, in order, so `var()` sees the final values.
+    if decls.iter().any(|d| d.name.starts_with("--")) {
+        let mut vars = (*style.vars).clone();
+        for d in decls.iter().filter(|d| d.name.starts_with("--")) {
+            match substitute(&d.raw, &vars, 0) {
+                Some(v) => vars.insert(d.name.clone(), v),
+                None => vars.remove(&d.name),
+            };
+        }
+        style.vars = Rc::new(vars);
+    }
+
+    // font-size first, so `em` in everything else resolves against it.
+    let vars = style.vars.clone();
+    let resolved: Vec<Declaration> = decls
+        .iter()
+        .filter(|d| !d.name.starts_with("--"))
+        .filter_map(|d| {
+            if d.raw.is_empty() {
+                return Some((*d).clone());
+            }
+            // A `var()` that can't be resolved makes the declaration invalid.
+            let text = substitute(&d.raw, &vars, 0)?;
+            Some(Declaration { values: parse::parse_values(&text, pcx), raw: String::new(), ..(*d).clone() })
+        })
+        .collect();
+    for d in resolved.iter().filter(|d| d.name == "font-size") {
+        apply(style, d, parent_font_size);
+    }
+    for d in resolved.iter().filter(|d| d.name != "font-size") {
+        apply(style, d, parent_font_size);
+    }
+    for i in 0..4 {
+        if *side(&mut style.border_style, i) == BorderStyle::None {
+            *side(&mut style.border_width, i) = 0.0;
+        }
+    }
+    let own = style.color;
+    let set = style.border_color_set;
+    let pick = |c: Option<Color>| c.unwrap_or(own);
+    style.border_color = Edges { top: pick(set.top), right: pick(set.right), bottom: pick(set.bottom), left: pick(set.left) };
+    resolved
+}
+
+/// The text a `content` value generates; `None` for `none`/`normal` or nothing usable.
+fn content_text(decls: &[Declaration], doc: &Document, id: NodeId) -> Option<String> {
+    let values = &decls.iter().rev().find(|d| d.name == "content")?.values;
+    if values.is_empty() || matches!(values.first().and_then(Value::ident), Some("none" | "normal")) {
+        return None;
+    }
+    let mut out = String::new();
+    let mut any = false;
+    for v in values {
+        match v {
+            Value::Str(t) => {
+                out.push_str(t);
+                any = true;
+            }
+            Value::Attr(name) => {
+                out.push_str(doc.node(id).attr(name).unwrap_or(""));
+                any = true;
+            }
+            Value::Ident(i) if i == "open-quote" => {
+                out.push('\u{201c}');
+                any = true;
+            }
+            Value::Ident(i) if i == "close-quote" => {
+                out.push('\u{201d}');
+                any = true;
+            }
+            _ => {}
+        }
+    }
+    any.then_some(out)
+}
+
+/// Style a `::before`/`::after` of `id`, if some rule gives it `content`. Its style
+/// goes at the end of `out`, and the new id is returned.
+fn pseudo_style(
+    cx: &CascadeInput,
+    id: NodeId,
+    element: &ComputedStyle,
+    kind: PseudoElement,
+    out: &mut Vec<ComputedStyle>,
+    extra: &mut Generated,
+) {
+    let el = ElementRef::new(cx.doc, id, cx.state);
+    let mut caches = SelectorCaches::default();
+    let mut ctx = MatchingContext::new(
+        MatchingMode::ForStatelessPseudoElement,
+        None,
+        &mut caches,
+        QuirksMode::NoQuirks,
+        NeedsSelectorFlags::No,
+        MatchingForInvalidation::No,
+    );
+    let wanted = move |p: &PseudoElement| *p == kind;
+    ctx.pseudo_element_matching_fn = Some(&wanted);
+    let decls = matching_decls(cx, &el, &mut ctx, true);
+    if decls.is_empty() {
+        return;
+    }
+    let mut style = ComputedStyle::inherit(element);
+    style.display = Display::Inline;
+    let pcx = Cx { viewport: cx.viewport, uses_viewport: cx.uses_viewport };
+    let applied = apply_declarations(&mut style, decls, element.font_size, &pcx);
+    let Some(content) = content_text(&applied, cx.doc, id) else { return };
+    let new = NodeId(out.len());
+    out.push(style);
+    extra.pseudo.insert((id, kind), new);
+    extra.origins.insert(new, id);
+    extra.contents.insert(new, content);
 }
 
 fn cascade(
@@ -452,6 +761,7 @@ fn cascade(
     id: NodeId,
     parent: &ComputedStyle,
     out: &mut Vec<ComputedStyle>,
+    extra: &mut Generated,
 ) {
     let doc = cx.doc;
     let node = doc.node(id);
@@ -459,46 +769,91 @@ fn cascade(
 
     if let NodeKind::Element { .. } = &node.kind {
         let el = ElementRef::new(doc, id, cx.state);
-
-        // Origin order: UA first, then author sheets; within an origin, by
-        // specificity, then source order.
-        let mut decls: Vec<&Declaration> = Vec::new();
-        for sheet in std::iter::once(cx.ua).chain(cx.author.iter()) {
-            let mut matched: Vec<(u32, usize, &Rule)> = sheet
-                .rules
-                .iter()
-                .enumerate()
-                .filter_map(|(i, rule)| {
-                    rule.selectors
-                        .slice()
-                        .iter()
-                        .filter(|s| matches_selector(s, 0, None, &el, ctx))
-                        .map(|s| s.specificity())
-                        .max()
-                        .map(|spec| (spec, i, rule))
-                })
-                .collect();
-            matched.sort_by_key(|(spec, i, _)| (*spec, *i));
-            decls.extend(matched.iter().flat_map(|(_, _, r)| r.declarations.iter()));
-        }
-        let inline = node.attr("style").map(parse::parse_declarations).unwrap_or_default();
+        let mut decls = matching_decls(cx, &el, ctx, false);
+        let pcx = Cx { viewport: cx.viewport, uses_viewport: cx.uses_viewport };
+        let inline = node.attr("style").map(|css| parse::parse_declarations(css, &pcx)).unwrap_or_default();
         decls.extend(inline.iter());
-
         style.checked = doc.has_state(id, "checked");
-
-        // font-size first, so `em` in everything else resolves against it.
-        for d in decls.iter().filter(|d| d.name == "font-size") {
-            apply(&mut style, d, parent.font_size);
-        }
-        for d in decls.iter().filter(|d| d.name != "font-size") {
-            apply(&mut style, d, parent.font_size);
-        }
+        apply_declarations(&mut style, decls, parent.font_size, &pcx);
     }
 
     out[id.0] = style.clone();
-    for child in &node.children {
-        cascade(cx, ctx, *child, &style, out);
+    if cx.has_pseudo && matches!(node.kind, NodeKind::Element { .. }) {
+        pseudo_style(cx, id, &style, PseudoElement::Before, out, extra);
+        pseudo_style(cx, id, &style, PseudoElement::After, out, extra);
     }
+    for child in &node.children {
+        cascade(cx, ctx, *child, &style, out, extra);
+    }
+}
+
+/// Replaces every `var(--name[, fallback])` in `text`. `None` if a variable is
+/// undefined without a fallback, or substitution nests too deeply (a cycle).
+fn substitute(text: &str, vars: &BTreeMap<String, String>, depth: u32) -> Option<String> {
+    if depth > 16 {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("var(") {
+        out.push_str(&rest[..at]);
+        let body = &rest[at + 4..];
+        let mut level = 1;
+        let mut end = None;
+        let mut comma = None;
+        for (i, c) in body.char_indices() {
+            match c {
+                '(' => level += 1,
+                ')' => {
+                    level -= 1;
+                    if level == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                ',' if level == 1 && comma.is_none() => comma = Some(i),
+                _ => {}
+            }
+        }
+        let end = end?;
+        let name = body[..comma.unwrap_or(end)].trim();
+        let value = match vars.get(name) {
+            Some(v) => substitute(v, vars, depth + 1)?,
+            None => substitute(body[comma? + 1..end].trim(), vars, depth + 1)?,
+        };
+        out.push_str(&value);
+        rest = &body[end + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+fn color_of(x: &Value, current: Color) -> Option<Color> {
+    x.color().or_else(|| (x.ident() == Some("currentcolor")).then_some(current))
+}
+
+fn side<T>(e: &mut Edges<T>, i: usize) -> &mut T {
+    match i {
+        0 => &mut e.top,
+        1 => &mut e.right,
+        2 => &mut e.bottom,
+        _ => &mut e.left,
+    }
+}
+
+/// Which side a `border-top-*` style property names; `None` for the all-sides ones.
+fn side_index(name: &str) -> Option<usize> {
+    ["-top", "-right", "-bottom", "-left"].iter().position(|s| name.contains(s))
+}
+
+fn border_style(v: &Value) -> Option<BorderStyle> {
+    Some(match v.ident()? {
+        "none" | "hidden" => BorderStyle::None,
+        "dashed" => BorderStyle::Dashed,
+        "dotted" => BorderStyle::Dotted,
+        "solid" | "double" | "groove" | "ridge" | "inset" | "outset" => BorderStyle::Solid,
+        _ => return None,
+    })
 }
 
 fn length(v: &Value, font_size: f32) -> Option<Length> {
@@ -508,6 +863,9 @@ fn length(v: &Value, font_size: f32) -> Option<Length> {
         Value::Em(e) => Length::Px(e * font_size),
         Value::Rem(e) => Length::Px(e * ROOT_FONT_SIZE),
         Value::Percent(p) => Length::Percent(p / 100.0),
+        Value::Calc { px, em, pct } if *pct == 0.0 => Length::Px(px + em * font_size),
+        Value::Calc { px, em, pct } if *px == 0.0 && *em == 0.0 => Length::Percent(pct / 100.0),
+        Value::Calc { px, em, pct } => Length::Calc { px: px + em * font_size, pct: pct / 100.0 },
         Value::Ident(i) if i == "auto" => Length::Auto,
         _ => return None,
     })
@@ -551,6 +909,17 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
     let first = v.first();
     let l = |val: Option<&Value>| val.and_then(|x| length(x, fs));
     let p = |val: Option<&Value>| val.and_then(|x| px(x, fs));
+    // `currentcolor` takes the element's own text color (as of this declaration).
+    let current = s.color;
+    let color = |x: &Value| x.color().or_else(|| (x.ident() == Some("currentcolor")).then_some(current));
+    // A border color as the author set it: `Some(None)` is `currentColor`.
+    let spec = |x: &Value| -> Option<Option<Color>> {
+        if x.ident() == Some("currentcolor") {
+            Some(None)
+        } else {
+            x.color().map(Some)
+        }
+    };
 
     match d.name.as_str() {
         "display" => {
@@ -613,6 +982,30 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         "margin-right" => s.margin.right = l(first).unwrap_or(s.margin.right),
         "margin-bottom" => s.margin.bottom = l(first).unwrap_or(s.margin.bottom),
         "margin-left" => s.margin.left = l(first).unwrap_or(s.margin.left),
+        "position" => {
+            s.position = match first.and_then(Value::ident) {
+                Some("static") => Position::Static,
+                Some("relative" | "sticky") => Position::Relative,
+                Some("absolute") => Position::Absolute,
+                Some("fixed") => Position::Fixed,
+                _ => return,
+            }
+        }
+        "z-index" => match first {
+            Some(Value::Number(n)) if n.fract() == 0.0 => s.z_index = Some(*n as i32),
+            Some(Value::Ident(i)) if i == "auto" => s.z_index = None,
+            _ => {}
+        },
+        "top" => s.inset.top = l(first).unwrap_or(s.inset.top),
+        "right" => s.inset.right = l(first).unwrap_or(s.inset.right),
+        "bottom" => s.inset.bottom = l(first).unwrap_or(s.inset.bottom),
+        "left" => s.inset.left = l(first).unwrap_or(s.inset.left),
+        "inset" => {
+            let vals: Option<Vec<Length>> = v.iter().map(|x| length(x, fs)).collect();
+            if let Some(e) = vals.as_deref().and_then(edges) {
+                s.inset = e;
+            }
+        }
         "padding" => {
             let vals: Option<Vec<f32>> = v.iter().map(|x| px(x, fs)).collect();
             if let Some(e) = vals.as_deref().and_then(edges) {
@@ -629,23 +1022,105 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.border_width = e;
             }
         }
-        "border-color" => s.border_color = first.and_then(Value::color).unwrap_or(s.border_color),
-        // `border: 1px solid #ccc` — order-independent.
-        "border" => {
+        "border-color" => {
+            let vals: Option<Vec<Option<Color>>> = v.iter().map(spec).collect();
+            if let Some(e) = vals.as_deref().and_then(edges) {
+                s.border_color_set = e;
+            }
+        }
+        "border-style" => {
+            let vals: Option<Vec<BorderStyle>> = v.iter().map(border_style).collect();
+            if let Some(e) = vals.as_deref().and_then(edges) {
+                s.border_style = e;
+            }
+        }
+        "border-top-color" | "border-right-color" | "border-bottom-color" | "border-left-color" => {
+            if let (Some(c), Some(i)) = (first.and_then(spec), side_index(&d.name)) {
+                *side(&mut s.border_color_set, i) = c;
+            }
+        }
+        "border-top-style" | "border-right-style" | "border-bottom-style" | "border-left-style" => {
+            if let (Some(st), Some(i)) = (first.and_then(border_style), side_index(&d.name)) {
+                *side(&mut s.border_style, i) = st;
+            }
+        }
+        // `border: 1px solid #ccc` — order-independent. Without a color the border
+        // follows `color`.
+        "border" | "border-top" | "border-right" | "border-bottom" | "border-left" => {
+            let mut width = None;
+            // A shorthand without a style is drawn solid (browsers draw nothing).
+            let mut line = BorderStyle::Solid;
+            let mut colored = None;
             for x in v {
                 if let Some(w) = px(x, fs) {
-                    s.border_width = Edges::all(w);
-                } else if let Some(c) = x.color() {
-                    s.border_color = c;
-                } else if x.ident() == Some("none") {
-                    s.border_width = Edges::all(0.0);
+                    width = Some(w);
+                } else if let Some(c) = spec(x) {
+                    colored = Some(c);
+                } else {
+                    match x.ident() {
+                        Some("none" | "hidden") => line = BorderStyle::None,
+                        Some("thin") => width = Some(1.0),
+                        Some("medium") => width = Some(3.0),
+                        Some("thick") => width = Some(5.0),
+                        Some("dashed") => line = BorderStyle::Dashed,
+                        Some("dotted") => line = BorderStyle::Dotted,
+                        _ => {}
+                    }
+                }
+            }
+            let sides: Vec<usize> = match side_index(&d.name) {
+                Some(i) => vec![i],
+                None => vec![0, 1, 2, 3],
+            };
+            for i in sides {
+                *side(&mut s.border_color_set, i) = colored.unwrap_or(None);
+                *side(&mut s.border_style, i) = line;
+                if let Some(w) = width {
+                    *side(&mut s.border_width, i) = w;
                 }
             }
         }
+        "border-top-width" => s.border_width.top = p(first).unwrap_or(s.border_width.top),
+        "border-right-width" => s.border_width.right = p(first).unwrap_or(s.border_width.right),
+        "border-bottom-width" => s.border_width.bottom = p(first).unwrap_or(s.border_width.bottom),
+        "border-left-width" => s.border_width.left = p(first).unwrap_or(s.border_width.left),
         "border-radius" => s.border_radius = p(first).unwrap_or(s.border_radius),
-        "background" | "background-color" => {
-            if let Some(c) = v.iter().find_map(Value::color) {
-                s.background = Some(c);
+        "background" | "background-color" | "background-image" => {
+            if d.name != "background-image" {
+                if let Some(c) = v.iter().find_map(&color) {
+                    s.background = Some(c);
+                }
+            }
+            if d.name != "background-color" {
+                // The shorthand resets the image; `none` and unsupported images clear it.
+                s.background_image = v.iter().find_map(|x| match x {
+                    Value::Gradient(g) => Some((**g).clone()),
+                    _ => None,
+                });
+            }
+        }
+        "box-shadow" => {
+            let mut shadows = Vec::new();
+            for group in v.split(|x| *x == Value::Comma) {
+                let mut lens = Vec::new();
+                let (mut color, mut inset) = (current, false);
+                for x in group {
+                    if let Some(n) = px(x, fs) {
+                        lens.push(n);
+                    } else if let Some(c) = self::color_of(x, current) {
+                        color = c;
+                    } else if x.ident() == Some("inset") {
+                        inset = true;
+                    }
+                }
+                if let [dx, dy, rest @ ..] = lens.as_slice() {
+                    let blur = rest.first().copied().unwrap_or(0.0).max(0.0);
+                    let spread = rest.get(1).copied().unwrap_or(0.0);
+                    shadows.push(BoxShadow { dx: *dx, dy: *dy, blur, spread, color, inset });
+                }
+            }
+            if !shadows.is_empty() || first.and_then(Value::ident) == Some("none") {
+                s.box_shadow = shadows;
             }
         }
         "opacity" => {
@@ -653,7 +1128,7 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.opacity = n.clamp(0.0, 1.0);
             }
         }
-        "color" => s.color = first.and_then(Value::color).unwrap_or(s.color),
+        "color" => s.color = first.and_then(color).unwrap_or(s.color),
         "font-size" => s.font_size = p(first).unwrap_or(s.font_size),
         "font-weight" => {
             s.font_weight = match first {
@@ -688,6 +1163,19 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 _ => return,
             }
         }
+        "text-transform" => {
+            s.text_transform = match first.and_then(Value::ident) {
+                Some("uppercase") => TextTransform::Uppercase,
+                Some("lowercase") => TextTransform::Lowercase,
+                Some("capitalize") => TextTransform::Capitalize,
+                Some("none") => TextTransform::None,
+                _ => return,
+            }
+        }
+        "letter-spacing" => match first {
+            Some(Value::Ident(i)) if i == "normal" => s.letter_spacing = 0.0,
+            other => s.letter_spacing = p(other).unwrap_or(s.letter_spacing),
+        },
         "font-style" => {
             s.italic = match first.and_then(Value::ident) {
                 Some("italic") | Some("oblique") => true,
@@ -894,7 +1382,7 @@ mod tests {
         assert_eq!(all.len(), 3);
         assert_eq!(Query::parse("li.a").unwrap().select_all(&doc, ul).len(), 2);
         assert!(Query::parse("li:hover").unwrap().select_all(&doc, ul).is_empty());
-        assert!(Query::parse("li::before").is_err());
+        assert!(Query::parse("li::marker").is_err());
         assert!(Query::parse("<<").is_err());
     }
 
@@ -904,5 +1392,184 @@ mod tests {
             r#"<style>p::first-line { color: red } p:visited { color: red } p { color: blue }</style><p id="p">x</p>"#,
         );
         assert_eq!(color_of(&doc, &compute_styles(&doc), "p"), BLUE);
+    }
+
+    fn style_of(doc: &Document, styles: &StyleMap, id: &str) -> ComputedStyle {
+        styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone()
+    }
+
+    #[test]
+    fn important_beats_specificity_and_inline() {
+        let doc = Document::parse(
+            r#"<style>.a { color: red !important } #a { color: blue }</style>
+               <p class="a" id="a" style="color: green">x</p>
+               <p id="b" style="color: green !important; color: blue">y</p>"#,
+        );
+        let styles = compute_styles(&doc);
+        assert_eq!(color_of(&doc, &styles, "a"), RED);
+        assert_eq!(color_of(&doc, &styles, "b"), Color::rgb(0, 128, 0));
+    }
+
+    #[test]
+    fn custom_properties_inherit_and_fall_back() {
+        let doc = Document::parse(
+            r#"<style>:root { --c: #ff0000; --pad: 6px; --both: var(--c) }
+               #a { color: var(--c); padding: var(--pad) 2px }
+               #b { --c: blue; color: var(--c) }
+               #c { color: var(--none, blue); margin: 3px }
+               #d { color: var(--none) }
+               #e { color: var(--both) }</style>
+               <div id="a"></div><div id="b"><span id="b2" style="color: var(--c)">x</span></div>
+               <div id="c"></div><div id="d"></div><div id="e"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        assert_eq!(color_of(&doc, &styles, "a"), RED);
+        assert_eq!(style_of(&doc, &styles, "a").padding.top, 6.0);
+        assert_eq!(style_of(&doc, &styles, "a").padding.left, 2.0);
+        assert_eq!(color_of(&doc, &styles, "b"), BLUE);
+        assert_eq!(color_of(&doc, &styles, "b2"), BLUE); // inherits the override
+        assert_eq!(color_of(&doc, &styles, "c"), BLUE);
+        assert_eq!(color_of(&doc, &styles, "d"), Color::BLACK); // unresolved: declaration dropped
+        assert_eq!(color_of(&doc, &styles, "e"), RED);
+    }
+
+    #[test]
+    fn calc_and_viewport_units() {
+        let doc = Document::parse(
+            r#"<style>#a { width: calc(10px + 2 * 5px); height: calc(1em + 4px); font-size: 10px }
+               #b { width: calc(100% / 4); height: 10vh; margin-left: min(5px, 9px); padding-top: clamp(2px, 1px, 8px) }
+               #c { width: calc(100% - 4px) }</style>
+               <div id="a"></div><div id="b"></div><div id="c"></div>"#,
+        );
+        let styles = compute_styles_in(&doc, &InteractionState::default(), (500.0, 400.0));
+        assert_eq!(style_of(&doc, &styles, "a").width, Length::Px(20.0));
+        assert_eq!(style_of(&doc, &styles, "a").height, Length::Px(14.0));
+        let b = style_of(&doc, &styles, "b");
+        assert_eq!(b.width, Length::Percent(0.25));
+        assert_eq!(b.height, Length::Px(40.0));
+        assert_eq!(b.margin.left, Length::Px(5.0));
+        assert_eq!(b.padding.top, 2.0);
+        // `%` mixed with `px` is resolved by layout.
+        assert_eq!(style_of(&doc, &styles, "c").width, Length::Calc { px: -4.0, pct: 1.0 });
+        assert!(styles.uses_viewport);
+    }
+
+    #[test]
+    fn media_queries_follow_the_viewport() {
+        let css = r#"<style>#a { color: red }
+            @media (min-width: 600px) { #a { color: blue } }
+            @media screen and (max-width: 300px), print { #a { color: green } }
+            @media not (min-width: 100px) { #a { color: yellow } }
+            @media (400px <= width < 700px) { #a { padding-top: 7px } }
+            @font-face { font-family: x; src: url(x.ttf) }</style><p id="a">x</p>"#;
+        let doc = Document::parse(css);
+        let at = |w: f32| {
+            let styles = compute_styles_in(&doc, &InteractionState::default(), (w, 500.0));
+            style_of(&doc, &styles, "a")
+        };
+        assert_eq!(at(800.0).color, BLUE);
+        assert_eq!(at(500.0).color, RED);
+        assert_eq!(at(500.0).padding.top, 0.0); // `a < b < c` chains aren't supported
+        assert_eq!(at(250.0).color, Color::rgb(0, 128, 0));
+    }
+
+    #[test]
+    fn colors_and_borders() {
+        let doc = Document::parse(
+            r#"<style>#a { background: hsl(120, 100%, 25%); color: rebeccapurple; border: 2px solid }
+               #b { border-bottom: 1px solid #888; color: red }
+               #c { background: rgb(0 128 255 / 50%) }</style>
+               <div id="a"></div><div id="b"></div><div id="c"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let a = style_of(&doc, &styles, "a");
+        assert_eq!(a.background, Some(Color::rgb(0, 128, 0)));
+        assert_eq!(a.border_color.left, Color::rgb(102, 51, 153)); // follows `color`
+        let b = style_of(&doc, &styles, "b");
+        assert_eq!((b.border_width.bottom, b.border_width.top), (1.0, 0.0));
+        assert_eq!(b.border_color.bottom, Color::rgb(136, 136, 136));
+        assert_eq!(b.border_color.top, RED); // not set: follows `color`
+        assert_eq!(style_of(&doc, &styles, "c").background, Some(Color { r: 0, g: 128, b: 255, a: 127 }));
+    }
+
+    #[test]
+    fn per_side_border_colors_and_styles() {
+        let doc = Document::parse(
+            r#"<style>#a { border: 2px dashed red; border-left-color: blue; border-bottom-style: dotted }
+               #b { border-style: solid none; border-width: 3px; border-color: red green }</style>
+               <div id="a"></div><div id="b"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let a = style_of(&doc, &styles, "a");
+        assert_eq!((a.border_color.top, a.border_color.left), (RED, BLUE));
+        assert_eq!((a.border_style.top, a.border_style.bottom), (BorderStyle::Dashed, BorderStyle::Dotted));
+        let b = style_of(&doc, &styles, "b");
+        assert_eq!((b.border_width.top, b.border_width.right), (3.0, 0.0));
+        assert_eq!(b.border_color.right, Color::rgb(0, 128, 0));
+    }
+
+    #[test]
+    fn box_shadow_lists() {
+        let doc = Document::parse(
+            r#"<div id="a" style="color: blue; box-shadow: 2px 3px 4px 1px rgba(0,0,0,0.5), inset 0 0 0 red, 1px 1px"></div>
+               <div id="b" style="box-shadow: none"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let a = style_of(&doc, &styles, "a").box_shadow;
+        assert_eq!(a.len(), 3);
+        assert_eq!((a[0].dx, a[0].dy, a[0].blur, a[0].spread), (2.0, 3.0, 4.0, 1.0));
+        assert_eq!(a[0].color.a, 127);
+        assert!(a[1].inset && a[1].color == RED);
+        assert_eq!(a[2].color, BLUE); // no color: currentColor
+        assert!(style_of(&doc, &styles, "b").box_shadow.is_empty());
+    }
+
+    #[test]
+    fn generated_content_boxes() {
+        let doc = Document::parse(
+            r#"<style>.a::before { content: "> "; color: red }
+               .a::after { content: attr(data-x) "!"; display: block }
+               .b::before { color: blue }
+               .c:hover::before, .c::after { content: "" } .c { color: blue }</style>
+               <p class="a" data-x="hi">t</p><p class="b">u</p><p class="c">v</p>"#,
+        );
+        let styles = compute_styles(&doc);
+        let node = |c: &str| doc.find(|n| n.attr("class") == Some(c)).unwrap();
+        let before = styles.pseudo(node("a"), PseudoElement::Before).unwrap();
+        assert_eq!(styles.content(before), "> ");
+        assert_eq!(styles.get(before).color, RED);
+        assert_eq!(styles.get(before).display, Display::Inline);
+        assert_eq!(styles.origin(before), node("a"));
+        let after = styles.pseudo(node("a"), PseudoElement::After).unwrap();
+        assert_eq!((styles.content(after), styles.get(after).display), ("hi!", Display::Block));
+        assert!(styles.pseudo(node("b"), PseudoElement::Before).is_none()); // no `content`
+        assert!(styles.pseudo(node("c"), PseudoElement::Before).is_none()); // :hover not active
+        let c_after = styles.pseudo(node("c"), PseudoElement::After).unwrap();
+        assert_eq!(styles.get(c_after).color, BLUE); // inherited from the element
+        assert!(styles.is_pseudo(c_after) && !styles.is_pseudo(node("c")));
+    }
+
+    #[test]
+    fn gradients_parse() {
+        let doc = Document::parse(
+            r#"<div id="a" style="background: #fff linear-gradient(to bottom right, red, blue 50%, green 60% 70%)"></div>
+               <div id="b" style="background-image: repeating-radial-gradient(circle at left 20%, #000 0 4px, #fff 4px 8px)"></div>
+               <div id="c" style="background: linear-gradient(45deg, red)"></div>
+               <div id="d" style="background-image: linear-gradient(0.25turn, red, blue); background-image: none"></div>
+               <div id="e" style="background-image: linear-gradient(0.25turn, red, blue)"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let a = style_of(&doc, &styles, "a");
+        assert_eq!(a.background, Some(Color::rgb(255, 255, 255)));
+        let g = a.background_image.unwrap();
+        assert_eq!(g.kind, GradientKind::Linear(LinearDir::Corner(1, 1)));
+        assert_eq!(g.stops.len(), 4); // `green 60% 70%` is two stops
+        assert_eq!(g.stops[2].pos, Some(StopPos::Fraction(0.6)));
+        let b = style_of(&doc, &styles, "b").background_image.unwrap();
+        assert!(b.repeating);
+        assert_eq!(b.kind, GradientKind::Radial { circle: true, extent: Extent::FarthestCorner, at: (StopPos::Fraction(0.0), StopPos::Fraction(0.2)) });
+        assert!(style_of(&doc, &styles, "c").background_image.is_none()); // needs two stops
+        assert!(style_of(&doc, &styles, "d").background_image.is_none());
+        assert_eq!(style_of(&doc, &styles, "e").background_image.unwrap().kind, GradientKind::Linear(LinearDir::Angle(90.0)));
     }
 }

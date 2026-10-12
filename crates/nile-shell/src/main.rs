@@ -14,7 +14,7 @@ use nile_dom::{Document, NodeId, ScriptSource};
 use nile_layout::{LayoutOptions, LayoutTree, MenuRequest, ScrollOffsets};
 use nile_render::{Overlay, Renderer};
 use nile_script::{Environment, ScriptHost, UiEvent};
-use nile_style::{compute_styles_with, InteractionState, StyleMap};
+use nile_style::{compute_styles_in, InteractionState, StyleMap};
 use nile_text::TextEngine;
 use skia_safe::{surfaces, AlphaType, Color, ColorType, EncodedImageFormat, ImageInfo};
 use winit::{
@@ -110,7 +110,7 @@ impl View {
     // layout-affecting property changed.
     fn restyle(&mut self) {
         let doc = self.doc.borrow();
-        self.styles = compute_styles_with(&doc, &self.interaction);
+        self.styles = compute_styles_in(&doc, &self.interaction, self.viewport);
         self.seen_version = doc.version;
         self.layout = None;
     }
@@ -159,7 +159,11 @@ impl View {
     }
 
     fn set_viewport(&mut self, width: f32, height: f32) {
+        let changed = self.viewport != (width, height);
         self.viewport = (width, height);
+        if changed && self.styles.uses_viewport {
+            self.restyle();
+        }
     }
 
     /// Layout at the current viewport, reusing the last result if unchanged.
@@ -297,7 +301,7 @@ impl Page {
         });
         let doc = Rc::new(RefCell::new(Document::parse(&html)));
         let interaction = InteractionState::default();
-        let styles = compute_styles_with(&doc.borrow(), &interaction);
+        let styles = compute_styles_in(&doc.borrow(), &interaction, viewport);
         let view = Rc::new(RefCell::new(View {
             doc: doc.clone(),
             seen_version: doc.borrow().version,

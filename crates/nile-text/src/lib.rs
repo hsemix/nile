@@ -40,6 +40,7 @@ pub struct TextStyle {
     pub italic: bool,
     pub underline: bool,
     pub line_through: bool,
+    pub letter_spacing: f32,
     pub align: Alignment,
 }
 
@@ -88,6 +89,7 @@ impl TextEngine {
             italic: false,
             underline: false,
             line_through: false,
+            letter_spacing: 0.0,
             align: Alignment::Start,
         };
         let mut layout = self.shape("\u{a0}", &style, 1.0);
@@ -126,6 +128,7 @@ impl TextEngine {
         b.push_default(StyleProperty::FontStyle(font_style(base)));
         b.push_default(StyleProperty::Underline(base.underline));
         b.push_default(StyleProperty::Strikethrough(base.line_through));
+        b.push_default(StyleProperty::LetterSpacing(base.letter_spacing));
         for (range, s) in spans {
             if range.is_empty() || *s == *base {
                 continue;
@@ -138,6 +141,7 @@ impl TextEngine {
             b.push(StyleProperty::FontStyle(font_style(s)), range.clone());
             b.push(StyleProperty::Underline(s.underline), range.clone());
             b.push(StyleProperty::Strikethrough(s.line_through), range.clone());
+            b.push(StyleProperty::LetterSpacing(s.letter_spacing), range.clone());
         }
         // Symbol characters the system fallback misses get named fallback fonts.
         for (i, c) in text.char_indices().filter(|(_, c)| is_symbol_gap(*c)) {
@@ -236,6 +240,7 @@ mod tests {
             italic: false,
             underline: false,
             line_through: false,
+            letter_spacing: 0.0,
             align: Alignment::Start,
         };
         let mut layout = engine.shape("the quick brown fox jumps over the lazy dog", &style, 1.0);
