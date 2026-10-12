@@ -1,0 +1,38 @@
+<!doctype html><meta charset="utf-8" /><title>Progress, meter, range</title>
+<style>
+  body {
+    font-family: sans-serif;
+    font-size: 14px;
+    margin: 20px;
+  }
+  .row {
+    margin: 10px 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  output {
+    min-width: 36px;
+  }
+</style>
+<div class="row">
+  <label>progress</label><progress value="40" max="100"></progress
+  ><progress></progress>
+</div>
+<div class="row">
+  <label>meter</label><meter value="0.7"></meter
+  ><meter value="0.2" low="0.3" high="0.8"></meter>
+</div>
+<div class="row">
+  <label>range</label
+  ><input id="r" type="range" min="0" max="10" value="4" /><output id="o"
+    >4</output
+  >
+</div>
+<script>
+  const r = document.$("#r"),
+    o = document.$("#o");
+  r.on("input", () => {
+    o.textContent = r.value;
+  });
+</script>

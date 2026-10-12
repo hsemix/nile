@@ -1,0 +1,45 @@
+# Using Nile
+
+Nile draws desktop interfaces from HTML, CSS and JavaScript with its own rendering
+pipeline. You can run a page in the `nile` development shell, render it without a
+window, or embed the engine in an application that owns its window and services.
+The authoring syntax is familiar, but the supported DOM and CSS are a subset;
+Nile is not a browser or a drop-in implementation of Sciter.
+
+## Start here
+
+1. [Build and run your first app](getting-started.md).
+2. [Lay out and style an interface](layout-and-style.md).
+3. [Add JavaScript, modules and JSX](scripting.md).
+4. [Use controls, selection and custom menus](controls-and-menus.md).
+5. [Configure a window or embed Nile](embedding.md).
+6. [Render and simulate input with the CLI](cli.md).
+7. [Troubleshoot common problems](troubleshooting.md).
+
+All shell commands in this guide assume your current directory is the repository
+root. Examples are source files you can edit and reload. No npm build is needed
+for these examples.
+
+## Example map
+
+| Learn about | Open this example |
+|---|---|
+| First app: input, events, theme, selectable text | [Getting started](../../examples/getting-started/index.html) |
+| An application-drawn menubar | [Menubar](../../examples/menubar.html), [its script](../../examples/menubar.js) |
+| Nine desktop interfaces with local state | [Workbench](../../examples/workbench/README.md) |
+| Word-style tabs and grouped commands | [Ribbon](../../examples/word-ribbon.html) |
+| DOM events and timers | [Scripting](../../examples/scripting.html) |
+| Forms, selection and clipboard shortcuts | [Forms](../../examples/forms.html) |
+| Multiple selection and list boxes | [List boxes](../../examples/listbox.html) |
+| Modules, JSX and reconciliation | [Todo](../../examples/todo/index.html), [app.jsx](../../examples/todo/app.jsx) |
+| Scrolling and layout measurements | [Scrolling](../../examples/scrolling.html), [Measurements](../../examples/measure.html) |
+| Flex, grid and table layout | [Hello](../../examples/hello.html), [Grid](../../examples/grid.html), [Tables](../../examples/tables.html) |
+| Local images, transforms, generated content | [Images](../../examples/images.html), [Transforms](../../examples/transforms.html), [Pseudo-elements](../../examples/pseudo.html) |
+| Gradients and animation | [Gradients](../../examples/gradients.html), [Animations](../../examples/animations.html) |
+| Frameless windows | [Window](../../examples/window.html) |
+| C embedding | [render.c](../../examples/c/render.c), [generated header](../../crates/nile-capi/include/nile.h) |
+
+For the broader feature list and remaining compatibility gaps, see the
+[project README](../../README.md#whats-supported-today). For Rust API details,
+generate the local crate documentation with `cargo doc --workspace --no-deps`;
+the entry page is `target/doc/nile_engine/index.html`.

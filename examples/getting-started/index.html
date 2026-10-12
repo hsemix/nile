@@ -1,0 +1,45 @@
+<!doctype html>
+<html window-title="My first Nile app" window-width="720" window-height="500">
+<head>
+  <meta charset="utf-8">
+  <title>My first Nile app</title>
+  <style>
+    * { box-sizing: border-box }
+    body { margin: 0; padding: 32px; background: #eef4f2; color: #24433e; font-family: sans-serif }
+    h1 { font-size: 26px; margin: 0 0 12px }
+    p { line-height: 1.6; margin: 0 0 20px }
+    .card { background: white; padding: 24px; border: 1px solid #d5e3de; border-radius: 10px }
+    .row { display: flex; align-items: center; gap: 10px; margin-bottom: 20px }
+    input { width: 240px; padding: 9px; border: 1px solid #b8cec6; border-radius: 5px }
+    button { padding: 9px 16px; background: #19796a; color: white; border: 0; border-radius: 5px; cursor: pointer }
+    button:hover { background: #126254 }
+    #result { user-select: text; text-selection-background-color: #b9e6d9 }
+    body.dark { background: #1e3631; color: #e5f3ee }
+    body.dark .card { background: #29463f; border-color: #48685e }
+  </style>
+</head>
+<body>
+  <h1>Hello from Nile</h1>
+  <p>A native UI built with HTML, CSS and JavaScript.</p>
+  <div class="card">
+    <label for="name">Your name</label>
+    <div class="row"><input id="name" placeholder="Enter your name"><button id="greet">Say hello</button></div>
+    <p id="result">Enter a name and press Say hello. You can select and copy this text.</p>
+    <button id="theme">Toggle theme</button>
+  </div>
+  <script>
+    const name = document.getElementById('name');
+    const result = document.getElementById('result');
+    function greet() {
+      result.textContent = 'Hello, ' + (name.value.trim() || 'friend') + '!';
+      console.log(result.textContent);
+    }
+    document.getElementById('greet').addEventListener('click', greet);
+    name.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { greet(); event.preventDefault(); }
+    });
+    document.getElementById('theme').addEventListener('click', () => document.body.classList.toggle('dark'));
+    console.log('first app ready');
+  </script>
+</body>
+</html>

@@ -138,6 +138,10 @@ impl<'i> Parser<'i> for NileParser {
         true
     }
 
+    fn parse_has(&self) -> bool {
+        true
+    }
+
     fn parse_pseudo_element(
         &self,
         name: CowRcStr<'i>,

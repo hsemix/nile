@@ -71,6 +71,9 @@ pub struct TextContent {
     pub control: bool,
     /// May the user select this text (`user-select`).
     pub user_select: nile_style::UserSelect,
+    /// `text-overflow: ellipsis` on a clipping box: the renderer cuts a too-long line short
+    /// and draws "…".
+    pub ellipsis: bool,
 }
 
 impl TextContent {
@@ -223,6 +226,8 @@ pub struct LayoutTree {
     pub content_height: f32,
     /// The open `<select>` drop-down, painted above everything else.
     pub menu: Option<MenuBox>,
+    /// List item markers by `<li>` node, placed left of the item.
+    markers: std::collections::HashMap<NodeId, ListMarker>,
     /// `<select multiple>` / `size > 1` list boxes by node: their rows are drawn inline.
     lists: std::collections::HashMap<NodeId, ListBox>,
     /// Element boxes by node, for `node_rect`.
@@ -284,6 +289,22 @@ impl MenuBox {
         let i = ((y - self.rect.y - 1.0 + self.scroll) / self.row_height).floor();
         (i >= 0.0 && (i as usize) < self.items.len()).then_some(i as usize)
     }
+}
+
+/// A list item's marker, positioned in document coordinates.
+pub struct ListMarker {
+    pub kind: MarkerKind,
+    /// Where the marker goes: the glyph text's box, or the bullet's bounding square.
+    pub rect: Rect,
+}
+
+pub enum MarkerKind {
+    /// A `<summary>` triangle: pointing down when open.
+    Disclosure { open: bool },
+    Disc,
+    Circle,
+    Square,
+    Text(Box<TextLayout>),
 }
 
 /// One row of a [`ListBox`].
@@ -435,6 +456,11 @@ impl LayoutTree {
                 b.transform = box_transform(styles.get(b.node), b.rect);
             }
         }
+    }
+
+    /// The marker of a list item.
+    pub fn marker(&self, node: NodeId) -> Option<&ListMarker> {
+        self.markers.get(&node)
     }
 
     /// The rows of a list-box `<select>`.
@@ -740,6 +766,7 @@ enum NodeCtx {
         spacers: Vec<Range<usize>>,
         control: bool,
         user_select: nile_style::UserSelect,
+        ellipsis: bool,
         /// Never wrap (single-line text inputs).
         nowrap: bool,
     },
@@ -836,9 +863,10 @@ pub fn layout_with(
         .map(|(i, b)| (b.node, i))
         .collect();
     let origins = styles.origins().clone();
-    let mut tree = LayoutTree { boxes, content_height, menu: None, lists: Default::default(), index, origins };
+    let mut tree = LayoutTree { boxes, content_height, menu: None, lists: Default::default(), markers: Default::default(), index, origins };
     tree.compute_scroll_boxes(styles);
     tree.lists = build_lists(doc, styles, text, &tree, options.offsets);
+    tree.markers = build_markers(doc, styles, text, &tree);
     if let Some(req) = options.menu {
         tree.menu = build_menu(doc, styles, text, &tree, req, options.offsets, (options.scroll_y, viewport_height));
     }
@@ -1318,7 +1346,7 @@ fn is_value_control(node: &nile_dom::Node) -> bool {
     node.tag() == Some("textarea")
         || node.tag() == Some("select")
         || node.tag() == Some("input")
-        && !matches!(node.attr("type").map(str::to_ascii_lowercase).as_deref(), Some("checkbox" | "radio" | "hidden" | "file" | "image"))
+        && !matches!(node.attr("type").map(str::to_ascii_lowercase).as_deref(), Some("checkbox" | "radio" | "hidden" | "file" | "image" | "range"))
 }
 
 fn is_password(node: &nile_dom::Node) -> bool {
@@ -1396,6 +1424,128 @@ fn widest_option(doc: &Document, style: &ComputedStyle, text: &mut TextEngine, s
         })
         .fold(0.0, f32::max)
         .ceil()
+}
+
+fn alpha(mut n: i64, upper: bool) -> String {
+    if n <= 0 {
+        return n.to_string();
+    }
+    let base = if upper { b'A' } else { b'a' };
+    let mut out = Vec::new();
+    while n > 0 {
+        n -= 1;
+        out.push(base + (n % 26) as u8);
+        n /= 26;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+fn roman(n: i64, upper: bool) -> String {
+    if !(1..4000).contains(&n) {
+        return n.to_string();
+    }
+    let table = [(1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"), (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")];
+    let (mut n, mut out) = (n, String::new());
+    for (v, r) in table {
+        while n >= v {
+            out.push_str(r);
+            n -= v;
+        }
+    }
+    if upper { out.to_uppercase() } else { out }
+}
+
+/// The text of a counter-style marker for item number `n`, or `None` for bullets and `none`.
+fn marker_text(t: nile_style::ListStyleType, n: i64) -> Option<String> {
+    use nile_style::ListStyleType as L;
+    Some(match t {
+        L::Decimal => format!("{n}."),
+        L::DecimalLeadingZero => format!("{n:02}."),
+        L::LowerAlpha => format!("{}.", alpha(n, false)),
+        L::UpperAlpha => format!("{}.", alpha(n, true)),
+        L::LowerRoman => format!("{}.", roman(n, false)),
+        L::UpperRoman => format!("{}.", roman(n, true)),
+        L::LowerGreek => {
+            let g: Vec<char> = "αβγδεζηθικλμνξοπρστυφχψω".chars().collect();
+            format!("{}.", if n >= 1 { g[(n as usize - 1) % g.len()].to_string() } else { n.to_string() })
+        }
+        L::Disc | L::Circle | L::Square | L::DisclosureClosed | L::DisclosureOpen | L::None => return None,
+    })
+}
+
+/// Numbers for each `display: list-item` child of `parent`: `start`, `reversed` and `value`
+/// on the list and its items.
+fn list_numbers(doc: &Document, styles: &StyleMap, parent: NodeId) -> std::collections::HashMap<NodeId, i64> {
+    let items: Vec<NodeId> = doc.node(parent).children.iter().copied().filter(|c| styles.get(*c).display == Display::ListItem).collect();
+    let attr = |n: NodeId, name: &str| doc.node(n).attr(name).and_then(|v| v.trim().parse::<i64>().ok());
+    let reversed = doc.node(parent).attr("reversed").is_some();
+    let step = if reversed { -1 } else { 1 };
+    let mut next = attr(parent, "start").unwrap_or(if reversed { items.len() as i64 } else { 1 });
+    let mut out = std::collections::HashMap::new();
+    for item in items {
+        let n = attr(item, "value").unwrap_or(next);
+        out.insert(item, n);
+        next = n + step;
+    }
+    out
+}
+
+/// A marker for every `<li>` (display: list-item) whose `list-style-type` isn't `none`.
+fn build_markers(
+    doc: &Document,
+    styles: &StyleMap,
+    text: &mut TextEngine,
+    tree: &LayoutTree,
+) -> std::collections::HashMap<NodeId, ListMarker> {
+    let mut out = std::collections::HashMap::new();
+    let mut numbers: std::collections::HashMap<NodeId, std::collections::HashMap<NodeId, i64>> = Default::default();
+    for b in &tree.boxes {
+        if !matches!(b.content, BoxContent::Element) || styles.is_pseudo(b.node) {
+            continue;
+        }
+        let style = styles.get(b.node);
+        if style.display != Display::ListItem || style.list_style_type == nile_style::ListStyleType::None {
+            continue;
+        }
+        let fs = style.font_size;
+        let line_h = fs * style.line_height;
+        let top = b.rect.y + style.border_width.top + style.padding.top;
+        let kind_and_rect = match style.list_style_type {
+            t @ (nile_style::ListStyleType::Disc | nile_style::ListStyleType::Circle | nile_style::ListStyleType::Square) => {
+                let d = (fs * 0.34).round().max(3.0);
+                let rect = Rect { x: b.rect.x - fs * 0.5 - d, y: top + (line_h - d) / 2.0 + fs * 0.05, width: d, height: d };
+                let kind = match t {
+                    nile_style::ListStyleType::Disc => MarkerKind::Disc,
+                    nile_style::ListStyleType::Circle => MarkerKind::Circle,
+                    _ => MarkerKind::Square,
+                };
+                Some((kind, rect))
+            }
+            t @ (nile_style::ListStyleType::DisclosureClosed | nile_style::ListStyleType::DisclosureOpen) => {
+                // Drawn inside the box's left padding.
+                let d = (fs * 0.5).round().max(4.0);
+                let rect = Rect { x: b.rect.x + style.border_width.left + fs * 0.25, y: top + (line_h - d) / 2.0, width: d, height: d };
+                Some((MarkerKind::Disclosure { open: t == nile_style::ListStyleType::DisclosureOpen }, rect))
+            }
+            t => {
+                let parent = doc.node(b.node).parent;
+                let n = parent
+                    .map(|p| *numbers.entry(p).or_insert_with(|| list_numbers(doc, styles, p)).get(&b.node).unwrap_or(&1))
+                    .unwrap_or(1);
+                marker_text(t, n).map(|label| {
+                    let mut l = text.shape(&label, &text_style(style), 1.0);
+                    break_lines(&mut l, None, Alignment::Start);
+                    let (w, h) = (l.full_width(), l.height());
+                    (MarkerKind::Text(Box::new(l)), Rect { x: b.rect.x - fs * 0.3 - w, y: top + (line_h - h) / 2.0, width: w, height: h })
+                })
+            }
+        };
+        if let Some((kind, rect)) = kind_and_rect {
+            out.insert(b.node, ListMarker { kind, rect });
+        }
+    }
+    out
 }
 
 /// Rows for every list-box select, positioned from its laid-out box.
@@ -1516,6 +1666,7 @@ fn build_control_text(
             spacers: Vec::new(),
             control: true,
             user_select: nile_style::UserSelect::None,
+            ellipsis: false,
             nowrap: node.tag() != Some("textarea"),
         },
     )
@@ -1640,8 +1791,9 @@ impl InlineText {
         let node = doc.node(id);
         match &node.kind {
             NodeKind::Text(raw) => {
-                let collapsed = transform_text(&collapse_whitespace(raw), styles.get(id).text_transform);
-                let piece = if self.collapse {
+                let es = styles.get(id);
+                let collapsed = transform_text(&apply_white_space(raw, es.white_space, &self.text), es.text_transform);
+                let piece = if self.collapse && !es.white_space.keeps_spaces() {
                     collapsed.strip_prefix(' ').unwrap_or(&collapsed)
                 } else {
                     &collapsed
@@ -1661,7 +1813,7 @@ impl InlineText {
                     for &outer in self.open.iter().rev().skip(1) {
                         self.owners.push((range.clone(), outer));
                     }
-                    self.collapse = piece.ends_with(' ');
+                    self.collapse = !es.white_space.keeps_spaces() && (piece.ends_with(' ') || (es.white_space.keeps_newlines() && piece.ends_with('\n')));
                 }
             }
             NodeKind::Element { .. } => {
@@ -1800,6 +1952,71 @@ impl InlineText {
     }
 }
 
+/// Text as `white-space` leaves it. `before` is the run so far, for tab stops.
+fn apply_white_space(raw: &str, ws: nile_style::WhiteSpace, before: &str) -> String {
+    use nile_style::WhiteSpace as W;
+    match ws {
+        W::Normal | W::Nowrap => collapse_whitespace(raw),
+        W::Pre | W::PreWrap => {
+            let mut out = String::with_capacity(raw.len());
+            let mut column = before.rsplit('\n').next().map_or(0, |l| l.chars().count());
+            let mut chars = raw.chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\r' => {
+                        if chars.peek() == Some(&'\n') {
+                            continue;
+                        }
+                        out.push('\n');
+                        column = 0;
+                    }
+                    '\n' => {
+                        out.push('\n');
+                        column = 0;
+                    }
+                    // Tab stops every 8 columns.
+                    '\t' => {
+                        let n = 8 - column % 8;
+                        out.extend(std::iter::repeat_n(' ', n));
+                        column += n;
+                    }
+                    c => {
+                        out.push(c);
+                        column += 1;
+                    }
+                }
+            }
+            out
+        }
+        W::PreLine => {
+            let mut out = String::with_capacity(raw.len());
+            let mut last_space = false;
+            for c in raw.chars() {
+                match c {
+                    '\n' => {
+                        if out.ends_with(' ') {
+                            out.pop();
+                        }
+                        out.push('\n');
+                        last_space = true;
+                    }
+                    c if c.is_whitespace() => {
+                        if !last_space {
+                            out.push(' ');
+                        }
+                        last_space = true;
+                    }
+                    c => {
+                        out.push(c);
+                        last_space = false;
+                    }
+                }
+            }
+            out
+        }
+    }
+}
+
 fn build_inline_run(
     doc: &Document,
     styles: &StyleMap,
@@ -1878,7 +2095,8 @@ fn build_inline_run_in(
             spacers,
             control: false,
             user_select: block_style.user_select,
-            nowrap: block_style.nowrap,
+            ellipsis: block_style.text_ellipsis && block_style.overflow_x != OverflowKind::Visible && !block_style.white_space.wraps(),
+            nowrap: !block_style.white_space.wraps(),
         },
     )
     .ok()
@@ -1921,7 +2139,7 @@ fn flatten(
             let transform = box_transform(styles.get(*id), rect);
             out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform })
         }
-        Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, nowrap }) => {
+        Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
             // Taffy rounds box sizes to whole pixels, which can shave a
             // fraction off the measured width and force a spurious wrap, so
@@ -1939,7 +2157,7 @@ fn flatten(
             let kids = kids.clone();
             let decos = decos.clone();
             let owners = owners.clone();
-            let (text, spacers, control, user_select) = (text.clone(), spacers.clone(), *control, *user_select);
+            let (text, spacers, control, user_select, ellipsis) = (text.clone(), spacers.clone(), *control, *user_select, *ellipsis);
             let placed: Vec<_> = layout
                 .lines()
                 .flat_map(|line| line.items().collect::<Vec<_>>())
@@ -1951,7 +2169,7 @@ fn flatten(
             out.push(LayoutBox {
                 node: *node,
                 rect,
-                content: BoxContent::Text(Box::new(TextContent { layout, decos, owners, text, spacers, control, user_select })),
+                content: BoxContent::Text(Box::new(TextContent { layout, decos, owners, text, spacers, control, user_select, ellipsis })),
                 subtree_end: 0,
                 scroll: None,
                 image: None,
@@ -2150,6 +2368,7 @@ fn taffy_style(s: &ComputedStyle) -> Style {
             Display::Block
             | Display::Inline
             | Display::InlineBlock
+            | Display::ListItem
             | Display::TableRowGroup
             | Display::TableRow
             | Display::TableCell
@@ -2866,5 +3085,75 @@ second</textarea><textarea id="e"></textarea></body>"#,
         let (above, below) = (text.y - b.y, b.y + b.height - (text.y + text.height));
         assert!((above - below).abs() <= 1.0 && above > 10.0, "label centred vertically: {above} vs {below}");
         assert!(text.x >= b.x && s.width > 0.0);
+    }
+
+    #[test]
+    fn white_space_pre_keeps_spaces_and_newlines_and_pre_line_keeps_only_newlines() {
+        let lines = |ws: &str| {
+            let (doc, t) = rects(&format!(
+                "<body style=\"margin:0\"><div id=\"d\" style=\"white-space:{ws}; width:600px; font-family:monospace; font-size:10px\">a   b\n  c\td</div></body>"
+            ));
+            let b = t.boxes.iter().rfind(|b| matches!(b.content, BoxContent::Text(_))).unwrap();
+            let BoxContent::Text(c) = &b.content else { unreachable!() };
+            let _ = &doc;
+            (c.text.clone(), b.rect.height)
+        };
+        let (normal, h1) = lines("normal");
+        assert_eq!(normal, "a b c d");
+        let (pre, h2) = lines("pre");
+        assert_eq!(pre, "a   b\n  c     d", "spaces kept, tab to the next multiple of 8");
+        assert!(h2 > h1 * 1.5, "the newline breaks the line");
+        let (line, _) = lines("pre-line");
+        assert_eq!(line, "a b\nc d", "spaces collapse, the newline stays and eats the spaces after it");
+        assert_eq!(lines("pre-wrap").0, pre);
+    }
+
+    #[test]
+    fn list_items_get_bullets_and_counter_markers() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><ul><li id="u">bullet</li></ul>
+               <ol start="3"><li id="a">a</li><li id="b" value="9">b</li><li id="c">c</li></ol>
+               <ol reversed type="x"><li id="r1">r</li><li id="r2">r</li></ol>
+               <ol style="list-style-type: upper-roman"><li id="v">v</li></ol>
+               <ul style="list-style: none"><li id="n">none</li></ul></body>"#,
+        );
+        let id = |s: &str| doc.find(|n| n.attr("id") == Some(s)).unwrap();
+        let label = |s: &str| match &t.marker(id(s)).map(|m| &m.kind) {
+            Some(MarkerKind::Text(l)) => {
+                // The shaped text isn't exposed; compare widths of known labels instead.
+                Some(l.full_width())
+            }
+            Some(_) => Some(-1.0),
+            None => None,
+        };
+        let item = rect_of(&doc, &t, "u");
+        let m = t.marker(id("u")).unwrap();
+        assert!(matches!(m.kind, MarkerKind::Disc));
+        assert!(m.rect.x + m.rect.width < item.x, "bullet sits left of the item: {:?} vs {item:?}", m.rect);
+        assert_eq!(item.x, 40.0, "ul pads its items by 40px");
+        assert!(label("a").unwrap() > 0.0 && label("b").unwrap() > label("a").unwrap() - 0.01, "9 is not narrower than 3");
+        assert!(t.marker(id("n")).is_none(), "list-style: none");
+        // Numbers: start=3, then value=9 resets, then 10; reversed counts down from 2.
+        let numbers = list_numbers(&doc, &compute_styles(&doc), doc.node(id("a")).parent.unwrap());
+        assert_eq!([numbers[&id("a")], numbers[&id("b")], numbers[&id("c")]], [3, 9, 10]);
+        let rev = list_numbers(&doc, &compute_styles(&doc), doc.node(id("r1")).parent.unwrap());
+        assert_eq!([rev[&id("r1")], rev[&id("r2")]], [2, 1]);
+        assert_eq!(marker_text(nile_style::ListStyleType::UpperRoman, 14).as_deref(), Some("XIV."));
+        assert_eq!(marker_text(nile_style::ListStyleType::LowerAlpha, 28).as_deref(), Some("ab."));
+        assert!(label("v").unwrap() > 0.0);
+    }
+
+    #[test]
+    fn text_overflow_ellipsis_applies_to_clipped_single_lines() {
+        let flag = |style: &str| {
+            let (_, t) = rects(&format!("<body style=\"margin:0\"><div style=\"width:60px;{style}\">some long text here</div></body>"));
+            let b = t.boxes.iter().rfind(|b| matches!(b.content, BoxContent::Text(_))).unwrap();
+            let BoxContent::Text(c) = &b.content else { unreachable!() };
+            c.ellipsis
+        };
+        assert!(flag("overflow:hidden;white-space:nowrap;text-overflow:ellipsis"));
+        assert!(!flag("white-space:nowrap;text-overflow:ellipsis"), "needs overflow other than visible");
+        assert!(!flag("overflow:hidden;text-overflow:ellipsis"), "needs a single line");
+        assert!(!flag("overflow:hidden;white-space:nowrap"));
     }
 }

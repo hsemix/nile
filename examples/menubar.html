@@ -1,0 +1,30 @@
+<!doctype html>
+<html window-title="Nile custom menubar" window-width="720" window-height="500">
+<head><meta charset="utf-8"><title>Nile custom menubar</title>
+<style>
+  * { box-sizing: border-box }
+  body { margin: 0; font-family: sans-serif; color: #24433e; background: #eef4f2 }
+  .menubar { display: flex; gap: 4px; padding: 8px 14px; background: white; border-bottom: 1px solid #d5e3de; position: relative; z-index: 10 }
+  .menu { position: relative }
+  button { padding: 8px 14px; border: 1px solid transparent; border-radius: 4px; background: white; color: #24433e; cursor: pointer }
+  button:hover, button:focus, .menu.open > button { background: #e0f1ea; border-color: #b8d5c9 }
+  button:disabled { color: #98aaa3; cursor: default }
+  .popup { display: none; position: absolute; top: 36px; left: 0; width: 220px; padding: 5px; background: white; border: 1px solid #d5e3de; border-radius: 5px; box-shadow: 0 4px 14px #24433e22; z-index: 10 }
+  .menu.open .popup { display: block }
+  .popup button { display: block; width: 100%; text-align: left; font-size: 12px }
+  .separator { height: 1px; background: #e0e9e4; margin: 5px }
+  main { padding: 32px }
+  h1 { font-size: 25px; margin: 0 0 18px }
+  p { line-height: 1.7; user-select: text }
+  #status { padding: 14px; background: white; border: 1px solid #d5e3de; border-radius: 6px; margin-top: 24px }
+  .hidden { display: none }
+</style></head>
+<body>
+  <div class="menubar" role="menubar">
+    <div class="menu"><button data-menu="file" aria-expanded="false">File</button><div class="popup" role="menu"><button data-command="new">New draft (Ctrl/Cmd+N)</button><button disabled>Save to disk</button><div class="separator"></div><button data-command="close">Close window</button></div></div>
+    <div class="menu"><button data-menu="view" aria-expanded="false">View</button><div class="popup" role="menu"><button data-command="details"><span id="details-label">Hide details</span></button><button data-command="title">Rename window</button></div></div>
+    <div class="menu"><button data-menu="help" aria-expanded="false">Help</button><div class="popup" role="menu"><button data-command="about">About this example</button></div></div>
+  </div>
+  <main><h1>A custom menubar</h1><p id="details">Click a menu, then use arrow keys to navigate. Escape closes it. Hover over another menu while one is open to switch. Tab still follows the regular focus order.</p><div id="status">Ready · changes stay in this session</div></main>
+  <script src="menubar.js"></script>
+</body></html>

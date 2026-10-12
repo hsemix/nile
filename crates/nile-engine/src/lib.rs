@@ -452,6 +452,8 @@ pub struct Page {
     pub mods: ModifiersState,
     /// Text input a mouse drag is selecting in.
     pub drag: Option<NodeId>,
+    /// A range slider being dragged, and its value when the drag began.
+    pub range_drag: Option<(NodeId, String)>,
     /// List box row the shift-range started from, and the row keys moved to last.
     pub list_anchor: Option<(NodeId, usize)>,
     pub list_cursor: Option<(NodeId, usize)>,
@@ -641,6 +643,7 @@ impl Page {
             scripts,
             mods: ModifiersState::default(),
             drag: None,
+            range_drag: None,
             list_anchor: None,
             list_cursor: None,
             last_click: None,
@@ -1039,6 +1042,98 @@ impl Page {
         Some((rgba, w as u32, h as u32))
     }
 
+    pub fn is_range(&self, id: NodeId) -> bool {
+        let doc = self.doc.borrow();
+        let n = doc.node(id);
+        n.tag() == Some("input") && n.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("range"))
+    }
+
+    /// `(min, max, step)` of a range input; step 0 means "any".
+    fn range_bounds(&self, id: NodeId) -> (f32, f32, f32) {
+        let doc = self.doc.borrow();
+        let n = doc.node(id);
+        let num = |name: &str| n.attr(name).and_then(|v| v.trim().parse::<f32>().ok());
+        let (min, max) = (num("min").unwrap_or(0.0), num("max").unwrap_or(100.0));
+        let step = match n.attr("step").map(str::trim) {
+            Some("any") => 0.0,
+            _ => num("step").filter(|s| *s > 0.0).unwrap_or(1.0),
+        };
+        (min, max.max(min), step)
+    }
+
+    /// The slider's current value, clamped into its range.
+    pub fn range_value(&self, id: NodeId) -> f32 {
+        let (min, max, _) = self.range_bounds(id);
+        let v = self.doc.borrow().node(id).attr("value").and_then(|v| v.trim().parse::<f32>().ok());
+        v.unwrap_or((min + max) / 2.0).clamp(min, max)
+    }
+
+    /// Set a slider's value (snapped to `step`), firing `input` if it changed.
+    fn range_set(&mut self, id: NodeId, value: f32) -> bool {
+        let (min, max, step) = self.range_bounds(id);
+        let mut v = value.clamp(min, max);
+        if step > 0.0 {
+            v = (min + ((v - min) / step).round() * step).min(max);
+        }
+        if v == self.range_value(id) && self.doc.borrow().node(id).attr("value").is_some() {
+            return false;
+        }
+        self.doc.borrow_mut().set_attr(id, "value", &v.to_string());
+        self.sync();
+        self.emit(id, UiEvent::Plain("input"));
+        true
+    }
+
+    /// Put a slider's thumb where the pointer is.
+    fn range_from_pointer(&mut self, id: NodeId) -> bool {
+        let Some((x, _)) = self.pointer else { return false };
+        let rect = {
+            let mut v = self.view.borrow_mut();
+            let offsets = v.scroll_offsets.clone();
+            v.layout().node_rect_scrolled(id, &offsets)
+        };
+        let Some(r) = rect else { return false };
+        let (min, max, _) = self.range_bounds(id);
+        let radius = (r.height / 2.0).min(8.0);
+        let span = (r.width - 2.0 * radius).max(1.0);
+        let f = ((x - r.x - radius) / span).clamp(0.0, 1.0);
+        self.range_set(id, min + f * (max - min))
+    }
+
+    /// Arrow keys, Page Up/Down, Home and End on a focused slider.
+    fn range_key(&mut self, id: NodeId, key: &str) -> bool {
+        let (min, max, step) = self.range_bounds(id);
+        let unit = if step > 0.0 { step } else { (max - min) / 100.0 };
+        let v = self.range_value(id);
+        let target = match key {
+            "ArrowRight" | "ArrowUp" => v + unit,
+            "ArrowLeft" | "ArrowDown" => v - unit,
+            "PageUp" => v + unit * 10.0,
+            "PageDown" => v - unit * 10.0,
+            "Home" => min,
+            "End" => max,
+            _ => return false,
+        };
+        let changed = self.range_set(id, target);
+        if changed {
+            self.emit(id, UiEvent::Plain("change"));
+        }
+        changed
+    }
+
+    /// The `<details>` whose `<summary>` is at or above `node`.
+    fn summary_details(&self, node: NodeId) -> Option<NodeId> {
+        let doc = self.doc.borrow();
+        let mut cur = Some(node);
+        while let Some(n) = cur {
+            if doc.node(n).tag() == Some("summary") {
+                return doc.node(n).parent.filter(|p| doc.node(*p).tag() == Some("details"));
+            }
+            cur = doc.node(n).parent;
+        }
+        None
+    }
+
     /// A press on a `role="window-caption"` element: drag the window, or on a double click
     /// toggle maximize. Returns true when the window loop should start the system drag.
     pub fn caption_press(&mut self) -> bool {
@@ -1092,6 +1187,9 @@ impl Page {
         self.pointer = Some((x, y));
         if self.bar_drag.is_some() {
             return self.bar_drag_to(x, y);
+        }
+        if let Some((node, _)) = self.range_drag.clone() {
+            return self.range_from_pointer(node);
         }
         if self.page_drag {
             if let Some(p) = self.page_text_point() {
@@ -1226,6 +1324,10 @@ impl Page {
                 changed |= before != (self.anchor(), self.caret());
             }
         }
+        if let Some(f) = self.interaction().focus.filter(|f| self.is_range(*f) && !self.is_disabled(*f)) {
+            self.range_drag = Some((f, self.range_value(f).to_string()));
+            changed |= self.range_from_pointer(f);
+        }
         if self.interaction().focus.is_some_and(|f| self.is_text_input(f)) {
             self.view.borrow_mut().page_sel = None;
         } else if self.interaction().focus.is_none() {
@@ -1314,6 +1416,14 @@ impl Page {
         }
         self.drag = None;
         self.page_drag = false;
+        if let Some((node, at_press)) = self.range_drag.take() {
+            if self.range_value(node).to_string() != at_press {
+                self.emit(node, UiEvent::Plain("change"));
+            }
+            let next = InteractionState { active: None, ..self.interaction() };
+            self.set_interaction(next);
+            return true;
+        }
         if self.view.borrow().menu.is_some() {
             return self.menu_release();
         }
@@ -1442,6 +1552,8 @@ impl Page {
             self.focus_next(!mods.shift_key())
         } else if self.interaction().focus.is_some_and(|f| self.is_select(f)) {
             self.select_key(key, mods)
+        } else if let Some(f) = self.interaction().focus.filter(|f| self.is_range(*f)) {
+            self.range_key(f, key)
         } else {
             let editing = self.interaction().focus.is_some_and(|f| self.is_text_input(f));
             self.edit_key(key, mods) || (!editing && self.scroll_key(key, mods))
@@ -1826,7 +1938,7 @@ impl Page {
             || n.tag() == Some("input")
                 && !matches!(
                     n.attr("type").map(str::to_ascii_lowercase).as_deref(),
-                    Some("checkbox" | "radio" | "hidden" | "file" | "image" | "button" | "submit" | "reset")
+                    Some("checkbox" | "radio" | "hidden" | "file" | "image" | "button" | "submit" | "reset" | "range")
                 )
     }
 
@@ -1837,6 +1949,20 @@ impl Page {
     /// Default action of a click on `target`: toggle a checkbox, select a
     /// radio, or forward a `<label>` click to its control. True if the page changed.
     pub fn click_default(&mut self, target: NodeId) -> bool {
+        // A click on a <summary> opens or closes its <details>.
+        if let Some(details) = self.summary_details(target) {
+            {
+                let mut doc = self.doc.borrow_mut();
+                if doc.node(details).attr("open").is_some() {
+                    doc.remove_attr(details, "open");
+                } else {
+                    doc.set_attr(details, "open", "");
+                }
+            }
+            self.sync();
+            self.emit(details, UiEvent::Plain("toggle"));
+            return true;
+        }
         // Elements acting as window buttons.
         let role = window::role_at(&self.doc.borrow(), target).map(|r| r.1);
         let cmd = match role {
@@ -2226,7 +2352,10 @@ impl Page {
                 }
             }
         }
-        self.restyle();
+        // A state no selector mentions can't change a style: skip the cascade (and keep the layout).
+        if self.view.borrow().styles.state_deps.affected_by(&current, &next) {
+            self.restyle();
+        }
         if old_focus != new_focus {
             self.focus_moved(old_focus, new_focus);
         }
@@ -3111,6 +3240,93 @@ cd</textarea>
         let doc = p.doc.borrow();
         assert_eq!(window::current_title(&doc, &WindowConfig::from_document(&doc)), "Renamed");
         drop(doc);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// How many pixels in a painted page are strongly `rgb`-ish red / blue.
+    fn count_colored(p: &mut Page) -> (usize, usize) {
+        let mut px = vec![0u8; 300 * 120 * 4];
+        p.paint(&mut px, 300, 120, 1.0);
+        let reds = px.chunks(4).filter(|c| c[2] > 180 && c[1] < 80 && c[0] < 80).count();
+        let blues = px.chunks(4).filter(|c| c[0] > 180 && c[1] < 80 && c[2] < 80).count();
+        (reds, blues)
+    }
+
+    #[test]
+    fn text_color_changes_repaint_without_a_new_layout_but_inline_backgrounds_do_relayout() {
+        let (mut p, path) = page(
+            r#"<style>
+                 #a { width: 280px; height: 30px; color: #00f; font-size: 22px } #a:hover { color: #f00 }
+                 #s { background: #00f; color: #fff } #s:hover { background: #f00 }
+               </style><body style="margin:0"><div id="a">WWWWWWWW</div><div><span id="s">inline span here</span></div></body>"#,
+            "text-color",
+        );
+        let built = |p: &Page| p.view.borrow().layout.is_some();
+        let (r0, b0) = count_colored(&mut p);
+        assert!(r0 == 0 && b0 > 100, "blue text to begin with: {r0} {b0}");
+        let (x, y) = center(&p, "a");
+        p.pointer_moved(x, y);
+        assert!(built(&p), "a text color change keeps the layout");
+        let (r1, _) = count_colored(&mut p);
+        assert!(r1 > 100, "and the text turns red: {r1}");
+        // An inline box's background is baked into its text run, so that one lays out again.
+        let (x, y) = center(&p, "s");
+        p.pointer_moved(x, y);
+        assert!(!built(&p));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn clicking_a_summary_toggles_its_details() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><details id="d"><summary id="s">More</summary><p id="body">Hidden</p></details>
+               <script>$('#d').addEventListener('toggle', () => console.log('toggle:' + $('#d').hasAttribute('open')));</script></body>"#,
+            "details",
+        );
+        let shown = |p: &mut Page| {
+            let id = p.doc.borrow().find(|n| n.attr("id") == Some("body")).unwrap();
+            p.view.borrow_mut().layout().node_rect(id).is_some()
+        };
+        assert!(!shown(&mut p), "closed details hide their content");
+        click(&mut p, "s");
+        assert!(shown(&mut p), "open shows it");
+        click(&mut p, "s");
+        assert!(!shown(&mut p));
+        assert_eq!(log(&p), ["toggle:true", "toggle:false"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn range_sliders_follow_the_pointer_and_keys_and_fire_events() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><input id="r" type="range" min="0" max="10" value="2" style="margin:0;width:116px">
+               <script>for (const t of ['input','change']) $('#r').addEventListener(t, () => console.log(t + ':' + $('#r').value));</script></body>"#,
+            "range",
+        );
+        let id = p.doc.borrow().find(|n| n.attr("id") == Some("r")).unwrap();
+        let rect = p.view.borrow_mut().layout().node_rect(id).unwrap();
+        let at = |f: f32| (rect.x + 8.0 + (rect.width - 16.0) * f, rect.y + rect.height / 2.0);
+        // Press at 50%: the thumb jumps there.
+        let (x, y) = at(0.5);
+        p.pointer_moved(x, y);
+        p.press();
+        assert_eq!(p.range_value(id), 5.0);
+        // Dragging follows (snapped to the step) and clamps at the ends.
+        let (x, y) = at(0.87);
+        p.pointer_moved(x, y);
+        assert_eq!(p.range_value(id), 9.0);
+        p.pointer_moved(rect.x + rect.width + 50.0, y);
+        assert_eq!(p.range_value(id), 10.0);
+        p.release();
+        assert_eq!(log(&p), ["input:5", "input:9", "input:10", "change:10"]);
+        // Keys on the focused slider.
+        let none = ModifiersState::default();
+        press_key(&mut p, "ArrowLeft", none);
+        press_key(&mut p, "Home", none);
+        assert_eq!(p.range_value(id), 0.0);
+        assert_eq!(log(&p).last().map(String::as_str), Some("change:0"));
+        let (fraction, _) = nile_style::control_fraction(&p.doc.borrow(), id);
+        assert_eq!(fraction, Some(0.0));
         let _ = std::fs::remove_file(path);
     }
 }
