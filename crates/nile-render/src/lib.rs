@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use nile_layout::{BoxContent, LayoutBox, LayoutTree, MenuBox, NodeId, Rect as LRect, ScrollOffsets, TextContent};
-use nile_style::{Appearance, Color as CssColor, Edges, StyleMap};
+use nile_style::{Appearance, BorderStyle, Color as CssColor, Edges, StyleMap};
 use nile_text::{Affinity, Cursor, PositionedLayoutItem, Selection};
 use skia_safe::{
     font::Edging, Canvas, Color, Font, FontMgr, GlyphId, Paint, Point, RRect, Rect, Typeface,
@@ -49,23 +49,31 @@ impl Renderer {
         let Overlay { scroll_y, offsets, caret, selection } = *overlay;
         canvas.save();
         canvas.translate((0.0, -scroll_y));
-        // An `overflow` box clips and scrolls its subtree; each ends where the subtree does.
-        let mut open: Vec<(usize, &LayoutBox)> = Vec::new();
+        // Boxes that wrap their subtree (an `overflow` clip, or an `opacity` layer) end
+        // where the subtree does. `None` is an opacity layer.
+        let mut open: Vec<(usize, Option<&LayoutBox>)> = Vec::new();
         for (i, b) in tree.boxes.iter().enumerate() {
             while open.last().is_some_and(|(end, _)| i >= *end) {
                 let (_, container) = open.pop().expect("checked above");
                 canvas.restore();
-                paint_scrollbars(canvas, container, offsets);
+                if let Some(container) = container {
+                    paint_scrollbars(canvas, container, offsets);
+                }
             }
             match &b.content {
                 BoxContent::Element => {
+                    let opacity = styles.get(b.node).opacity;
+                    if opacity < 1.0 {
+                        canvas.save_layer_alpha_f(None, opacity);
+                        open.push((b.subtree_end.max(i + 1), None));
+                    }
                     self.paint_box(canvas, b, styles);
                     if let Some(sb) = &b.scroll {
                         let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
                         canvas.save();
                         canvas.clip_rect(skia_rect(sb.clip), None, true);
                         canvas.translate((-ox, -oy));
-                        open.push((b.subtree_end, b));
+                        open.push((b.subtree_end, Some(b)));
                     }
                 }
                 BoxContent::Text(content) => {
@@ -81,7 +89,9 @@ impl Renderer {
         }
         while let Some((_, container)) = open.pop() {
             canvas.restore();
-            paint_scrollbars(canvas, container, offsets);
+            if let Some(container) = container {
+                paint_scrollbars(canvas, container, offsets);
+            }
         }
         if let Some(menu) = &tree.menu {
             self.paint_menu(canvas, menu);
@@ -116,10 +126,9 @@ impl Renderer {
 
     fn paint_box(&mut self, canvas: &Canvas, b: &LayoutBox, styles: &StyleMap) {
         let s = styles.get(b.node);
-        paint_decorated(canvas, skia_rect(b.rect), s.background, s.border_width, s.border_color, s.border_radius);
+        paint_shadows(canvas, skia_rect(b.rect), &s.box_shadow, s.border_radius);
+        paint_decorated(canvas, skia_rect(b.rect), s.background, &Border { width: s.border_width, color: s.border_color, style: s.border_style }, s.border_radius);
         paint_control_mark(canvas, s, b.rect);
-        // TODO: opacity needs a save_layer around the element's whole subtree,
-        // which needs the paint list to keep tree structure (stacking contexts).
     }
 
     fn paint_text(&mut self, canvas: &Canvas, rect: LRect, content: &TextContent) {
@@ -253,30 +262,97 @@ fn extract_collection_face(bytes: &[u8], index: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Outer `box-shadow`s: a blurred copy of the box outline, kept out from under the box.
+// TODO: `inset` shadows.
+fn paint_shadows(canvas: &Canvas, outer: Rect, shadows: &[nile_style::BoxShadow], radius: f32) {
+    for sh in shadows.iter().rev().filter(|s| !s.inset && s.color.a > 0) {
+        let shape = Rect::from_ltrb(
+            outer.left - sh.spread + sh.dx,
+            outer.top - sh.spread + sh.dy,
+            outer.right + sh.spread + sh.dx,
+            outer.bottom + sh.spread + sh.dy,
+        );
+        let r = (radius + sh.spread).max(0.0);
+        let mut paint = fill(sh.color);
+        if sh.blur > 0.0 {
+            paint.set_mask_filter(skia_safe::MaskFilter::blur(skia_safe::BlurStyle::Normal, sh.blur / 2.0, false));
+        }
+        canvas.save();
+        canvas.clip_rrect(RRect::new_rect_xy(outer, radius, radius), skia_safe::ClipOp::Difference, true);
+        canvas.draw_rrect(RRect::new_rect_xy(shape, r, r), &paint);
+        canvas.restore();
+    }
+}
+
+/// A box's border: width, color and line style for each side.
+struct Border {
+    width: Edges<f32>,
+    color: Edges<CssColor>,
+    style: Edges<BorderStyle>,
+}
+
 /// Draw `bg` and a (per-side) border inside `outer`, with rounded corners.
-fn paint_decorated(
-    canvas: &Canvas,
-    outer: Rect,
-    bg: Option<CssColor>,
-    w: Edges<f32>,
-    border_color: CssColor,
-    radius: f32,
-) {
+fn paint_decorated(canvas: &Canvas, outer: Rect, bg: Option<CssColor>, border: &Border, radius: f32) {
+    let (w, c, st) = (border.width, border.color, border.style);
     let outer_r = RRect::new_rect_xy(outer, radius, radius);
     if let Some(bg) = bg.filter(|c| c.a > 0) {
         canvas.draw_rrect(outer_r, &fill(bg));
     }
-    if (w.top > 0.0 || w.right > 0.0 || w.bottom > 0.0 || w.left > 0.0) && border_color.a > 0 {
-        let inner_rect = Rect::from_ltrb(
-            outer.left + w.left,
-            outer.top + w.top,
-            outer.right - w.right,
-            outer.bottom - w.bottom,
-        );
+    if !(w.top > 0.0 || w.right > 0.0 || w.bottom > 0.0 || w.left > 0.0) {
+        return;
+    }
+    let uniform = c.top == c.right && c.top == c.bottom && c.top == c.left;
+    let solid = [st.top, st.right, st.bottom, st.left].iter().all(|s| matches!(*s, BorderStyle::Solid | BorderStyle::None));
+    if uniform && solid {
+        if c.top.a == 0 {
+            return;
+        }
+        let inner_rect = Rect::from_ltrb(outer.left + w.left, outer.top + w.top, outer.right - w.right, outer.bottom - w.bottom);
         let inner_radius = (radius - w.top.max(w.left)).max(0.0);
         let inner = RRect::new_rect_xy(inner_rect, inner_radius, inner_radius);
-        canvas.draw_drrect(outer_r, inner, &fill(border_color));
+        canvas.draw_drrect(outer_r, inner, &fill(c.top));
+        return;
     }
+    // Mixed colors or styles: each side on its own, clipped to the rounded outline.
+    canvas.save();
+    canvas.clip_rrect(outer_r, skia_safe::ClipOp::Intersect, true);
+    let (l, t, r, b) = (outer.left, outer.top, outer.right, outer.bottom);
+    let sides = [
+        (w.top, c.top, st.top, [(l, t), (r, t), (r - w.right, t + w.top), (l + w.left, t + w.top)], ((l, t + w.top / 2.0), (r, t + w.top / 2.0))),
+        (w.right, c.right, st.right, [(r, t), (r, b), (r - w.right, b - w.bottom), (r - w.right, t + w.top)], ((r - w.right / 2.0, t), (r - w.right / 2.0, b))),
+        (w.bottom, c.bottom, st.bottom, [(l, b), (r, b), (r - w.right, b - w.bottom), (l + w.left, b - w.bottom)], ((l, b - w.bottom / 2.0), (r, b - w.bottom / 2.0))),
+        (w.left, c.left, st.left, [(l, t), (l, b), (l + w.left, b - w.bottom), (l + w.left, t + w.top)], ((l + w.left / 2.0, t), (l + w.left / 2.0, b))),
+    ];
+    for (width, color, style, quad, (from, to)) in sides {
+        if width <= 0.0 || color.a == 0 {
+            continue;
+        }
+        let mut paint = fill(color);
+        match style {
+            BorderStyle::None => {}
+            BorderStyle::Solid => {
+                let mut path = skia_safe::PathBuilder::new();
+                path.move_to(quad[0]).line_to(quad[1]).line_to(quad[2]).line_to(quad[3]).close();
+                canvas.draw_path(&path.detach(), &paint);
+            }
+            BorderStyle::Dashed | BorderStyle::Dotted => {
+                let dotted = style == BorderStyle::Dotted;
+                let on = if dotted { width } else { width * 3.0 };
+                paint.set_style(skia_safe::PaintStyle::Stroke);
+                paint.set_stroke_width(width);
+                if dotted {
+                    paint.set_stroke_cap(skia_safe::PaintCap::Round);
+                }
+                // Round dots add half the width at each end, so the gap makes up for it.
+                let intervals = if dotted { [0.01, width * 2.0] } else { [on, on] };
+                paint.set_path_effect(skia_safe::PathEffect::dash(&intervals, 0.0));
+                let mut path = skia_safe::PathBuilder::new();
+                path.move_to(from).line_to(to);
+                canvas.draw_path(&path.detach(), &paint);
+            }
+        }
+    }
+    canvas.restore();
 }
 
 /// The check or radio dot for `appearance: checkbox | radio` when checked.
@@ -442,7 +518,7 @@ fn paint_inline_fragments(
             origin.x + f.x1,
             origin.y + f.bottom + d.padding.bottom + d.border.bottom,
         );
-        paint_decorated(canvas, rect, d.background, d.border, d.border_color, d.radius);
+        paint_decorated(canvas, rect, d.background, &Border { width: d.border, color: d.border_color, style: d.border_style }, d.radius);
     }
 }
 

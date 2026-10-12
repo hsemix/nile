@@ -1,0 +1,84 @@
+<!doctype html>
+<html>
+<head>
+<style>
+  :root { --accent: #2a7; --pad: 8px; }
+  body { margin: 0; padding: 12px; font-size: 13px; font-family: sans-serif; background: #fff; }
+  h1 { font-size: 16px; margin: 0 0 8px 0; }
+  .row { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; }
+  .lbl { width: 150px; color: #555; }
+  .box { width: 60px; height: 22px; background: #ccc; }
+
+  /* green = the feature works; grey/red = not supported (except where labelled) */
+  #important { background: red !important; }
+  #important { background: #2a7; }
+  #imp2 { background: #2a7 !important; }
+  #imp2 { background: red; }
+  #var { background: var(--accent); }
+  #varfb { background: var(--missing, #2a7); }
+  #calc { width: calc(30px + 30px); background: #2a7; }
+  #calcpct { width: calc(100% - 100px); background: #2a7; }
+  #hsl { background: hsl(150, 60%, 40%); }
+  #hex8 { background: #22aa77ff; }
+  #named { background: seagreen; }
+  #cur { color: #2a7; border: 3px solid currentColor; }
+  #vw { width: 5vw; background: #2a7; }
+  #vh { height: 3vh; background: #2a7; }
+  #media { background: red; }
+  @media (min-width: 100px) { #media { background: #2a7; } }
+  @media (max-width: 100px) { #media { background: red; } }
+  #pos { position: relative; left: 20px; background: #2a7; }
+  #opacity { background: #2a7; opacity: 0.3; }
+  #shadow { background: #2a7; box-shadow: 4px 4px 8px rgba(0,0,0,0.5), -3px -3px 0 #e74; }
+  #grad { background: linear-gradient(#2a7, #7a2); }
+  #corner { background: #2a7; border-radius: 12px 0 12px 0; }
+  #bgshort { background: #2a7 none; }
+  #bside { border-left: 6px solid #2a7; border-bottom: 2px dashed #888; }
+  #dash { border: 2px dashed #2a7; }
+  #dot { border: 3px dotted #2a7; border-radius: 6px; }
+  #mixed { border-top: 4px solid #2a7; border-right: 4px solid #e74; border-bottom: 4px solid #37e; border-left: 4px solid #eb2; }
+  #bcolor { border: 2px solid; border-color: #2a7; }
+  #minmax { width: min(60px, 100%); background: #2a7; }
+  #pseudo::before { content: "x"; }
+  #tt { text-transform: uppercase; color: #2a7 }
+  #ls { letter-spacing: 3px; color: #2a7 }
+  #ws { white-space: pre; }
+  #va { vertical-align: top; }
+  #sel:not(.x):is(div) { background: #2a7; }
+  #has:has(span) { background: #2a7; }
+  #grid { display: grid; grid-template-columns: 30px 30px; }
+  #cursor { cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>CSS compatibility</h1>
+<div class="row"><span class="lbl">!important (green=ok)</span><div class="box" id="imp2"></div></div>
+<div class="row"><span class="lbl">!important (red = !important wins)</span><div class="box" id="important"></div></div>
+<div class="row"><span class="lbl">var()</span><div class="box" id="var"></div></div>
+<div class="row"><span class="lbl">var() fallback</span><div class="box" id="varfb"></div></div>
+<div class="row"><span class="lbl">calc(px)</span><div class="box" id="calc"></div></div>
+<div class="row"><span class="lbl">calc(% - px)</span><div style="flex:1"><div class="box" id="calcpct"></div></div></div>
+<div class="row"><span class="lbl">hsl()</span><div class="box" id="hsl"></div></div>
+<div class="row"><span class="lbl">#rrggbbaa</span><div class="box" id="hex8"></div></div>
+<div class="row"><span class="lbl">named color</span><div class="box" id="named"></div></div>
+<div class="row"><span class="lbl">currentColor</span><div class="box" id="cur">c</div></div>
+<div class="row"><span class="lbl">vw (5vw)</span><div class="box" id="vw"></div></div>
+<div class="row"><span class="lbl">vh</span><div class="box" id="vh"></div></div>
+<div class="row"><span class="lbl">@media</span><div class="box" id="media"></div></div>
+<div class="row"><span class="lbl">position:relative</span><div class="box" id="pos"></div></div>
+<div class="row"><span class="lbl">opacity .3</span><div class="box" id="opacity"></div></div>
+<div class="row"><span class="lbl">box-shadow</span><div class="box" id="shadow"></div></div>
+<div class="row"><span class="lbl">gradient</span><div class="box" id="grad"></div></div>
+<div class="row"><span class="lbl">per-corner radius</span><div class="box" id="corner"></div></div>
+<div class="row"><span class="lbl">border-left/bottom</span><div class="box" id="bside"></div></div>
+<div class="row"><span class="lbl">dashed</span><div class="box" id="dash"></div></div>
+<div class="row"><span class="lbl">dotted + radius</span><div class="box" id="dot"></div></div>
+<div class="row"><span class="lbl">4 side colors</span><div class="box" id="mixed"></div></div>
+<div class="row"><span class="lbl">border-color</span><div class="box" id="bcolor"></div></div>
+<div class="row"><span class="lbl">min()</span><div class="box" id="minmax"></div></div>
+<div class="row"><span class="lbl">text-transform</span><span id="tt">upper (UPPERCASE)</span></div>
+<div class="row"><span class="lbl">letter-spacing</span><span id="ls">spaced (wide)</span></div>
+<div class="row"><span class="lbl">:not():is()</span><div class="box" id="sel"></div></div>
+<div class="row"><span class="lbl">:has()</span><div class="box" id="has"><span></span></div></div>
+</body>
+</html>

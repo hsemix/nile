@@ -94,7 +94,15 @@ cargo test --workspace
   click-to-focus on links and form controls, restyled live (see `examples/interact.html`).
 - **Inline content:** mixed text, `<br>`, inline padding/border/background/radius and `inline-block` (with
   baseline) wrap as one flow (see `examples/inline.html`, `examples/selectors.html`).
-- **Units:** `px`, `em`, `rem`, `%`, `pt`. **Colors:** hex, `rgb()/rgba()`, basic names.
+- **Cascade and values:** `!important`, custom properties with `var(--x, fallback)` (inherited, can reference each
+  other), `@media` (width/height features incl. range syntax, `orientation`, `screen`, `and`/`not`/commas; re-evaluated
+  when the window resizes). `calc()` (including `100% - 20px`, resolved in layout), `min()`, `max()`, `clamp()` with absolute units.
+  **Units:** `px`, `em`, `rem`, `%`, `pt`, `vw`, `vh`, `vmin`, `vmax`, `cm`, `mm`, `in`, `pc`. **Colors:** hex (3/4/6/8
+  digits), `rgb()/rgba()` (legacy and `r g b / a` syntax), `hsl()/hsla()`, all CSS named colors, `transparent`,
+  `currentColor` (borders follow `color` by default). Borders: per-side width, color and style (`solid`, `dashed`, `dotted`) with mitred corners.
+  `text-transform`, `letter-spacing`, outer `box-shadow` (several, blurred, spread) and painted `opacity` (a layer
+  over the whole subtree) and `position: relative|absolute` with `top/right/bottom/left/inset` (see
+  `examples/position.html`) too. See `examples/css-compat.html` for a page that checks these.
 
 ## Known gaps (deliberate, for now)
 
@@ -117,9 +125,13 @@ cargo test --workspace
   page), `offsetParent` (approximated by the parent). From Sciter: class components, `componentUpdate`,
   `onGlobalEvent`, `Element.value` (no native behaviors yet), `this://` URLs, and JSX shortcuts like `.class`;
   `patch` is simplified (children match by key, id, then tag).
+- CSS gaps: no `grid`, `float`, tables, `z-index` or `::before/::after`; `position: absolute` is placed against the parent (not the nearest positioned ancestor), `fixed` acts like `absolute`, `sticky` like `relative`, and paint order is document order; no gradients, `inset` shadows, transforms,
+  transitions; `double`/`groove` borders draw solid; `calc()` percentages
+  resolve against the parent's laid-out content size (heights only when the element sets its own height);
+  `@supports`/`@font-face`/`@keyframes` are skipped; `@media` has no `prefers-*` beyond light/no-preference and no
+  `resolution`.
 - `border-radius` takes one value (no per-corner radii); `:has()`, `::before/::after` and `:visited` aren't supported.
 - Sibling and `:nth-child` matching scans child lists, so very wide lists restyle slowly.
-- `opacity` is parsed but not painted (needs stacking contexts in the paint list).
 - Variable-font axes aren't applied when drawing glyphs.
 - CPU rasterization (`softbuffer`) — fine for now, GPU comes later.
 

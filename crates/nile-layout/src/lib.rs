@@ -17,7 +17,7 @@ use std::ops::Range;
 
 pub use nile_dom::NodeId;
 use nile_dom::{Document, NodeKind};
-use nile_style::{
+use nile_style::{BorderStyle, Position, TextTransform, 
     Align, Color, ComputedStyle, Display, Edges, FlexDirection, Length, OverflowKind, StyleMap, TextAlign,
 };
 use nile_text::{
@@ -44,7 +44,8 @@ pub enum BoxContent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct InlineDeco {
     pub background: Option<Color>,
-    pub border_color: Color,
+    pub border_color: Edges<Color>,
+    pub border_style: Edges<BorderStyle>,
     pub border: Edges<f32>,
     pub padding: Edges<f32>,
     pub radius: f32,
@@ -480,12 +481,25 @@ pub fn layout_with(
     root_style.min_size.height = LengthPercentageAuto::length(viewport_height);
     tree.set_style(root, root_style).unwrap();
 
-    tree.compute_layout_with_measure(
-        root,
-        Size { width: AvailableSpace::Definite(viewport_width), height: AvailableSpace::MaxContent },
-        |inputs, _id, ctx, style| measure_node(inputs, ctx, style),
-    )
-    .expect("layout of a well-formed tree cannot fail");
+    let compute = |tree: &mut TaffyTree<NodeCtx>| {
+        tree.compute_layout_with_measure(
+            root,
+            Size { width: AvailableSpace::Definite(viewport_width), height: AvailableSpace::MaxContent },
+            |inputs, _id, ctx, style| measure_node(inputs, ctx, style),
+        )
+        .expect("layout of a well-formed tree cannot fail");
+    };
+    compute(&mut tree);
+    // `calc()` mixing `%` and `px` can't be expressed to Taffy; resolve it against the
+    // containing block's laid-out size and lay out again until it settles.
+    if styles.styles.iter().any(has_calc) {
+        for _ in 0..4 {
+            if !resolve_calcs(&mut tree, root, styles, None) {
+                break;
+            }
+            compute(&mut tree);
+        }
+    }
 
     let mut boxes = Vec::new();
     flatten(&mut tree, root, 0.0, 0.0, &mut boxes);
@@ -502,6 +516,91 @@ pub fn layout_with(
         tree.menu = build_menu(doc, styles, text, &tree, req, options.offsets);
     }
     tree
+}
+
+fn has_calc(s: &ComputedStyle) -> bool {
+    let calc = |l: Length| matches!(l, Length::Calc { .. });
+    let m = s.margin;
+    [s.width, s.height, s.min_width, s.min_height, s.max_width, s.max_height, s.flex_basis, m.top, m.right, m.bottom, m.left]
+        .into_iter()
+        .any(calc)
+}
+
+/// Gives every `calc()` size and margin under `node` a concrete value from `parent`'s
+/// content size (`None` for the root). True if any style changed.
+// TODO: a percentage height should only resolve against a definite parent height; here
+// it uses the parent's laid-out height whenever the parent's own height isn't `auto`.
+fn resolve_calcs(
+    tree: &mut TaffyTree<NodeCtx>,
+    node: taffy::NodeId,
+    styles: &StyleMap,
+    parent: Option<(f32, Option<f32>)>,
+) -> bool {
+    let mut changed = false;
+    let id = match tree.get_node_context(node) {
+        Some(NodeCtx::Element(id)) => Some(*id),
+        _ => None,
+    };
+    let mut content = None;
+    if let Some(id) = id {
+        let cs = styles.get(id);
+        if let (true, Some((pw, ph))) = (has_calc(cs), parent) {
+            let mut ts = tree.style(node).unwrap().clone();
+            let across = |l: Length, basis: f32| match l {
+                Length::Calc { px, pct } => Some(px + pct * basis),
+                _ => None,
+            };
+            let w = |l: Length| across(l, pw).map(Dimension::length);
+            let h = |l: Length| ph.and_then(|b| across(l, b)).map(Dimension::length);
+            let wl = |l: Length| across(l, pw).map(LengthPercentageAuto::length);
+            let hl = |l: Length| ph.and_then(|b| across(l, b)).map(LengthPercentageAuto::length);
+            if let Some(v) = w(cs.width) {
+                ts.size.width = v;
+            }
+            if let Some(v) = h(cs.height) {
+                ts.size.height = v;
+            }
+            if let Some(v) = w(cs.flex_basis) {
+                ts.flex_basis = v;
+            }
+            for (slot, l) in [(&mut ts.min_size.width, cs.min_width), (&mut ts.max_size.width, cs.max_width)] {
+                if let Some(v) = wl(l) {
+                    *slot = v;
+                }
+            }
+            for (slot, l) in [(&mut ts.min_size.height, cs.min_height), (&mut ts.max_size.height, cs.max_height)] {
+                if let Some(v) = hl(l) {
+                    *slot = v;
+                }
+            }
+            for (slot, l) in [
+                (&mut ts.margin.left, cs.margin.left),
+                (&mut ts.margin.right, cs.margin.right),
+                (&mut ts.margin.top, cs.margin.top),
+                (&mut ts.margin.bottom, cs.margin.bottom),
+            ] {
+                if let Some(v) = wl(l) {
+                    *slot = v;
+                }
+            }
+            if ts != *tree.style(node).unwrap() {
+                tree.set_style(node, ts).unwrap();
+                changed = true;
+            }
+        }
+        let l = tree.layout(node).unwrap();
+        let (p, b) = (cs.padding, cs.border_width);
+        let cw = (l.size.width - p.left - p.right - b.left - b.right).max(0.0);
+        let ch = (l.size.height - p.top - p.bottom - b.top - b.bottom).max(0.0);
+        // Containing-block height is only definite when the element sets one.
+        let definite = !matches!(cs.height, Length::Auto);
+        content = Some((cw, definite.then_some(ch)));
+    }
+    let kids = tree.children(node).unwrap();
+    for k in kids {
+        changed |= resolve_calcs(tree, k, styles, content.or(parent));
+    }
+    changed
 }
 
 fn measure_text(
@@ -746,7 +845,8 @@ fn build_children(
         let is_inline = match &node.kind {
             NodeKind::Text(_) => true,
             NodeKind::Element { .. } => {
-                matches!(styles.get(c).display, Display::Inline | Display::InlineBlock)
+                let cs = styles.get(c);
+                matches!(cs.display, Display::Inline | Display::InlineBlock) && !cs.position.out_of_flow()
             }
             NodeKind::Document => false,
         };
@@ -782,7 +882,7 @@ type BoxMaker<'a> = dyn FnMut(NodeId) -> Option<InlineBoxSpec> + 'a;
 
 fn has_inline_paint(s: &ComputedStyle) -> bool {
     let e = |e: Edges<f32>| e.top > 0.0 || e.right > 0.0 || e.bottom > 0.0 || e.left > 0.0;
-    s.background.is_some_and(|c| c.a > 0) || (e(s.border_width) && s.border_color.a > 0) || e(s.padding)
+    s.background.is_some_and(|c| c.a > 0) || (e(s.border_width) && [s.border_color.top, s.border_color.right, s.border_color.bottom, s.border_color.left].iter().any(|c| c.a > 0)) || e(s.padding)
 }
 
 impl InlineText {
@@ -811,7 +911,7 @@ impl InlineText {
         let node = doc.node(id);
         match &node.kind {
             NodeKind::Text(raw) => {
-                let collapsed = collapse_whitespace(raw);
+                let collapsed = transform_text(&collapse_whitespace(raw), styles.get(id).text_transform);
                 let piece = if self.collapse {
                     collapsed.strip_prefix(' ').unwrap_or(&collapsed)
                 } else {
@@ -857,6 +957,7 @@ impl InlineText {
                     self.decos.push(InlineDeco {
                         background: es.background,
                         border_color: es.border_color,
+                        border_style: es.border_style,
                         border: es.border_width,
                         padding: es.padding,
                         radius: es.border_radius,
@@ -1064,6 +1165,24 @@ fn flatten(
     }
 }
 
+fn transform_text(text: &str, t: TextTransform) -> String {
+    match t {
+        TextTransform::None => text.to_string(),
+        TextTransform::Uppercase => text.to_uppercase(),
+        TextTransform::Lowercase => text.to_lowercase(),
+        TextTransform::Capitalize => {
+            let mut start = true;
+            text.chars()
+                .flat_map(|c| {
+                    let up = start && c.is_alphanumeric();
+                    start = !c.is_alphanumeric() && c != '\'';
+                    if up { c.to_uppercase().collect::<Vec<_>>() } else { vec![c] }
+                })
+                .collect()
+        }
+    }
+}
+
 fn text_style(s: &ComputedStyle) -> TextStyle {
     TextStyle {
         font_family: s.font_family.clone(),
@@ -1076,6 +1195,7 @@ fn text_style(s: &ComputedStyle) -> TextStyle {
         italic: s.italic,
         underline: s.underline,
         line_through: s.line_through,
+        letter_spacing: s.letter_spacing,
         align: alignment(s.text_align),
     }
 }
@@ -1094,6 +1214,8 @@ fn dim(l: Length) -> Dimension {
         Length::Auto => Dimension::auto(),
         Length::Px(px) => Dimension::length(px),
         Length::Percent(p) => Dimension::percent(p),
+        // Resolved after the first layout pass (`resolve_calcs`).
+        Length::Calc { .. } => Dimension::auto(),
     }
 }
 
@@ -1102,6 +1224,7 @@ fn lpa(l: Length) -> LengthPercentageAuto {
         Length::Auto => LengthPercentageAuto::auto(),
         Length::Px(px) => LengthPercentageAuto::length(px),
         Length::Percent(p) => LengthPercentageAuto::percent(p),
+        Length::Calc { .. } => LengthPercentageAuto::auto(),
     }
 }
 
@@ -1143,6 +1266,16 @@ fn taffy_style(s: &ComputedStyle) -> Style {
             Display::Flex => taffy::Display::Flex,
             Display::None => taffy::Display::None,
             Display::Block | Display::Inline | Display::InlineBlock => taffy::Display::Block,
+        },
+        position: match s.position {
+            Position::Static => taffy::Position::Relative,
+            Position::Relative => taffy::Position::Relative,
+            Position::Absolute | Position::Fixed => taffy::Position::Absolute,
+        },
+        inset: if s.position == Position::Static {
+            taffy::Rect::auto()
+        } else {
+            taffy::Rect { top: lpa(s.inset.top), right: lpa(s.inset.right), bottom: lpa(s.inset.bottom), left: lpa(s.inset.left) }
         },
         box_sizing: if s.border_box { BoxSizing::BorderBox } else { BoxSizing::ContentBox },
         size: Size { width: dim(s.width), height: dim(s.height) },
@@ -1528,5 +1661,53 @@ second</textarea><textarea id="e"></textarea></body>"#,
         let t = tree.boxes.iter().find(|b| matches!(b.content, BoxContent::Text(_))).unwrap();
         assert_eq!(t.rect.width, 60.0);
         assert!(t.rect.height > 16.0 * 1.2 * 2.0);
+    }
+
+    #[test]
+    fn calc_mixing_percent_and_px_resolves_against_the_parent() {
+        let doc = Document::parse(
+            r#"<body style="margin:0"><div style="width:300px; height:100px">
+               <div id="a" style="width:calc(100% - 20px); height:calc(50% + 10px); margin-left:calc(10% + 5px)"></div>
+               <div id="b" style="width:calc(50% - 10px)"></div></div></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 400.0, 100.0);
+        let rect = |id: &str| tree.node_rect(doc.find(|n| n.attr("id") == Some(id)).unwrap()).unwrap();
+        let a = rect("a");
+        assert_eq!((a.x, a.width, a.height), (35.0, 280.0, 60.0));
+        assert_eq!(rect("b").width, 140.0);
+    }
+
+    #[test]
+    fn text_transform_and_letter_spacing() {
+        let (plain, _) = run_width(r#"<body><p style="margin:0">hello world</p></body>"#);
+        let (spaced, _) = run_width(r#"<body><p style="margin:0; letter-spacing: 2px">hello world</p></body>"#);
+        assert!((spaced - plain - 22.0).abs() < 1.0, "11 characters x 2px: {plain} -> {spaced}");
+        assert_eq!(transform_text("it's a dog", TextTransform::Capitalize), "It's A Dog");
+        assert_eq!(transform_text("Straße", TextTransform::Uppercase), "STRASSE");
+        assert_eq!(transform_text("ABC", TextTransform::Lowercase), "abc");
+    }
+
+    #[test]
+    fn position_relative_and_absolute() {
+        let doc = Document::parse(
+            r#"<body style="margin:0"><div id="box" style="position:relative; width:200px; height:100px">
+               <span id="a" style="position:absolute; top:10px; left:20px; width:50px; height:30px"></span>
+               <div id="b" style="position:absolute; right:0; bottom:0; width:50px; height:30px"></div>
+               <div id="c" style="height:20px"></div>
+               <div id="d" style="position:relative; top:5px; left:7px; height:10px"></div></div></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 400.0, 300.0);
+        let rect = |id: &str| tree.node_rect(doc.find(|n| n.attr("id") == Some(id)).unwrap()).unwrap();
+        let a = rect("a");
+        assert_eq!((a.x, a.y, a.width, a.height), (20.0, 10.0, 50.0, 30.0));
+        let b = rect("b");
+        assert_eq!((b.x, b.y), (150.0, 70.0));
+        assert_eq!(rect("c").y, 0.0); // out-of-flow boxes take no space
+        let d = rect("d");
+        assert_eq!((d.x, d.y), (7.0, 25.0)); // 20 (after c) + 5
     }
 }
