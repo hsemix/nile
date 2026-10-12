@@ -109,6 +109,8 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
   the choice is the option's `selected` state flag. Changing the menu or scrolling
   invalidates the cached layout.
 - Page text selection: `View::page_sel` holds two `TextPoint`s (a text run's index in `LayoutTree::boxes` + byte), valid for one `Document::version`. Layout provides `text_point_at`, `word_at`, `selection_ranges`, `selection_text` (control text and padding spacers excluded); the renderer highlights `Overlay::page_selection`. Pressing on non-focusable content starts it in `Page::begin_page_selection`, but only text whose style has `user_select != None` (the default is *none*, as in desktop UIs; opt-in via `user-select`, a `selectable` attribute (UA rule) or `behavior: htmlarea`; verified against sciter.com docs).
+- List boxes (`<select multiple>` / `size > 1`, `list_rows`): layout gives the select a fixed height of `size` rows and builds a `ListBox` (rows, scroll) per select in `LayoutTree::lists`; the renderer paints it inline after the box. Its scroll offset lives in `View::scroll_offsets` under the select's id (not a `ScrollBox`). The shell's `list_click`/`list_key` set the `selected` state flags. The drop-down `MenuBox` has its own `scroll`/`max_scroll` and flips above the select when `LayoutOptions::scroll_y` + viewport leave more room there.
+- Tables (`build_table`): a table is a Taffy grid with auto tracks. Cells get explicit grid lines from `colspan`/`rowspan`; each `<tr>` becomes an empty grid item behind its cells (so row backgrounds paint); `thead` rows go first and `tfoot` last; `border-spacing` is the gap plus padding, and `border-collapse` zeroes the gap and gives cells negative top/left margins so borders overlap. Taffy's `item_is_table` makes the table shrink-wrap. Middle/bottom `vertical-align` wraps the cell's children in an anonymous flex-column node with auto margins (anonymous nodes have no `NodeCtx`, which `flatten` allows).
 - JSX is a source transform (`nile-script/src/jsx.rs`, a scanner, not a parser)
   applied to every script and module before QuickJS sees it; it returns `None`
   for non-JSX or malformed input so the engine reports the original error. Modules
@@ -141,8 +143,7 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
 
 ## Next up
 
-`<select multiple>`/listboxes and a scrollable, flipping drop-down.
-CSS: proper stacking contexts, real `position: fixed`, static positions for auto insets, `:has()`, text wrapping
-around floats line by line, `inset` shadows, 3D transforms, `transitionend`/`animationend`, tables. Also open:
+`<optgroup>`, list-box drag selection. CSS: proper stacking contexts, real `position: fixed`, static positions for auto insets, `:has()`, text wrapping
+around floats line by line, `inset` shadows, 3D transforms, `transitionend`/`animationend`, `table-layout: fixed` and table-width edge cases. Also open:
 `white-space: pre*` whitespace handling, incremental restyle (animations restyle and relayout the whole page every
 frame), the `cursor` property, `@env`/`@sciter` modules, IME, symbol fallback check on Windows/Linux.

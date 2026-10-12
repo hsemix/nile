@@ -79,6 +79,9 @@ impl Renderer {
                         open.push((b.subtree_end.max(i + 1), None));
                     }
                     self.paint_box(canvas, b, styles);
+                    if let Some(list) = tree.list_box(b.node) {
+                        self.paint_list(canvas, b.rect, styles.get(b.node), list);
+                    }
                     if let Some(sb) = &b.scroll {
                         let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
                         canvas.save();
@@ -117,6 +120,36 @@ impl Renderer {
         }
     }
 
+    /// The rows of a list-box `<select>`, clipped to its padding box.
+    fn paint_list(&mut self, canvas: &Canvas, r: LRect, s: &nile_style::ComputedStyle, l: &nile_layout::ListBox) {
+        let b = s.border_width;
+        canvas.save();
+        canvas.clip_rect(Rect::from_ltrb(r.x + b.left, r.y + b.top, r.x + r.width - b.right, r.y + r.height - b.bottom), None, true);
+        for (i, item) in l.items.iter().enumerate() {
+            let top = r.y + l.inset_top - l.scroll + l.row_height * i as f32;
+            if top + l.row_height < r.y || top > r.y + r.height {
+                continue;
+            }
+            if item.selected {
+                canvas.draw_rect(Rect::from_xywh(r.x + b.left, top, r.width - b.left - b.right, l.row_height), &fill(CssColor::rgb(29, 78, 216)));
+            }
+            let line_h = item.text.height();
+            let at = LRect { x: r.x + b.left + l.pad_x, y: top + (l.row_height - line_h) / 2.0, width: r.width, height: line_h };
+            let tint = if item.selected { Some([255, 255, 255, 255]) } else if item.disabled { Some([150, 150, 150, 255]) } else { None };
+            self.paint_text_tinted(canvas, at, &item.text, tint);
+        }
+        canvas.restore();
+        if l.max_scroll > 0.0 {
+            let track = l.view_height - 4.0;
+            let thumb = (track * l.view_height / (l.view_height + l.max_scroll)).max(16.0).min(track);
+            let at = r.y + l.inset_top + 2.0 + (track - thumb) * l.scroll / l.max_scroll;
+            canvas.draw_rrect(
+                RRect::new_rect_xy(Rect::from_xywh(r.x + r.width - b.right - 7.0, at, 4.0, thumb), 2.0, 2.0),
+                &fill(CssColor { r: 0, g: 0, b: 0, a: 110 }),
+            );
+        }
+    }
+
     /// The open `<select>` list: white panel, highlighted row, a mark on the chosen one.
     fn paint_menu(&mut self, canvas: &Canvas, m: &MenuBox) {
         let r = m.rect;
@@ -126,8 +159,13 @@ impl Renderer {
         border.set_style(skia_safe::PaintStyle::Stroke);
         border.set_stroke_width(1.0);
         canvas.draw_rrect(RRect::new_rect_xy(Rect::from_xywh(r.x + 0.5, r.y + 0.5, r.width - 1.0, r.height - 1.0), 3.0, 3.0), &border);
+        canvas.save();
+        canvas.clip_rect(Rect::from_xywh(r.x + 1.0, r.y + 1.0, r.width - 2.0, r.height - 2.0), None, false);
         for (i, item) in m.items.iter().enumerate() {
-            let top = r.y + 1.0 + m.row_height * i as f32;
+            let top = r.y + 1.0 - m.scroll + m.row_height * i as f32;
+            if top + m.row_height < r.y || top > r.y + r.height {
+                continue;
+            }
             let on = m.highlight == Some(i) && !item.disabled;
             if on {
                 canvas.draw_rect(Rect::from_xywh(r.x + 1.0, top, r.width - 2.0, m.row_height), &fill(CssColor::rgb(29, 78, 216)));
@@ -139,6 +177,15 @@ impl Renderer {
             if m.selected == Some(i) && !on {
                 canvas.draw_rect(Rect::from_xywh(r.x + 2.0, top + 2.0, 2.0, m.row_height - 4.0), &fill(CssColor::rgb(29, 78, 216)));
             }
+        }
+        canvas.restore();
+        if m.max_scroll > 0.0 {
+            let track = r.height - 4.0;
+            let thumb = (track * track / (track + m.max_scroll)).max(16.0).min(track);
+            let at = r.y + 2.0 + (track - thumb) * m.scroll / m.max_scroll;
+            let mut paint = fill(CssColor { r: 0, g: 0, b: 0, a: 110 });
+            paint.set_anti_alias(true);
+            canvas.draw_rrect(RRect::new_rect_xy(Rect::from_xywh(r.x + r.width - 6.0, at, 4.0, thumb), 2.0, 2.0), &paint);
         }
     }
 

@@ -60,6 +60,19 @@ paragraph; formatting undo/redo, document search and zoom also work. Other comma
 report a design-preview message. This is a UI example, not a document editor;
 save, sharing and clipboard commands do not persist or transfer content.
 
+## Desktop application showcase
+
+```sh
+cargo run -p nile-shell -- examples/workbench/index.html
+```
+
+Nine interactive interfaces with shared navigation: settings, dashboard, kanban,
+mail, code studio, inventory, calendar, media library and presentations. They use
+existing HTML/CSS/JS APIs and in-memory sample data. See
+[the showcase guide](examples/workbench/README.md) for workflows and validation.
+
+![Nine Nile application interfaces](docs/workbench/overview.png)
+
 ## What's supported today
 
 - **Selectors** (Servo's `selectors` crate): type, `.class`, `#id`, attributes (`[a]`, `[a^=b]`, ...), the
@@ -103,7 +116,10 @@ save, sharing and clipboard commands do not persist or transfer content.
   copy/cut/paste through the system clipboard; Tab selects an input's contents. In JS: `selectionStart`,
   `selectionEnd`, `setSelectionRange()`, `select()`. `<select>` with `<option>`s: a drop-down that opens on click,
   Space/Enter or Alt+Down, with mouse hover, arrows/Home/End, type-ahead, Escape, disabled options, and `input`/
-  `change` events; sized to its longest option. In JS: `value`, `selectedIndex`, `options`, `option.selected`/
+  `change` events; sized to its longest option; a long list scrolls (wheel, arrows) and opens upward when there is
+  more room above. `<select multiple>` and `size > 1` are list boxes drawn inline: click, Cmd/Ctrl-click to toggle,
+  Shift-click to extend, arrows/Page/Home/End (Shift extends), Cmd/Ctrl+A, type-ahead, wheel (see
+  `examples/listbox.html`). In JS: `value`, `selectedIndex`, `selectedOptions`, `options`, `option.selected`/
   `text`/`label`/`value`, `length`. In JS: `value`, `checked`, `disabled`, `type`, `name`,
   `placeholder`, `focus()`, `blur()`, `document.activeElement` (see `examples/forms.html`).
 - **Pointer interaction:** hit testing (down to the inline element under the pointer), `:hover`, `:active` and
@@ -119,7 +135,7 @@ save, sharing and clipboard commands do not persist or transfer content.
   `text-transform`, `letter-spacing`, outer `box-shadow` (several, blurred, spread) and painted `opacity` (a layer
   over the whole subtree) and `position: relative|absolute` (against the nearest positioned ancestor) with `top/right/bottom/left/inset` and `z-index` (see
   `examples/position.html`) `linear-gradient`/`radial-gradient` and their `repeating-` forms as `background`
-  (`examples/gradients.html`), `transition` (any animatable property or `all`, with delay, `ease`/`linear`/`cubic-bezier()`/`steps()`; a change mid-transition continues from where it is) and `@keyframes` `animation` (iterations, `infinite`, direction, fill modes, delays; `examples/animations.html`) over opacity, colors, lengths, padding/border widths, radius, `transform` and more, `transform` (`translate`, `scale`, `rotate`, `skew`, `matrix`, with `transform-origin`; hit testing and `getBoundingClientRect` follow it; `examples/transforms.html`), `<img>` (PNG/JPEG/WebP/GIF from files next to the page or `data:` URLs; sized by CSS, `width`/`height` attributes or the picture) and `background-image: url()` with `background-size`/`-position`/`-repeat` (`examples/images.html`), `float`/`clear` (`examples/float.html`), `display: grid` (`grid-template-columns/rows` with `px`/`%`/`fr`/`auto`/`minmax()`/`repeat()` incl. `auto-fill`/`auto-fit`,
+  (`examples/gradients.html`), `transition` (any animatable property or `all`, with delay, `ease`/`linear`/`cubic-bezier()`/`steps()`; a change mid-transition continues from where it is) and `@keyframes` `animation` (iterations, `infinite`, direction, fill modes, delays; `examples/animations.html`) over opacity, colors, lengths, padding/border widths, radius, `transform` and more, `transform` (`translate`, `scale`, `rotate`, `skew`, `matrix`, with `transform-origin`; hit testing and `getBoundingClientRect` follow it; `examples/transforms.html`), `<img>` (PNG/JPEG/WebP/GIF from files next to the page or `data:` URLs; sized by CSS, `width`/`height` attributes or the picture) and `background-image: url()` with `background-size`/`-position`/`-repeat` (`examples/images.html`), `float`/`clear` (`examples/float.html`), tables (`table`, row groups, `tr`, `td`/`th` with `colspan`/`rowspan`, `caption`, `border-spacing`, `border-collapse`, `vertical-align`/`valign`; `examples/tables.html`), `display: grid` (`grid-template-columns/rows` with `px`/`%`/`fr`/`auto`/`minmax()`/`repeat()` incl. `auto-fill`/`auto-fit`,
   `grid-auto-*`, `grid-column/row` with spans and line numbers, `grid-template-areas` + `grid-area`, `row-gap`/`column-gap`,
   `justify-items`/`justify-self`/`align-self`/`align-content`/`place-*`; `examples/grid.html`), and `::before`/`::after` with `content` (strings, `attr()`, quotes; any `display`, including
   inline-block and absolute; `examples/pseudo.html`) too. See `examples/css-compat.html` for a page that checks these.
@@ -134,8 +150,8 @@ save, sharing and clipboard commands do not persist or transfer content.
   innermost decorated inline is painted, and block children of an inline element don't split the run.
 - Selection gaps: page text selection works across runs in paint order (so `z-index` reordering can scramble the
   selection order), can't start inside a link or control, has no keyboard (Shift+arrows), and ignores `user-select: none` on a span inside a selectable block (it applies per paragraph/run); `text-selection-color` isn't painted; `Range`/
-  `Selection` objects beyond `toString()`/`removeAllRanges()` are missing. Form gaps: no IME or drag-and-drop; no `<form>` submit or validation; `<select>` is single-choice only (no `multiple`, `size`, `<optgroup>` labels), its
-  list doesn't scroll or flip above the select near the bottom edge, and it closes when the page scrolls; Home/End in a
+  `Selection` objects beyond `toString()`/`removeAllRanges()` are missing. Form gaps: no IME or drag-and-drop; no `<form>` submit or validation; `<select>` has no `<optgroup>` labels, list boxes have no drag-selection, focus ring or
+  `Ctrl`-arrow cursor, and the drop-down closes when the page scrolls; Home/End in a
   `<textarea>` use hard line breaks only; `selectionStart/End` count characters, not UTF-16 units; `value` lives
   in the `value` attribute (no separate default value). Sciter's `Element.value` for other behaviors isn't there.
 - Scrollbars are thin overlay bars (draggable; clicking the track jumps there), with no `scrollbar-*` styling, no
@@ -146,7 +162,7 @@ save, sharing and clipboard commands do not persist or transfer content.
   page), `offsetParent` (approximated by the parent). From Sciter: class components, `componentUpdate`,
   `onGlobalEvent`, `Element.value` (no native behaviors yet), `this://` URLs, and JSX shortcuts like `.class`;
   `patch` is simplified (children match by key, id, then tag).
-- CSS gaps: no tables; `float`/`clear` work on boxes, but text next to a float keeps the narrowed width for the whole paragraph instead of widening below it; named grid lines, `grid-template` shorthand, `subgrid`, `counter()`/`url()` in `content`, other pseudo-elements (`::first-line`, `::placeholder`, ...) or `:has()`; `fixed` acts like `absolute` against the page (it scrolls), `sticky` like `relative`, an absolute box with `auto` insets sits at its containing block's corner when that isn't its parent (not at its static position), `z-index` only reorders siblings (no isolated stacking contexts, flex items ignore it); `inset` shadows, multiple background layers, `background-origin`/`-clip`/`-attachment`, `object-fit`, SVG, `<img>` alt text, remote (`http`) images, transforms,
+- CSS gaps: tables are laid out as a grid, so there's no `table-layout: fixed`, percentage column widths, `<col>` widths, `caption-side`, row-group backgrounds or collapsed-border conflict resolution (each cell keeps its own borders and they overlap), and `display: table-*` on stray elements isn't wrapped in anonymous tables; `float`/`clear` work on boxes, but text next to a float keeps the narrowed width for the whole paragraph instead of widening below it; named grid lines, `grid-template` shorthand, `subgrid`, `counter()`/`url()` in `content`, other pseudo-elements (`::first-line`, `::placeholder`, ...) or `:has()`; `fixed` acts like `absolute` against the page (it scrolls), `sticky` like `relative`, an absolute box with `auto` insets sits at its containing block's corner when that isn't its parent (not at its static position), `z-index` only reorders siblings (no isolated stacking contexts, flex items ignore it); `inset` shadows, multiple background layers, `background-origin`/`-clip`/`-attachment`, `object-fit`, SVG, `<img>` alt text, remote (`http`) images, transforms,
   transitions; `double`/`groove` borders draw solid; `calc()` percentages
   resolve against the parent's laid-out content size (heights only when the element sets its own height);
   `@supports`/`@font-face`/`@keyframes` are skipped; `@media` has no `prefers-*` beyond light/no-preference and no
@@ -158,13 +174,22 @@ save, sharing and clipboard commands do not persist or transfer content.
 
 ## Roadmap
 
-1. **Incremental updates** — the `cursor` property, and restyling /
-   relaying out only what a state change affects (today every change restyles the whole page).
-2. **More controls + Sciter compatibility** — selecting page text, undo, `<select multiple>`, draggable scrollbars and keyboard scrolling, `@env`/`@sciter`/`@sys` modules, class components and `componentUpdate`, `this://` URLs.
-3. **Stacking contexts + GPU** — paint tree with opacity, transforms, clipping,
-   overflow scrolling; Skia on Metal (macOS), D3D (Windows), Vulkan/GL (Linux).
-4. **Embedding API** — a C ABI (`cbindgen`) so Go, C#, Python, etc. can host it.
-5. **Form controls, images, JSX in the module loader, accessibility (`accesskit`).**
+Done so far: the full pipeline (HTML, CSS, layout, Skia painting, QuickJS scripting), forms and
+text editing (undo/redo, selection, drop-downs, list boxes), scrolling, images, gradients, grid,
+float, tables, transforms, transitions and animations, and opt-in page text selection.
+
+1. **Incremental updates** (next) — the `cursor` property, and restyling and relaying out only
+   what a state change affects. Today every change and every animation frame restyles and
+   relays out the whole page.
+2. **Embedding API** — a C ABI (`cbindgen`) so Go, C#, Python, etc. can host it.
+3. **Sciter compatibility** — `@env`/`@sciter`/`@sys` modules, class components and
+   `componentUpdate`, `this://` URLs.
+4. **Stacking contexts + GPU** — real stacking contexts and `position: fixed`; Skia on Metal
+   (macOS), D3D (Windows), Vulkan/GL (Linux) instead of the CPU raster path.
+5. **Accessibility and input** — `accesskit`, IME.
+6. **CSS and control polish** — `white-space: pre*`, `:has()`, `transitionend`/`animationend`,
+   3D transforms, `inset` shadows, text wrapping around floats line by line, `table-layout: fixed`,
+   `<optgroup>`, list-box drag selection. The known gaps above list the rest.
 
 ## License
 

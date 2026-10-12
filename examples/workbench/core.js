@@ -3,7 +3,7 @@ export const button = (text, action, value = '', cls = '') => `<button class="${
 export const badge = (text, cls = '') => `<span class="badge ${cls}">${escape(text)}</span>`;
 export const empty = (text) => `<div class="empty">${escape(text)}</div>`;
 export const field = (label, id, value = '', type = 'text') => `<label class="field"><span>${escape(label)}</span><input id="${id}" type="${type}" value="${escape(value)}"></label>`;
-export const select = (label, id, options, value) => `<label class="field"><span>${escape(label)}</span><select id="${id}">${options.map((o) => `<option value="${escape(o)}"${o === value ? ' selected' : ''}>${escape(o)}</option>`).join('')}</select></label>`;
+export const select = (label, id, options, value) => `<label class="field">${label ? '<span>' + escape(label) + '</span>' : ''}<select id="${id}" title="${escape(label || id)}">${options.map((o) => `<option value="${escape(o)}"${o === value ? ' selected' : ''}>${escape(o)}</option>`).join('')}</select></label>`;
 export const modal = (title, content, saveAction, saveLabel = 'Save') => `<div class="scrim"><div class="dialog"><div class="row between"><h2>${escape(title)}</h2>${button('Close', 'close')}</div>${content}<div class="row dialog-actions">${button('Cancel', 'close')}${button(saveLabel, saveAction, '', 'primary')}</div><div id="validation" class="validation"></div></div></div>`;
 export function notice(text) { document.getElementById('notice').textContent = text; console.log('workbench:', text); }
 export function value(id) { return document.getElementById(id).value; }

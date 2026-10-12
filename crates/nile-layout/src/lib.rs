@@ -24,7 +24,7 @@ pub use images::{FileImages, ImageData, ImageLoader};
 pub use nile_dom::NodeId;
 use nile_dom::{Document, NodeKind};
 use nile_style::{area_lines, Breadth, BorderStyle, GridLine, GridPlace, Position, Track, TrackItem, TrackRepeat, PseudoElement, TextTransform, 
-    Align, Color, ComputedStyle, Display, Edges, FlexDirection, Length, OverflowKind, StyleMap, TextAlign,
+    Align, Color, ComputedStyle, Display, Edges, FlexDirection, Length, OverflowKind, StyleMap, TextAlign, VerticalAlign,
 };
 use nile_text::{
     break_lines, collapse_whitespace, Affinity, Alignment, Cluster, Cursor, InlineBoxSpec, Selection, PositionedLayoutItem, TextEngine,
@@ -223,6 +223,8 @@ pub struct LayoutTree {
     pub content_height: f32,
     /// The open `<select>` drop-down, painted above everything else.
     pub menu: Option<MenuBox>,
+    /// `<select multiple>` / `size > 1` list boxes by node: their rows are drawn inline.
+    lists: std::collections::HashMap<NodeId, ListBox>,
     /// Element boxes by node, for `node_rect`.
     index: std::collections::HashMap<NodeId, usize>,
     /// Generated (`::before`/`::after`) box -> its element, so hits land on the element.
@@ -235,12 +237,16 @@ pub struct MenuRequest {
     pub select: NodeId,
     /// The row under the pointer or keyboard cursor.
     pub highlight: Option<usize>,
+    /// How far the list is scrolled, in pixels (clamped when it's laid out).
+    pub scroll: f32,
 }
 
 /// Inputs to layout beyond the document and styles.
 #[derive(Default)]
 pub struct LayoutOptions<'a> {
     pub menu: Option<MenuRequest>,
+    /// The page's scroll position: the drop-down opens upward when it doesn't fit below.
+    pub scroll_y: f32,
     /// Scroll offsets, so the menu opens under where its select actually paints.
     pub offsets: Option<&'a ScrollOffsets>,
     /// Where `<img src>` and `url()` backgrounds come from; without one they don't show.
@@ -260,6 +266,9 @@ pub struct MenuBox {
     pub items: Vec<MenuItem>,
     pub selected: Option<usize>,
     pub highlight: Option<usize>,
+    /// Pixels scrolled; the list is taller than its panel when `max_scroll > 0`.
+    pub scroll: f32,
+    pub max_scroll: f32,
 }
 
 impl MenuBox {
@@ -272,9 +281,58 @@ impl MenuBox {
         if !self.contains(x, y) {
             return None;
         }
-        let i = ((y - self.rect.y - 1.0) / self.row_height).floor();
+        let i = ((y - self.rect.y - 1.0 + self.scroll) / self.row_height).floor();
         (i >= 0.0 && (i as usize) < self.items.len()).then_some(i as usize)
     }
+}
+
+/// One row of a [`ListBox`].
+pub struct ListItem {
+    pub text: TextLayout,
+    pub disabled: bool,
+    pub selected: bool,
+}
+
+/// The rows of a list-box `<select>`, painted inside its box and scrolled by `scroll`.
+pub struct ListBox {
+    pub items: Vec<ListItem>,
+    pub row_height: f32,
+    /// Distance from the box's top edge to the first row (border + padding).
+    pub inset_top: f32,
+    /// Distance from the box's left edge to the row text.
+    pub pad_x: f32,
+    /// Height of the visible rows area.
+    pub view_height: f32,
+    pub scroll: f32,
+    pub max_scroll: f32,
+}
+
+impl ListBox {
+    /// The row at `y` pixels below the box's top edge.
+    pub fn row_at(&self, y: f32) -> Option<usize> {
+        let i = ((y - self.inset_top + self.scroll) / self.row_height).floor();
+        (i >= 0.0 && (i as usize) < self.items.len()).then_some(i as usize)
+    }
+}
+
+/// How many rows a `<select>` list box shows, or `None` for a drop-down:
+/// `multiple` shows `size` rows (4 by default), a `size` above 1 does too.
+pub fn list_rows(doc: &Document, select: NodeId) -> Option<usize> {
+    let n = doc.node(select);
+    if n.tag() != Some("select") {
+        return None;
+    }
+    let size = n.attr("size").and_then(|s| s.trim().parse::<usize>().ok()).filter(|s| *s > 0);
+    match (n.attr("multiple").is_some(), size) {
+        (true, s) => Some(s.unwrap_or(4)),
+        (false, Some(s)) if s > 1 => Some(s),
+        _ => None,
+    }
+}
+
+/// Height of one row in a drop-down or list box.
+fn option_row_height(style: &ComputedStyle) -> f32 {
+    (style.font_size * style.line_height + 6.0).ceil()
 }
 
 /// The `<option>` elements of a `<select>`, in document order.
@@ -369,6 +427,11 @@ impl LayoutTree {
     }
 
     /// Where every box paints under `offsets` (parallel to `boxes`).
+    /// The rows of a list-box `<select>`.
+    pub fn list_box(&self, select: NodeId) -> Option<&ListBox> {
+        self.lists.get(&select)
+    }
+
     pub fn placements(&self, offsets: &ScrollOffsets) -> Vec<Placement> {
         let mut out = Vec::with_capacity(self.boxes.len());
         let mut stack: Vec<(usize, Placement)> = Vec::new();
@@ -763,10 +826,11 @@ pub fn layout_with(
         .map(|(i, b)| (b.node, i))
         .collect();
     let origins = styles.origins().clone();
-    let mut tree = LayoutTree { boxes, content_height, menu: None, index, origins };
+    let mut tree = LayoutTree { boxes, content_height, menu: None, lists: Default::default(), index, origins };
     tree.compute_scroll_boxes(styles);
+    tree.lists = build_lists(doc, styles, text, &tree, options.offsets);
     if let Some(req) = options.menu {
-        tree.menu = build_menu(doc, styles, text, &tree, req, options.offsets);
+        tree.menu = build_menu(doc, styles, text, &tree, req, options.offsets, (options.scroll_y, viewport_height));
     }
     tree
 }
@@ -998,17 +1062,27 @@ fn build(
             if style.display == Display::None {
                 return None;
             }
+            if style.display == Display::Table {
+                return build_table(doc, styles, text, tree, id);
+            }
             let children = with_containing_block(style.position != Position::Static, || {
-                if is_value_control(node) {
+                if list_rows(doc, id).is_some() {
+                    Vec::new()
+                } else if is_value_control(node) {
                     build_control_text(doc, styles, text, tree, id).into_iter().collect()
                 } else {
                     build_children(doc, styles, text, tree, &kids(doc, styles, id), style)
                 }
             });
             let mut ts = taffy_style(style);
+            if let Some(rows) = list_rows(doc, id) {
+                ts.size.height = Dimension::length(rows as f32 * option_row_height(style));
+            }
             if node.tag() == Some("select") && style.width == Length::Auto {
                 // Wide enough for the longest option, whichever is showing.
-                ts.min_size.width = LengthPercentageAuto::length(widest_option(doc, style, text, id));
+                // A list box has no chevron but needs room for its row padding and scroll bar.
+                let extra = if list_rows(doc, id).is_some() { 22.0 } else { 0.0 };
+                ts.min_size.width = LengthPercentageAuto::length(widest_option(doc, style, text, id) + extra);
             }
             let n = tree.new_with_children(ts, &children).ok()?;
             tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
@@ -1018,6 +1092,176 @@ fn build(
 }
 
 /// `<input>` types whose `value` is drawn as a line of text.
+/// A table laid out as a grid: columns and rows are auto-sized tracks, each cell is a grid
+/// item spanning `colspan` x `rowspan` tracks, and each `<tr>` is an empty item behind its
+/// cells so row backgrounds and borders still paint.
+fn build_table(
+    doc: &Document,
+    styles: &StyleMap,
+    text: &mut TextEngine,
+    tree: &mut TaffyTree<NodeCtx>,
+    id: NodeId,
+) -> Option<taffy::NodeId> {
+    let style = styles.get(id);
+    let shown = |n: &NodeId| styles.get(*n).display != Display::None;
+    let with_display = |parent: NodeId, d: Display| -> Vec<NodeId> {
+        kids(doc, styles, parent).into_iter().filter(|n| shown(n) && !styles.is_pseudo(*n) && styles.get(*n).display == d).collect()
+    };
+    // Rows in visual order: header groups first, footers last.
+    let tag = |n: NodeId| doc.node(n).tag().map(str::to_string);
+    let mut head = Vec::new();
+    let mut body = Vec::new();
+    let mut foot = Vec::new();
+    let mut captions = Vec::new();
+    for c in kids(doc, styles, id).into_iter().filter(|n| shown(n) && !styles.is_pseudo(*n)) {
+        match styles.get(c).display {
+            Display::TableRow => body.push(c),
+            Display::TableRowGroup => {
+                let rows = with_display(c, Display::TableRow);
+                match tag(c).as_deref() {
+                    Some("thead") => head.extend(rows),
+                    Some("tfoot") => foot.extend(rows),
+                    _ => body.extend(rows),
+                }
+            }
+            Display::TableCaption => captions.push(c),
+            _ => {}
+        }
+    }
+    let rows: Vec<NodeId> = head.into_iter().chain(body).chain(foot).collect();
+
+    // Give every cell its grid rectangle, skipping slots taken by earlier row spans.
+    struct Cell {
+        node: NodeId,
+        row: usize,
+        col: usize,
+        rows: usize,
+        cols: usize,
+    }
+    let span = |n: NodeId, attr: &str| doc.node(n).attr(attr).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(1).clamp(1, 1000);
+    let mut taken: Vec<Vec<bool>> = vec![Vec::new(); rows.len()];
+    let mut cells = Vec::new();
+    let mut columns = 0;
+    for (r, row) in rows.iter().enumerate() {
+        let mut c = 0;
+        for cell in with_display(*row, Display::TableCell) {
+            while taken[r].get(c).copied().unwrap_or(false) {
+                c += 1;
+            }
+            let (cs, rs) = (span(cell, "colspan"), span(cell, "rowspan").min(rows.len() - r));
+            for row_taken in &mut taken[r..r + rs] {
+                if row_taken.len() < c + cs {
+                    row_taken.resize(c + cs, false);
+                }
+                row_taken[c..c + cs].fill(true);
+            }
+            cells.push(Cell { node: cell, row: r, col: c, rows: rs, cols: cs });
+            columns = columns.max(c + cs);
+            c += cs;
+        }
+    }
+    let columns = columns.max(1);
+    let first_row = captions.len();
+    let line = |n: usize, span: usize| taffy::Line {
+        start: taffy::style_helpers::line((n + 1) as i16),
+        end: taffy::style_helpers::span(span as u16),
+    };
+
+    let mut items = Vec::new();
+    // Captions sit above the grid, each on its own row.
+    for (i, cap) in captions.iter().enumerate() {
+        if let Some(n) = build(doc, styles, text, tree, *cap) {
+            let mut st = tree.style(n).ok()?.clone();
+            st.grid_row = line(i, 1);
+            st.grid_column = line(0, columns);
+            tree.set_style(n, st).ok()?;
+            items.push(n);
+        }
+    }
+    for (r, row) in rows.iter().enumerate() {
+        let rs = styles.get(*row);
+        let mut st = taffy_style(rs);
+        st.display = taffy::Display::Block;
+        st.margin = taffy::Rect::zero();
+        st.size = Size::auto();
+        st.grid_row = line(first_row + r, 1);
+        st.grid_column = line(0, columns);
+        let n = tree.new_leaf_with_context(st, NodeCtx::Element(*row)).ok()?;
+        items.push(n);
+    }
+    for cell in &cells {
+        let Some(n) = build(doc, styles, text, tree, cell.node) else { continue };
+        let cs = styles.get(cell.node);
+        let mut st = tree.style(n).ok()?.clone();
+        st.display = taffy::Display::Block;
+        st.grid_row = line(first_row + cell.row, cell.rows);
+        st.grid_column = line(cell.col, cell.cols);
+        st.margin = taffy::Rect::zero();
+        // Collapsed borders are shared: overlap each cell's top/left edge with its neighbour's.
+        if style.border_collapse {
+            if cell.col > 0 {
+                st.margin.left = LengthPercentageAuto::length(-cs.border_width.left);
+            }
+            if cell.row > 0 {
+                st.margin.top = LengthPercentageAuto::length(-cs.border_width.top);
+            }
+        }
+        let attr_align = doc.node(cell.node).attr("valign").or_else(|| doc.node(rows[cell.row]).attr("valign"));
+        // The `valign` attribute is a presentational hint; it beats the UA default.
+        let v = match attr_align.map(str::to_ascii_lowercase).as_deref() {
+            Some("top") => VerticalAlign::Top,
+            Some("bottom") => VerticalAlign::Bottom,
+            Some("middle") => VerticalAlign::Middle,
+            _ => cs.vertical_align,
+        };
+        // The cell box always fills its slot; its content sits at the top, or is pushed to the
+        // middle or bottom by auto margins on a wrapper inside a column flex cell.
+        if matches!(v, VerticalAlign::Middle | VerticalAlign::Bottom) {
+            let inner = tree.children(n).ok()?;
+            let auto = LengthPercentageAuto::auto();
+            let wrapper = Style {
+                display: taffy::Display::Flex,
+                flex_direction: taffy::FlexDirection::Column,
+                margin: taffy::Rect {
+                    top: auto,
+                    bottom: if v == VerticalAlign::Middle { auto } else { LengthPercentageAuto::length(0.0) },
+                    left: LengthPercentageAuto::length(0.0),
+                    right: LengthPercentageAuto::length(0.0),
+                },
+                flex_shrink: 0.0,
+                size: Size { width: Dimension::percent(1.0), height: Dimension::auto() },
+                ..Default::default()
+            };
+            let wrapper = tree.new_with_children(wrapper, &inner).ok()?;
+            tree.set_children(n, &[wrapper]).ok()?;
+            st.display = taffy::Display::Flex;
+            st.flex_direction = taffy::FlexDirection::Column;
+        }
+        tree.set_style(n, st).ok()?;
+        items.push(n);
+    }
+
+    let mut ts = taffy_style(style);
+    ts.grid_auto_columns = vec![taffy::style_helpers::auto()];
+    ts.grid_auto_rows = vec![taffy::style_helpers::auto()];
+    if !style.border_collapse {
+        let (h, v) = style.border_spacing;
+        ts.gap = Size { width: LengthPercentage::length(h), height: LengthPercentage::length(v) };
+        let p = style.padding;
+        ts.padding = taffy::Rect {
+            left: LengthPercentage::length(p.left + h),
+            right: LengthPercentage::length(p.right + h),
+            top: LengthPercentage::length(p.top + v),
+            bottom: LengthPercentage::length(p.bottom + v),
+        };
+    } else {
+        ts.gap = Size::zero();
+    }
+    let n = tree.new_with_children(ts, &items).ok()?;
+    tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
+    hand_off_absolute(style, n)
+}
+
 /// The children of `id` with its generated `::before` and `::after` boxes around them.
 fn kids(doc: &Document, styles: &StyleMap, id: NodeId) -> Vec<NodeId> {
     let node = doc.node(id);
@@ -1133,6 +1377,39 @@ fn widest_option(doc: &Document, style: &ComputedStyle, text: &mut TextEngine, s
         .ceil()
 }
 
+/// Rows for every list-box select, positioned from its laid-out box.
+fn build_lists(
+    doc: &Document,
+    styles: &StyleMap,
+    text: &mut TextEngine,
+    tree: &LayoutTree,
+    offsets: Option<&ScrollOffsets>,
+) -> std::collections::HashMap<NodeId, ListBox> {
+    let mut out = std::collections::HashMap::new();
+    for b in &tree.boxes {
+        if !matches!(b.content, BoxContent::Element) || styles.is_pseudo(b.node) || list_rows(doc, b.node).is_none() {
+            continue;
+        }
+        let style = styles.get(b.node);
+        let ts = text_style(style);
+        let row_height = option_row_height(style);
+        let items: Vec<ListItem> = select_options(doc, b.node)
+            .into_iter()
+            .map(|o| {
+                let mut l = text.shape(&option_label(doc, o), &ts, 1.0);
+                break_lines(&mut l, None, Alignment::Start);
+                ListItem { text: l, disabled: doc.has_state(o, "disabled"), selected: doc.has_state(o, "selected") }
+            })
+            .collect();
+        let inset_top = style.border_width.top + style.padding.top;
+        let view_height = (b.rect.height - inset_top - style.border_width.bottom - style.padding.bottom).max(0.0);
+        let max_scroll = (items.len() as f32 * row_height - view_height).max(0.0);
+        let scroll = offsets.and_then(|o| o.get(&b.node)).map_or(0.0, |o| o.1).clamp(0.0, max_scroll);
+        out.insert(b.node, ListBox { items, row_height, inset_top, pad_x: 6.0, view_height, scroll, max_scroll });
+    }
+    out
+}
+
 /// The drop-down list for `req.select`, below its box.
 fn build_menu(
     doc: &Document,
@@ -1141,6 +1418,7 @@ fn build_menu(
     tree: &LayoutTree,
     req: MenuRequest,
     offsets: Option<&ScrollOffsets>,
+    (view_top, view_height): (f32, f32),
 ) -> Option<MenuBox> {
     let style = styles.get(req.select);
     let rect = match offsets {
@@ -1162,17 +1440,27 @@ fn build_menu(
     let pad_x = 8.0;
     let widest = items.iter().map(|i| i.text.full_width()).fold(0.0, f32::max);
     let row_height = (style.font_size * style.line_height + 6.0).ceil();
+    // Open below the select; if the list doesn't fit there, use whichever side has more
+    // room and scroll the rest.
+    let full = row_height * items.len() as f32 + 2.0;
+    const MARGIN: f32 = 4.0;
+    let below = (view_top + view_height - (rect.y + rect.height) - MARGIN).max(0.0);
+    let above = (rect.y - view_top - MARGIN).max(0.0);
+    let (y, height) = if full <= below || below >= above {
+        (rect.y + rect.height, full.min(below.max(row_height + 2.0)))
+    } else {
+        let h = full.min(above);
+        (rect.y - h, h)
+    };
+    let max_scroll = (full - height).max(0.0);
     Some(MenuBox {
-        rect: Rect {
-            x: rect.x,
-            y: rect.y + rect.height,
-            width: rect.width.max((widest + 2.0 * pad_x + 2.0).ceil()),
-            height: row_height * items.len() as f32 + 2.0,
-        },
+        rect: Rect { x: rect.x, y, width: rect.width.max((widest + 2.0 * pad_x + 2.0).ceil()), height },
         row_height,
         pad_x,
         selected: selected_index(doc, req.select),
         highlight: req.highlight,
+        scroll: req.scroll.clamp(0.0, max_scroll),
+        max_scroll,
         items,
     })
 }
@@ -1837,8 +2125,16 @@ fn taffy_style(s: &ComputedStyle) -> Style {
             Display::Flex => taffy::Display::Flex,
             Display::Grid => taffy::Display::Grid,
             Display::None => taffy::Display::None,
-            Display::Block | Display::Inline | Display::InlineBlock => taffy::Display::Block,
+            Display::Table => taffy::Display::Grid,
+            Display::Block
+            | Display::Inline
+            | Display::InlineBlock
+            | Display::TableRowGroup
+            | Display::TableRow
+            | Display::TableCell
+            | Display::TableCaption => taffy::Display::Block,
         },
+        item_is_table: s.display == Display::Table,
         position: match s.position {
             Position::Static => taffy::Position::Relative,
             Position::Relative => taffy::Position::Relative,
@@ -2090,7 +2386,7 @@ second</textarea><textarea id="e"></textarea></body>"#,
         assert!(e.height > 16.0, "an empty select still has a line");
         assert!(tree.menu.is_none());
 
-        let opts = LayoutOptions { menu: Some(MenuRequest { select: id("s"), highlight: Some(0) }), offsets: None, images: None };
+        let opts = LayoutOptions { menu: Some(MenuRequest { select: id("s"), highlight: Some(0), scroll: 0.0 }), scroll_y: 0.0, offsets: None, images: None };
         let tree = layout_with(&doc, &styles, &mut text, 800.0, 400.0, &opts);
         let m = tree.menu.as_ref().unwrap();
         assert_eq!((m.rect.x, m.rect.y), (s.x, s.y + s.height), "opens right under the select");
@@ -2100,6 +2396,38 @@ second</textarea><textarea id="e"></textarea></body>"#,
         assert_eq!(m.row_at(m.rect.x + 5.0, mid(1)), Some(1));
         assert_eq!(m.row_at(m.rect.x + 5.0, mid(2)), Some(2));
         assert_eq!(m.row_at(m.rect.x - 5.0, mid(1)), None);
+    }
+
+    #[test]
+    fn long_menus_scroll_and_open_upward_when_below_is_cramped() {
+        let options: String = (0..30).map(|i| format!("<option>Item {i}</option>")).collect();
+        let html = |top: u32| {
+            format!(r#"<body style="margin:0"><div style="height:{top}px"></div><select id="s">{options}</select></body>"#)
+        };
+        let menu_for = |top: u32, scroll: f32| {
+            let doc = Document::parse(&html(top));
+            let styles = compute_styles(&doc);
+            let s = doc.find(|n| n.attr("id") == Some("s")).unwrap();
+            let opts = LayoutOptions {
+                menu: Some(MenuRequest { select: s, highlight: None, scroll }),
+                scroll_y: 0.0,
+                offsets: None,
+                images: None,
+            };
+            let tree = layout_with(&doc, &styles, &mut TextEngine::new(), 400.0, 300.0, &opts);
+            (tree.node_rect(s).unwrap(), tree.menu.unwrap())
+        };
+        // Near the top: opens below and is cut to the viewport, scrollable.
+        let (s, m) = menu_for(10, 0.0);
+        assert_eq!(m.rect.y, s.y + s.height);
+        assert!(m.rect.y + m.rect.height <= 300.0 && m.max_scroll > 0.0, "{:?}", m.rect);
+        let (_, m2) = menu_for(10, 1e6);
+        assert_eq!(m2.scroll, m2.max_scroll, "scroll is clamped");
+        assert_eq!(m2.row_at(m2.rect.x + 5.0, m2.rect.y + 5.0), Some(((m2.scroll + 4.0) / m2.row_height) as usize));
+        // Near the bottom: flips above.
+        let (s, m) = menu_for(250, 0.0);
+        assert_eq!(m.rect.y + m.rect.height, s.y, "sits directly above");
+        assert!(m.rect.y >= 0.0);
     }
 
     #[test]
@@ -2463,5 +2791,47 @@ second</textarea><textarea id="e"></textarea></body>"#,
         assert_eq!((rb.x, rb.y, rb.width, rb.height), (100.0, 220.0, 100.0, 100.0));
         assert_eq!(tree.hit_test_scrolled(190.0, 310.0, &ScrollOffsets::new()), Some(b));
         assert_ne!(tree.hit_test_scrolled(40.0, 240.0, &ScrollOffsets::new()), Some(b));
+    }
+
+    fn rects(html: &str) -> (Document, LayoutTree) {
+        let doc = Document::parse(html);
+        let styles = compute_styles(&doc);
+        let tree = layout(&doc, &styles, &mut TextEngine::new(), 800.0, 400.0);
+        (doc, tree)
+    }
+
+    fn rect_of(doc: &Document, tree: &LayoutTree, id: &str) -> Rect {
+        tree.node_rect(doc.find(|n| n.attr("id") == Some(id)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn tables_size_columns_from_content_and_honour_spans_and_spacing() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><table id="t" style="border-spacing:4px">
+                 <tr><td id="a" style="width:100px;padding:0;height:20px">a</td><td id="b" style="width:50px;padding:0">b</td></tr>
+                 <tr><td id="c" colspan="2" style="padding:0;height:30px">c</td></tr>
+                 <tr><td id="d" rowspan="1" style="padding:0">d</td><td id="e" style="padding:0">e</td></tr>
+               </table></body>"#,
+        );
+        let (a, b, c, tb) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"), rect_of(&doc, &t, "c"), rect_of(&doc, &t, "t"));
+        assert_eq!((a.x, a.width, b.width), (4.0, 100.0, 50.0), "columns follow their widest cell");
+        assert_eq!(b.x, a.x + a.width + 4.0, "border-spacing between columns");
+        assert_eq!(c.width, 154.0, "colspan covers both columns and the gap");
+        assert_eq!(c.y, a.y + 20.0 + 4.0, "rows stack with spacing");
+        assert_eq!(tb.width, 4.0 + 100.0 + 4.0 + 50.0 + 4.0, "the table shrinks to its columns");
+    }
+
+    #[test]
+    fn collapsed_borders_overlap_and_rowspans_fill_their_rows() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><table style="border-collapse:collapse">
+                 <tr><td id="a" rowspan="2" style="border:1px solid;padding:0;width:40px">a</td><td id="b" style="border:1px solid;padding:0;width:40px;height:10px">b</td></tr>
+                 <tr><td id="c" style="border:1px solid;padding:0;height:10px">c</td></tr>
+               </table></body>"#,
+        );
+        let (a, b, c) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"), rect_of(&doc, &t, "c"));
+        assert_eq!(b.x, a.x + a.width - 1.0, "neighbouring borders share a pixel");
+        assert_eq!(c.y, b.y + b.height - 1.0);
+        assert_eq!(a.height, b.height + c.height - 1.0, "a row-spanning cell fills both rows");
     }
 }

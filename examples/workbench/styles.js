@@ -1,3 +1,5 @@
+// Shared CSS injected into a <style> element; Nile does not load CSS links.
+export default `
 * { box-sizing: border-box }
 body { margin: 0; font-family: sans-serif; font-size: 13px; color: #263b46; background: #f3f6f7 }
 button, input, select, textarea { font-family: sans-serif; font-size: 12px }
@@ -14,6 +16,7 @@ input { width: 220px }
 input[type=checkbox] { width: 17px; height: 17px; padding: 0 }
 textarea { width: 100%; height: 120px; line-height: 1.6 }
 select { min-width: 120px }
+.toolbar select { width: 150px }
 h1 { font-size: 28px; font-weight: 600; letter-spacing: -0.6px; margin: 0 0 8px }
 h2 { font-size: 17px; margin: 0 0 15px; font-weight: 600 }
 h3 { font-size: 14px; margin: 0 0 8px }
@@ -67,6 +70,10 @@ p { line-height: 1.65; margin: 0 0 16px }
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 17px 0; border-top: 1px solid #edf0f2 }
 .setting-row h3 { margin-bottom: 4px }
 .setting-row select { width: 150px }
+.setting-row .field { margin-bottom: 0 }
+body[data-current=settings] .card { padding: 18px }
+body[data-current=settings] .setting-row { padding: 11px 0 }
+body[data-current=settings] .section { margin-bottom: 16px }
 .preview-card { background: #eef5f2; min-height: 170px; padding: 22px; border-radius: 6px; margin-bottom: 16px }
 .preview-card.dark { background: #233c46; color: #e9f0f2 }
 .preview-line { height: 7px; background: #c3d8d1; border-radius: 3px; margin: 12px 0; width: 85% }
@@ -134,6 +141,7 @@ p { line-height: 1.65; margin: 0 0 16px }
 .day.selected { background: #edf6f2 }
 .day.selected button { background: #19796d; color: white }
 .calendar-event { display: block; background: #e1efe9; color: #327d6d; font-size: 9px; padding: 5px; border-radius: 3px; margin-top: 6px; border: 0; width: 100%; text-align: left }
+.day .calendar-event { padding: 5px; background: #e1efe9; font-size: 9px }
 .agenda { margin-top: 20px }
 .gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px }
 .media-card { padding: 0; overflow: hidden }
@@ -165,3 +173,4 @@ p { line-height: 1.65; margin: 0 0 16px }
 .presentation .thumbnails { display: none }
 .presentation .slide { height: 480px }
 @media (max-width: 1080px) { .sidebar { width: 170px; padding: 24px 10px } .app-nav button { width: 150px; padding: 11px 8px } .content { padding: 25px 20px } .side-card { width: 215px } .messages { width: 200px } .folders { width: 110px } .folders button { width: 92px } .mail-body { padding: 22px } .gallery { grid-template-columns: repeat(2, 1fr) } }
+`;

@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Tables</title>
+<style>
+  body { font-family: sans-serif; font-size: 14px; margin: 20px }
+  h3 { margin: 18px 0 6px; font-size: 13px; color: #555 }
+  table.plain { border: 1px solid #94a3b8 }
+  table.plain td, table.plain th { border: 1px solid #cbd5e1; padding: 4px 10px }
+  table.grid { border-collapse: collapse; width: 420px }
+  table.grid th, table.grid td { border: 1px solid #64748b; padding: 6px 10px; text-align: left }
+  table.grid thead th { background: #1e3a8a; color: white }
+  table.grid tbody tr:nth-child(even) { background: #eff6ff }
+  table.grid tr.total td { font-weight: bold; background: #fef3c7 }
+  td.num { text-align: right }
+  caption { font-weight: bold; padding: 4px; color: #334155 }
+  table.span td { border: 1px solid #94a3b8; padding: 6px 12px; background: #f8fafc }
+  table.span { border-spacing: 6px }
+</style>
+<h3>Auto-sized columns, default spacing, nothing set but borders</h3>
+<table class="plain">
+  <tr><th>Name</th><th>Role</th><th>Location</th></tr>
+  <tr><td>Ada Lovelace</td><td>Mathematician</td><td>London</td></tr>
+  <tr><td>Grace</td><td>Admiral</td><td>New York</td></tr>
+</table>
+
+<h3>border-collapse, width, thead / tbody, zebra rows, caption</h3>
+<table class="grid">
+  <caption>Quarterly sales</caption>
+  <thead><tr><th>Region</th><th>Q1</th><th>Q2</th></tr></thead>
+  <tbody>
+    <tr><td>North</td><td class="num">1,200</td><td class="num">1,450</td></tr>
+    <tr><td>South</td><td class="num">980</td><td class="num">1,010</td></tr>
+    <tr><td>West</td><td class="num">1,760</td><td class="num">2,030</td></tr>
+    <tr class="total"><td>Total</td><td class="num">3,940</td><td class="num">4,490</td></tr>
+  </tbody>
+</table>
+
+<h3>colspan, rowspan, vertical-align</h3>
+<table class="span">
+  <tr><td colspan="2">spans two columns</td><td rowspan="2" valign="top">spans two rows (top)</td></tr>
+  <tr><td>a</td><td>b</td></tr>
+  <tr><td>c</td><td colspan="2" style="vertical-align: bottom; height: 40px">wide, bottom</td></tr>
+</table>

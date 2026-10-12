@@ -196,7 +196,11 @@ impl View {
     /// Scroll an `overflow` element, clamped to its range. True if it moved.
     fn set_element_scroll(&mut self, node: NodeId, x: f32, y: f32) -> bool {
         self.sync();
-        let Some((mx, my)) = self.layout().scroll_box(node).map(|sb| sb.max_offset()) else { return false };
+        let max = {
+            let l = self.layout();
+            l.scroll_box(node).map(|sb| sb.max_offset()).or_else(|| l.list_box(node).map(|b| (0.0, b.max_scroll)))
+        };
+        let Some((mx, my)) = max else { return false };
         let new = (x.clamp(0.0, mx), y.clamp(0.0, my));
         let old = self.scroll_offsets.get(&node).copied().unwrap_or_default();
         if new == old {
@@ -240,7 +244,7 @@ impl View {
         let (width, height) = self.viewport;
         let stale = !matches!(&self.layout, Some((w, h, _)) if *w == width && *h == height);
         if stale {
-            let options = LayoutOptions { menu: self.menu, offsets: Some(&self.scroll_offsets), images: Some(&self.images) };
+            let options = LayoutOptions { menu: self.menu, scroll_y: self.scroll_y, offsets: Some(&self.scroll_offsets), images: Some(&self.images) };
             let tree = nile_layout::layout_with(&self.doc.borrow(), &self.styles, &mut self.text, width, height, &options);
             self.layout = Some((width, height, tree));
         }
@@ -363,6 +367,9 @@ struct Page {
     mods: ModifiersState,
     /// Text input a mouse drag is selecting in.
     drag: Option<NodeId>,
+    /// List box row the shift-range started from, and the row keys moved to last.
+    list_anchor: Option<(NodeId, usize)>,
+    list_cursor: Option<(NodeId, usize)>,
     /// Time, position and count of the last primary click, for double/triple-click.
     last_click: Option<(Instant, (f32, f32), u32)>,
     clipboard: Box<dyn Clipboard>,
@@ -534,6 +541,8 @@ impl Page {
             scripts,
             mods: ModifiersState::default(),
             drag: None,
+            list_anchor: None,
+            list_cursor: None,
             last_click: None,
             clipboard: Box::new(MemoryClipboard::default()),
             value_at_focus: None,
@@ -655,6 +664,12 @@ impl Page {
     /// i.e. `dy > 0` is wheel-up): the innermost `overflow: auto | scroll` ancestor
     /// that can still move that way takes it, else the page does.
     fn wheel(&mut self, dx: f32, dy: f32) {
+        if let Some((x, y)) = self.pointer {
+            if self.menu_row_at(x, y).is_some() {
+                self.scroll_menu(-dy);
+                return;
+            }
+        }
         self.close_menu();
         let target = self.pointer.and_then(|(x, y)| self.hit_test(x, y));
         self.scroll_chain(target, dx, dy);
@@ -667,8 +682,13 @@ impl Page {
             let moved = {
                 let mut v = self.view.borrow_mut();
                 let sb = v.layout().scroll_box(n).copied();
+                let list = v.layout().list_box(n).map(|l| l.max_scroll);
                 let (ox, oy) = v.scroll_offsets.get(&n).copied().unwrap_or_default();
                 match sb {
+                    None if list.is_some() => {
+                        let my = list.unwrap_or(0.0);
+                        ((dy > 0.0 && oy > 0.0) || (dy < 0.0 && oy < my)) && v.set_element_scroll(n, 0.0, oy - dy)
+                    }
                     Some(sb) => {
                         let (mx, my) = sb.max_offset();
                         let can_y = sb.wheel_y && ((dy > 0.0 && oy > 0.0) || (dy < 0.0 && oy < my));
@@ -1263,7 +1283,10 @@ impl Page {
 
     fn open_menu(&mut self, select: NodeId) {
         let selected = nile_layout::selected_index(&self.doc.borrow(), select);
-        self.view.borrow_mut().set_menu(Some(MenuRequest { select, highlight: selected }));
+        self.view.borrow_mut().set_menu(Some(MenuRequest { select, highlight: selected, scroll: 0.0 }));
+        if let Some(row) = selected {
+            self.reveal_menu_row(row);
+        }
     }
 
     fn close_menu(&mut self) {
@@ -1295,6 +1318,32 @@ impl Page {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Scroll the open drop-down's list by `dy` pixels.
+    fn scroll_menu(&mut self, dy: f32) {
+        let mut v = self.view.borrow_mut();
+        let Some(m) = v.menu else { return };
+        let Some(max) = v.layout().menu.as_ref().map(|b| b.max_scroll) else { return };
+        let scroll = (m.scroll + dy).clamp(0.0, max);
+        if scroll != m.scroll {
+            v.set_menu(Some(MenuRequest { scroll, ..m }));
+        }
+    }
+
+    /// Scroll the open drop-down just enough to show `row`.
+    fn reveal_menu_row(&mut self, row: usize) {
+        let mut v = self.view.borrow_mut();
+        let Some(m) = v.menu else { return };
+        let Some((top, bottom, view, scroll)) = v.layout().menu.as_ref().map(|b| {
+            (b.row_height * row as f32, b.row_height * (row + 1) as f32, b.rect.height - 2.0, b.scroll)
+        }) else {
+            return;
+        };
+        let want = if top < scroll { top } else if bottom > scroll + view { bottom - view } else { scroll };
+        if want != scroll {
+            v.set_menu(Some(MenuRequest { scroll: want, ..m }));
         }
     }
 
@@ -1343,6 +1392,128 @@ impl Page {
         }
     }
 
+    /// Options of a list box as (node, disabled).
+    fn list_options(&self, select: NodeId) -> Vec<(NodeId, bool)> {
+        let doc = self.doc.borrow();
+        nile_layout::select_options(&doc, select).into_iter().map(|o| (o, doc.has_state(o, "disabled"))).collect()
+    }
+
+    /// Make exactly the options for which `want` is true the selected ones, firing
+    /// `input` and `change` if that differs from now. True if anything changed.
+    fn set_list_selection(&mut self, select: NodeId, want: impl Fn(usize) -> bool) -> bool {
+        let mut changed = false;
+        {
+            let mut doc = self.doc.borrow_mut();
+            for (i, o) in nile_layout::select_options(&doc, select).into_iter().enumerate() {
+                let on = want(i);
+                if doc.has_state(o, "selected") != on {
+                    changed = true;
+                    doc.set_state(o, "selected", on);
+                }
+                if !on {
+                    doc.remove_attr(o, "selected");
+                }
+            }
+        }
+        if changed {
+            self.sync();
+            self.emit(select, UiEvent::Plain("input"));
+            self.emit(select, UiEvent::Plain("change"));
+        }
+        changed
+    }
+
+    /// Scroll a list box just enough to show `row`.
+    fn reveal_list_row(&mut self, select: NodeId, row: usize) {
+        let mut v = self.view.borrow_mut();
+        let Some((rh, view, scroll)) = v.layout().list_box(select).map(|l| (l.row_height, l.view_height, l.scroll)) else {
+            return;
+        };
+        let (top, bottom) = (rh * row as f32, rh * (row + 1) as f32);
+        let want = if top < scroll { top } else if bottom > scroll + view { bottom - view } else { scroll };
+        if want != scroll {
+            v.set_element_scroll(select, 0.0, want);
+        }
+    }
+
+    /// A click on a list box: select the row under the pointer (Cmd/Ctrl toggles, Shift extends).
+    fn list_click(&mut self, select: NodeId) -> bool {
+        let Some((_, y)) = self.pointer else { return false };
+        let row = {
+            let mut v = self.view.borrow_mut();
+            let offsets = v.scroll_offsets.clone();
+            let top = v.scroll_y;
+            let Some(rect) = v.layout().node_rect_scrolled(select, &offsets) else { return false };
+            v.layout().list_box(select).and_then(|l| l.row_at(y + top - rect.y))
+        };
+        let Some(row) = row else { return false };
+        if self.list_options(select)[row].1 {
+            return false;
+        }
+        let multiple = self.doc.borrow().node(select).attr("multiple").is_some();
+        let (shift, toggle) = (self.mods.shift_key(), self.mods.control_key() || self.mods.super_key());
+        let anchor = self.list_anchor.filter(|a| a.0 == select).map_or(row, |a| a.1);
+        let before: Vec<bool> = {
+            let doc = self.doc.borrow();
+            nile_layout::select_options(&doc, select).iter().map(|o| doc.has_state(*o, "selected")).collect()
+        };
+        let disabled: Vec<bool> = self.list_options(select).iter().map(|o| o.1).collect();
+        let changed = if multiple && shift {
+            let (lo, hi) = (anchor.min(row), anchor.max(row));
+            self.set_list_selection(select, |i| i >= lo && i <= hi && !disabled[i])
+        } else if multiple && toggle {
+            self.list_anchor = Some((select, row));
+            self.set_list_selection(select, |i| if i == row { !before[i] } else { before[i] })
+        } else {
+            self.list_anchor = Some((select, row));
+            self.set_list_selection(select, |i| i == row)
+        };
+        self.list_cursor = Some((select, row));
+        changed
+    }
+
+    /// Keys in a focused list box: arrows, Home/End, Page Up/Down and type-ahead move the
+    /// selection (Shift extends it in a `multiple` list); Cmd/Ctrl+A selects everything.
+    fn list_key(&mut self, select: NodeId, key: &str, mods: ModifiersState) -> bool {
+        let options = self.list_options(select);
+        let multiple = self.doc.borrow().node(select).attr("multiple").is_some();
+        if multiple && key.eq_ignore_ascii_case("a") && (mods.control_key() || mods.super_key()) {
+            let disabled: Vec<bool> = options.iter().map(|o| o.1).collect();
+            return self.set_list_selection(select, |i| !disabled[i]);
+        }
+        let current = self
+            .list_cursor
+            .filter(|c| c.0 == select)
+            .map(|c| c.1)
+            .or_else(|| options.iter().position(|o| self.doc.borrow().has_state(o.0, "selected")));
+        let page = self.view.borrow_mut().layout().list_box(select).map_or(1, |l| (l.view_height / l.row_height) as i32);
+        let target = match key {
+            "ArrowDown" => self.step_option(current, 1, &options),
+            "ArrowUp" => self.step_option(current, -1, &options),
+            "PageDown" => (0..page.max(1)).fold(current, |c, _| self.step_option(c, 1, &options)),
+            "PageUp" => (0..page.max(1)).fold(current, |c, _| self.step_option(c, -1, &options)),
+            "Home" => self.step_option(None, 1, &options),
+            "End" => self.step_option(None, -1, &options),
+            k if k.chars().count() == 1 && !mods.control_key() && !mods.super_key() => {
+                self.find_option_starting(select, current, k.chars().next().unwrap())
+            }
+            _ => return false,
+        };
+        let Some(row) = target else { return false };
+        let anchor = self.list_anchor.filter(|a| a.0 == select).map_or(row, |a| a.1);
+        let changed = if multiple && mods.shift_key() {
+            let (lo, hi) = (anchor.min(row), anchor.max(row));
+            let disabled: Vec<bool> = options.iter().map(|o| o.1).collect();
+            self.set_list_selection(select, |i| i >= lo && i <= hi && !disabled[i])
+        } else {
+            self.list_anchor = Some((select, row));
+            self.set_list_selection(select, |i| i == row)
+        };
+        self.list_cursor = Some((select, row));
+        self.reveal_list_row(select, row);
+        changed || Some(row) != current
+    }
+
     /// Next enabled option from `from` in direction `dir`, stopping at the ends.
     fn step_option(&self, from: Option<usize>, dir: i32, options: &[(NodeId, bool)]) -> Option<usize> {
         let mut i = from.map_or(if dir > 0 { -1 } else { options.len() as i32 }, |f| f as i32);
@@ -1375,15 +1546,15 @@ impl Page {
         match key {
             "ArrowDown" | "ArrowUp" => {
                 let next = self.step_option(m.highlight, if key == "ArrowDown" { 1 } else { -1 }, &options);
-                self.set_highlight(next)
+                self.highlight_and_reveal(next)
             }
             "Home" => {
                 let first = self.step_option(None, 1, &options);
-                self.set_highlight(first)
+                self.highlight_and_reveal(first)
             }
             "End" => {
                 let last = self.step_option(None, -1, &options);
-                self.set_highlight(last)
+                self.highlight_and_reveal(last)
             }
             "Enter" | " " => {
                 if let Some(row) = m.highlight {
@@ -1396,11 +1567,19 @@ impl Page {
                 true
             }
             k if k.chars().count() == 1 => match self.find_option_starting(m.select, m.highlight, k.chars().next().unwrap()) {
-                Some(i) => self.set_highlight(Some(i)),
+                Some(i) => self.highlight_and_reveal(Some(i)),
                 None => false,
             },
             _ => false,
         }
+    }
+
+    fn highlight_and_reveal(&mut self, row: Option<usize>) -> bool {
+        let changed = self.set_highlight(row);
+        if let Some(r) = row {
+            self.reveal_menu_row(r);
+        }
+        changed
     }
 
     /// Keys on a focused, closed `<select>`: arrows change the choice, space/Enter open it.
@@ -1408,6 +1587,9 @@ impl Page {
         let Some(select) = self.interaction().focus.filter(|f| self.is_select(*f)) else { return false };
         if self.is_disabled(select) {
             return false;
+        }
+        if nile_layout::list_rows(&self.doc.borrow(), select).is_some() {
+            return self.list_key(select, key, mods);
         }
         let options: Vec<(NodeId, bool)> = {
             let doc = self.doc.borrow();
@@ -1492,6 +1674,9 @@ impl Page {
         };
         // A click on a <select> opens its drop-down.
         if let Some(select) = self.select_at_or_above(target) {
+            if nile_layout::list_rows(&self.doc.borrow(), select).is_some() {
+                return !self.is_disabled(select) && self.list_click(select);
+            }
             if !self.is_disabled(select) {
                 self.open_menu(select);
                 return true;
@@ -2875,6 +3060,71 @@ cd</textarea>
         assert!(p.view.borrow().menu.is_none());
         assert_eq!(sel_index(&p, "s"), 0);
         assert_eq!(log(&p), ["input:b", "change:b", "input:y", "change:y", "input:r", "change:r"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    const LIST_PAGE: &str = r#"<body style="margin:0"><select id="l" multiple size="4"><option>A</option><option>B</option><option disabled>C</option><option>D</option><option>E</option><option>F</option></select>
+        <script>$('#l').addEventListener('change', () => console.log('change:' + $('#l').selectedOptions.map((o) => o.text).join('')));</script></body>"#;
+
+    /// Viewport point in row `row` of the list box.
+    fn list_row_point(p: &mut Page, row: usize) -> (f32, f32) {
+        let id = p.doc.borrow().find(|n| n.attr("id") == Some("l")).unwrap();
+        let mut v = p.view.borrow_mut();
+        let r = v.layout().node_rect(id).unwrap();
+        let l = v.layout().list_box(id).unwrap();
+        (r.x + 10.0, r.y + l.inset_top - l.scroll + l.row_height * (row as f32 + 0.5))
+    }
+
+    fn selected_rows(p: &Page) -> Vec<usize> {
+        let doc = p.doc.borrow();
+        let id = doc.find(|n| n.attr("id") == Some("l")).unwrap();
+        nile_layout::select_options(&doc, id).iter().enumerate().filter(|(_, o)| doc.has_state(**o, "selected")).map(|(i, _)| i).collect()
+    }
+
+    #[test]
+    fn list_box_selects_rows_with_modifiers_keys_and_the_wheel() {
+        let (mut p, path) = page(LIST_PAGE, "list-box");
+        let click_row = |p: &mut Page, row: usize, mods: ModifiersState| {
+            let (x, y) = list_row_point(p, row);
+            p.mods = mods;
+            p.pointer_moved(x, y);
+            p.press();
+            p.release();
+            p.mods = ModifiersState::default();
+        };
+        let none = ModifiersState::default();
+        click_row(&mut p, 1, none);
+        assert_eq!(selected_rows(&p), [1]);
+        assert!(p.view.borrow().menu.is_none(), "a list box has no drop-down");
+        click_row(&mut p, 3, ModifiersState::SUPER);
+        assert_eq!(selected_rows(&p), [1, 3], "cmd-click adds");
+        click_row(&mut p, 1, ModifiersState::SUPER);
+        assert_eq!(selected_rows(&p), [3], "cmd-click toggles off");
+        click_row(&mut p, 0, ModifiersState::SHIFT);
+        assert_eq!(selected_rows(&p), [0, 1], "shift-click replaces the selection with anchor..row");
+        click_row(&mut p, 2, none);
+        assert_eq!(selected_rows(&p), [0, 1], "disabled rows can't be chosen");
+        // Keys, with the list still focused.
+        press_key(&mut p, "ArrowDown", none);
+        assert_eq!(selected_rows(&p), [1]);
+        press_key(&mut p, "ArrowDown", none);
+        assert_eq!(selected_rows(&p), [3], "moves past the disabled row");
+        press_key(&mut p, "ArrowDown", ModifiersState::SHIFT);
+        assert_eq!(selected_rows(&p), [3, 4]);
+        press_key(&mut p, "a", ModifiersState::SUPER);
+        assert_eq!(selected_rows(&p), [0, 1, 3, 4, 5]);
+        press_key(&mut p, "Home", none);
+        assert_eq!(selected_rows(&p), [0]);
+        // The wheel scrolls the rows (4 visible of 6).
+        let (x, y) = list_row_point(&mut p, 1);
+        p.pointer_moved(x, y);
+        p.wheel(0.0, -30.0);
+        let id = p.doc.borrow().find(|n| n.attr("id") == Some("l")).unwrap();
+        assert!(p.view.borrow_mut().layout().list_box(id).unwrap().scroll > 0.0);
+        press_key(&mut p, "End", none);
+        let l = p.view.borrow_mut().layout().list_box(id).unwrap().scroll;
+        assert!(l > 0.0 && selected_rows(&p) == [5], "End selects and scrolls to the last row");
+        assert_eq!(log(&p).last().map(String::as_str), Some("change:F"));
         let _ = std::fs::remove_file(path);
     }
 }

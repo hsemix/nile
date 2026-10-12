@@ -174,6 +174,12 @@ pub enum Display {
     InlineBlock,
     Flex,
     Grid,
+    /// `table` and its parts; layout turns a table into a grid.
+    Table,
+    TableRowGroup,
+    TableRow,
+    TableCell,
+    TableCaption,
     None,
 }
 
@@ -204,6 +210,16 @@ pub enum FlexDirection {
     Column,
     RowReverse,
     ColumnReverse,
+}
+
+/// `vertical-align`; only table cells act on it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum VerticalAlign {
+    #[default]
+    Baseline,
+    Top,
+    Middle,
+    Bottom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -268,6 +284,11 @@ pub struct ComputedStyle {
     pub align_items: Align,
     pub row_gap: f32,
     pub column_gap: f32,
+    /// `border-spacing` (horizontal, vertical) and `border-collapse: collapse`; inherited.
+    pub border_spacing: (f32, f32),
+    pub border_collapse: bool,
+    /// `vertical-align` for table cells.
+    pub vertical_align: VerticalAlign,
     pub align_self: Align,
     pub align_content: Align,
 
@@ -367,6 +388,9 @@ impl Default for ComputedStyle {
             align_items: Align::Normal,
             row_gap: 0.0,
             column_gap: 0.0,
+            border_spacing: (0.0, 0.0),
+            border_collapse: false,
+            vertical_align: VerticalAlign::Baseline,
             align_self: Align::Normal,
             align_content: Align::Normal,
             justify_items: Align::Normal,
@@ -446,6 +470,11 @@ impl ComputedStyle {
                 Display::InlineBlock => "inline-block",
                 Display::Flex => "flex",
                 Display::Grid => "grid",
+                Display::Table => "table",
+                Display::TableRowGroup => "table-row-group",
+                Display::TableRow => "table-row",
+                Display::TableCell => "table-cell",
+                Display::TableCaption => "table-caption",
                 Display::None => "none",
             }
             .into(),
@@ -548,6 +577,8 @@ impl ComputedStyle {
             line_through: parent.line_through,
             text_transform: parent.text_transform,
             user_select: parent.user_select,
+            border_spacing: parent.border_spacing,
+            border_collapse: parent.border_collapse,
             selection_bg: parent.selection_bg,
             letter_spacing: parent.letter_spacing,
             vars: parent.vars.clone(),
@@ -563,6 +594,13 @@ head, script, style, title, meta, link, option, optgroup { display: none }
 img { display: inline-block }
 [selectable] { user-select: text }
 html, body, div, p, h1, h2, h3, section, header, footer, main, nav, ul, li { display: block }
+table { display: table; border-spacing: 2px; border-collapse: separate; box-sizing: border-box }
+thead, tbody, tfoot { display: table-row-group }
+tr { display: table-row }
+td, th { display: table-cell; padding: 1px; vertical-align: middle }
+th { font-weight: bold; text-align: center }
+caption { display: table-caption; text-align: center }
+col, colgroup { display: none }
 span, a, b, strong, em, i, u, s, del, br, label { display: inline }
 form { display: block }
 body { margin: 8px }
@@ -582,6 +620,7 @@ textarea { display: inline-block; font-size: 13px; color: #000000; padding: 3px 
   border-radius: 3px; background: #ffffff; width: 200px; height: 60px; margin: 2px; overflow: auto }
 select { display: inline-block; font-size: 13px; color: #000000; padding: 3px 26px 3px 8px; border: 1px solid #767676;
   border-radius: 3px; background: #ffffff; min-height: 16px; margin: 2px; overflow: hidden; appearance: select }
+select[multiple], select[size]:not([size="1"]) { appearance: none; padding: 1px 0; min-width: 60px }
 input:focus, textarea:focus, select:focus { border-color: #1d4ed8 }
 button:disabled, input:disabled, textarea:disabled, select:disabled { color: #8a8a8a; background: #f0f0f0; border-color: #c4c4c4 }
 input[type=checkbox], input[type=radio] { width: 13px; height: 13px; min-height: 0; padding: 0;
@@ -1117,6 +1156,11 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 Some("inline-block") => Display::InlineBlock,
                 Some("flex") | Some("inline-flex") => Display::Flex,
                 Some("grid") | Some("inline-grid") => Display::Grid,
+                Some("table" | "inline-table") => Display::Table,
+                Some("table-row-group" | "table-header-group" | "table-footer-group") => Display::TableRowGroup,
+                Some("table-row") => Display::TableRow,
+                Some("table-cell") => Display::TableCell,
+                Some("table-caption") => Display::TableCaption,
                 Some("none") => Display::None,
                 _ => return,
             }
