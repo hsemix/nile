@@ -11,6 +11,15 @@
   .shifted { position: relative; left: 24px; top: 4px; color: #2a7 }
   .stretch { position: absolute; inset: 40px 12px 36px 12px; background: rgba(34,170,119,0.15); border-radius: 4px }
   .faded { opacity: 0.4 }
+  .stack { position: relative; height: 90px; margin-top: 24px }
+  .stack div { position: absolute; width: 90px; height: 60px; border-radius: 6px; color: white; padding: 6px; box-sizing: border-box }
+  .s1 { left: 0; top: 0; background: #37e; z-index: 2 }
+  .s2 { left: 40px; top: 20px; background: #e74; z-index: 1 }
+  .s3 { left: 80px; top: 10px; background: #2a7 }
+  .under { z-index: -1; left: 20px; top: 40px; background: #eb2 !important }
+  .outer { position: relative; margin-top: 24px; width: 260px; height: 90px; background: #fff; border: 1px solid #ccc }
+  .outer .mid { padding: 10px }
+  .outer .pin { position: absolute; right: 8px; bottom: 8px; background: #2a7; color: #fff; padding: 2px 8px; border-radius: 4px }
 </style>
 </head>
 <body>
@@ -21,5 +30,10 @@
     <div class="corner">absolute: bottom-left</div>
   </div>
   <div class="card faded" style="margin-top: 24px"><span class="badge">faded</span>opacity: 0.4 on the whole card</div>
+  <div class="stack">
+    <div class="s1">z-index 2</div><div class="s2">z-index 1</div><div class="s3">auto</div>
+    <div class="under">z -1</div>
+  </div>
+  <div class="outer"><div class="mid">static parent <span class="pin">pinned to the outer box</span></div></div>
 </body>
 </html>

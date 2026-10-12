@@ -101,7 +101,7 @@ cargo test --workspace
   digits), `rgb()/rgba()` (legacy and `r g b / a` syntax), `hsl()/hsla()`, all CSS named colors, `transparent`,
   `currentColor` (borders follow `color` by default). Borders: per-side width, color and style (`solid`, `dashed`, `dotted`) with mitred corners.
   `text-transform`, `letter-spacing`, outer `box-shadow` (several, blurred, spread) and painted `opacity` (a layer
-  over the whole subtree) and `position: relative|absolute` with `top/right/bottom/left/inset` (see
+  over the whole subtree) and `position: relative|absolute` (against the nearest positioned ancestor) with `top/right/bottom/left/inset` and `z-index` (see
   `examples/position.html`) `linear-gradient`/`radial-gradient` and their `repeating-` forms as `background`
   (`examples/gradients.html`), and `::before`/`::after` with `content` (strings, `attr()`, quotes; any `display`, including
   inline-block and absolute; `examples/pseudo.html`) too. See `examples/css-compat.html` for a page that checks these.
@@ -127,7 +127,7 @@ cargo test --workspace
   page), `offsetParent` (approximated by the parent). From Sciter: class components, `componentUpdate`,
   `onGlobalEvent`, `Element.value` (no native behaviors yet), `this://` URLs, and JSX shortcuts like `.class`;
   `patch` is simplified (children match by key, id, then tag).
-- CSS gaps: no `grid`, `float`, tables, `z-index`, `counter()`/`url()` in `content`, other pseudo-elements (`::first-line`, `::placeholder`, ...) or `:has()`; `position: absolute` is placed against the parent (not the nearest positioned ancestor), `fixed` acts like `absolute`, `sticky` like `relative`, and paint order is document order; `inset` shadows, multiple background layers, `background-size`/`-position`/`-repeat`, images, transforms,
+- CSS gaps: no `grid`, `float`, tables, `counter()`/`url()` in `content`, other pseudo-elements (`::first-line`, `::placeholder`, ...) or `:has()`; `fixed` acts like `absolute` against the page (it scrolls), `sticky` like `relative`, an absolute box with `auto` insets sits at its containing block's corner when that isn't its parent (not at its static position), `z-index` only reorders siblings (no isolated stacking contexts, flex items ignore it); `inset` shadows, multiple background layers, `background-size`/`-position`/`-repeat`, images, transforms,
   transitions; `double`/`groove` borders draw solid; `calc()` percentages
   resolve against the parent's laid-out content size (heights only when the element sets its own height);
   `@supports`/`@font-face`/`@keyframes` are skipped; `@media` has no `prefers-*` beyond light/no-preference and no

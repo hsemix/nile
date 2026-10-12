@@ -473,9 +473,16 @@ pub fn layout_with(
     let mut tree: TaffyTree<NodeCtx> = TaffyTree::new();
 
     let html = doc.find(|n| n.tag() == Some("html")).unwrap_or(Document::ROOT);
+    // Absolute boxes with no positioned ancestor use the root as their containing block.
+    CONTAINING_BLOCKS.with(|s| s.borrow_mut().push(Vec::new()));
+    let was = PARENT_IS_CB.replace(false);
     let root = build(doc, styles, text, &mut tree, html).unwrap_or_else(|| {
         tree.new_leaf_with_context(Style::default(), NodeCtx::Element(html)).unwrap()
     });
+    PARENT_IS_CB.set(was);
+    for abs in CONTAINING_BLOCKS.with(|s| s.borrow_mut().pop()).unwrap_or_default() {
+        tree.add_child(root, abs).unwrap();
+    }
 
     // The root fills the viewport, like a browser's initial containing block.
     let mut root_style = tree.style(root).unwrap().clone();
@@ -504,7 +511,7 @@ pub fn layout_with(
     }
 
     let mut boxes = Vec::new();
-    flatten(&mut tree, root, 0.0, 0.0, &mut boxes);
+    flatten(&mut tree, styles, root, 0.0, 0.0, &mut boxes);
     let content_height = tree.layout(root).map(|l| l.size.height).unwrap_or(0.0);
     let index = boxes
         .iter()
@@ -626,6 +633,46 @@ fn measure_text(
     }
 }
 
+thread_local! {
+    /// Absolutely positioned boxes waiting to be attached to their containing block: one
+    /// list per positioned ancestor being built, the root's at the bottom.
+    static CONTAINING_BLOCKS: std::cell::RefCell<Vec<Vec<taffy::NodeId>>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The element whose children are being built is itself a containing block.
+    static PARENT_IS_CB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `build_children` for a box that may be a containing block for absolute
+/// descendants; those are attached to the box's Taffy node, not their DOM parent's.
+fn with_containing_block(
+    positioned: bool,
+    children: impl FnOnce() -> Vec<taffy::NodeId>,
+) -> Vec<taffy::NodeId> {
+    if positioned {
+        CONTAINING_BLOCKS.with(|s| s.borrow_mut().push(Vec::new()));
+    }
+    let was = PARENT_IS_CB.replace(positioned);
+    let mut kids = children();
+    PARENT_IS_CB.set(was);
+    if positioned {
+        kids.extend(CONTAINING_BLOCKS.with(|s| s.borrow_mut().pop()).unwrap_or_default());
+    }
+    kids
+}
+
+/// An absolutely positioned box whose containing block is above its parent goes to that
+/// block's list. `None` if it was handed off, else the node to place as usual.
+// TODO: with `auto` insets such a box sits at its containing block's corner, not at its
+// static position in the flow.
+fn hand_off_absolute(style: &ComputedStyle, n: taffy::NodeId) -> Option<taffy::NodeId> {
+    if style.position.out_of_flow() && !PARENT_IS_CB.get() {
+        let taken = CONTAINING_BLOCKS.with(|s| s.borrow_mut().last_mut().map(|list| list.push(n)).is_some());
+        if taken {
+            return None;
+        }
+    }
+    Some(n)
+}
+
 fn build(
     doc: &Document,
     styles: &StyleMap,
@@ -646,11 +693,13 @@ fn build(
             if style.display == Display::None {
                 return None;
             }
-            let children = if is_value_control(node) {
-                build_control_text(doc, styles, text, tree, id).into_iter().collect()
-            } else {
-                build_children(doc, styles, text, tree, &kids(doc, styles, id), style)
-            };
+            let children = with_containing_block(style.position != Position::Static, || {
+                if is_value_control(node) {
+                    build_control_text(doc, styles, text, tree, id).into_iter().collect()
+                } else {
+                    build_children(doc, styles, text, tree, &kids(doc, styles, id), style)
+                }
+            });
             let mut ts = taffy_style(style);
             if node.tag() == Some("select") && style.width == Length::Auto {
                 // Wide enough for the longest option, whichever is showing.
@@ -658,7 +707,7 @@ fn build(
             }
             let n = tree.new_with_children(ts, &children).ok()?;
             tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
-            Some(n)
+            hand_off_absolute(style, n)
         }
     }
 }
@@ -687,10 +736,12 @@ fn build_pseudo(
     if style.display == Display::None {
         return None;
     }
-    let children: Vec<taffy::NodeId> = build_inline_run_in(doc, styles, text, tree, &[id], style, Some(id)).into_iter().collect();
+    let children = with_containing_block(style.position != Position::Static, || {
+        build_inline_run_in(doc, styles, text, tree, &[id], style, Some(id)).into_iter().collect()
+    });
     let n = tree.new_with_children(taffy_style(style), &children).ok()?;
     tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
-    Some(n)
+    hand_off_absolute(style, n)
 }
 
 fn is_value_control(node: &nile_dom::Node) -> bool {
@@ -1208,6 +1259,7 @@ fn last_baseline(tree: &TaffyTree<NodeCtx>, n: taffy::NodeId) -> Option<f32> {
 
 fn flatten(
     tree: &mut TaffyTree<NodeCtx>,
+    styles: &StyleMap,
     n: taffy::NodeId,
     parent_x: f32,
     parent_y: f32,
@@ -1261,7 +1313,7 @@ fn flatten(
             });
             for b in placed {
                 let kid = kids[b.id as usize];
-                flatten(tree, kid.node, rect.x + b.x + kid.dx, rect.y + b.y + kid.dy, out);
+                flatten(tree, styles, kid.node, rect.x + b.x + kid.dx, rect.y + b.y + kid.dy, out);
             }
         }
         None => {}
@@ -1269,11 +1321,30 @@ fn flatten(
 
     // Only a node that pushed its own box (at `first`) owns a subtree.
     let pushed_self = matches!(out.get(first), Some(b) if b.subtree_end == 0);
-    for child in tree.children(n).unwrap() {
-        flatten(tree, child, rect.x, rect.y, out);
+    let mut children = tree.children(n).unwrap();
+    // Paint order inside a stacking context: negative `z-index`, then ordinary boxes,
+    // then positioned ones (`z-index` auto or 0) in tree order, then positive `z-index`.
+    // Only siblings are reordered, so every subtree stays contiguous.
+    children.sort_by_key(|c| match tree.get_node_context(*c) {
+        Some(NodeCtx::Element(id)) => paint_layer(styles.get(*id)),
+        _ => (1, 0),
+    });
+    for child in children {
+        flatten(tree, styles, child, rect.x, rect.y, out);
     }
     if pushed_self {
         out[first].subtree_end = out.len();
+    }
+}
+
+/// (layer, z-index) for sorting siblings into paint order.
+fn paint_layer(s: &ComputedStyle) -> (u8, i32) {
+    let positioned = s.position != Position::Static;
+    match s.z_index {
+        Some(z) if positioned && z < 0 => (0, z),
+        Some(z) if positioned && z > 0 => (3, z),
+        _ if positioned || s.opacity < 1.0 => (2, 0),
+        _ => (1, 0),
     }
 }
 
@@ -1847,5 +1918,45 @@ second</textarea><textarea id="e"></textarea></body>"#,
         // An inline-block ::before gives the (otherwise empty) div a line, like any inline content.
         let m = doc.find(|n| n.attr("id") == Some("m")).unwrap();
         assert_eq!(tree.node_rect(m).unwrap().height, 19.0);
+    }
+
+    #[test]
+    fn absolute_boxes_use_the_nearest_positioned_ancestor() {
+        let doc = Document::parse(
+            r#"<body style="margin:0"><div style="height:30px"></div>
+               <div id="cb" style="position:relative; margin-left:40px; width:200px; height:100px">
+                 <div style="padding:10px"><div id="inner" style="position:absolute; right:0; bottom:0; width:50px; height:20px"></div></div>
+               </div>
+               <div><div id="page" style="position:absolute; top:5px; left:6px; width:10px; height:10px"></div></div></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 400.0, 300.0);
+        let rect = |id: &str| tree.node_rect(doc.find(|n| n.attr("id") == Some(id)).unwrap()).unwrap();
+        // Against #cb (x 40, y 30, 200x100), not its static parent.
+        let r = rect("inner");
+        assert_eq!((r.x, r.y), (40.0 + 200.0 - 50.0, 30.0 + 100.0 - 20.0));
+        // No positioned ancestor: the page.
+        let p = rect("page");
+        assert_eq!((p.x, p.y), (6.0, 5.0));
+    }
+
+    #[test]
+    fn z_index_orders_painting_and_hit_testing() {
+        let doc = Document::parse(
+            r#"<body style="margin:0"><div style="position:relative; width:100px; height:100px">
+               <div id="hi" style="position:absolute; z-index:5; left:0; top:0; width:50px; height:50px"></div>
+               <div id="lo" style="position:absolute; z-index:-1; left:0; top:0; width:50px; height:50px"></div>
+               <div id="plain" style="position:absolute; left:0; top:0; width:50px; height:50px"></div>
+               <div id="flow" style="height:20px"></div></div></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 400.0, 300.0);
+        let node = |id: &str| doc.find(|n| n.attr("id") == Some(id)).unwrap();
+        let order: Vec<NodeId> = tree.boxes.iter().map(|b| b.node).collect();
+        let at = |id: &str| order.iter().position(|n| *n == node(id)).unwrap();
+        assert!(at("lo") < at("flow") && at("flow") < at("plain") && at("plain") < at("hi"));
+        assert_eq!(tree.hit_test(5.0, 5.0), Some(node("hi")));
     }
 }

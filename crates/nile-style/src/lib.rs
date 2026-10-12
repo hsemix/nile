@@ -196,6 +196,8 @@ pub struct ComputedStyle {
     pub max_height: Length,
     pub margin: Edges<Length>,
     pub position: Position,
+    /// `z-index`; `None` is `auto`.
+    pub z_index: Option<i32>,
     /// `top`, `right`, `bottom`, `left`.
     pub inset: Edges<Length>,
     pub padding: Edges<f32>,
@@ -266,6 +268,7 @@ impl Default for ComputedStyle {
             max_height: Length::Auto,
             margin: Edges::all(Length::Px(0.0)),
             position: Position::Static,
+            z_index: None,
             inset: Edges::all(Length::Auto),
             padding: Edges::all(0.0),
             border_width: Edges::all(0.0),
@@ -988,6 +991,11 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 _ => return,
             }
         }
+        "z-index" => match first {
+            Some(Value::Number(n)) if n.fract() == 0.0 => s.z_index = Some(*n as i32),
+            Some(Value::Ident(i)) if i == "auto" => s.z_index = None,
+            _ => {}
+        },
         "top" => s.inset.top = l(first).unwrap_or(s.inset.top),
         "right" => s.inset.right = l(first).unwrap_or(s.inset.right),
         "bottom" => s.inset.bottom = l(first).unwrap_or(s.inset.bottom),
