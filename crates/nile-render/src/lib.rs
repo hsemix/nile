@@ -69,6 +69,11 @@ impl Renderer {
                         canvas.save_layer_alpha_f(None, opacity);
                         open.push((b.subtree_end.max(i + 1), None));
                     }
+                    if let Some(t) = &b.transform {
+                        canvas.save();
+                        canvas.concat(&skia_safe::Matrix::new_all(t.a, t.c, t.e, t.b, t.d, t.f, 0.0, 0.0, 1.0));
+                        open.push((b.subtree_end.max(i + 1), None));
+                    }
                     self.paint_box(canvas, b, styles);
                     if let Some(sb) = &b.scroll {
                         let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();

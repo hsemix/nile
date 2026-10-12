@@ -1,7 +1,7 @@
 //! CSS parsing on top of `cssparser`'s tokenizer.
 
 use crate::selector::{NileImpl, NileParser};
-use crate::gradient::{ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
+use crate::gradient::{TransformFn, ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
 use crate::{colors, Color};
 use std::cell::Cell;
 use cssparser::{Delimiter, ParseError, Parser, Token};
@@ -41,6 +41,7 @@ pub enum Value {
     Fr(f32),
     /// `url(...)`.
     Url(String),
+    Transform(TransformFn),
     /// A top-level `/` (grid lines).
     Slash,
     /// `minmax(min, max)`, and `fit-content(x)` as `minmax(auto, x)`.
@@ -423,6 +424,14 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
                     let url = p.parse_nested_block(|p| Ok::<_, ParseError<()>>(p.expect_string()?.to_string()))?;
                     Value::Url(url)
                 }
+                "matrix" | "translate" | "translatex" | "translatey" | "translate3d" | "scale" | "scalex" | "scaley" | "scale3d"
+                | "rotate" | "rotatez" | "skew" | "skewx" | "skewy" => {
+                    let args = p.parse_nested_block(|p| gradient_items(p, cx))?;
+                    match transform_fn(&name, &args) {
+                        Some(t) => Value::Transform(t),
+                        None => return Ok(None),
+                    }
+                }
                 "attr" => {
                     let name = p.parse_nested_block(|p| Ok::<_, ParseError<()>>(p.expect_ident()?.to_string()))?;
                     Value::Attr(name)
@@ -570,6 +579,52 @@ fn radial_kind(config: &[Value]) -> Option<GradientKind> {
     let x = x.or_else(|| free.next()).unwrap_or(center.0);
     let y = y.or_else(|| free.next()).unwrap_or(center.1);
     Some(GradientKind::Radial { circle, extent, at: (x, y) })
+}
+
+fn transform_fn(name: &str, args: &[Vec<Value>]) -> Option<TransformFn> {
+    let one = |i: usize| -> Option<&Value> { match args.get(i)?.as_slice() { [v] => Some(v), _ => None } };
+    let len = |v: &Value| -> Option<StopPos> {
+        match v {
+            Value::Px(p) => Some(StopPos::Px(*p)),
+            Value::Percent(p) => Some(StopPos::Fraction(p / 100.0)),
+            Value::Number(n) if *n == 0.0 => Some(StopPos::Px(0.0)),
+            // `em`/`rem` need the font size; treated like the default 16px.
+            Value::Em(e) | Value::Rem(e) => Some(StopPos::Px(e * 16.0)),
+            _ => None,
+        }
+    };
+    let angle = |v: &Value| -> Option<f32> {
+        match v {
+            Value::Angle(a) => Some(*a),
+            Value::Number(n) if *n == 0.0 => Some(0.0),
+            _ => None,
+        }
+    };
+    let num = |v: &Value| if let Value::Number(n) = v { Some(*n) } else { None };
+    let zero = StopPos::Px(0.0);
+    Some(match name {
+        "matrix" if args.len() == 6 => {
+            let mut m = [0.0; 6];
+            for (i, slot) in m.iter_mut().enumerate() {
+                *slot = num(one(i)?)?;
+            }
+            TransformFn::Matrix(m)
+        }
+        "translate" | "translate3d" => TransformFn::Translate(len(one(0)?)?, one(1).map_or(Some(zero), len)?),
+        "translatex" => TransformFn::Translate(len(one(0)?)?, zero),
+        "translatey" => TransformFn::Translate(zero, len(one(0)?)?),
+        "scale" | "scale3d" => {
+            let x = num(one(0)?)?;
+            TransformFn::Scale(x, one(1).map_or(Some(x), num)?)
+        }
+        "scalex" => TransformFn::Scale(num(one(0)?)?, 1.0),
+        "scaley" => TransformFn::Scale(1.0, num(one(0)?)?),
+        "rotate" | "rotatez" => TransformFn::Rotate(angle(one(0)?)?),
+        "skew" => TransformFn::Skew(angle(one(0)?)?, one(1).map_or(Some(0.0), angle)?),
+        "skewx" => TransformFn::Skew(angle(one(0)?)?, 0.0),
+        "skewy" => TransformFn::Skew(0.0, angle(one(0)?)?),
+        _ => return None,
+    })
 }
 
 /// `vw`, `vh`, `vmin`, `vmax` as pixels of the current viewport.

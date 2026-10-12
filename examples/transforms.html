@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head>
+<style>
+  body { margin: 0; padding: 20px; font-family: sans-serif; font-size: 13px; background: #f4f1ea }
+  .row { display: flex; gap: 40px; margin-bottom: 40px }
+  .b { width: 90px; height: 50px; background: #2a7; color: white; padding: 6px; box-sizing: border-box; border-radius: 6px }
+  .ghost { position: absolute; border: 1px dashed #999; width: 90px; height: 50px; background: none }
+  .slot { position: relative; width: 90px; height: 50px }
+  #t1 { transform: rotate(20deg) }
+  #t2 { transform: scale(1.4, 0.8); background: #37e }
+  #t3 { transform: translate(20px, 10px) rotate(-10deg); background: #e74 }
+  #t4 { transform: skew(20deg, 0); background: #eb2 }
+  #t5 { transform: rotate(45deg); transform-origin: left top; background: #a5c }
+  #t6 { transform: translateX(50%) scale(0.7) }
+  .hover:hover { transform: scale(1.2) rotate(-4deg); background: #e74 }
+  .p { width: 110px; height: 70px; background: #fff; border: 1px solid #ccc; transform: rotate(10deg) }
+  .p .b { width: 60px; height: 30px; transform: rotate(-10deg); background: #37e }
+</style>
+</head>
+<body>
+  <div class="row">
+    <div class="slot"><div class="ghost"></div><div class="b" id="t1">rotate</div></div>
+    <div class="slot"><div class="ghost"></div><div class="b" id="t2">scale</div></div>
+    <div class="slot"><div class="ghost"></div><div class="b" id="t3">translate+rotate</div></div>
+    <div class="slot"><div class="ghost"></div><div class="b" id="t4">skew</div></div>
+  </div>
+  <div class="row">
+    <div class="slot"><div class="ghost"></div><div class="b" id="t5">origin left top</div></div>
+    <div class="slot"><div class="ghost"></div><div class="b" id="t6">translateX(50%)</div></div>
+    <div class="slot"><div class="b hover" id="t7">hover me</div></div>
+    <div class="p"><div class="b">nested</div></div>
+  </div>
+</body>
+</html>

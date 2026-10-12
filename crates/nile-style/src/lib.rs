@@ -23,7 +23,7 @@ use selectors::context::{
 };
 use selectors::matching::matches_selector;
 pub use grid::{area_lines, Breadth, GridAutoFlow, GridLine, GridPlace, Track, TrackItem, TrackRepeat};
-pub use gradient::{ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
+pub use gradient::{TransformFn, ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
 pub use parse::{Declaration, Rule, Stylesheet, Value};
 use parse::Cx;
 pub use selector::{ElementRef, InteractionState, NileImpl, PseudoClass, PseudoElement, Query};
@@ -291,6 +291,9 @@ pub struct ComputedStyle {
     pub border_style: Edges<BorderStyle>,
     pub border_radius: f32,
     pub opacity: f32,
+    pub transform: Vec<TransformFn>,
+    /// Origin of `transform` within the border box.
+    pub transform_origin: (StopPos, StopPos),
     /// Outer shadows, first = topmost. `inset` ones are parsed but not painted yet.
     pub box_shadow: Vec<BoxShadow>,
 
@@ -370,6 +373,8 @@ impl Default for ComputedStyle {
             border_style: Edges::all(BorderStyle::None),
             border_radius: 0.0,
             opacity: 1.0,
+            transform: Vec::new(),
+            transform_origin: (StopPos::Fraction(0.5), StopPos::Fraction(0.5)),
             box_shadow: Vec::new(),
             color: Color::BLACK,
             font_size: 16.0,
@@ -1279,6 +1284,23 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.background_repeat = bg_repeat(before).unwrap_or((true, true));
             }
         }
+        "transform" => {
+            let list: Vec<TransformFn> = v
+                .iter()
+                .filter_map(|x| if let Value::Transform(t) = x { Some(*t) } else { None })
+                .collect();
+            // A list with anything unusable in it is invalid as a whole.
+            if first.and_then(Value::ident) == Some("none") {
+                s.transform.clear();
+            } else if !list.is_empty() && list.len() == v.len() {
+                s.transform = list;
+            }
+        }
+        "transform-origin" => {
+            if let Some(o) = bg_position(&v[..v.len().min(2)], fs) {
+                s.transform_origin = o;
+            }
+        }
         "background-position" => {
             if let Some(p) = bg_position(v, fs) {
                 s.background_position = p;
@@ -1819,5 +1841,29 @@ mod tests {
         assert_eq!((b.background_size, b.background_repeat), (BgSize::Cover, (true, false)));
         assert_eq!(b.background_position, (StopPos::Fraction(0.5), StopPos::Fraction(0.0)));
         assert!(style_of(&doc, &styles, "c").background_url.is_none()); // the shorthand reset it
+    }
+
+    #[test]
+    fn transform_lists_parse() {
+        let doc = Document::parse(
+            r#"<div id="a" style="transform: translate(10px, 50%) rotate(0.25turn) scale(2) skewX(10deg) matrix(1,0,0,1,5,6); transform-origin: left 10px"></div>
+               <div id="b" style="transform: rotate(10deg) 5"></div>
+               <div id="c" style="transform: rotate(10deg); transform: none"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let a = style_of(&doc, &styles, "a");
+        assert_eq!(
+            a.transform,
+            vec![
+                TransformFn::Translate(StopPos::Px(10.0), StopPos::Fraction(0.5)),
+                TransformFn::Rotate(90.0),
+                TransformFn::Scale(2.0, 2.0),
+                TransformFn::Skew(10.0, 0.0),
+                TransformFn::Matrix([1.0, 0.0, 0.0, 1.0, 5.0, 6.0]),
+            ]
+        );
+        assert_eq!(a.transform_origin, (StopPos::Fraction(0.0), StopPos::Px(10.0)));
+        assert!(style_of(&doc, &styles, "b").transform.is_empty());
+        assert!(style_of(&doc, &styles, "c").transform.is_empty());
     }
 }

@@ -16,6 +16,8 @@
 use std::ops::Range;
 use std::rc::Rc;
 
+mod affine;
+pub use affine::Affine;
 mod images;
 pub use images::{FileImages, ImageData, ImageLoader};
 
@@ -77,6 +79,9 @@ pub struct LayoutBox {
     pub image: Option<Rc<ImageData>>,
     /// The picture of `background-image: url(...)`.
     pub bg_image: Option<Rc<ImageData>>,
+    /// `transform` of the element, as layout coordinates to layout coordinates (the
+    /// origin is already folded in). Applies to the box and its subtree.
+    pub transform: Option<Affine>,
 }
 
 /// Clipping and scroll extent of an `overflow` box.
@@ -106,9 +111,17 @@ pub type ScrollOffsets = std::collections::HashMap<NodeId, (f32, f32)>;
 /// containers around it, and the clip those containers impose.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Placement {
-    pub dx: f32,
-    pub dy: f32,
+    /// Layout (unscrolled document) coordinates to where the box paints.
+    pub xf: Affine,
+    /// What containers clip it to, as a rectangle in painted coordinates.
     pub clip: Option<Rect>,
+}
+
+impl Placement {
+    /// A painted point mapped back into layout coordinates.
+    pub fn to_layout(&self, x: f32, y: f32) -> (f32, f32) {
+        self.xf.inverse().map_or((x, y), |inv| inv.apply(x, y))
+    }
 }
 
 fn intersect(a: Option<Rect>, b: Rect) -> Rect {
@@ -278,11 +291,16 @@ impl LayoutTree {
                 stack.pop();
             }
             let cur = stack.last().map_or(Placement::default(), |(_, p)| *p);
-            out.push(cur);
+            // A transform applies to the box itself and everything inside it.
+            let own = Placement { xf: b.transform.map_or(cur.xf, |t| cur.xf.then_after(t)), clip: cur.clip };
+            out.push(own);
             if let Some(sb) = &b.scroll {
                 let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
-                let shifted = Rect { x: sb.clip.x + cur.dx, y: sb.clip.y + cur.dy, ..sb.clip };
-                stack.push((b.subtree_end, Placement { dx: cur.dx - ox, dy: cur.dy - oy, clip: Some(intersect(cur.clip, shifted)) }));
+                let clip = intersect(own.clip, own.xf.bounds(sb.clip));
+                let xf = own.xf.then_after(Affine::translate(-ox, -oy));
+                stack.push((b.subtree_end, Placement { xf, clip: Some(clip) }));
+            } else if b.transform.is_some() {
+                stack.push((b.subtree_end, own));
             }
         }
         out
@@ -299,7 +317,8 @@ impl LayoutTree {
         let (i, b) = self.text_box_of(node)?;
         let BoxContent::Text(c) = &b.content else { return None };
         let p = self.placements(offsets)[i];
-        Some(Cursor::from_point(&c.layout, x - p.dx - b.rect.x, y - p.dy - b.rect.y).index())
+        let (lx, ly) = p.to_layout(x, y);
+        Some(Cursor::from_point(&c.layout, lx - b.rect.x, ly - b.rect.y).index())
     }
 
     /// The word (byte range of `node`'s displayed text) under a point in painted
@@ -308,7 +327,8 @@ impl LayoutTree {
         let (i, b) = self.text_box_of(node)?;
         let BoxContent::Text(c) = &b.content else { return None };
         let p = self.placements(offsets)[i];
-        Some(Selection::word_from_point(&c.layout, x - p.dx - b.rect.x, y - p.dy - b.rect.y).text_range())
+        let (lx, ly) = p.to_layout(x, y);
+        Some(Selection::word_from_point(&c.layout, lx - b.rect.x, ly - b.rect.y).text_range())
     }
 
     fn text_box_of(&self, node: NodeId) -> Option<(usize, &LayoutBox)> {
@@ -363,16 +383,14 @@ impl LayoutTree {
     }
 
     fn node_rect_with(&self, node: NodeId, places: Option<&[Placement]>) -> Option<Rect> {
-        let shift = |i: usize| places.map_or((0.0, 0.0), |p| (p[i].dx, p[i].dy));
+        let xf = |i: usize| places.map_or(Affine::IDENTITY, |p| p[i].xf);
         if let Some(&i) = self.index.get(&node) {
-            let (dx, dy) = shift(i);
-            let r = self.boxes[i].rect;
-            return Some(Rect { x: r.x + dx, y: r.y + dy, ..r });
+            return Some(xf(i).bounds(self.boxes[i].rect));
         }
         let (mut l, mut t, mut r, mut b) = (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
         for (ti, tb) in self.boxes.iter().enumerate() {
             let BoxContent::Text(c) = &tb.content else { continue };
-            let (dx, dy) = shift(ti);
+            let m = xf(ti);
             let ranges: Vec<_> = c.owners.iter().filter(|(_, n)| *n == node).map(|(r, _)| r.clone()).collect();
             if ranges.is_empty() {
                 continue;
@@ -388,10 +406,17 @@ impl LayoutTree {
                         continue;
                     }
                     let fm = gr.run().font_metrics();
-                    l = l.min(tb.rect.x + dx + gr.offset());
-                    r = r.max(tb.rect.x + dx + gr.offset() + gr.advance());
-                    t = t.min(tb.rect.y + dy + gr.baseline() - fm.ascent);
-                    b = b.max(tb.rect.y + dy + gr.baseline() + fm.descent);
+                    let run = Rect {
+                        x: tb.rect.x + gr.offset(),
+                        y: tb.rect.y + gr.baseline() - fm.ascent,
+                        width: gr.advance(),
+                        height: fm.ascent + fm.descent,
+                    };
+                    let bounds = m.bounds(run);
+                    l = l.min(bounds.x);
+                    r = r.max(bounds.x + bounds.width);
+                    t = t.min(bounds.y);
+                    b = b.max(bounds.y + bounds.height);
                 }
             }
         }
@@ -414,14 +439,15 @@ impl LayoutTree {
                     continue;
                 }
             }
-            let r = Rect { x: b.rect.x + p.dx, y: b.rect.y + p.dy, ..b.rect };
-            if x < r.x || y < r.y || x >= r.x + r.width || y >= r.y + r.height {
+            let (lx, ly) = p.to_layout(x, y);
+            let r = b.rect;
+            if lx < r.x || ly < r.y || lx >= r.x + r.width || ly >= r.y + r.height {
                 continue;
             }
             match &b.content {
                 BoxContent::Element => return Some(self.origins.get(&b.node).copied().unwrap_or(b.node)),
                 BoxContent::Text(c) => {
-                    let Some((cluster, _)) = Cluster::from_point_exact(&c.layout, x - r.x, y - r.y) else {
+                    let Some((cluster, _)) = Cluster::from_point_exact(&c.layout, lx - r.x, ly - r.y) else {
                         continue;
                     };
                     let at = cluster.text_range().start;
@@ -1374,11 +1400,13 @@ fn flatten(
     match tree.get_node_context_mut(n) {
         Some(NodeCtx::Element(id)) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image })
+            let transform = box_transform(styles.get(*id), rect);
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform })
         }
         Some(NodeCtx::Replaced { id, image, .. }) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image })
+            let transform = box_transform(styles.get(*id), rect);
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform })
         }
         Some(NodeCtx::Text { node, layout, align, kids, decos, owners, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
@@ -1414,6 +1442,7 @@ fn flatten(
                 scroll: None,
                 image: None,
                 bg_image: None,
+                transform: None,
             });
             for b in placed {
                 let kid = kids[b.id as usize];
@@ -1441,13 +1470,17 @@ fn flatten(
     }
 }
 
+fn box_transform(s: &ComputedStyle, rect: Rect) -> Option<Affine> {
+    (!s.transform.is_empty()).then(|| Affine::from_style(&s.transform, s.transform_origin, rect))
+}
+
 /// (layer, z-index) for sorting siblings into paint order.
 fn paint_layer(s: &ComputedStyle) -> (u8, i32) {
     let positioned = s.position != Position::Static;
     match s.z_index {
         Some(z) if positioned && z < 0 => (0, z),
         Some(z) if positioned && z > 0 => (3, z),
-        _ if positioned || s.opacity < 1.0 => (2, 0),
+        _ if positioned || s.opacity < 1.0 || !s.transform.is_empty() => (2, 0),
         _ => (1, 0),
     }
 }
@@ -2201,5 +2234,29 @@ second</textarea><textarea id="e"></textarea></body>"#,
         let boxes = |id: &str| tree.boxes.iter().find(|b| b.node == find(id) && matches!(b.content, BoxContent::Element)).unwrap();
         assert!(boxes("a").image.is_some() && boxes("d").image.is_none());
         assert!(boxes("e").bg_image.is_some());
+    }
+
+    #[test]
+    fn transforms_move_hits_and_bounding_boxes() {
+        let doc = Document::parse(
+            r#"<body style="margin:0"><div id="a" style="width:100px; height:20px; transform: rotate(90deg)"></div>
+               <div id="b" style="width:50px; height:50px; margin-top:200px; transform: translate(100px, 0) scale(2); transform-origin: 0 0"></div></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 400.0, 400.0);
+        let a = doc.find(|n| n.attr("id") == Some("a")).unwrap();
+        let b = doc.find(|n| n.attr("id") == Some("b")).unwrap();
+        // Rotated about its center (50, 10): now 20 wide, 100 tall.
+        let r = tree.node_rect_scrolled(a, &ScrollOffsets::new()).unwrap();
+        assert!((r.x - 40.0).abs() < 0.01 && (r.y + 40.0).abs() < 0.01 && (r.width - 20.0).abs() < 0.01 && (r.height - 100.0).abs() < 0.01, "{r:?}");
+        // A point inside the rotated box but outside the original one hits it.
+        assert_eq!(tree.hit_test_scrolled(50.0, -30.0, &ScrollOffsets::new()), Some(a));
+        assert_ne!(tree.hit_test_scrolled(90.0, 10.0, &ScrollOffsets::new()), Some(a));
+        // b: layout rect (0,220,50,50) -> translated and doubled: x 100..200, y 220..320.
+        let rb = tree.node_rect_scrolled(b, &ScrollOffsets::new()).unwrap();
+        assert_eq!((rb.x, rb.y, rb.width, rb.height), (100.0, 220.0, 100.0, 100.0));
+        assert_eq!(tree.hit_test_scrolled(190.0, 310.0, &ScrollOffsets::new()), Some(b));
+        assert_ne!(tree.hit_test_scrolled(40.0, 240.0, &ScrollOffsets::new()), Some(b));
     }
 }

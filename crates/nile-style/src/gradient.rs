@@ -100,6 +100,20 @@ impl Gradient {
     }
 }
 
+/// One function of a `transform` list.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransformFn {
+    /// `matrix(a, b, c, d, e, f)`.
+    Matrix([f32; 6]),
+    /// A fraction is of the box's own width/height.
+    Translate(StopPos, StopPos),
+    Scale(f32, f32),
+    /// Degrees, clockwise.
+    Rotate(f32),
+    /// Degrees along x and y.
+    Skew(f32, f32),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
