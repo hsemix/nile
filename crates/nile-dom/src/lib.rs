@@ -106,19 +106,24 @@ impl Document {
         self.nodes.iter().position(pred).map(NodeId)
     }
 
-    /// Classic `<script>` elements in document order: inline text or an `src`
-    /// to load. Other types (`module`, JSON, templates) are skipped.
+    /// `<script>` elements in document order: classic (`Inline`/`External`) and
+    /// `type="module"`. Other types (JSON, templates) are skipped.
     pub fn script_sources(&self) -> Vec<ScriptSource> {
         self.descendants(Document::ROOT)
             .into_iter()
             .filter(|id| self.node(*id).tag() == Some("script"))
-            .filter(|id| {
-                let ty = self.node(*id).attr("type").unwrap_or("").trim().to_ascii_lowercase();
-                ty.is_empty() || ty.contains("javascript") || ty.contains("ecmascript")
-            })
-            .map(|id| match self.node(id).attr("src") {
-                Some(src) => ScriptSource::External(src.to_string()),
-                None => ScriptSource::Inline(self.text_content(id)),
+            .filter_map(|id| {
+                let ty = self.node(id).attr("type").unwrap_or("").trim().to_ascii_lowercase();
+                let module = ty == "module";
+                if !(module || ty.is_empty() || ty.contains("javascript") || ty.contains("ecmascript")) {
+                    return None;
+                }
+                Some(match (self.node(id).attr("src"), module) {
+                    (Some(src), false) => ScriptSource::External(src.to_string()),
+                    (Some(src), true) => ScriptSource::ModuleExternal(src.to_string()),
+                    (None, false) => ScriptSource::Inline(self.text_content(id)),
+                    (None, true) => ScriptSource::ModuleInline(self.text_content(id)),
+                })
             })
             .collect()
     }
@@ -352,6 +357,8 @@ fn escape(s: &str, attr: bool, out: &mut String) {
 pub enum ScriptSource {
     Inline(String),
     External(String),
+    ModuleInline(String),
+    ModuleExternal(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,9 +396,10 @@ mod tests {
     }
 
     #[test]
-    fn finds_classic_scripts_only() {
+    fn finds_scripts_and_skips_other_types() {
         let doc = Document::parse(
             r#"<script>a()</script><script src="x.js"></script><script type="module">m()</script>
+               <script type="module" src="m.js"></script>
                <script type="text/javascript">b()</script><script type="application/json">{}</script>"#,
         );
         assert_eq!(
@@ -399,6 +407,8 @@ mod tests {
             vec![
                 ScriptSource::Inline("a()".into()),
                 ScriptSource::External("x.js".into()),
+                ScriptSource::ModuleInline("m()".into()),
+                ScriptSource::ModuleExternal("m.js".into()),
                 ScriptSource::Inline("b()".into())
             ]
         );

@@ -286,7 +286,20 @@
     get previousElementSibling() { for (let n = this.previousSibling; n; n = n.previousSibling) if (n.nodeType === 1) return n; return null; }
     get innerHTML() { return N.innerHTML(this._id); }
     set innerHTML(v) { N.setInnerHTML(this._id, String(v)); }
-    append(...items) { for (const i of items) this.appendChild(typeof i === "object" ? i : documentObj.createTextNode(String(i))); }
+    // Items may be nodes, strings/numbers (text), arrays of those, or null/false (skipped).
+    append(...items) { for (const n of toNodes(items)) this.appendChild(n); }
+    prepend(...items) {
+      const first = this.firstChild;
+      for (const n of toNodes(items)) this.insertBefore(n, first);
+    }
+    // Sciter: replace all children.
+    content(...items) { N.setText(this._id, ""); this.append(...items); return this; }
+    // Sciter: insert at a child index.
+    insert(item, index) {
+      const ref = this.childNodes[index] || null;
+      for (const n of toNodes([item])) this.insertBefore(n, ref);
+    }
+    get index() { const p = this.parentElement; return p ? p.children.indexOf(this) : -1; }
     querySelector(s) { const r = N.select(this._id, String(s)); return r.length ? wrap(r[0]) : null; }
     querySelectorAll(s) { return N.select(this._id, String(s)).map(wrap); }
     matches(s) { return N.matches(this._id, String(s)); }
@@ -317,6 +330,14 @@
     scrollIntoView() { const r = N.rect(this._id); if (r) N.scrollTo(N.scrollY() + r[1]); }
   }
 
+  function toNodes(x, out = []) {
+    if (x == null || x === false || x === true) return out;
+    if (Array.isArray(x)) for (const y of x) toNodes(y, out);
+    else if (x instanceof Node) out.push(x);
+    else out.push(documentObj.createTextNode(String(x)));
+    return out;
+  }
+
   class Document extends Node {
     get nodeName() { return "#document"; }
     get readyState() { return readyState; }
@@ -343,6 +364,99 @@
     dispatchEvent: (ev) => dispatch(g, ev),
     performance: { now: () => N.now() },
     queueMicrotask: (f) => { Promise.resolve().then(f).catch(report); },
+  });
+
+  // ---- JSX ---------------------------------------------------------------
+  // `<div class="a" onclick={f}>hi</div>` compiles to JSX("div", {...}, "hi"),
+  // which builds real DOM elements. Function components are called as
+  // `Component(props, children)`. Replace `globalThis.JSX` to render differently.
+  function JSX(tag, props, ...children) {
+    props = props || {};
+    const kids = toNodes(children);
+    if (tag === JSX.Fragment) return kids;
+    if (typeof tag === "function") return tag(props, kids);
+    const el = documentObj.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (v == null || v === false) continue;
+      if (k === "key" || k === "ref") continue; // `ref` is called after children, below
+      if (/^on[A-Za-z]/.test(k) && typeof v === "function") {
+        el.addEventListener(k.slice(2).toLowerCase(), v);
+      } else if (k === "style" && typeof v === "object") {
+        for (const [p, val] of Object.entries(v)) el.style.setProperty(p, val);
+      } else if ((k === "class" || k === "className") && typeof v !== "string") {
+        el.className = Array.isArray(v) ? v.filter(Boolean).join(" ") : Object.keys(v).filter((c) => v[c]).join(" ");
+      } else {
+        el.setAttribute(k === "className" ? "class" : k, v === true ? "" : String(v));
+      }
+    }
+    for (const c of kids) el.appendChild(c);
+    if (typeof props.ref === "function") props.ref(el);
+    return el;
+  }
+  JSX.Fragment = function Fragment() {};
+  g.JSX = JSX;
+
+  // ---- Sciter-style helpers ----------------------------------------------
+  g.$ = (s) => documentObj.querySelector(s);
+  g.$$ = (s) => documentObj.querySelectorAll(s);
+  for (const C of [Element, Document]) {
+    C.prototype.$ = C.prototype.querySelector;
+    C.prototype.$$ = C.prototype.querySelectorAll;
+  }
+
+  // on("click mousedown", [selector], handler): `handler.call(target, event, target)`,
+  // where `target` is the descendant matching `selector` (delegation) or `this`.
+  const bound = new WeakMap(); // handler -> [{ type, selector, wrapper }]
+  EventTarget.prototype.on = function (types, selector, handler) {
+    if (typeof selector === "function") [selector, handler] = [null, selector];
+    for (const type of String(types).split(/\s+/).filter(Boolean)) {
+      const wrapper = (ev) => {
+        if (!selector) return handler.call(this, ev, this);
+        const m = ev.target instanceof Element ? ev.target.closest(selector) : null;
+        if (m && this.contains(m)) return handler.call(m, ev, m);
+      };
+      (bound.get(handler) || bound.set(handler, []).get(handler)).push({ type, selector, wrapper, owner: this });
+      this.addEventListener(type, wrapper);
+    }
+    return this;
+  };
+  EventTarget.prototype.off = function (types, handler) {
+    const list = bound.get(handler) || [];
+    const wanted = types ? String(types).split(/\s+/) : null;
+    for (const rec of list.slice()) {
+      if (rec.owner !== this || (wanted && !wanted.includes(rec.type))) continue;
+      this.removeEventListener(rec.type, rec.wrapper);
+      list.splice(list.indexOf(rec), 1);
+    }
+    return this;
+  };
+
+  // Element.state: hover/active/focus reflect interaction; the rest map to attributes.
+  const ATTR_STATES = new Set(["disabled", "checked", "selected", "readonly", "hidden"]);
+  Object.defineProperty(Element.prototype, "state", {
+    get() {
+      return new Proxy({}, {
+        get: (_, k) => (k === "hover" || k === "active" || k === "focus" ? this.matches(":" + k) : ATTR_STATES.has(k) ? this.hasAttribute(k) : undefined),
+        set: (_, k, v) => {
+          if (ATTR_STATES.has(k)) v ? this.setAttribute(k, "") : this.removeAttribute(k);
+          return true;
+        },
+      });
+    },
+  });
+
+  // Element.attributes: name -> value, assignable.
+  Object.defineProperty(Element.prototype, "attributes", {
+    get() {
+      return new Proxy({}, {
+        get: (_, k) => (typeof k === "symbol" ? undefined : this.getAttribute(k) ?? undefined),
+        set: (_, k, v) => { this.setAttribute(k, v); return true; },
+        deleteProperty: (_, k) => { this.removeAttribute(k); return true; },
+        has: (_, k) => this.hasAttribute(k),
+        ownKeys: () => this.getAttributeNames(),
+        getOwnPropertyDescriptor: (_, k) => (this.hasAttribute(k) ? { value: this.getAttribute(k), enumerable: true, configurable: true, writable: true } : undefined),
+      });
+    },
   });
 
   // ---- computed style, window metrics, scrolling ---------------------------

@@ -349,11 +349,15 @@ impl Query {
     }
 
     pub fn matches(&self, doc: &Document, id: NodeId) -> bool {
+        self.matches_with(doc, id, &InteractionState::default())
+    }
+
+    /// Like [`Query::matches`], with `:hover`/`:active`/`:focus` resolved against `state`.
+    pub fn matches_with(&self, doc: &Document, id: NodeId, state: &InteractionState) -> bool {
         use selectors::context::{
             MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, QuirksMode, SelectorCaches,
         };
-        let state = InteractionState::default();
-        let el = ElementRef::new(doc, id, &state);
+        let el = ElementRef::new(doc, id, state);
         let mut caches = SelectorCaches::default();
         let mut ctx = MatchingContext::new(
             MatchingMode::Normal,
@@ -368,9 +372,13 @@ impl Query {
 
     /// Descendants of `root` (not `root` itself) that match, in document order.
     pub fn select_all(&self, doc: &Document, root: NodeId) -> Vec<NodeId> {
+        self.select_all_with(doc, root, &InteractionState::default())
+    }
+
+    pub fn select_all_with(&self, doc: &Document, root: NodeId, state: &InteractionState) -> Vec<NodeId> {
         doc.descendants(root)
             .into_iter()
-            .filter(|id| matches!(doc.node(*id).kind, NodeKind::Element { .. }) && self.matches(doc, *id))
+            .filter(|id| matches!(doc.node(*id).kind, NodeKind::Element { .. }) && self.matches_with(doc, *id, state))
             .collect()
     }
 }

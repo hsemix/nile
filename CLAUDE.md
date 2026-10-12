@@ -45,6 +45,7 @@ cargo run -p nile-shell -- examples/hello.html --png out.png --scale 2
 cargo run -p nile-shell -- examples/interact.html --png out.png --hover 40,40   # or --press / --click X,Y
 cargo run -p nile-shell -- examples/scripting.html --png out.png --click 60,80 --wait 400
 cargo run -p nile-shell -- examples/measure.html --png out.png
+cargo run -p nile-shell -- examples/todo/index.html --png out.png --click 60,128   # modules + JSX
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings          # CI enforces this
 ```
@@ -77,6 +78,11 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
   normalise in `prelude.js`.
 - Boxes are `content-box` unless `box-sizing: border-box` (Taffy's own default
   is border-box, so `taffy_style` sets it explicitly).
+- JSX is a source transform (`nile-script/src/jsx.rs`, a scanner, not a parser)
+  applied to every script and module before QuickJS sees it; it returns `None`
+  for non-JSX or malformed input so the engine reports the original error. Modules
+  resolve relative to the importing file (inline modules are named
+  `page.html#moduleN`).
 - DOM wrappers in JS are keyed by arena id (`wrap(id)` in `prelude.js`); new
   DOM API usually means one small native in `lib.rs` plus a JS method.
 
@@ -95,8 +101,9 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
 
 ## Next up
 
-JSX/module loader and Sciter-shaped DOM extensions (README roadmap #2):
-`import` of local files with the loader in `nile-script`, JSX transform, and
-Sciter's `$()`, `Element.state`, `Element.value` etc. so existing Sciter apps
-can port. Check Sciter's docs for exact shapes before inventing any. Also open:
-Tab focus order, element-level scrolling, incremental restyle (README roadmap #1).
+Sciter compatibility pass (README roadmap #2). The helpers added so far (`$`,
+`on`/`off`, `state`, `attributes`, JSX semantics) were written from memory of
+Sciter.JS: read Sciter's docs and fix any shape that differs, then add the
+`@env`/`@sciter`/`@sys` modules, `Element.value`, reactor-style updates and
+`this://` URLs. Also open: font fallback for symbol glyphs, Tab focus order,
+element-level scrolling, incremental restyle.
