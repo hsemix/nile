@@ -1,0 +1,132 @@
+<!doctype html>
+<html>
+<head>
+  <title>Nile — Word ribbon</title>
+  <style>
+    * { box-sizing: border-box }
+    body { margin: 0; font-family: sans-serif; font-size: 13px; color: #252733; background: #edf0f5 }
+    button { font-family: sans-serif, "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols"; font-size: 12px; background: transparent; border: 1px solid transparent; color: #333644; padding: 5px 9px; border-radius: 4px }
+    button:hover { background: #e2e6f2; border-color: #cbd2e5 }
+    button:focus { border-color: #526ab1 }
+    button.selected { background: #dbe3fa; border-color: #bbc9eb; color: #24499a }
+    .titlebar { height: 52px; display: flex; align-items: center; gap: 18px; padding: 0 22px; background: #e6eaf6 }
+    .brand { width: 29px; height: 29px; background: #2356ab; border-radius: 4px; color: white; font-weight: 700; font-size: 21px; text-align: center; line-height: 29px }
+    .autosave { display: flex; gap: 8px; align-items: center; font-size: 11px }
+    .switch { width: 29px; height: 16px; border-radius: 12px; background: #315dc2; padding: 3px; display: flex; justify-content: flex-end }
+    .switch-dot { width: 10px; height: 10px; background: white; border-radius: 9px }
+    .switch.off { background: #949bab; justify-content: flex-start }
+    .quick { display: flex; gap: 2px }
+    .quick button { font-size: 18px; padding: 2px 6px }
+    .symbol { font-family: "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols", sans-serif }
+    .chevron { display: inline-block; width: 5px; height: 5px; border-right: 1px solid #58657c; border-bottom: 1px solid #58657c; transform: rotate(45deg); margin-left: 4px }
+    .filename { font-size: 12px; font-weight: 600 }
+    .saved { color: #71788a; font-size: 11px; margin-left: 10px }
+    .search { margin-left: auto; width: 255px; height: 29px; border: 1px solid #d7dceb; background: #f4f6fc; border-radius: 5px; padding: 6px 13px; color: #7a8192; font-size: 11px }
+    .avatar { width: 28px; height: 28px; background: #687daf; color: white; border-radius: 20px; text-align: center; line-height: 28px; font-size: 10px }
+    .tabs { height: 40px; display: flex; align-items: center; gap: 6px; padding: 0 20px; background: #e6eaf6 }
+    .tab { height: 34px; border-radius: 0; padding: 7px 11px; font-size: 13px }
+    .tab.active { font-weight: 700; color: #244b9d; border-bottom: 3px solid #315dc2 }
+    .right-tabs { margin-left: auto; display: flex; gap: 8px }
+    .share { background: #315dc2; color: white; padding: 5px 16px }
+    .share:hover { background: #254caa; color: white }
+    .ribbon-wrap { background: #e6eaf6; padding: 0 12px 10px }
+    .ribbon { height: 132px; border-radius: 8px; background: #fafbfe; border: 1px solid #dce1ed; display: flex; padding: 10px 8px 5px; overflow-x: auto; box-shadow: 0 2px 4px #d8deec }
+    .group { flex-shrink: 0; height: 114px; padding: 0 12px; border-right: 1px solid #dde1eb; display: flex; flex-direction: column }
+    .group:last-child { border-right: 0 }
+    .group-body { display: flex; gap: 5px; flex: 1; align-items: flex-start }
+    .group-label { text-align: center; color: #737989; font-size: 10px; height: 19px; padding-top: 4px }
+    .large { width: 57px; height: 80px; display: flex; flex-direction: column; align-items: center; gap: 7px; padding: 5px 4px }
+    .large-icon { font-size: 29px; line-height: 33px; height: 35px; color: #526eb0; font-family: "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols", sans-serif }
+    .paste-icon { width: 26px; height: 30px; background: #f1dfaf; border: 2px solid #b5995a; border-radius: 3px; position: relative; margin-top: 2px }
+    .paste-icon::before { content: ''; position: absolute; width: 12px; height: 6px; top: -5px; left: 5px; background: #b5995a; border-radius: 2px }
+    .paste-icon::after { content: ''; position: absolute; width: 17px; height: 22px; left: 10px; top: 8px; background: #fafbfe; border: 1px solid #91a2c6 }
+    .stack { display: flex; flex-direction: column; gap: 1px }
+    .small-command { height: 26px; padding: 3px 5px; text-align: left; white-space: nowrap }
+    .command-symbol { color: #6479aa; margin-right: 7px; font-size: 15px; font-family: "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols", sans-serif }
+    .font-tools { width: 244px; flex: 1 }
+    .tool-row { display: flex; align-items: center; gap: 3px; margin-bottom: 8px }
+    select { font-size: 12px; height: 27px; border: 1px solid #ced4e2; border-radius: 3px; background: white; padding: 4px 7px; width: 134px }
+    #font-size { width: 49px }
+    .square { width: 28px; height: 27px; padding: 3px; font-size: 14px }
+    .highlighter { border-bottom: 3px solid #f3d452 }
+    .font-color { border-bottom: 3px solid #cb575b }
+    .paragraph-tools { width: 179px; flex: 1 }
+    .group > .stack { flex: 1 }
+    .lines { display: flex; flex-direction: column; gap: 3px; width: 16px; margin: 3px auto }
+    .lines span { display: block; height: 1px; background: #4e5972; width: 16px }
+    .lines span.short { width: 10px }
+    .center-lines { align-items: center }
+    .right-lines { align-items: flex-end }
+    .styles { display: flex; gap: 5px }
+    .style-card { width: 78px; height: 65px; padding: 9px 5px; background: white; border: 1px solid #e1e4ec; display: flex; flex-direction: column; gap: 10px; align-items: center }
+    .style-preview { font-family: serif; font-size: 20px; color: #333 }
+    .style-card.heading .style-preview { color: #315dc2; font-size: 19px }
+    .style-card.title .style-preview { font-size: 25px }
+    .style-card small { font-size: 10px }
+    .workspace { height: calc(100vh - 263px); min-height: 450px; display: flex; overflow: hidden }
+    .navigation { width: 218px; flex-shrink: 0; background: #f9fafe; border-right: 1px solid #dce1eb; padding: 24px 19px }
+    .nav-title { font-size: 17px; font-weight: 600; margin-bottom: 18px }
+    .nav-search { width: 178px; height: 29px; background: white; border: 1px solid #d6dce8; border-radius: 3px; font-size: 11px; padding: 6px 9px; margin-bottom: 20px }
+    .nav-tabs { display: flex; gap: 14px; font-size: 11px; color: #737a8d; border-bottom: 1px solid #dce1eb; padding-bottom: 10px; margin-bottom: 18px }
+    .nav-tabs .current { color: #315dc2; font-weight: 600 }
+    .nav-item { display: block; text-align: left; width: 180px; padding: 9px 10px; font-size: 11px; margin-bottom: 3px }
+    .nav-item.current { color: #315dc2; background: #e7edfb; border-left: 3px solid #315dc2; border-radius: 0 }
+    .nav-sub { color: #7e8595; padding-left: 23px }
+    .canvas { flex: 1; overflow: auto; padding: 0 30px 50px; background: #edf0f5 }
+    .ruler { width: 720px; height: 29px; margin: 0 auto 17px; display: flex; align-items: center; justify-content: space-between; color: #8991a1; font-size: 9px; padding: 0 48px; border-bottom: 1px solid #cdd3df }
+    .paper { width: 720px; min-height: 790px; margin: 0 auto; padding: 57px 70px; background: white; box-shadow: 0 2px 12px #d1d6e0; border: 1px solid #dfe3eb }
+    .document-meta { display: flex; justify-content: space-between; font-size: 9px; color: #8992a1; letter-spacing: 1.5px; padding-bottom: 22px; border-bottom: 1px solid #e4e8ef }
+    .eyebrow { color: #315dc2; font-size: 10px; letter-spacing: 2px; margin-top: 35px; margin-bottom: 12px; font-weight: 700 }
+    .paper h1 { font-family: serif; font-size: 39px; font-weight: 400; line-height: 1.16; color: #203655; margin: 0 0 15px }
+    .subtitle { color: #8690a0; font-size: 13px; margin-bottom: 30px }
+    .paper h2 { font-size: 18px; font-weight: 600; color: #294d85; margin: 26px 0 12px }
+    .paper p { font-family: serif; font-size: 15px; line-height: 1.7; color: #4d5563; margin: 0 0 16px }
+    .callout { border-left: 3px solid #5275b9; padding: 16px 19px; background: #f2f5fb; margin: 25px 0; font-family: serif; color: #405679; font-size: 17px; line-height: 1.5 }
+    .milestones { display: flex; gap: 13px; margin-top: 20px }
+    .milestone { flex: 1; padding-top: 13px; border-top: 2px solid #d7e2f4 }
+    .milestone b { display: block; font-size: 11px; color: #315dc2; margin-bottom: 7px }
+    .milestone div { font-size: 11px; line-height: 1.6; color: #7a8393 }
+    .statusbar { height: 29px; background: #fafbfe; border-top: 1px solid #dce1eb; display: flex; align-items: center; gap: 23px; padding: 0 20px; color: #71798a; font-size: 10px }
+    #status { color: #315dc2; margin-left: auto }
+    .zoom-tools { display: flex; align-items: center; gap: 8px }
+    .zoom-tools button { padding: 0 5px; font-size: 15px }
+    .zoom-track { width: 85px; height: 3px; background: #cbd3e3; position: relative }
+    .zoom-thumb { position: absolute; left: 42px; top: -4px; width: 5px; height: 11px; background: #526eb0 }
+    .hidden { display: none }
+    .alt-ribbon .group { min-width: 140px }
+    .alt-ribbon .large { width: 78px }
+    @media (max-width: 1050px) { .navigation { display: none } .search { width: 190px } .saved { display: none } }
+  </style>
+</head>
+<body>
+  <div class="titlebar">
+    <div class="brand">W</div>
+    <div class="autosave">AutoSave <button id="autosave" class="switch" title="Toggle AutoSave"><span class="switch-dot"></span></button></div>
+    <div class="quick"><button data-action="save" title="Save preview"><span class="symbol">▣</span></button><button data-action="undo" title="Undo formatting"><span class="symbol">↶</span></button><button data-action="redo" title="Redo formatting"><span class="symbol">↷</span></button></div>
+    <div class="filename">Project proposal <span class="saved">Local draft</span></div>
+    <div class="search">Search commands</div><div class="avatar">AD</div>
+  </div>
+  <div class="tabs">
+    <button class="tab" data-tab="File">File</button><button class="tab active" data-tab="Home">Home</button><button class="tab" data-tab="Insert">Insert</button><button class="tab" data-tab="Layout">Layout</button><button class="tab" data-tab="References">References</button><button class="tab" data-tab="Review">Review</button><button class="tab" data-tab="View">View</button>
+    <div class="right-tabs"><button data-action="comments">Comments</button><button data-action="editing">Editing <span class="chevron"></span></button><button class="share" data-action="share">Share</button></div>
+  </div>
+  <div class="ribbon-wrap">
+    <div class="ribbon" id="home-ribbon">
+      <div class="group"><div class="group-body"><button class="large" data-action="paste"><span class="paste-icon"></span><span>Paste <span class="chevron"></span></span></button><div class="stack"><button class="small-command" data-action="cut"><span class="command-symbol">✂</span>Cut</button><button class="small-command" data-action="copy"><span class="command-symbol">▤</span>Copy</button><button class="small-command" data-action="format-painter"><span class="command-symbol">▧</span>Format Painter</button></div></div><div class="group-label">Clipboard</div></div>
+      <div class="group"><div class="font-tools"><div class="tool-row"><select id="font-family" title="Document font"><option value="serif">Serif</option><option value="sans-serif">Arial</option><option value="monospace">Monospace</option></select><select id="font-size" title="Font size"><option>12</option><option selected>15</option><option>18</option><option>22</option></select><button class="square" data-action="grow" title="Increase font size">A+</button><button class="square" data-action="shrink" title="Decrease font size">A−</button></div><div class="tool-row"><button class="square" id="bold" data-format="bold" title="Bold"><b>B</b></button><button class="square" id="italic" data-format="italic" title="Italic"><i>I</i></button><button class="square" id="underline" data-format="underline" title="Underline"><u>U</u></button><button class="square" id="strike" data-format="strike" title="Strikethrough">ab</button><button class="square" data-action="clear" title="Clear formatting">A×</button><button class="square highlighter" id="highlight" data-format="highlight" title="Highlight">ab</button><button class="square font-color" id="color" data-format="color" title="Font color">A</button></div></div><div class="group-label">Font</div></div>
+      <div class="group"><div class="paragraph-tools"><div class="tool-row"><button class="square" data-action="bullets" title="Bulleted list">• ≡</button><button class="square" data-action="numbering" title="Numbered list">1 ≡</button><button class="square" data-action="outdent" title="Decrease indent">‹≡</button><button class="square" data-action="indent" title="Increase indent">≡›</button><button class="square" data-action="marks" title="Show paragraph marks">¶</button></div><div class="tool-row"><button class="square selected" data-align="left" title="Align left"><span class="lines"><span></span><span class="short"></span><span></span><span class="short"></span></span></button><button class="square" data-align="center" title="Center"><span class="lines center-lines"><span></span><span class="short"></span><span></span><span class="short"></span></span></button><button class="square" data-align="right" title="Align right"><span class="lines right-lines"><span></span><span class="short"></span><span></span><span class="short"></span></span></button><button class="square" data-action="spacing" title="Line spacing">↕</button><button class="square" data-action="borders" title="Paragraph border"><span class="symbol">▦</span></button></div></div><div class="group-label">Paragraph</div></div>
+      <div class="group"><div class="group-body styles"><button class="style-card selected" data-style="normal"><span class="style-preview">AaBb</span><small>Normal</small></button><button class="style-card heading" data-style="heading"><span class="style-preview">AaBb</span><small>Heading 1</small></button><button class="style-card title" data-style="title"><span class="style-preview">AaBb</span><small>Title</small></button></div><div class="group-label">Styles</div></div>
+      <div class="group"><div class="stack"><button class="small-command" data-action="find"><span class="command-symbol">⌕</span>Find</button><button class="small-command" data-action="replace"><span class="command-symbol">⇄</span>Replace</button><button class="small-command" data-action="select"><span class="command-symbol">↖</span>Select <span class="chevron"></span></button></div><div class="group-label">Editing</div></div>
+    </div>
+    <div class="ribbon alt-ribbon hidden" id="other-ribbon"></div>
+  </div>
+  <div class="workspace">
+    <div class="navigation" id="navigation"><div class="nav-title">Navigation</div><input class="nav-search" id="find-input" placeholder="Search in document"><div class="nav-tabs"><span class="current">Headings</span><span>Pages</span><span>Results</span></div><button class="nav-item current" data-section="document-title">Project proposal</button><button class="nav-item nav-sub" data-section="overview">Overview</button><button class="nav-item nav-sub" data-section="approach">Our approach</button><button class="nav-item nav-sub" data-section="timeline">The road ahead</button></div>
+    <div class="canvas" id="canvas"><div class="ruler"><span>1</span><span>· · · ·</span><span>2</span><span>· · · ·</span><span>3</span><span>· · · ·</span><span>4</span><span>· · · ·</span><span>5</span><span>· · · ·</span><span>6</span></div>
+      <div class="paper" id="paper"><div class="document-meta"><span>NORTHSTAR STUDIO</span><span>STRATEGY / 2026</span></div><div class="eyebrow">A NEW CHAPTER</div><h1 id="document-title">Good ideas deserve<br>a great beginning.</h1><div class="subtitle">Project proposal · Prepared by Alex Davis</div><h2 id="overview">Overview</h2><p id="sample">We believe the best work starts with a clear purpose. This proposal outlines a thoughtful path from an ambitious idea to a useful, beautifully crafted experience.</p><p>Our goal is simple: bring the right people, a shared direction, and the space to do meaningful work together.</p><div class="callout">“Make room for the work that matters.”</div><h2 id="approach">Our approach</h2><p>Start with listening. Build with intention. Refine the details. At every step, we will keep the people who use this experience at the heart of our decisions.</p><h2 id="timeline">The road ahead</h2><div class="milestones"><div class="milestone"><b>01 / DISCOVER</b><div>Ask better questions.<br>Find the opportunity.</div></div><div class="milestone"><b>02 / DESIGN</b><div>Explore possibilities.<br>Shape the experience.</div></div><div class="milestone"><b>03 / DELIVER</b><div>Bring it to life.<br>Make every detail count.</div></div></div></div>
+    </div>
+  </div>
+  <div class="statusbar"><span>Page 1 of 1</span><span id="word-count">151 words</span><span>English (United States)</span><span id="status">Ready</span><div class="zoom-tools"><button data-action="zoom-out" title="Zoom out">−</button><div class="zoom-track"><div class="zoom-thumb"></div></div><button data-action="zoom-in" title="Zoom in">+</button><span id="zoom-label">100%</span></div></div>
+  <script src="word-ribbon.js"></script>
+</body>
+</html>

@@ -25,6 +25,10 @@ pub struct Overlay<'a> {
     pub caret: Option<(NodeId, usize)>,
     /// The input with a selection and the selected byte range of its displayed text.
     pub selection: Option<(NodeId, usize, usize)>,
+    /// The window's logical size, for the page's own scrollbar.
+    pub viewport: (f32, f32),
+    /// Selected page text: `(text run, from, to)` byte ranges.
+    pub page_selection: &'a [(usize, usize, usize)],
 }
 
 pub struct Renderer {
@@ -48,7 +52,7 @@ impl Renderer {
 
     /// Paint the whole tree.
     pub fn paint(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, overlay: &Overlay) {
-        let Overlay { scroll_y, offsets, caret, selection } = *overlay;
+        let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection } = *overlay;
         canvas.save();
         canvas.translate((0.0, -scroll_y));
         // Boxes that wrap their subtree (an `overflow` clip, or an `opacity` layer) end
@@ -69,7 +73,15 @@ impl Renderer {
                         canvas.save_layer_alpha_f(None, opacity);
                         open.push((b.subtree_end.max(i + 1), None));
                     }
+                    if let Some(t) = &b.transform {
+                        canvas.save();
+                        canvas.concat(&skia_safe::Matrix::new_all(t.a, t.c, t.e, t.b, t.d, t.f, 0.0, 0.0, 1.0));
+                        open.push((b.subtree_end.max(i + 1), None));
+                    }
                     self.paint_box(canvas, b, styles);
+                    if let Some(list) = tree.list_box(b.node) {
+                        self.paint_list(canvas, b.rect, styles.get(b.node), list);
+                    }
                     if let Some(sb) = &b.scroll {
                         let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
                         canvas.save();
@@ -79,8 +91,12 @@ impl Renderer {
                     }
                 }
                 BoxContent::Text(content) => {
+                    let highlight = styles.get(b.node).selection_bg;
                     if let Some((_, from, to)) = selection.filter(|(n, ..)| content.owners.iter().any(|(_, o)| o == n)) {
-                        paint_selection(canvas, b.rect, content, from, to);
+                        paint_selection(canvas, b.rect, content, from, to, highlight);
+                    }
+                    if let Some(&(_, from, to)) = page_selection.iter().find(|(run, ..)| *run == i) {
+                        paint_selection(canvas, b.rect, content, from, to, highlight);
                     }
                     self.paint_text(canvas, b.rect, content);
                     if let Some((_, at)) = caret.filter(|(n, _)| content.owners.iter().any(|(_, o)| o == n)) {
@@ -99,6 +115,39 @@ impl Renderer {
             self.paint_menu(canvas, menu);
         }
         canvas.restore();
+        if let Some(t) = nile_layout::page_thumb(viewport, tree.content_height, scroll_y) {
+            paint_thumb(canvas, &t);
+        }
+    }
+
+    /// The rows of a list-box `<select>`, clipped to its padding box.
+    fn paint_list(&mut self, canvas: &Canvas, r: LRect, s: &nile_style::ComputedStyle, l: &nile_layout::ListBox) {
+        let b = s.border_width;
+        canvas.save();
+        canvas.clip_rect(Rect::from_ltrb(r.x + b.left, r.y + b.top, r.x + r.width - b.right, r.y + r.height - b.bottom), None, true);
+        for (i, item) in l.items.iter().enumerate() {
+            let top = r.y + l.inset_top - l.scroll + l.row_height * i as f32;
+            if top + l.row_height < r.y || top > r.y + r.height {
+                continue;
+            }
+            if item.selected {
+                canvas.draw_rect(Rect::from_xywh(r.x + b.left, top, r.width - b.left - b.right, l.row_height), &fill(CssColor::rgb(29, 78, 216)));
+            }
+            let line_h = item.text.height();
+            let at = LRect { x: r.x + b.left + l.pad_x, y: top + (l.row_height - line_h) / 2.0, width: r.width, height: line_h };
+            let tint = if item.selected { Some([255, 255, 255, 255]) } else if item.disabled { Some([150, 150, 150, 255]) } else { None };
+            self.paint_text_tinted(canvas, at, &item.text, tint);
+        }
+        canvas.restore();
+        if l.max_scroll > 0.0 {
+            let track = l.view_height - 4.0;
+            let thumb = (track * l.view_height / (l.view_height + l.max_scroll)).max(16.0).min(track);
+            let at = r.y + l.inset_top + 2.0 + (track - thumb) * l.scroll / l.max_scroll;
+            canvas.draw_rrect(
+                RRect::new_rect_xy(Rect::from_xywh(r.x + r.width - b.right - 7.0, at, 4.0, thumb), 2.0, 2.0),
+                &fill(CssColor { r: 0, g: 0, b: 0, a: 110 }),
+            );
+        }
     }
 
     /// The open `<select>` list: white panel, highlighted row, a mark on the chosen one.
@@ -110,8 +159,13 @@ impl Renderer {
         border.set_style(skia_safe::PaintStyle::Stroke);
         border.set_stroke_width(1.0);
         canvas.draw_rrect(RRect::new_rect_xy(Rect::from_xywh(r.x + 0.5, r.y + 0.5, r.width - 1.0, r.height - 1.0), 3.0, 3.0), &border);
+        canvas.save();
+        canvas.clip_rect(Rect::from_xywh(r.x + 1.0, r.y + 1.0, r.width - 2.0, r.height - 2.0), None, false);
         for (i, item) in m.items.iter().enumerate() {
-            let top = r.y + 1.0 + m.row_height * i as f32;
+            let top = r.y + 1.0 - m.scroll + m.row_height * i as f32;
+            if top + m.row_height < r.y || top > r.y + r.height {
+                continue;
+            }
             let on = m.highlight == Some(i) && !item.disabled;
             if on {
                 canvas.draw_rect(Rect::from_xywh(r.x + 1.0, top, r.width - 2.0, m.row_height), &fill(CssColor::rgb(29, 78, 216)));
@@ -123,6 +177,15 @@ impl Renderer {
             if m.selected == Some(i) && !on {
                 canvas.draw_rect(Rect::from_xywh(r.x + 2.0, top + 2.0, 2.0, m.row_height - 4.0), &fill(CssColor::rgb(29, 78, 216)));
             }
+        }
+        canvas.restore();
+        if m.max_scroll > 0.0 {
+            let track = r.height - 4.0;
+            let thumb = (track * track / (track + m.max_scroll)).max(16.0).min(track);
+            let at = r.y + 2.0 + (track - thumb) * m.scroll / m.max_scroll;
+            let mut paint = fill(CssColor { r: 0, g: 0, b: 0, a: 110 });
+            paint.set_anti_alias(true);
+            canvas.draw_rrect(RRect::new_rect_xy(Rect::from_xywh(r.x + r.width - 6.0, at, 4.0, thumb), 2.0, 2.0), &paint);
         }
     }
 
@@ -590,37 +653,32 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
 /// Thin overlay scrollbars for an `overflow: auto | scroll` box that has more to show.
 fn paint_scrollbars(canvas: &Canvas, b: &LayoutBox, offsets: &ScrollOffsets) {
     let Some(sb) = &b.scroll else { return };
-    let (max_x, max_y) = sb.max_offset();
     let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    paint.set_color(Color::from_argb(110, 0, 0, 0));
-    const THICK: f32 = 6.0;
-    const EDGE: f32 = 2.0;
-    let c = sb.clip;
-    if sb.wheel_y && max_y > 0.0 {
-        let len = (c.height * c.height / sb.content_height).clamp(16.0, c.height);
-        let top = c.y + (c.height - len) * (oy / max_y).clamp(0.0, 1.0);
-        let r = Rect::from_xywh(c.x + c.width - THICK - EDGE, top, THICK, len);
-        canvas.draw_round_rect(r, THICK / 2.0, THICK / 2.0, &paint);
-    }
-    if sb.wheel_x && max_x > 0.0 {
-        let len = (c.width * c.width / sb.content_width).clamp(16.0, c.width);
-        let left = c.x + (c.width - len) * (ox / max_x).clamp(0.0, 1.0);
-        let r = Rect::from_xywh(left, c.y + c.height - THICK - EDGE, len, THICK);
-        canvas.draw_round_rect(r, THICK / 2.0, THICK / 2.0, &paint);
+    for t in sb.thumbs(ox, oy) {
+        paint_thumb(canvas, &t);
     }
 }
 
+fn paint_thumb(canvas: &Canvas, t: &nile_layout::Thumb) {
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(Color::from_argb(110, 0, 0, 0));
+    let r = Rect::from_xywh(t.rect.x, t.rect.y, t.rect.width, t.rect.height);
+    canvas.draw_round_rect(r, nile_layout::SCROLLBAR_THICK / 2.0, nile_layout::SCROLLBAR_THICK / 2.0, &paint);
+}
+
 /// Highlight bytes `from..to` of a text run.
-fn paint_selection(canvas: &Canvas, origin: LRect, content: &TextContent, from: usize, to: usize) {
+fn paint_selection(canvas: &Canvas, origin: LRect, content: &TextContent, from: usize, to: usize, color: Option<CssColor>) {
     let layout = &content.layout;
     let sel = Selection::new(
         Cursor::from_byte_index(layout, from, Affinity::Downstream),
         Cursor::from_byte_index(layout, to, Affinity::Upstream),
     );
     let mut paint = Paint::default();
-    paint.set_color(Color::from_argb(90, 59, 130, 246));
+    match color {
+        Some(c) => paint.set_color(Color::from_argb(c.a, c.r, c.g, c.b)),
+        None => paint.set_color(Color::from_argb(90, 59, 130, 246)),
+    };
     for (r, _) in sel.geometry(layout) {
         let rect = Rect::from_ltrb(
             origin.x + r.x0 as f32,

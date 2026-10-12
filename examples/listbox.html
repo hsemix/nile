@@ -1,0 +1,31 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>List boxes and drop-downs</title>
+<style>
+  body { font-family: sans-serif; margin: 24px; display: flex; gap: 32px; align-items: flex-start }
+  h3 { margin: 0 0 8px; font-size: 14px }
+  select { font-size: 14px }
+  p { color: #555; font-size: 12px; max-width: 220px }
+</style>
+<div>
+  <h3>multiple</h3>
+  <select id="m" multiple>
+    <option>Apple</option><option selected>Banana</option><option>Cherry</option>
+    <option selected>Date</option><option>Elderberry</option><option>Fig</option>
+    <option disabled>Grape (n/a)</option><option>Honeydew</option>
+  </select>
+  <p>Click selects one, Cmd/Ctrl-click toggles, Shift-click extends, wheel scrolls.</p>
+</div>
+<div>
+  <h3>size="3"</h3>
+  <select id="s" size="3"><option>One</option><option>Two</option><option selected>Three</option><option>Four</option><option>Five</option></select>
+</div>
+<div>
+  <h3>long drop-down</h3>
+  <select id="d"></select>
+  <p>Scrolls with the wheel; opens upward near the window's bottom.</p>
+</div>
+<script>
+  const d = document.$("#d");
+  for (let i = 1; i <= 40; i++) d.append(<option>Item {i}</option>);
+</script>

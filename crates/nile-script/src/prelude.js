@@ -522,6 +522,8 @@
       if (this.localName !== "select") return undefined;
       const opts = this.options;
       let i = opts.findIndex((o) => N.getState(o._id, "selected"));
+      // A multiple list box may have nothing chosen; a drop-down always shows something.
+      if (i < 0 && this.hasAttribute("multiple")) return -1;
       if (i < 0) i = opts.findIndex((o) => !N.getState(o._id, "disabled"));
       return i < 0 && opts.length ? 0 : i;
     },
@@ -538,14 +540,19 @@
     get() {
       if (this.localName !== "option") return undefined;
       const s = this.closest("select");
+      if (s && s.hasAttribute("multiple")) return N.getState(this._id, "selected");
       return s ? s.options[s.selectedIndex] === this : N.getState(this._id, "selected");
     },
     set(v) {
       if (this.localName !== "option") return;
       const s = this.closest("select");
-      if (s && v) s.selectedIndex = s.options.indexOf(this);
+      if (s && v && !s.hasAttribute("multiple")) s.selectedIndex = s.options.indexOf(this);
       else { N.setState(this._id, "selected", !!v); if (!v) this.removeAttribute("selected"); }
     },
+  });
+  Object.defineProperty(Element.prototype, "selectedOptions", {
+    configurable: true,
+    get() { return this.localName === "select" ? this.options.filter((o) => N.getState(o._id, "selected")) : undefined; },
   });
   Object.defineProperty(Element.prototype, "text", {
     configurable: true,
@@ -701,6 +708,14 @@
   });
 
   // ---- computed style, window metrics, scrolling ---------------------------
+  // `window.getSelection()`: the text selected on the page (not inside inputs).
+  g.getSelection = () => ({
+    toString: () => N.pageSelection(),
+    get isCollapsed() { return N.pageSelection() === ""; },
+    get rangeCount() { return N.pageSelection() === "" ? 0 : 1; },
+    removeAllRanges: () => N.clearPageSelection(),
+    empty: () => N.clearPageSelection(),
+  });
   g.getComputedStyle = (el) => {
     const get = (n) => {
       n = kebab(n);

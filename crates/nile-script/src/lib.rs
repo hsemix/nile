@@ -54,6 +54,11 @@ pub trait Environment {
     /// `(start, end)` of an input's selection, in characters of its value.
     fn selection(&self, node: NodeId) -> (usize, usize);
     fn set_selection(&self, node: NodeId, start: usize, end: usize);
+    /// The text selected on the page (outside inputs); empty if none.
+    fn selected_text(&self) -> String {
+        String::new()
+    }
+    fn clear_selected_text(&self) {}
 }
 
 /// Resolves `./` and `../` imports against the importing module's file.
@@ -345,6 +350,14 @@ fn install_natives(
                 env.set_selection(n, start.max(0.0) as usize, end.max(0.0) as usize);
             }
         }
+    });
+    native!("pageSelection", {
+        let env = env.clone();
+        move || env.selected_text()
+    });
+    native!("clearPageSelection", {
+        let env = env.clone();
+        move || env.clear_selected_text()
     });
     native!("now", move || start.elapsed().as_secs_f64() * 1000.0);
     native!("log", move |level: String, msg: String| {

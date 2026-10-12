@@ -2,7 +2,7 @@
 //! properties; layout turns the results into Taffy's grid style.
 
 use crate::parse::{RepeatKind, Value};
-use crate::{length, px, Align, ComputedStyle, Length};
+use crate::{length, px, Align, ComputedStyle, Length, VerticalAlign};
 
 /// The size of a track's min or max.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -233,6 +233,25 @@ pub(crate) fn apply(s: &mut ComputedStyle, name: &str, v: &[Value], fs: f32) -> 
             if let Some(r) = first.and_then(|x| px(x, fs)) {
                 s.row_gap = r;
                 s.column_gap = v.get(1).and_then(|x| px(x, fs)).unwrap_or(r);
+            }
+        }
+        "border-spacing" => {
+            if let Some(h) = first.and_then(|x| px(x, fs)) {
+                s.border_spacing = (h, v.get(1).and_then(|x| px(x, fs)).unwrap_or(h));
+            }
+        }
+        "border-collapse" => match first.and_then(Value::ident) {
+            Some("collapse") => s.border_collapse = true,
+            Some("separate") => s.border_collapse = false,
+            _ => {}
+        },
+        "vertical-align" => {
+            s.vertical_align = match first.and_then(Value::ident) {
+                Some("top") => VerticalAlign::Top,
+                Some("middle") => VerticalAlign::Middle,
+                Some("bottom") => VerticalAlign::Bottom,
+                Some("baseline") => VerticalAlign::Baseline,
+                _ => s.vertical_align,
             }
         }
         "justify-items" => s.justify_items = align_of(first).unwrap_or(s.justify_items),
