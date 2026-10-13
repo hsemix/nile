@@ -78,7 +78,7 @@ fn expand_at(html: &str, dir: &str, load: &mut dyn FnMut(&str) -> Option<String>
 }
 
 /// Index of the `>` that closes the tag whose attributes start at `from`, skipping quoted values.
-fn tag_end(html: &str, from: usize) -> Option<usize> {
+pub(crate) fn tag_end(html: &str, from: usize) -> Option<usize> {
     let mut quote = None;
     for (i, b) in html.bytes().enumerate().skip(from) {
         match (quote, b) {
@@ -170,6 +170,40 @@ fn comparison(term: &str) -> bool {
     }
 }
 
+/// The HTML parser drops `<frame>` outside a `<frameset>`, but Sciter allows it wherever a block
+/// goes (and `<frame src=...>` needs no closing tag). So `<frame ...>` becomes
+/// `<nile-frame ...></nile-frame>`, which `Document::parse` turns back into a `frame` element.
+pub(crate) fn rewrite_frames(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    if !lower.contains("<frame") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len() + 32);
+    let mut at = 0;
+    while let Some(i) = lower[at..].find("<frame").map(|i| i + at) {
+        let after = i + "<frame".len();
+        let delimited = html.as_bytes().get(after).is_some_and(|b| b.is_ascii_whitespace() || *b == b'/' || *b == b'>');
+        let Some(end) = tag_end(html, after).filter(|_| delimited) else {
+            out.push_str(&html[at..after]);
+            at = after;
+            continue;
+        };
+        out.push_str(&html[at..i]);
+        out.push_str("<nile-frame");
+        out.push_str(html[after..end].trim_end().trim_end_matches('/'));
+        out.push_str("></nile-frame>");
+        at = end + 1;
+        // An explicit `</frame>` right after is the same element, not another one.
+        let rest = &lower[at..];
+        let trimmed = rest.trim_start();
+        if trimmed.starts_with("</frame>") {
+            at += rest.len() - trimmed.len() + "</frame>".len();
+        }
+    }
+    out.push_str(&html[at..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +235,13 @@ mod tests {
         assert_eq!(run(&here), "<p>A</p>");
         let not = format!("<include src=\"a.htm\" media=\"platform != '{}'\">fb</include>", platform());
         assert_eq!(run(&not), "fb");
+    }
+
+    #[test]
+    fn frames_become_closed_custom_elements() {
+        assert_eq!(rewrite_frames("<div><frame src=a.htm><p>x</p></div>"), "<div><nile-frame src=a.htm></nile-frame><p>x</p></div>");
+        assert_eq!(rewrite_frames("<FRAME src='a'/> </frame><frameset>"), "<nile-frame src='a'></nile-frame><frameset>");
+        assert_eq!(rewrite_frames("<frame src=a></frame>z"), "<nile-frame src=a></nile-frame>z");
     }
 
     #[test]

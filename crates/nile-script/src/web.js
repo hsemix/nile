@@ -833,6 +833,100 @@
     variable: (name, set) => (set === undefined ? call("variable", String(name)) : call("variable", String(name), set === null ? "\u0000" : String(set))),
     exec: (...args) => { call("exec", ...args.map(String)); },
   };
+
+  // ---- <frame> / <iframe> ------------------------------------------------------
+  // The sub-document is a separate page with its own script context, so the outer page reaches
+  // into it by running code there (`__frameEval`) and talks to it with messages.
+  const isFrame = (el) => el.localName === "frame" || el.localName === "iframe";
+  const rpc = (frame, code) => {
+    const r = host.__frameEval(frame._id, "JSON.stringify(" + code + ")");
+    if (!r || !r.ok) throw new Error((r && r.error) || "the frame has no document");
+    return r.v === "" ? undefined : JSON.parse(r.v);
+  };
+  const lit = (v) => JSON.stringify(v === undefined ? null : v);
+  class FrameElement {
+    constructor(frame, expr) { this._f = frame; this._e = expr; }
+    _get(body) { return rpc(this._f, `(function (e) { return e ? ${body} : undefined; })(${this._e})`); }
+    _do(body) { rpc(this._f, `(function (e) { if (e) { ${body} } })(${this._e})`); }
+    get exists() { return rpc(this._f, `!!(${this._e})`); }
+    get tag() { return this._get("e.localName"); }
+    get text() { return this._get("e.textContent"); }
+    set text(v) { this._do(`e.textContent = ${lit(String(v))};`); }
+    get html() { return this._get("e.innerHTML"); }
+    set html(v) { this._do(`e.innerHTML = ${lit(String(v))};`); }
+    get value() { return this._get("e.value"); }
+    set value(v) { this._do(`e.value = ${lit(v)};`); }
+    getAttribute(name) { return this._get(`e.getAttribute(${lit(String(name))})`) ?? null; }
+    setAttribute(name, v) { this._do(`e.setAttribute(${lit(String(name))}, ${lit(String(v))});`); }
+    click() { this._do("e.click();"); }
+    $(sel) { const x = new FrameElement(this._f, `(${this._e}).querySelector(${lit(sel)})`); return x.exists ? x : null; }
+    $$(sel) {
+      const n = rpc(this._f, `(${this._e}).querySelectorAll(${lit(sel)}).length`);
+      return Array.from({ length: n }, (_, i) => new FrameElement(this._f, `(${this._e}).querySelectorAll(${lit(sel)})[${i}]`));
+    }
+  }
+  class FrameDocument {
+    constructor(frame) { this._f = frame; }
+    $(sel) { const x = new FrameElement(this._f, `document.querySelector(${lit(sel)})`); return x.exists ? x : null; }
+    $$(sel) {
+      const n = rpc(this._f, `document.querySelectorAll(${lit(sel)}).length`);
+      return Array.from({ length: n }, (_, i) => new FrameElement(this._f, `document.querySelectorAll(${lit(sel)})[${i}]`));
+    }
+    querySelector(sel) { return this.$(sel); }
+    querySelectorAll(sel) { return this.$$(sel); }
+    eval(code) { return rpc(this._f, `(0, eval)(${lit(String(code))})`); }
+    call(name, ...args) { return rpc(this._f, `${name}(...${lit(args)})`); }
+    get title() { return rpc(this._f, "document.title"); }
+    get body() { return this.$("body"); }
+  }
+  const frameProp = (name, desc) => Object.defineProperty(Element.prototype, name, { configurable: true, ...desc });
+  frameProp("frame", { get() { return isFrame(this) ? this : undefined; } });
+  frameProp("document", { get() { return isFrame(this) ? new FrameDocument(this) : undefined; } });
+  frameProp("contentDocument", { get() { return isFrame(this) ? new FrameDocument(this) : undefined; } });
+  frameProp("contentWindow", {
+    get() {
+      if (!isFrame(this)) return undefined;
+      const f = this;
+      return { postMessage: (data) => f.postMessage(data), document: new FrameDocument(f), eval: (code) => new FrameDocument(f).eval(code) };
+    },
+  });
+  frameProp("url", {
+    get() { return isFrame(this) ? this.getAttribute("src") || "" : undefined; },
+    set(v) { if (isFrame(this)) this.loadFile(v); },
+  });
+  const frameMethod = (name, fn) => Object.defineProperty(Element.prototype, name, { configurable: true, writable: true, value: fn });
+  frameMethod("loadFile", function (url) {
+    if (!isFrame(this)) return false;
+    this.removeAttribute("srcdoc");
+    this.setAttribute("src", String(url));
+    return true;
+  });
+  frameMethod("loadHtml", function (html, baseUrl) {
+    if (!isFrame(this)) return false;
+    if (baseUrl) this.setAttribute("nile-base", String(baseUrl).replace(/[^/\\]*$/, ""));
+    this.setAttribute("srcdoc", typeof html === "string" ? html : new TextDecoder().decode(html));
+    return true;
+  });
+  frameMethod("loadEmpty", function () { return isFrame(this) ? this.loadHtml("") : false; });
+  frameMethod("postMessage", function (data) {
+    if (isFrame(this)) host.__framePost(this._id, JSON.stringify(data) ?? "null");
+  });
+  // Inside a frame, `window.parent` can post messages up; at the top it is the window itself.
+  const parentWindow = { postMessage: (data) => { host.__parentPost(JSON.stringify(data) ?? "null"); } };
+  const upward = { configurable: true, get() { return host.has("__parentPost") ? parentWindow : g; } };
+  Object.defineProperty(g, "parent", upward);
+  Object.defineProperty(g, "top", upward);
+  Object.defineProperty(g, "__frameMessage", {
+    value(...args) {
+      // From the outer page: (frame node id, data). From a frame's parent: (data).
+      const fromFrame = args.length === 2;
+      const event = new Event("message");
+      event.data = fromFrame ? args[1] : args[0];
+      event.origin = "";
+      event.source = fromFrame ? wrap(args[0]) : parentWindow;
+      g.dispatchEvent(event);
+    },
+  });
   Object.defineProperty(g, "__sciterModule", { value: sciterModule });
   Object.defineProperty(g, "__envModule", { value: envModule });
   }

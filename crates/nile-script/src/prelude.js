@@ -573,7 +573,8 @@
   });
   Object.defineProperty(Element.prototype, "text", {
     configurable: true,
-    get() { return this.localName === "option" ? this.textContent.replace(/\s+/g, " ").trim() : undefined; },
+    get() { return this.localName === "option" ? this.textContent.replace(/\s+/g, " ").trim() : this.textContent; },
+    set(v) { this.textContent = String(v); },
   });
   Object.defineProperty(Element.prototype, "label", {
     configurable: true,

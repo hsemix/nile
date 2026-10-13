@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head><title>frames</title>
+<style>
+  body { margin: 0; font: 15px sans-serif; }
+  header { background: #2b4c7e; color: white; padding: 10px 16px; }
+  #layout { display: flex; height: 300px; }
+  #side { width: 160px; height: 300px; }
+  #main { flex: 1; height: 300px; border: 2px solid #2b4c7e; }
+  footer { padding: 10px 16px; }
+  iframe { border: 1px solid #aab; }
+</style></head>
+<body>
+  <header>Outer document
+    <button id="read">Read frame</button>
+    <button id="swap">loadHtml</button>
+    <button id="ping">postMessage</button>
+    <span id="status">…</span>
+  </header>
+  <div id="layout">
+    <frame id="side" src="frames/sidebar.html"></frame>
+    <frame id="main" src="frames/content.html"></frame>
+  </div>
+  <footer>Inline frame: <iframe id="small" src="frames/sidebar.html" style="width:200px;height:90px"></iframe></footer>
+  <script>
+    const main = document.$('#main');
+    const status = document.$('#status');
+    main.on('complete', () => status.text = 'main complete');
+    document.$('#read').on('click', () => { status.text = 'frame says count = ' + main.document.$('#n').text; });
+    document.$('#swap').on('click', () => main.loadHtml('<body style="font:15px sans-serif;padding:14px"><h2>loadHtml</h2><p>Replaced at runtime.</p></body>'));
+    document.$('#ping').on('click', () => main.postMessage({ hello: 'frame' }));
+    window.addEventListener('message', (e) => status.text = 'reply: ' + e.data.reply);
+  </script>
+</body></html>

@@ -9,7 +9,7 @@
 use html5ever::tendril::TendrilSink;
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub usize);
 
 #[derive(Debug, Clone)]
@@ -61,11 +61,13 @@ pub struct Document {
 
 mod include;
 pub use include::expand as expand_includes;
+use include::rewrite_frames;
 
 impl Document {
     pub const ROOT: NodeId = NodeId(0);
 
     pub fn parse(html: &str) -> Document {
+        let html = rewrite_frames(html);
         let dom = html5ever::parse_document(RcDom::default(), Default::default())
             .from_utf8()
             .read_from(&mut html.as_bytes())
@@ -80,7 +82,8 @@ impl Document {
         let kind = match &handle.data {
             NodeData::Document => NodeKind::Document,
             NodeData::Element { name, attrs, .. } => NodeKind::Element {
-                tag: name.local.to_string(),
+                // `rewrite_frames` hid `<frame>` from the HTML parser behind this name.
+                tag: if &*name.local == "nile-frame" { "frame".to_string() } else { name.local.to_string() },
                 attrs: attrs
                     .borrow()
                     .iter()

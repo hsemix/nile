@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><title>sidebar</title>
+<style>
+  body { margin: 0; padding: 10px; background: #263248; color: #dbe6ff; font: 14px sans-serif; }
+  a { color: #8fd0ff; display: block; padding: 4px 0; }
+  a:hover { color: white; }
+  input { width: 90%; }
+</style></head>
+<body>
+  <b>Sidebar</b>
+  <a href="#">Inbox</a><a href="#">Sent</a><a href="#">Drafts</a><a href="#">Archive</a>
+  <input id="q" placeholder="search…">
+  <p id="out">idle</p>
+  <script>
+    document.on('click', 'a', function () { document.$('#out').text = 'clicked ' + this.text; });
+  </script>
+</body></html>

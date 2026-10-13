@@ -807,6 +807,8 @@ td, th { display: table-cell; padding: 1px; vertical-align: middle }
 th { font-weight: bold; text-align: center }
 caption { display: table-caption; text-align: center }
 col, colgroup { display: none }
+frame { display: block; height: 150px; border: 0 }
+iframe { display: inline-block; width: 300px; height: 150px; border: 0 }
 article, aside, address, blockquote, figure, figcaption, details, summary, fieldset, legend, dl, dt, dd, ol, pre,
   h4, h5, h6, hgroup, menu { display: block }
 span, a, b, strong, em, i, u, s, del, br, label, code, kbd, samp, var, tt, small, big, sub, sup, mark, abbr, cite, q,

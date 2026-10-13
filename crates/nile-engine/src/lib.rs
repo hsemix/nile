@@ -6,6 +6,7 @@
 //! them are internal plumbing, so prefer the C API (`nile-capi`) for anything else.
 
 pub mod editing;
+pub mod frames;
 mod inputs;
 mod net;
 pub mod window;
@@ -585,6 +586,8 @@ pub struct Page {
     /// Blink phase of the caret and when it flips next.
     pub caret_visible: bool,
     pub blink_at: Instant,
+    /// Sub-documents of `<frame>`/`<iframe>` elements.
+    pub frames: Rc<RefCell<frames::Frames>>,
 }
 
 /// A scrollbar thumb held by the pointer.
@@ -661,10 +664,23 @@ impl Page {
     }
 
     pub fn load(path: PathBuf, viewport: (f32, f32), scroll_y: f32) -> Page {
+        Page::load_in(path, viewport, scroll_y, None)
+    }
+
+    /// A page shown inside a `<frame>`: `outbox` collects what its scripts post to `window.parent`.
+    pub(crate) fn load_embedded(path: PathBuf, viewport: (f32, f32), outbox: Rc<RefCell<Vec<String>>>) -> Page {
+        Page::load_in(path, viewport, 0.0, Some(outbox))
+    }
+
+    pub(crate) fn html_embedded(html: &str, base_dir: PathBuf, viewport: (f32, f32), outbox: Rc<RefCell<Vec<String>>>) -> Page {
+        Page::from_source_in(html.to_string(), base_dir.join("index.html"), Some(html.to_string()), viewport, 0.0, Some(outbox))
+    }
+
+    fn load_in(path: PathBuf, viewport: (f32, f32), scroll_y: f32, outbox: Option<Rc<RefCell<Vec<String>>>>) -> Page {
         let html = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             format!("<body><h1>Could not open file</h1><p>{}: {e}</p></body>", path.display())
         });
-        Page::from_source(html, path, None, viewport, scroll_y)
+        Page::from_source_in(html, path, None, viewport, scroll_y, outbox)
     }
 
     /// A page from HTML text. Relative `src`, `href` and `url()` paths resolve against `base_dir`.
@@ -674,12 +690,17 @@ impl Page {
 
     /// `memory`: the HTML to use again on reload, for pages that didn't come from a file.
     fn from_source(html: String, path: PathBuf, memory: Option<String>, viewport: (f32, f32), scroll_y: f32) -> Page {
+        Page::from_source_in(html, path, memory, viewport, scroll_y, None)
+    }
+
+    fn from_source_in(html: String, path: PathBuf, memory: Option<String>, viewport: (f32, f32), scroll_y: f32, outbox: Option<Rc<RefCell<Vec<String>>>>) -> Page {
         // `<include>` fragments are spliced in as text before parsing; paths are the page's folder's.
         let folder = path.parent().map(PathBuf::from).unwrap_or_default();
         let html = nile_dom::expand_includes(&html, &mut |src| {
             let file = folder.join(src);
             std::fs::read_to_string(&file).map_err(|e| eprintln!("[include] could not load {}: {e}", file.display())).ok()
         });
+        let frames: Rc<RefCell<frames::Frames>> = Rc::default();
         let doc = Rc::new(RefCell::new(Document::parse(&html)));
         let interaction = InteractionState::default();
         let styles = compute_styles_in(&doc.borrow(), &interaction, viewport);
@@ -721,6 +742,15 @@ impl Page {
                 let sources = doc.borrow().script_sources();
                 let dir = path.parent().unwrap_or(std::path::Path::new("."));
                 host.set_fetcher(std::sync::Arc::new(net::PageFetcher::new(dir)));
+                if let Some(outbox) = outbox.clone() {
+                    host.register_host_fn("__parentPost", move |args| {
+                        if let Some(json) = args.trim().strip_prefix('[').and_then(|a| a.strip_suffix(']')).and_then(editing::unjson_string) {
+                            outbox.borrow_mut().push(json);
+                        }
+                        String::new()
+                    });
+                }
+                frames::register_frame_functions(&host, &frames);
                 let url = std::fs::canonicalize(&path).ok().map(|p| format!("file://{}", p.to_string_lossy().replace('\\', "/")));
                 host.set_location(url.as_deref().unwrap_or("about:blank"));
                 if memory.is_none() {
@@ -805,6 +835,7 @@ impl Page {
             page_drag: false,
             caret_visible: true,
             blink_at: Instant::now() + CARET_BLINK,
+            frames,
         }
     }
 
@@ -900,7 +931,8 @@ impl Page {
         for node in scrolled {
             self.emit(node, UiEvent::Plain("scroll"));
         }
-        changed | moved
+        let delivered = self.deliver_frame_messages();
+        changed | moved | delivered
     }
 
     /// Focus moved from `old` to `new`: end the old input's edit (firing
@@ -987,6 +1019,9 @@ impl Page {
     /// i.e. `dy > 0` is wheel-up): the innermost `overflow: auto | scroll` ancestor
     /// that can still move that way takes it, else the page does.
     pub fn wheel(&mut self, dx: f32, dy: f32) {
+        if self.frames_wheel(dx, dy) {
+            return;
+        }
         if let Some((x, y)) = self.pointer {
             if self.menu_row_at(x, y).is_some() {
                 self.scroll_menu(-dy);
@@ -1276,6 +1311,16 @@ impl Page {
         let request = self.view.borrow_mut().file_request.take();
         if let Some(r) = &request {
             self.file_target = Some(r.node);
+            self.frames.borrow_mut().file_frame = None;
+        }
+        if request.is_none() {
+            let ids: Vec<NodeId> = self.frames.borrow().slots.keys().copied().collect();
+            for id in ids {
+                if let Some(r) = self.with_frame(id, |p| p.take_file_request()).flatten() {
+                    self.frames.borrow_mut().file_frame = Some(id);
+                    return Some(r);
+                }
+            }
         }
         request
     }
@@ -1294,6 +1339,11 @@ impl Page {
     /// Give a file input the files the user picked (an empty list clears it) and fire
     /// `input` and `change`.
     pub fn choose_files(&mut self, node: NodeId, paths: &[String]) {
+        let file_frame = self.frames.borrow_mut().file_frame.take();
+        if let Some(id) = file_frame {
+            self.with_frame(id, |p| p.choose_files(node, paths));
+            return;
+        }
         let joined = paths.join("\n");
         {
             let mut doc = self.doc.borrow_mut();
@@ -1481,6 +1531,10 @@ impl Page {
     /// The pointer shape for what's under the pointer: a pressed scrollbar thumb or an open
     /// drop-down use the arrow; otherwise the hovered element's `cursor`.
     pub fn cursor(&self) -> nile_style::Cursor {
+        let hovered = self.frames.borrow().hover;
+        if let Some(cursor) = hovered.and_then(|id| self.frames.borrow().slots.get(&id).map(|s| s.page.cursor())) {
+            return cursor;
+        }
         use nile_style::Cursor;
         if self.bar_drag.is_some() || self.view.borrow().menu.is_some() {
             return Cursor::Default;
@@ -1516,6 +1570,11 @@ impl Page {
 
     pub fn pointer_moved(&mut self, x: f32, y: f32) -> bool {
         self.pointer = Some((x, y));
+        let in_frames = self.frames_pointer_moved(x, y);
+        in_frames | self.pointer_moved_here(x, y)
+    }
+
+    fn pointer_moved_here(&mut self, x: f32, y: f32) -> bool {
         if self.bar_drag.is_some() {
             return self.bar_drag_to(x, y);
         }
@@ -1561,7 +1620,8 @@ impl Page {
 
     pub fn pointer_left(&mut self) -> bool {
         self.pointer = None;
-        self.refresh_hover()
+        let in_frames = self.frames_pointer_left();
+        in_frames | self.refresh_hover()
     }
 
     /// Count consecutive clicks close in time and place (1, 2, 3).
@@ -1615,6 +1675,11 @@ impl Page {
     /// Primary button down: the hovered element becomes active and focus moves
     /// to its nearest focusable ancestor (or is cleared).
     pub fn press(&mut self) -> bool {
+        let here = self.press_here();
+        self.frames_press() | here
+    }
+
+    fn press_here(&mut self) -> bool {
         if self.hover_due.is_some() {
             self.refresh_hover(); // a click lands on what is under the pointer now
         }
@@ -1783,6 +1848,11 @@ impl Page {
     /// Primary button up: `mouseup`, then `click` on the common ancestor of the
     /// pressed and released elements.
     pub fn release(&mut self) -> bool {
+        let there = self.frames_release();
+        self.release_here() | there
+    }
+
+    fn release_here(&mut self) -> bool {
         if self.bar_drag.take().is_some() {
             return true;
         }
@@ -1863,7 +1933,8 @@ impl Page {
         let (c1, n1) = self.run_timers();
         let (c2, n2) = self.blink();
         let (c3, n3) = self.animate();
-        (c0 | c1 | c2 | c3, [n0, n1, n2, n3].into_iter().flatten().min())
+        let (c4, n4) = self.frames_tick();
+        (c0 | c1 | c2 | c3 | c4, [n0, n1, n2, n3, n4].into_iter().flatten().min())
     }
 
     /// Step transitions and animations; wake again in a frame while any is running.
@@ -1938,6 +2009,9 @@ impl Page {
     /// Default action for a key the page didn't cancel: Tab moves focus,
     /// anything else edits the focused text input.
     pub fn default_key(&mut self, key: &str, mods: ModifiersState) -> bool {
+        if let Some(id) = self.focused_frame() {
+            return self.with_frame(id, |p| p.default_key(key, mods)).unwrap_or(false);
+        }
         if self.view.borrow().menu.is_none() && self.page_key(key, mods) {
             return true;
         }
@@ -2771,6 +2845,9 @@ impl Page {
 
     /// Whether the focused element takes text, so the window should enable its input method.
     pub fn ime_wanted(&self) -> bool {
+        if let Some(id) = self.focused_frame() {
+            return self.frames.borrow().slots[&id].page.ime_wanted();
+        }
         if self.focused_host().is_some() {
             return true;
         }
@@ -2782,6 +2859,10 @@ impl Page {
     /// Where the input method should put its candidate window: the caret, in window
     /// coordinates `(x, y, width, height)`.
     pub fn ime_cursor_rect(&mut self) -> Option<(f32, f32, f32, f32)> {
+        if let Some(id) = self.focused_frame() {
+            let (fx, fy, ..) = self.frames.borrow().slots[&id].rect;
+            return self.with_frame(id, |p| p.ime_cursor_rect()).flatten().map(|(x, y, w, h)| (x + fx, y + fy, w, h));
+        }
         if let Some(_host) = self.focused_host() {
             let (_, f) = self.edit_selection()?;
             let (x, y, h) = self.edit_caret_painted(f)?;
@@ -2806,6 +2887,9 @@ impl Page {
     /// The input method is composing `text` (`cursor` is its caret as a byte range of `text`).
     /// An empty `text` ends the composition without inserting anything.
     pub fn ime_preedit(&mut self, text: &str, cursor: Option<(usize, usize)>) -> bool {
+        if let Some(id) = self.focused_frame() {
+            return self.with_frame(id, |p| p.ime_preedit(text, cursor)).unwrap_or(false);
+        }
         if self.focused_host().is_some() {
             let ok = self.call("__imePreedit", &format!("[{}]", editing::json_string(text))).0.is_ok();
             self.ime_host = !text.is_empty();
@@ -2828,6 +2912,9 @@ impl Page {
 
     /// The input method finished: `text` goes in where the composition was.
     pub fn ime_commit(&mut self, text: &str) -> bool {
+        if let Some(id) = self.focused_frame() {
+            return self.with_frame(id, |p| p.ime_commit(text)).unwrap_or(false);
+        }
         self.ime_cursor = None;
         self.view.borrow_mut().set_preedit(None);
         if self.focused_host().is_some() {
@@ -2842,6 +2929,10 @@ impl Page {
 
     /// The composition was abandoned (focus moved, or the input method turned off).
     pub fn ime_cancel(&mut self) {
+        if let Some(id) = self.focused_frame() {
+            self.with_frame(id, |p| p.ime_cancel());
+            return;
+        }
         if std::mem::take(&mut self.ime_host) {
             // The composition lives in the page; the span goes wherever focus is now.
             let _ = self.call("__imePreedit", "[\"\"]");
@@ -2854,6 +2945,9 @@ impl Page {
     /// Replace the selection of the focused text input with `text` (filtered to what the input
     /// takes) as one edit; an empty `text` just deletes the selection.
     pub fn insert_text(&mut self, text: &str) -> bool {
+        if let Some(id) = self.focused_frame() {
+            return self.with_frame(id, |p| p.insert_text(text)).unwrap_or(false);
+        }
         let Some(focus) = self.interaction().focus.filter(|f| self.is_text_input(*f)) else { return false };
         if self.is_disabled(focus) || self.doc.borrow().node(focus).attr("readonly").is_some() {
             return false;
@@ -2922,6 +3016,9 @@ impl Page {
     /// A key event goes to the focused element, or `<body>`. Returns whether
     /// the page should keep its default handling (no `preventDefault`).
     pub fn key(&mut self, kind: &'static str, key: String, mods: ModifiersState) -> (bool, bool) {
+        if let Some(r) = self.frames_key(kind, &key, mods) {
+            return r;
+        }
         let target = self.interaction().focus.or_else(|| self.doc.borrow().body());
         let Some(target) = target else { return (true, false) };
         self.emit(
@@ -2992,11 +3089,13 @@ impl Page {
 
         let (lw, lh) = (width as f32 / scale, height as f32 / scale);
         self.layout(lw, lh);
+        self.update_frames();
         let bg = self.canvas_background();
         let caret = self.caret_for_paint();
         let selection = self.selection_for_paint();
         let dom_caret = self.dom_caret_for_paint();
         let ime_underline = self.ime_underline();
+        {
         let mut view = self.view.borrow_mut();
         view.layout();
         let page_selection = view.page_ranges();
@@ -3019,6 +3118,8 @@ impl Page {
             )
         });
         canvas.restore();
+        }
+        self.paint_frames(surface.canvas(), scale);
     }
 }
 
@@ -4622,6 +4723,99 @@ cd</textarea>
         }
         eprintln!("wheel+sync+paint: {:.2} ms avg, {:.2} ms worst", total / 40.0, worst);
         eprintln!("frames: {}", all.iter().map(|m| format!("{m:.1}")).collect::<Vec<_>>().join(" "));
+    }
+
+    #[test]
+    fn frames_host_documents_route_input_and_talk_to_scripts() {
+        let dir = std::env::temp_dir().join(format!("nile-frames-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("child.html"),
+            r#"<body style="margin:0"><input id="t"><button id="b" style="display:block">Go</button><p id="o"></p>
+               <div style="height:600px"></div>
+               <script>
+                 let n = 0;
+                 document.$('#b').on('click', () => { n++; document.$('#o').text = n; });
+                 window.addEventListener('message', (e) => window.parent.postMessage({ echo: e.data.say, same: window.parent !== window }));
+               </script></body>"#,
+        )
+        .unwrap();
+        let main = dir.join("main.html");
+        std::fs::write(
+            &main,
+            r#"<body style="margin:0"><p style="margin:0;height:40px">top</p><frame id="f" src="child.html" style="height:200px"></frame>
+               <script>
+                 globalThis.seen = [];
+                 const f = document.$('#f');
+                 f.on('newdocument', () => seen.push('new'));
+                 f.on('complete', () => seen.push('complete'));
+                 window.addEventListener('message', (e) => seen.push('msg:' + e.data.echo + ':' + e.data.same + ':' + (e.source === f)));
+               </script></body>"#,
+        )
+        .unwrap();
+        let mut p = Page::load(main, (600.0, 300.0), 0.0);
+        p.layout(600.0, 300.0);
+        p.update_frames();
+        let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+        assert_eq!(ev(&mut p, "seen.join()"), "new,complete");
+        assert_eq!(ev(&mut p, "f.document.$('#b').text"), "Go");
+
+        // A click inside the frame reaches the frame's own script, and the frame takes keyboard focus.
+        let id = p.doc.borrow().find(|n| n.attr("id") == Some("f")).unwrap();
+        let (fx, fy, ..) = p.frames.borrow().slots[&id].rect;
+        assert_eq!((fx, fy), (0.0, 40.0));
+        let button = {
+            let fr = p.frames.borrow();
+            let child = &fr.slots[&id].page;
+            let node = child.doc.borrow().find(|n| n.attr("id") == Some("b")).unwrap();
+            let r = child.view.borrow_mut().layout().node_rect(node).unwrap();
+            (fx + r.x + r.width / 2.0, fy + r.y + r.height / 2.0)
+        };
+        p.pointer_moved(button.0, button.1);
+        p.press();
+        p.release();
+        assert_eq!(ev(&mut p, "f.document.$('#o').text"), "1");
+        assert_eq!(p.focused_frame(), Some(id));
+
+        // Typing goes to the focused frame's input.
+        let input = {
+            let fr = p.frames.borrow();
+            let child = &fr.slots[&id].page;
+            let node = child.doc.borrow().find(|n| n.attr("id") == Some("t")).unwrap();
+            let r = child.view.borrow_mut().layout().node_rect(node).unwrap();
+            (fx + r.x + 4.0, fy + r.y + 4.0)
+        };
+        p.pointer_moved(input.0, input.1);
+        p.press();
+        p.release();
+        for k in ["h", "i"] {
+            let (proceed, _) = p.key("keydown", k.to_string(), ModifiersState::default());
+            if proceed {
+                p.default_key(k, ModifiersState::default());
+            }
+        }
+        assert_eq!(ev(&mut p, "f.document.$('#t').value"), "hi");
+
+        // The wheel scrolls the frame, not the outer page.
+        p.wheel(0.0, -50.0);
+        assert_eq!(p.view.borrow().scroll_y, 0.0);
+        assert!(p.frames.borrow().slots[&id].page.view.borrow().scroll_y > 0.0);
+
+        // Messages go both ways.
+        ev(&mut p, "f.postMessage({ say: 'yo' })");
+        p.sync();
+        assert_eq!(ev(&mut p, "seen.slice(2).join()"), "msg:yo:true:true");
+
+        // loadHtml and loadFile replace the document and fire the events again.
+        ev(&mut p, "f.loadHtml('<p id=z>hello</p>')");
+        p.update_frames();
+        assert_eq!(ev(&mut p, "f.document.$('#z').text"), "hello");
+        assert_eq!(ev(&mut p, "seen.slice(3).join()"), "new,complete");
+        ev(&mut p, "f.loadFile('child.html')");
+        p.update_frames();
+        assert_eq!(ev(&mut p, "f.document.$('#b').text"), "Go");
+        assert_eq!(ev(&mut p, "f.document.$('#nope') === null"), "true");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

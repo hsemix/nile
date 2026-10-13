@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><title>content</title>
+<style>
+  body { margin: 0; padding: 14px; font: 15px sans-serif; background: #fffdf5; }
+  h2 { margin-top: 0; }
+  .row { padding: 12px; border-bottom: 1px solid #ddd; }
+  button { padding: 4px 10px; }
+</style></head>
+<body>
+  <h2>Content frame</h2>
+  <p>This is a separate document with its own scripts and scrolling.</p>
+  <button id="b">Count</button> <span id="n">0</span>
+  <div class="row">Row 1</div><div class="row">Row 2</div><div class="row">Row 3</div>
+  <div class="row">Row 4</div><div class="row">Row 5</div><div class="row">Row 6</div>
+  <div class="row">Row 7</div><div class="row">Row 8</div><div class="row">Row 9</div>
+  <script>
+    window.addEventListener('message', (e) => { document.$('h2').text = 'Hello, ' + e.data.hello; window.parent.postMessage({ reply: 'got ' + e.data.hello }); });
+    let n = 0;
+    document.$('#b').on('click', () => { document.$('#n').text = ++n; });
+  </script>
+</body></html>
