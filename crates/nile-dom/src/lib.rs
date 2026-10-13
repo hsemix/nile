@@ -59,6 +59,9 @@ pub struct Document {
     states: std::collections::HashMap<NodeId, u32>,
 }
 
+mod include;
+pub use include::expand as expand_includes;
+
 impl Document {
     pub const ROOT: NodeId = NodeId(0);
 

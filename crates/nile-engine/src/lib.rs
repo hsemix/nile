@@ -674,6 +674,12 @@ impl Page {
 
     /// `memory`: the HTML to use again on reload, for pages that didn't come from a file.
     fn from_source(html: String, path: PathBuf, memory: Option<String>, viewport: (f32, f32), scroll_y: f32) -> Page {
+        // `<include>` fragments are spliced in as text before parsing; paths are the page's folder's.
+        let folder = path.parent().map(PathBuf::from).unwrap_or_default();
+        let html = nile_dom::expand_includes(&html, &mut |src| {
+            let file = folder.join(src);
+            std::fs::read_to_string(&file).map_err(|e| eprintln!("[include] could not load {}: {e}", file.display())).ok()
+        });
         let doc = Rc::new(RefCell::new(Document::parse(&html)));
         let interaction = InteractionState::default();
         let styles = compute_styles_in(&doc.borrow(), &interaction, viewport);
