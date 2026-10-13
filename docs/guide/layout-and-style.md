@@ -56,7 +56,9 @@ For cards or a calendar, use grid:
 
 See [grid.html](../../examples/grid.html) for spans, template areas and automatic
 tracks. HTML tables also work; see [tables.html](../../examples/tables.html).
-They use grid-based layout and have compatibility limits documented in the README.
+They use grid-based layout. `table-layout: fixed` uses explicit table/column
+widths; auto layout sizes columns from content. See
+[table-fixed.html](../../examples/table-fixed.html) for column sizing examples.
 
 ## Reuse colors and interactive states
 
@@ -74,6 +76,10 @@ The shell supplies hover, active and focus states. `classList` lets scripts chan
 application states. Custom properties inherit and support `var()` fallbacks.
 Unsupported CSS declarations are generally ignored; unsupported selectors can
 cause a rule to be dropped. Check an example before assuming browser compatibility.
+`:has()` is now supported. Border radius accepts one to four values and per-corner
+longhands; elliptical radii are currently treated as circular. Inset box shadows
+also work; see [radius.html](../../examples/radius.html) and
+[inset-shadow.html](../../examples/inset-shadow.html).
 
 ## Images and text
 
@@ -92,9 +98,10 @@ installed on the target machine. Symbol glyphs may need an explicit family list:
 ```
 
 Keep symbol testing cross-platform. Text wrapping, alignment, weight, italic,
-decoration and letter spacing work; whitespace preservation for `pre`/`pre-wrap`
-is incomplete. Use `<textarea>` for a plain-text editable buffer, and `<br>` for
-explicit breaks in display text.
+decoration and letter spacing work. `white-space: pre`, `pre-wrap` and `pre-line`
+preserve whitespace according to their modes, with tab stops. Use `<textarea>`
+for a plain-text editable buffer or `contenteditable` for
+[rich-text editing](rich-text-editing.md).
 
 ## Animation and overlays
 
@@ -105,12 +112,21 @@ Transforms, opacity, gradients, transitions and keyframe animations are availabl
 .card:hover { background-color: #e3f1eb; transform: translateY(-2px) }
 ```
 
+Listen for `transitionend`, `animationstart` and `animationend` to coordinate
+application state. `transitioncancel` and `animationiteration` are not implemented.
+See [anim-events.html](../../examples/anim-events.html). 3D transforms and perspective
+project onto the page, but preserve-3d, backface visibility and depth sorting are
+not implemented; do not expect a full 3D scene graph.
+
 An absolute child is positioned against its nearest positioned ancestor. Use
 `position: relative` on a menu's container and `position: absolute` on its popup.
-Keep popups outside clipping scrollers when possible. `z-index` currently reorders
-siblings rather than implementing complete browser stacking contexts. `fixed`
-scrolls like an absolute element; `sticky` behaves like relative positioning.
-These constraints matter for modal and menu placement.
+`fixed` is pinned to the viewport; `sticky` follows page scrolling within its
+parent, with vertical insets. Sticky positioning inside an overflow scroller is
+not implemented. Stacking contexts support positioned boxes, opacity, transforms
+and flex/grid items. Keep popups outside clipping ancestors: positioned descendants
+of overflow/opacity/transform/sticky ancestors still paint with those ancestors.
+See [fixed.html](../../examples/fixed.html) and [stacking.html](../../examples/stacking.html).
+Frames have additional overlay limits covered in [composition](composition.md).
 
 Whenever you change layout or styling, [render a PNG](cli.md) and inspect it at
 the intended window sizes. Passing JavaScript checks does not verify visual layout.

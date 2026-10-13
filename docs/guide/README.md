@@ -12,9 +12,12 @@ Nile is not a browser or a drop-in implementation of Sciter.
 2. [Lay out and style an interface](layout-and-style.md).
 3. [Add JavaScript, modules and JSX](scripting.md).
 4. [Use controls, selection and custom menus](controls-and-menus.md).
-5. [Configure a window or embed Nile](embedding.md).
-6. [Render and simulate input with the CLI](cli.md).
-7. [Troubleshoot common problems](troubleshooting.md).
+5. [Edit rich text and connect a ribbon](rich-text-editing.md).
+6. [Load data and persist drafts](data-and-services.md).
+7. [Compose pages with includes, frames and splitters](composition.md).
+8. [Configure a window or embed Nile](embedding.md).
+9. [Render and simulate input with the CLI](cli.md).
+10. [Troubleshoot common problems](troubleshooting.md).
 
 All shell commands in this guide assume your current directory is the repository
 root. Examples are source files you can edit and reload. No npm build is needed
@@ -27,7 +30,13 @@ for these examples.
 | First app: input, events, theme, selectable text | [Getting started](../../examples/getting-started/index.html) |
 | An application-drawn menubar | [Menubar](../../examples/menubar.html), [its script](../../examples/menubar.js) |
 | Nine desktop interfaces with local state | [Workbench](../../examples/workbench/README.md) |
-| Word-style tabs and grouped commands | [Ribbon](../../examples/word-ribbon.html) |
+| Rich-text editing and a Word-style ribbon | [Editor](../../examples/editor.html), [Ribbon](../../examples/word-ribbon.html), [editing guide](rich-text-editing.md) |
+| IME composition | [IME](../../examples/ime.html) |
+| Networking and storage | [Fetch](../../examples/fetch.html), [data guide](data-and-services.md) |
+| Built-in modules | [Nile modules](../../examples/nile-modules.html) |
+| Includes, frames and resizable panes | [Include](../../examples/include.html), [Frames](../../examples/frames.html), [Frameset](../../examples/frameset.html) |
+| Fixed/sticky positioning and stacking | [Fixed](../../examples/fixed.html), [Stacking](../../examples/stacking.html) |
+| Extended input types and file chooser | [Inputs](../../examples/inputs.html) |
 | DOM events and timers | [Scripting](../../examples/scripting.html) |
 | Forms, selection and clipboard shortcuts | [Forms](../../examples/forms.html) |
 | Multiple selection and list boxes | [List boxes](../../examples/listbox.html) |

@@ -47,10 +47,26 @@ Read its chosen options with `select.selectedOptions.map((o) => o.value)`.
 See [forms.html](../../examples/forms.html) and [listbox.html](../../examples/listbox.html).
 
 Validation and submission belong to your script or host: automatic `<form>`
-submission, browser validation, IME composition and drag-and-drop are not
-implemented. Input selection indices currently count characters rather than
+submission, browser validation and drag-and-drop are not implemented. IME
+composition works in text controls and editable documents through the shell or
+[host IME integration](embedding.md#input-methods-and-file-choosers).
+Input selection indices currently count characters rather than
 JavaScript UTF-16 code units. Values live in attributes rather than a separate
 default-value model.
+
+## Additional controls
+
+Nile also renders number/range/color inputs, typed date/time/month/datetime-local
+fields, file inputs, progress/meter, fieldsets, and details/summary disclosure.
+See [inputs.html](../../examples/inputs.html), [number.html](../../examples/number.html)
+and [controls2.html](../../examples/controls2.html).
+
+Number controls step with arrows and respect min/max; range controls drag and emit
+input/change. Date/time fields offer digit editing and field stepping, without a
+calendar/clock popup. Color inputs accept hex text, without a color-picker popup.
+File inputs request a native chooser in the shell; scripts read `.files` entries
+with name/size/type and `.text()`. Other hosts must implement the chooser request
+API. These controls do not add automatic form validation/submission.
 
 ## Enable page-text selection
 
@@ -80,11 +96,12 @@ window.getSelection().removeAllRanges();
 For editable input text, use `selectionStart`, `selectionEnd`,
 `setSelectionRange(start, end)` and `.select()` instead.
 
-Selecting and copying display text does not make it editable. Rich-text editing
-and complete browser `Range`/`Selection` APIs are not provided. Selection follows
-paint order, cannot begin inside a link/control, and does not support extending
-page selections with Shift+arrow keys. A `user-select: none` inline span inside a
-selectable text run is not fully respected.
+For editing, use `contenteditable` and the selection/command APIs documented in
+[rich-text editing](rich-text-editing.md). Read-only page selection follows paint
+order, cannot begin inside a link/control, and does not support Shift+arrow
+extension. A `user-select: none` inline span inside a selectable text run is not
+fully respected. Selection inside inputs/textareas remains separate from the
+document selection.
 
 ## Build an application-drawn menubar
 
@@ -125,9 +142,10 @@ and menu roles as markup, but a full platform accessibility bridge is still pend
 Tab follows regular focus order; the example does not implement the full browser
 ARIA menu pattern, nested submenus or automatic repositioning at viewport edges.
 
-The menubar itself needs a higher sibling paint order than the main content, so
-its dropdowns paint above that content. Giving only a nested popup a high z-index
-does not provide full browser stacking-context behavior in Nile.
+The menubar creates a positioned stacking context above main content. A popup
+cannot escape an ancestor's clipping/stacking constraints merely by increasing
+its z-index. Outer-page menus also cannot currently cover embedded frames;
+see [composition limits](composition.md#current-limits).
 
 Custom menus are regular DOM elements, so they can be styled, checked, disabled
 or given submenus using the same approach. Prefer popups outside overflow-clipped

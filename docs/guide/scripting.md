@@ -3,9 +3,10 @@
 [Guide index](README.md) · Next: [Controls and menus](controls-and-menus.md)
 
 Nile runs JavaScript with QuickJS. It supplies a DOM bridge, timers, window
-commands and optional host functions. Browser services such as `fetch` and
-`window.location` are not supplied. Keep application state in JavaScript and
-connect storage/network services through an embedding host when needed.
+commands and optional host functions. It also supplies fetch/XHR, storage,
+observers, URL utilities and built-in modules. See [data and services](data-and-services.md)
+for persistence, networking features and their limits. Host functions connect
+application-specific services to the page.
 
 ## Load scripts
 
@@ -25,9 +26,10 @@ the importing file:
 import { createStore } from './store.js';
 ```
 
-Relative and absolute filesystem module paths work. Bare package names, npm
-resolution, `@env`, `@sciter`, `@sys`, and `this://` URLs are not implemented.
-An inline module resolves imports from the HTML file's folder.
+Relative and absolute filesystem module paths work, together with `@nile`,
+`@sciter` (an alias) and `@env`. Bare npm package resolution, `@sys` and `this://`
+URLs are not implemented. An inline module resolves imports from the HTML file's
+folder. See [built-in modules](data-and-services.md#built-in-modules).
 
 ## Find and update elements
 
@@ -120,9 +122,10 @@ scroller.scrollTo({ top: 100, left: 0 });
 Layout queries synchronize pending DOM changes before answering. Batch writes
 before reads instead of repeatedly changing a style and measuring it in a loop.
 `getComputedStyle()` exposes implemented properties, not the full browser set.
-`offsetParent` is approximated by the parent; `devicePixelRatio` currently reports
-1 even when the host renders at a higher scale. Element scroll properties and
-scroll events work; page scrolling is vertical.
+`offsetParent` is approximated by the parent. `devicePixelRatio` reflects the
+host's render scale. Element scroll properties and scroll events work; page
+scrolling is vertical. `ResizeObserver` and `IntersectionObserver` are available;
+intersection `rootMargin` is currently ignored.
 
 ## Call application services
 

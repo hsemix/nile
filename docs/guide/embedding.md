@@ -10,9 +10,10 @@
 | `nile-engine::Page` | Rust hosts that manage input and a pixel buffer |
 | `nile-capi` / `libnile` | Hosts using C or an FFI binding |
 
-The engine does not create a window or provide your application's storage/network
-services. The shell supplies a winit window, software presentation and a system
-text clipboard. Other hosts must supply their own integrations.
+The engine does not create a window. It supplies storage and file/data requests;
+HTTP networking is available with its `net` feature. The shell enables networking
+and supplies a winit window, software presentation, clipboard, IME and file chooser
+integration. Other hosts supply their own platform integrations.
 
 ## Configure the development-shell window
 
@@ -58,7 +59,8 @@ on the host surface; the software shell does not expose a surface alpha mode.
 Scripts can set `document.title`, call `window.close()`, `moveTo`/`moveBy`,
 `resizeTo`/`resizeBy`, and request/exit fullscreen. These enqueue host commands.
 Headless runs have no native window, so they do not perform the native actions.
-Multiple windows and native dialog APIs are not provided.
+Multiple windows and a general native dialog API are not provided. File-input
+chooser requests are supported through the shell or C-host callbacks.
 
 ## Embed from Rust
 
@@ -129,6 +131,29 @@ Provide system clipboard callbacks with `nile_view_set_clipboard`; the default
 clipboard is private memory. `nile_view_selected_text` returns the input/page
 selection for a host Copy command. Update the window rectangle so script window
 measurements reflect the actual host window.
+
+### Input methods and file choosers
+
+The shell forwards native IME composition through winit. An embedding host should
+enable its input method when `nile_view_ime_wanted` returns 1, position its candidate
+window using `nile_view_ime_cursor_area`, and forward preedit/commit/cancel through
+`nile_view_ime_preedit`, `nile_view_ime_commit` and `nile_view_ime_cancel`. Candidate
+geometry is in logical viewport coordinates; convert it to your platform's required
+space. Check the header for cursor-range parameters. Do not also send committed
+composition text through ordinary text input or it will be inserted twice.
+
+For `<input type="file">`, drain `nile_view_take_file_request`, show your chooser,
+and answer with `nile_view_choose_files`. The request includes `accept` and
+`multiple`; the returned accept string must be freed with `nile_string_free`.
+Consult the header for the selected-path encoding and cancellation convention.
+The shell uses AppleScript, PowerShell or zenity/kdialog depending on the OS;
+chooser availability therefore depends on installed platform tools.
+
+HTTP fetch/XHR support requires `nile-capi --features net`; file/data requests
+work without it. The tick loop services asynchronous completions. File-created
+views persist localStorage by default; `NILE_STORAGE_DIR` or
+`nile_view_set_storage_file` controls its backing location. See
+[data and services](data-and-services.md) for storage semantics.
 
 ### Connect scripts and services
 
