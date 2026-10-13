@@ -944,6 +944,314 @@
       g.dispatchEvent(event);
     },
   });
+
+  // ---- Window: native dialogs -----------------------------------------------------
+  // Shapes follow docs.sciter.com/docs/DOM/Window. `Window.this` is this document's window;
+  // `new Window(...)` and `modal({...})` with a document aren't supported yet.
+  const dialog = (kind, a = "", b = "", c = "", d = "") => N.dialog(kind, String(a), String(b), String(c), String(d));
+  const textOf = (n) => (Array.isArray(n) ? n.map(textOf).join("") : n == null || typeof n === "boolean" ? "" : typeof n === "object" ? "" : String(n));
+  class Window {
+    constructor() { throw new Error("new Window() is not supported yet: Nile has one window per page (use <frame> or a popup)"); }
+    static get this() { return thisWindow; }
+    static get all() { return [thisWindow]; }
+    static get share() { return shared; }
+    // selectFile({ mode: "open" | "open-multiple" | "save", filter, extension, caption, path })
+    selectFile(params = {}) {
+      const mode = params.mode || "open";
+      const answer = mode === "save"
+        ? dialog("save", params.filter, params.extension, params.caption, params.path)
+        : dialog("open", mode, params.filter, params.caption, params.path);
+      if (answer === undefined || answer === "") return null;
+      return mode === "open-multiple" ? lines(answer).map(toUrl) : toUrl(lines(answer)[0]);
+    }
+    selectFolder(params = {}) {
+      const answer = dialog("folder", "", "", params.caption, params.path);
+      return answer ? toUrl(answer) : null;
+    }
+    // modal(<alert>text</alert>) shows a message box (<info>, <alert>, <error>, <question>). By default it
+    // is the system's own box and the answer comes back at once: "yes" (or "yes" from an OK) or, for a
+    // question, "yes"/"no". `Window.this.messageBoxes = "inline"` (or an `inline` attribute on the tag)
+    // draws it in the window instead, as styleable HTML with your own <button>s and rich content; that
+    // one can't block the script, so it returns a Promise (`await` works for both). `native` forces the
+    // system box. What Sciter returns isn't documented.
+    modal(arg) {
+      const vnode = Array.isArray(arg) && typeof arg[0] === "string" ? arg : Array.isArray(arg) ? arg.find((v) => Array.isArray(v)) : null;
+      if (!vnode) throw new Error("Window.modal() supports the message boxes <info>, <alert>, <error> and <question> only");
+      const [tag, attrs, kids] = vnode;
+      if (!["info", "alert", "error", "question"].includes(tag)) throw new Error(`Window.modal(): unknown message box <${tag}>`);
+      const caption = (attrs && (attrs.caption || attrs.title)) || document.title || "";
+      const inline = attrs && attrs.native !== undefined ? false : attrs && attrs.inline !== undefined ? true : boxMode === "inline";
+      if (inline) return inlineBox(tag, attrs || {}, kids || [], caption);
+      const answer = dialog("message", tag, textOf(kids).trim(), caption);
+      if (answer === undefined) return tag === "question" ? "no" : "yes";
+      return tag === "question" ? answer : "yes";
+    }
+    get messageBoxes() { return boxMode; }
+    set messageBoxes(v) { boxMode = v === "inline" ? "inline" : "native"; }
+    get isActive() { return true; }
+    close(value) { N.windowCommand("close", 0, 0); return true; }
+    get caption() { return document.title; }
+    set caption(v) { document.title = String(v); }
+  }
+  let boxMode = "native";
+  const BOX_ICONS = { info: "i", alert: "!", error: "×", question: "?" };
+  // The in-window message box: `.nile-modal` (backdrop) > `.nile-messagebox.<kind>` with a title, a body
+  // (icon + content) and the buttons, all plain elements so CSS can restyle them.
+  function inlineBox(kind, attrs, kids, caption) {
+    return new Promise((resolve) => {
+      const list = Array.isArray(kids) ? kids : [kids];
+      const isVnode = (v) => Array.isArray(v) && typeof v[0] === "string";
+      const specs = list.filter((v) => isVnode(v) && v[0] === "button").map((v) => ({
+        text: textOf(v[2]).trim(), value: (v[1] && (v[1].value ?? v[1].id)) ?? textOf(v[2]).trim(),
+        isDefault: !!(v[1] && v[1].default !== undefined), isCancel: !!(v[1] && v[1].cancel !== undefined),
+      }));
+      const content = list.filter((v) => !(isVnode(v) && v[0] === "button"));
+      if (!specs.length) {
+        if (kind === "question") specs.push({ text: "No", value: "no", isCancel: true }, { text: "Yes", value: "yes", isDefault: true });
+        else specs.push({ text: "OK", value: "yes", isDefault: true, isCancel: true });
+      }
+      const backdrop = document.createElement("div");
+      backdrop.className = "nile-modal";
+      const box = document.createElement("div");
+      box.className = "nile-messagebox " + kind;
+      box.setAttribute("role", kind === "question" ? "dialog" : "alertdialog");
+      if (caption) { const t = document.createElement("div"); t.className = "nile-messagebox-title"; t.textContent = caption; box.appendChild(t); }
+      const body = document.createElement("div");
+      body.className = "nile-messagebox-body";
+      const icon = document.createElement("div");
+      icon.className = "nile-messagebox-icon";
+      icon.textContent = BOX_ICONS[kind];
+      const text = document.createElement("div");
+      text.className = "nile-messagebox-text";
+      text.content(content);
+      body.append(icon, text);
+      const row = document.createElement("div");
+      row.className = "nile-messagebox-buttons";
+      box.append(body, row);
+      backdrop.appendChild(box);
+      let done = false;
+      const finish = (value) => {
+        if (done) return;
+        done = true;
+        document.removeEventListener("keydown", onKey, true);
+        backdrop.remove();
+        resolve(value);
+      };
+      for (const spec of specs) {
+        const b = document.createElement("button");
+        b.textContent = spec.text;
+        if (spec.isDefault) b.className = "default";
+        b.addEventListener("click", () => finish(spec.value));
+        row.appendChild(b);
+        spec.el = b;
+      }
+      const cancel = specs.find((x) => x.isCancel);
+      const fallback = specs.find((x) => x.isDefault) || specs[0];
+      function onKey(e) {
+        if (e.key === "Escape") { e.preventDefault(); finish(cancel ? cancel.value : null); }
+        else if (e.key === "Enter" && !(e.target && e.target.localName === "button")) { e.preventDefault(); finish(fallback.value); }
+      }
+      // Presses behind the box go nowhere.
+      backdrop.addEventListener("mousedown", (e) => { if (e.target === backdrop) e.preventDefault(); });
+      document.body.appendChild(backdrop);
+      document.addEventListener("keydown", onKey, true);
+      (specs.find((x) => x.isDefault) || specs[0]).el.focus();
+    });
+  }
+  const shared = {};
+  const thisWindow = Object.create(Window.prototype);
+  g.Window = Window;
+
+  // ---- popups and airborne elements -----------------------------------------------
+  // `el.popup(popup, params)` shows an element (or JSX) above the page next to `el`; `el.takeOff()`
+  // lifts an element out of the flow. Sciter draws them in separate OS windows; Nile paints them in
+  // this window as `position: fixed` boxes, so they can't leave the window. See
+  // docs.sciter.com/docs/DOM/Element (popup, takeOff) and /docs/DOM/out-of-canvas-elements.
+  const openPopups = [];
+  const SAVED = ["position", "display", "left", "top", "width", "height", "z-index", "visibility", "margin"];
+  // NUMPAD placement: 1 bottom-left ... 9 top-right. Offsets of that point inside a w x h box.
+  const padPoint = (n, w, h) => {
+    const col = (((n | 0) - 1) % 3 + 3) % 3, row = Math.floor(((n | 0) - 1) / 3);
+    return [(w * col) / 2, row === 0 ? h : row === 1 ? h / 2 : 0];
+  };
+  const fire = (target, type, source) => {
+    const e = new Event(type, { bubbles: true });
+    if (source) e.source = source;
+    target.dispatchEvent(e);
+  };
+  class PopupWindow {
+    constructor(rec) { this._r = rec; }
+    get root() { return this._r.el; }
+    get anchor() { return this._r.anchor || null; }
+    get isValid() { return this._r.open; }
+    get isTopmost() { return this._r.topmost; }
+    set isTopmost(v) { this._r.topmost = !!v; }
+    get isResizable() { return !!this._r.resizable; }
+    set isResizable(v) { this._r.resizable = !!v; }
+    get isMousePassthrough() { return !!this._r.passthrough; }
+    set isMousePassthrough(v) { this._r.passthrough = !!v; this._r.el.style.pointerEvents = v ? "none" : ""; }
+    on(type, cb) { (this._r.listeners[type] ||= []).push(cb); return this; }
+    close() { closePopup(this._r); }
+  }
+  const lift = (el) => {
+    const rec = { el, open: true, listeners: {}, topmost: true, saved: {}, attached: el.parentNode };
+    for (const k of SAVED) rec.saved[k] = el.style.getPropertyValue(k);
+    rec.next = el.nextSibling;
+    if (!el.parentNode || !document.body.contains(el)) document.body.appendChild(el);
+    return rec;
+  };
+  const place = (rec, left, top) => {
+    rec.el.style.left = Math.round(left) + "px";
+    rec.el.style.top = Math.round(top) + "px";
+    for (const cb of rec.listeners.move || []) cb({ type: "move", x: left, y: top });
+  };
+  function closePopup(rec) {
+    if (!rec.open) return;
+    // Anything opened after this one goes with it.
+    const at = openPopups.indexOf(rec);
+    if (at >= 0) for (const later of openPopups.splice(at + 1)) closePopup(later);
+    if (rec.popup) fire(rec.el, "popup-dismissing");
+    for (const cb of rec.listeners.close || []) cb({ type: "close" });
+    rec.open = false;
+    const i = openPopups.indexOf(rec);
+    if (i >= 0) openPopups.splice(i, 1);
+    for (const k of SAVED) {
+      if (rec.saved[k]) rec.el.style.setProperty(k, rec.saved[k]);
+      else rec.el.style.removeProperty(k);
+    }
+    if (rec.created) rec.el.remove();
+    if (rec.popup && rec.anchor) fire(rec.anchor, "popup-dismissed");
+    if (!openPopups.length) { document.removeEventListener("mousedown", outside, true); document.removeEventListener("keydown", escape, true); }
+  }
+  // A press on a popup's own anchor closes it, and the click that follows must not open it again.
+  let suppressed = null;
+  function outside(e) {
+    const t = e.target;
+    suppressed = null;
+    const inside = (rec) => rec.el.contains(t);
+    // A press outside the newest popups closes them; a press inside one keeps it and those below.
+    for (let i = openPopups.length - 1; i >= 0; i--) {
+      if (!openPopups[i].popup) continue;
+      if (inside(openPopups[i])) return;
+      const anchor = openPopups[i].anchor;
+      if (anchor && anchor.contains(t)) suppressed = anchor;
+      closePopup(openPopups[i]);
+    }
+  }
+  function escape(e) {
+    if (e.key !== "Escape") return;
+    const top = [...openPopups].reverse().find((r) => r.popup);
+    if (top) closePopup(top);
+  }
+  const intoElement = (content) => {
+    if (content instanceof Element) return [content, false];
+    // One element (the usual `<popup>` or `<menu>` of JSX) is the popup itself; several get a wrapper.
+    const scratch = document.createElement("div");
+    scratch.content(content);
+    const kids = Array.from(scratch.children);
+    if (kids.length === 1 && scratch.childNodes.length === 1) { kids[0].remove(); return [kids[0], true]; }
+    const holder = document.createElement("popup");
+    while (scratch.firstChild) holder.appendChild(scratch.firstChild);
+    return [holder, true];
+  };
+  Element.prototype.popup = function (content, params = {}) {
+    const anchor = this;
+    if (suppressed === anchor) { suppressed = null; return undefined; }
+    const [el, created] = intoElement(content);
+    fire(anchor, "popup-request", el);
+    const rec = lift(el);
+    Object.assign(rec, { anchor, popup: true, created });
+    const st = el.style;
+    st.setProperty("position", "fixed");
+    st.setProperty("display", "block");
+    st.setProperty("margin", "0");
+    st.setProperty("left", "0px");
+    st.setProperty("top", "0px");
+    st.setProperty("z-index", "2147483000");
+    st.setProperty("visibility", "hidden");
+    const pr = el.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let left, top;
+    if (params.x !== undefined || params.y !== undefined) {
+      const [ox, oy] = padPoint(params.popupAt || 7, pr.width, pr.height);
+      left = (params.x || 0) - ox; top = (params.y || 0) - oy;
+    } else {
+      const ar = anchor.getBoundingClientRect();
+      const [ax, ay] = padPoint(params.anchorAt || 1, ar.width, ar.height);
+      const [px, py] = padPoint(params.popupAt || 7, pr.width, pr.height);
+      left = ar.left + ax - px; top = ar.top + ay - py;
+      // Below doesn't fit but above does: flip to the anchor's top edge.
+      if (top + pr.height > vh && ar.top - pr.height >= 0 && (params.anchorAt || 1) <= 3) top = ar.top - pr.height;
+    }
+    left = Math.max(0, Math.min(left, vw - pr.width));
+    top = Math.max(0, Math.min(top, vh - pr.height));
+    place(rec, left, top);
+    st.removeProperty("visibility");
+    // The UA menu look highlights `.nile-hover` (a UA `:hover` rule would make every page restyle on hover).
+    let lit = null;
+    el.addEventListener("mouseover", (e) => {
+      const item = e.target.closest && e.target.closest("li");
+      if (item === lit) return;
+      if (lit) lit.classList.remove("nile-hover");
+      lit = item && !item.hasAttribute("disabled") ? item : null;
+      if (lit) lit.classList.add("nile-hover");
+    });
+    el.addEventListener("mouseout", (e) => { if (lit && !el.contains(e.relatedTarget || null)) { lit.classList.remove("nile-hover"); lit = null; } });
+    // A menu closes when one of its items is clicked.
+    el.addEventListener("click", (e) => {
+      const item = e.target.closest && e.target.closest("li, [role=menuitem]");
+      if (item && el.querySelector("menu, li") && !item.hasAttribute("disabled") && !item.querySelector("menu")) setTimeout(() => closePopup(rec), 0);
+    });
+    if (!openPopups.length) { document.addEventListener("mousedown", outside, true); document.addEventListener("keydown", escape, true); }
+    openPopups.push(rec);
+    fire(el, "popup-ready", el);
+    return new PopupWindow(rec);
+  };
+  const airborne = new WeakMap();
+  Element.prototype.takeOff = function (params) {
+    if (params === undefined) {
+      const rec = airborne.get(this);
+      if (rec) { airborne.delete(this); closePopup(rec); }
+      return undefined;
+    }
+    let rec = airborne.get(this);
+    if (!rec) {
+      rec = lift(this);
+      rec.airborne = true;
+      airborne.set(this, rec);
+      openPopups.push(rec);
+      this.style.setProperty("position", "fixed");
+      this.style.setProperty("margin", "0");
+      this.style.setProperty("z-index", "2147483000");
+    }
+    const st = this.style;
+    let [x, y] = [params.x || 0, params.y || 0];
+    const rel = params.relativeTo || "window";
+    if (rel === "screen") { x -= window.screenX; y -= window.screenY; }
+    else if (rel === "document") y -= window.scrollY;
+    else if (rel === "parent" || rel === "self") {
+      const base = (rel === "parent" ? rec.attached || document.body : this).getBoundingClientRect();
+      x += base.left; y += base.top;
+    }
+    if (params.width !== undefined) st.setProperty("width", params.width + "px");
+    if (params.height !== undefined) st.setProperty("height", params.height + "px");
+    if (params.isTopmost !== undefined) rec.topmost = !!params.isTopmost;
+    if (params.isResizable !== undefined) rec.resizable = !!params.isResizable;
+    place(rec, x, y);
+    const win = new PopupWindow(rec);
+    if (params.isMousePassthrough !== undefined) win.isMousePassthrough = params.isMousePassthrough;
+    return win;
+  };
+  // A right click: scripts get `contextmenu` and may answer with `evt.source = menuElement`.
+  Object.defineProperty(g, "__contextMenu", {
+    value(id, x, y) {
+      const target = wrap(id);
+      const e = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 2 });
+      target.dispatchEvent(e);
+      if (e.source instanceof Element) target.popup(e.source, { x, y, popupAt: 7 });
+      return !e.defaultPrevented;
+    },
+  });
   Object.defineProperty(g, "__sciterModule", { value: sciterModule });
   Object.defineProperty(g, "__envModule", { value: envModule });
   }

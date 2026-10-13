@@ -1,0 +1,407 @@
+<!doctype html>
+<html
+  window-title="Northstar budget — Nile spreadsheet"
+  window-width="1280"
+  window-height="900"
+>
+  <head>
+    <meta charset="utf-8" />
+    <title>Nile spreadsheet</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: sans-serif;
+        font-size: 12px;
+        color: #293d35;
+        background: #f3f6f4;
+      }
+      button,
+      input,
+      select {
+        font-family: sans-serif;
+        font-size: 12px;
+      }
+      button {
+        border: 1px solid transparent;
+        padding: 6px 11px;
+        border-radius: 4px;
+        background: transparent;
+        color: #35493f;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #dcece2;
+        border-color: #b9d2c3;
+      }
+      button:focus {
+        border-color: #238254;
+      }
+      button.on {
+        background: #d9eddf;
+        border-color: #a6cbb5;
+        color: #17693f;
+      }
+      button:disabled {
+        color: #9caca3;
+        cursor: default;
+      }
+      .titlebar {
+        height: 50px;
+        display: flex;
+        align-items: center;
+        gap: 17px;
+        padding: 0 23px;
+        background: #e4efe7;
+      }
+      .brand {
+        width: 28px;
+        height: 28px;
+        border-radius: 4px;
+        background: #217346;
+        color: white;
+        font-size: 21px;
+        font-weight: 700;
+        text-align: center;
+        line-height: 28px;
+      }
+      .filename {
+        font-weight: 600;
+        font-size: 12px;
+      }
+      .saved {
+        color: #788d7f;
+        font-size: 10px;
+        margin-left: 10px;
+      }
+      .titlebar .spacer {
+        flex: 1;
+      }
+      .avatar {
+        width: 28px;
+        height: 28px;
+        border-radius: 20px;
+        background: #65937a;
+        color: white;
+        line-height: 28px;
+        text-align: center;
+        font-size: 10px;
+      }
+      .tabs {
+        height: 37px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 0 21px;
+        background: #e4efe7;
+      }
+      .tab {
+        height: 33px;
+        border-radius: 0;
+        padding: 6px 12px;
+      }
+      .tab.active {
+        color: #176c40;
+        font-weight: 700;
+        border-bottom: 3px solid #217346;
+      }
+      .ribbon-wrap {
+        padding: 0 12px 10px;
+        background: #e4efe7;
+      }
+      .ribbon {
+        display: flex;
+        height: 116px;
+        background: #fbfdfb;
+        border: 1px solid #d4e2d8;
+        border-radius: 8px;
+        padding: 9px 5px;
+        overflow-x: auto;
+      }
+      .group {
+        padding: 0 16px;
+        border-right: 1px solid #dce7df;
+        display: flex;
+        flex-direction: column;
+        flex-shrink: 0;
+      }
+      .group:last-child {
+        border-right: 0;
+      }
+      .tools {
+        display: flex;
+        gap: 5px;
+        flex: 1;
+        align-items: flex-start;
+      }
+      .group-label {
+        color: #809186;
+        font-size: 10px;
+        text-align: center;
+        padding-top: 6px;
+      }
+      .stack {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .large {
+        width: 64px;
+        height: 73px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 2px;
+        font-size: 11px;
+      }
+      .large-icon {
+        color: #328b59;
+        font-size: 29px;
+        line-height: 34px;
+        height: 34px;
+      }
+      .symbol {
+        font-family:
+          "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols", sans-serif;
+      }
+      .square {
+        width: 30px;
+        height: 28px;
+        padding: 4px;
+      }
+      select {
+        background: white;
+        color: #40594a;
+        border: 1px solid #cbdacf;
+        border-radius: 3px;
+        padding: 4px 8px;
+        height: 28px;
+        width: 123px;
+      }
+      .formula-bar {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        height: 47px;
+        padding: 8px 14px;
+        background: #f5f8f5;
+        border-bottom: 1px solid #d4e0d7;
+      }
+      input {
+        border: 1px solid #cfddd3;
+        border-radius: 3px;
+        padding: 5px 9px;
+        height: 29px;
+        background: white;
+        color: #31463a;
+      }
+      input:focus {
+        border-color: #217346;
+      }
+      #name-box {
+        width: 90px;
+        text-align: center;
+        font-weight: 600;
+      }
+      #formula {
+        flex: 1;
+        min-width: 0;
+      }
+      .fx {
+        font-family: serif;
+        font-style: italic;
+        font-size: 19px;
+        color: #8a9d90;
+        margin: 0 5px;
+      }
+      .sheet-viewport {
+        height: calc(100vh - 320px);
+        min-height: 340px;
+        overflow: auto;
+        background: #fff;
+        outline: none;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 44px 235px repeat(7, 135px);
+        width: 1224px;
+      }
+      .column-head,
+      .row-head,
+      .corner {
+        height: 27px;
+        background: #f2f6f3;
+        color: #7a8b80;
+        text-align: center;
+        font-size: 11px;
+        padding: 5px;
+        border-right: 1px solid #dce5df;
+        border-bottom: 1px solid #dce5df;
+      }
+      .row-head {
+        height: 29px;
+        padding-top: 7px;
+      }
+      .column-head.active,
+      .row-head.active {
+        background: #d6e9dd;
+        color: #1e7145;
+        font-weight: 600;
+      }
+      .cell {
+        height: 29px;
+        border-right: 1px solid #e0e7e2;
+        border-bottom: 1px solid #e0e7e2;
+        padding: 6px 9px;
+        position: relative;
+        white-space: nowrap;
+        overflow: hidden;
+        background: white;
+      }
+      .cell.number {
+        text-align: right;
+      }
+      .cell.heading {
+        background: #edf4ef;
+        font-weight: 600;
+        color: #54715d;
+      }
+      .cell.total {
+        background: #edf6ef;
+        border-top: 2px solid #92bba1;
+        font-weight: 700;
+        color: #205c38;
+      }
+      .cell.title {
+        font-weight: 700;
+        color: #217346;
+        font-size: 13px;
+      }
+      .cell.subtitle {
+        color: #849c8b;
+        font-size: 11px;
+      }
+      .cell.selected {
+        border: 2px solid #217346;
+        padding: 5px 8px;
+        background: #eef8f1;
+      }
+      .cell.error {
+        color: #b35c50;
+      }
+      #cell-editor {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 27px;
+        padding: 4px 7px;
+        border: 0;
+        border-radius: 0;
+        background: white;
+      }
+      .sheets-bar {
+        height: 34px;
+        display: flex;
+        gap: 5px;
+        align-items: center;
+        padding: 0 18px;
+        background: #f5f8f5;
+        border-top: 1px solid #d6e2d9;
+      }
+      .sheet-tab {
+        border-radius: 0;
+        height: 32px;
+        font-size: 11px;
+      }
+      .sheet-tab.active {
+        color: #217346;
+        font-weight: 700;
+        background: white;
+        border-bottom: 2px solid #217346;
+      }
+      .sheet-hint {
+        margin-left: auto;
+        color: #8b9e90;
+        font-size: 10px;
+      }
+      .statusbar {
+        height: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 18px;
+        background: #edf3ee;
+        border-top: 1px solid #d6e2d9;
+        color: #718779;
+        font-size: 10px;
+      }
+      #status {
+        color: #217346;
+      }
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="titlebar">
+      <div class="brand">X</div>
+      <button data-action="save" title="Save workbook locally">
+        <span class="symbol">▣</span></button
+      ><button data-action="undo" title="Undo">
+        <span class="symbol">↶</span></button
+      ><button data-action="redo" title="Redo">
+        <span class="symbol">↷</span>
+      </button>
+      <div class="filename">
+        Northstar budget
+        <span class="saved" id="save-state">Sample workbook</span>
+      </div>
+      <span class="spacer"></span
+      ><span style="color: #7b9383; font-size: 11px">Nile spreadsheet</span>
+      <div class="avatar">AD</div>
+    </div>
+    <div class="tabs">
+      <button class="tab" data-tab="File">File</button
+      ><button class="tab active" data-tab="Home">Home</button
+      ><button class="tab" data-tab="Formulas">Formulas</button
+      ><button class="tab" data-tab="Data">Data</button>
+    </div>
+    <div class="ribbon-wrap"><div class="ribbon" id="ribbon"></div></div>
+    <div class="formula-bar">
+      <input
+        id="name-box"
+        value="E11"
+        title="Cell address; Enter to navigate"
+      /><button data-action="cancel" title="Cancel edit">×</button
+      ><button data-action="commit" title="Apply edit">✓</button
+      ><span class="fx">fx</span
+      ><input id="formula" aria-label="Cell value or formula" />
+    </div>
+    <div class="sheet-viewport" id="viewport" tabindex="0">
+      <div class="grid" id="grid"></div>
+    </div>
+    <div class="sheets-bar">
+      <span class="symbol" style="color: #8da293; margin-right: 15px">▦</span
+      ><button class="sheet-tab active" data-sheet="Budget">Budget</button
+      ><button class="sheet-tab" data-sheet="Forecast">Forecast</button
+      ><span class="sheet-hint"
+        >Double-click or press F2 to edit · Enter to apply · Esc to cancel</span
+      >
+    </div>
+    <div class="statusbar">
+      <span id="status">Ready</span><span id="cell-info"></span
+      ><span>8 columns × 24 rows · local workbook</span>
+    </div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

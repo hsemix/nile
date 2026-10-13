@@ -174,6 +174,7 @@ impl Page {
                 let css = style_url.as_deref().and_then(|u| std::fs::read_to_string(self.resolve_path(u)).ok());
                 let mut page = self.load_frame_document(&source, (w, h), Embed { outbox: outbox.clone(), css });
                 page.clipboard = Box::new(crate::MemoryClipboard::default());
+                page.view.borrow_mut().dialogs = self.view.borrow().dialogs.clone();
                 self.frames.borrow_mut().slots.insert(id, FrameSlot { page: Box::new(page), src: key, rect: (x, y, w, h), outbox, buf: Vec::new() });
                 created.push(id);
             } else if let Some(slot) = self.frames.borrow_mut().slots.get_mut(&id) {
@@ -234,7 +235,7 @@ impl Page {
         Some(out)
     }
 
-    fn local(&self, id: NodeId, x: f32, y: f32) -> (f32, f32) {
+    pub(crate) fn local(&self, id: NodeId, x: f32, y: f32) -> (f32, f32) {
         let (fx, fy, ..) = self.frames.borrow().slots[&id].rect;
         (x - fx, y - fy)
     }

@@ -151,6 +151,41 @@ Custom menus are regular DOM elements, so they can be styled, checked, disabled
 or given submenus using the same approach. Prefer popups outside overflow-clipped
 containers. Native macOS/global OS menus require integration in the embedding host.
 
+## Native dialogs, message boxes and popups
+
+`Window.this` (shapes from docs.sciter.com/docs/DOM/Window) opens the system's own dialogs. They
+block until answered and return `null` when cancelled, or when the host gave the page no dialogs
+(headless renders, C hosts that haven't wired them):
+
+```js
+const url = Window.this.selectFile({ mode: "open", filter: "Text (*.txt)|*.txt;*.md|All (*.*)|*.*", caption: "Open" });
+const urls = Window.this.selectFile({ mode: "open-multiple" });          // array of file:// URLs
+const save = Window.this.selectFile({ mode: "save", extension: "txt" });
+const dir = Window.this.selectFolder({ caption: "Pick a folder", path: "/tmp" });
+Window.this.modal(<alert>Careful!</alert>);              // <info>, <alert>, <error>, <question>
+if (Window.this.modal(<question>Delete it?</question>) === "yes") { /* ... */ }
+```
+
+`<question>` returns `"yes"` or `"no"` (Sciter doesn't document its return value). The system box is the
+default and only shows the tag's plain text and a `caption`/`title`. To go further, opt in per box with an
+`inline` attribute, or for every box with `Window.this.messageBoxes = "inline"` (`native` on a tag wins
+over the setting). The box is then plain HTML in the window, `.nile-modal` > `.nile-messagebox.<kind>`
+with `-title`, `-body`, `-icon`, `-text` and `-buttons` parts, so CSS restyles it; the tag's content
+may be rich markup, and `<button value="save" default>` / `cancel` children replace the default OK or
+Yes/No buttons. Enter chooses the default button, Escape the `cancel` one. Because it can't block the
+script it returns a **Promise** of the clicked button's `value` (else its `id`, else its text):
+`const r = await Window.this.modal(<question inline>…</question>)`. `new Window(...)`
+and `modal({url})` for a second document aren't supported; use a `<frame>` or a popup.
+
+`element.popup(menuOrJSX, { anchorAt, popupAt, x, y })` shows an element next to `element` (placement
+points are numpad digits: 1 bottom-left … 9 top-right; the default is below the anchor), closes on a
+click outside, on Escape, and after a menu item is clicked, and fires `popup-request`, `popup-ready`,
+`popup-dismissing` and `popup-dismissed`. `element.takeOff({ x, y, width, height, relativeTo })` lifts
+an element out of the flow until `takeOff()` is called without arguments. Right-clicking fires
+`contextmenu`; set `evt.source = menuElement` (for example a `<menu.context>`) to show it at the
+pointer. Popups are painted inside the window, not as separate OS windows. See
+[popups example](../../examples/popups.html) and [dialogs example](../../examples/dialogs.html).
+
 ## Dialogs and command state
 
 Use a positioned overlay and a panel for an application-drawn dialog. Manage its

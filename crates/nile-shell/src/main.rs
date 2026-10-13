@@ -43,6 +43,8 @@ struct Pointer {
     press: bool,
     /// Release again after pressing (a full click).
     release: bool,
+    /// A right click (the `contextmenu` event).
+    context: bool,
     /// Wheel delta to apply at the point (positive scrolls content down, like wheel-up).
     wheel: f32,
 }
@@ -86,6 +88,9 @@ fn render_png(page: &mut Page, snap: Snapshot) {
         }
         if p.release {
             page.release();
+        }
+        if p.context {
+            page.context_menu();
         }
         if p.wheel != 0.0 {
             page.wheel(0.0, p.wheel);
@@ -452,6 +457,11 @@ impl App {
                     window.request_redraw();
                 }
             }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
+                if self.page.context_menu() {
+                    window.request_redraw();
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y * 40.0,
@@ -541,7 +551,7 @@ fn main() {
             "--png" => png = args.next(),
             "--width" => width = args.next().and_then(|v| v.parse().ok()).unwrap_or(width),
             "--height" => height = args.next().and_then(|v| v.parse().ok()).unwrap_or(height),
-            "--hover" | "--press" | "--click" | "--wheel" => {
+            "--hover" | "--press" | "--click" | "--rclick" | "--wheel" => {
                 // X,Y (or X,Y,DY for --wheel), in logical px.
                 let nums: Vec<f32> = args.next().map(|v| v.split(',').filter_map(|n| n.trim().parse().ok()).collect()).unwrap_or_default();
                 if let [x, y, rest @ ..] = nums.as_slice() {
@@ -550,6 +560,7 @@ fn main() {
                         y: *y,
                         press: arg == "--press" || arg == "--click",
                         release: arg == "--click",
+                        context: arg == "--rclick",
                         wheel: if arg == "--wheel" { rest.first().copied().unwrap_or(0.0) } else { 0.0 },
                     });
                 }
@@ -576,6 +587,7 @@ fn main() {
     let mut page = Page::load(file, (width as f32, height as f32), 0.0);
     if png.is_none() {
         page.clipboard = Box::new(SystemClipboard::default());
+        page.set_dialogs(Rc::new(dialogs::NativeDialogs));
     }
     if let Some(out) = png {
         render_png(&mut page, Snapshot { out, width, height, scale, pointer, typed, compose, wait_ms, settle_ms, select });

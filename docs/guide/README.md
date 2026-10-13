@@ -31,6 +31,7 @@ for these examples.
 | An application-drawn menubar | [Menubar](../../examples/menubar.html), [its script](../../examples/menubar.js) |
 | Nine desktop interfaces with local state | [Workbench](../../examples/workbench/README.md) |
 | Rich-text editing and a Word-style ribbon | [Editor](../../examples/editor.html), [Ribbon](../../examples/word-ribbon.html), [editing guide](rich-text-editing.md) |
+| Excel-style grid, formulas and local saving | [Spreadsheet guide](../../examples/excel/README.md), [example](../../examples/excel/index.html) |
 | IME composition | [IME](../../examples/ime.html) |
 | Networking and storage | [Fetch](../../examples/fetch.html), [data guide](data-and-services.md) |
 | Built-in modules | [Nile modules](../../examples/nile-modules.html) |

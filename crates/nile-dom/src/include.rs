@@ -170,6 +170,84 @@ fn comparison(term: &str) -> bool {
     }
 }
 
+/// Sciter's `<menu.context id=x>` shorthand: a class list after the tag name becomes a `class`
+/// attribute (`<menu id=x class="context">`). Raw text (`<script>`, `<style>`) and comments are left alone.
+pub(crate) fn expand_class_tags(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len() + 16);
+    let mut at = 0; // how much of `html` is already in `out`
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        if lower[i..].starts_with("<!--") {
+            i = lower[i..].find("-->").map_or(bytes.len(), |e| i + e + 3);
+            continue;
+        }
+        for raw in ["script", "style"] {
+            if lower[i + 1..].starts_with(raw) && !bytes.get(i + 1 + raw.len()).is_some_and(|b| b.is_ascii_alphanumeric()) {
+                // Skip to the closing tag: its content is not markup.
+                let close = format!("</{raw}");
+                let body_start = tag_end(html, i + 1).unwrap_or(bytes.len());
+                i = lower[body_start..].find(&close).map_or(bytes.len(), |e| body_start + e);
+                break;
+            }
+        }
+        if i >= bytes.len() || bytes[i] != b'<' {
+            continue;
+        }
+        let closing = bytes.get(i + 1) == Some(&b'/');
+        let name_start = i + 1 + closing as usize;
+        let mut j = name_start;
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'-') {
+            j += 1;
+        }
+        if j == name_start || bytes[j.min(bytes.len() - 1)] != b'.' || !bytes[name_start].is_ascii_alphabetic() {
+            i += 1;
+            continue;
+        }
+        // `.class.class` up to whitespace, `/` or `>`.
+        let mut k = j;
+        while k < bytes.len() && !bytes[k].is_ascii_whitespace() && bytes[k] != b'>' && bytes[k] != b'/' {
+            k += 1;
+        }
+        let classes: Vec<&str> = html[j..k].split('.').filter(|c| !c.is_empty()).collect();
+        let valid = !classes.is_empty() && classes.iter().all(|c| c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
+        if !valid {
+            i += 1;
+            continue;
+        }
+        out.push_str(&html[at..j]);
+        if closing {
+            at = k;
+        } else {
+            // Merge with an existing quoted `class="..."` on the same tag, else add one.
+            let end = tag_end(html, k).unwrap_or(k);
+            let rest = &html[k..end];
+            let list = classes.join(" ");
+            match rest.find("class=\"") {
+                Some(p) => {
+                    out.push_str(&rest[..p + 7]);
+                    out.push_str(&list);
+                    out.push(' ');
+                    out.push_str(&rest[p + 7..]);
+                    at = end;
+                }
+                None => {
+                    out.push_str(&format!(" class=\"{list}\""));
+                    at = k;
+                }
+            }
+        }
+        i = at.max(i + 1);
+    }
+    out.push_str(&html[at..]);
+    out
+}
+
 /// `<splitter>` and `<splitter/>` become `<splitter></splitter>`.
 fn close_splitters(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
@@ -202,6 +280,7 @@ fn close_splitters(html: &str) -> String {
 /// goes (and `<frame src=...>` needs no closing tag). So `<frame ...>` becomes
 /// `<nile-frame ...></nile-frame>`, which `Document::parse` turns back into a `frame` element.
 pub(crate) fn rewrite_frames(html: &str) -> String {
+    let html = &expand_class_tags(html);
     let lower = html.to_ascii_lowercase();
     if !lower.contains("<frame") && !lower.contains("<splitter") {
         return html.to_string();
@@ -283,6 +362,16 @@ mod tests {
     fn framesets_and_splitters_survive_the_parser() {
         assert_eq!(rewrite_frames("<frameset cols='1,*'><div></div><splitter/><frame src=a></frameset>"), "<nile-frameset cols='1,*'><div></div><splitter></splitter><nile-frame src=a></nile-frame></nile-frameset>");
         assert_eq!(rewrite_frames("<splitter></splitter>"), "<splitter></splitter>");
+    }
+
+    #[test]
+    fn class_shorthand_on_tags() {
+        assert_eq!(expand_class_tags("<menu.context id=x><li>a</li></menu>"), "<menu class=\"context\" id=x><li>a</li></menu>");
+        assert_eq!(expand_class_tags("<div.a.b>x</div.a.b>"), "<div class=\"a b\">x</div>");
+        assert_eq!(expand_class_tags("<p.x class=\"y\">"), "<p class=\"x y\">");
+        // Not markup: comparisons in scripts, comments, plain tags.
+        assert_eq!(expand_class_tags("<script>if (a<b.c) {}</script><p>1 < 2.5</p>"), "<script>if (a<b.c) {}</script><p>1 < 2.5</p>");
+        assert_eq!(expand_class_tags("<!-- <a.b> --><a href=x.y>"), "<!-- <a.b> --><a href=x.y>");
     }
 
     #[test]

@@ -1,0 +1,55 @@
+<!doctype html>
+<html><head><title>dialogs</title>
+<style>
+  body { font: 15px sans-serif; margin: 0; padding: 16px; }
+  button { margin: 0 6px 8px 0; padding: 4px 10px; }
+  #out { white-space: pre-wrap; font-family: monospace; background: #f3f5f9; border: 1px solid #ccd; padding: 10px; min-height: 90px; margin-top: 10px; }
+  /* Message boxes are plain HTML: restyle them here. */
+  .nile-messagebox { border-radius: 12px; }
+  .nile-messagebox.question .nile-messagebox-icon { background: #7b4fd1; }
+  label { display: block; margin: 12px 0 4px; font-weight: bold; }
+</style></head>
+<body>
+  <h3>Native dialogs</h3>
+  <label>File choosers (<code>Window.this.selectFile</code> / <code>selectFolder</code>)</label>
+  <button id="open">Open…</button>
+  <button id="multi">Open several…</button>
+  <button id="save">Save as…</button>
+  <button id="folder">Choose folder…</button>
+  <label>Message boxes (<code>Window.this.modal(&lt;alert&gt;…)</code>)</label>
+  <button id="info">info</button>
+  <button id="alert">alert</button>
+  <button id="error">error</button>
+  <button id="question">question</button>
+  <label>The same boxes drawn in the window (<code>inline</code>: rich content, your own buttons, CSS-styleable; returns a Promise)</label>
+  <button id="inline-q">inline question</button>
+  <button id="inline-e">inline error</button>
+  <label><code>&lt;input type=file&gt;</code> (the same chooser)</label>
+  <input type="file" id="f" multiple accept=".png,.jpg,.txt">
+  <div id="out">(results appear here)</div>
+  <script>
+    const out = document.$('#out');
+    const show = (what, v) => { out.text = what + ' → ' + JSON.stringify(v, null, 1); };
+    const win = Window.this;
+    document.$('#open').on('click', () => show('selectFile', win.selectFile({ mode: 'open', filter: 'Text (*.txt,*.md)|*.txt;*.md|All Files (*.*)|*.*', caption: 'Open a file' })));
+    document.$('#multi').on('click', () => show('open-multiple', win.selectFile({ mode: 'open-multiple', caption: 'Pick some files' })));
+    document.$('#save').on('click', () => show('save', win.selectFile({ mode: 'save', extension: 'txt', caption: 'Save as', filter: 'Text (*.txt)|*.txt' })));
+    document.$('#folder').on('click', () => show('selectFolder', win.selectFolder({ caption: 'Pick a folder' })));
+    document.$('#info').on('click', () => show('info', win.modal(<info>Everything is fine.</info>)));
+    document.$('#alert').on('click', () => show('alert', win.modal(<alert>Careful: this is a warning.</alert>)));
+    document.$('#error').on('click', () => show('error', win.modal(<error>Something went wrong.</error>)));
+    document.$('#question').on('click', () => show('question', win.modal(<question>Delete everything?</question>)));
+    document.$('#inline-q').on('click', async () => {
+      const answer = await win.modal(
+        <question inline caption="Unsaved changes">
+          <b>Save</b> your work before closing?<br/>Your edits will be lost otherwise.
+          <button value="save" default>Save</button>
+          <button value="discard">Don't save</button>
+          <button value="cancel" cancel>Cancel</button>
+        </question>);
+      show('inline question', answer);
+    });
+    document.$('#inline-e').on('click', async () => show('inline error', await win.modal(<error inline caption="Failed">Could not write the file.</error>)));
+    document.$('#f').on('change', function () { out.text = 'input files: ' + Array.from(this.files).map((f) => f.name).join(', '); });
+  </script>
+</body></html>
