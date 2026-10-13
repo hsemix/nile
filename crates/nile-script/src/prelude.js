@@ -867,6 +867,9 @@
       else if (kind === "focus" || kind === "blur") ev = new FocusEvent(kind, { ...o, bubbles: false });
       else if (kind === "scroll") ev = new Event(kind, { ...o, bubbles: false, cancelable: false });
       else ev = new Event(kind, o);
+      if (kind === "transitionend" || kind === "animationstart" || kind === "animationend") {
+        for (const k of ["propertyName", "animationName", "elapsedTime", "pseudoElement"]) if (k in init) ev[k] = init[k];
+      }
       ev.isTrusted = true;
       return dispatch(target, ev);
     },

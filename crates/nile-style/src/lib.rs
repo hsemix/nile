@@ -23,7 +23,7 @@ use selectors::context::{
     SelectorCaches,
 };
 use selectors::matching::matches_selector;
-pub use anim::{AnimValue, AnimationSpec, Animator, Direction, Fill, Timing, TransitionSpec};
+pub use anim::{AnimEvent, AnimValue, AnimationSpec, Animator, Direction, Fill, Timing, TransitionSpec};
 pub use grid::{area_lines, Breadth, GridAutoFlow, GridLine, GridPlace, Track, TrackItem, TrackRepeat};
 pub use gradient::{TransformFn, ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
 pub use parse::{Declaration, Rule, Stylesheet, Value};

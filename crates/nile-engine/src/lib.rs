@@ -1567,9 +1567,16 @@ impl Page {
 
     /// Step transitions and animations; wake again in a frame while any is running.
     pub fn animate(&mut self) -> (bool, Option<Duration>) {
-        let mut v = self.view.borrow_mut();
-        let changed = v.animate();
-        (changed, v.animator.is_active().then_some(Duration::from_millis(16)))
+        let (changed, events, active) = {
+            let mut v = self.view.borrow_mut();
+            let changed = v.animate();
+            (changed, v.animator.take_events(), v.animator.is_active())
+        };
+        let fired = !events.is_empty();
+        for e in events {
+            self.emit(e.node, UiEvent::Animation { kind: e.kind, name: e.name, elapsed: e.elapsed });
+        }
+        (changed | fired, active.then_some(Duration::from_millis(16)))
     }
 
     /// Elements Tab visits: positive `tabindex` first (ascending), then the
@@ -3623,6 +3630,39 @@ cd</textarea>
         press_key(&mut p, "Enter", ModifiersState::default());
         assert_eq!(js(&mut p, "document.getElementById('h').lastChild.tagName"), "P");
         assert_eq!(js(&mut p, "document.getElementById('u').children.length"), "2");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn transitions_and_animations_fire_their_events() {
+        let (mut p, path) = page(
+            r#"<style>
+                #t { width: 10px; transition: width 0.05s linear }
+                #t.on { width: 50px }
+                #a { animation: nudge 0.05s linear }
+                @keyframes nudge { from { margin-left: 0 } to { margin-left: 5px } }
+            </style>
+            <div id=t></div><div id=a></div>
+            <script>
+              window.log = [];
+              for (const id of ["t", "a"]) {
+                const el = document.getElementById(id);
+                for (const k of ["transitionend", "animationstart", "animationend"])
+                  el.addEventListener(k, e => log.push(k + ":" + (e.propertyName || e.animationName) + ":" + e.target.id));
+              }
+              document.getElementById("t").classList.add("on");
+            </script>"#,
+            "anim_events",
+        );
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            p.tick();
+        }
+        let log = js(&mut p, "log.join(',')");
+        assert!(log.contains("animationstart:nudge:a"), "{log}");
+        assert!(log.contains("animationend:nudge:a"), "{log}");
+        assert!(log.contains("transitionend:width:t"), "{log}");
+        assert_eq!(log.matches("end").count(), 2, "each fires once: {log}");
         let _ = std::fs::remove_file(path);
     }
 }

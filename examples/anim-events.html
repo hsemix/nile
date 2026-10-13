@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+  <head>
+    <style>
+      body {
+        margin: 20px;
+        font: 14px sans-serif;
+        background: #f4f1ea;
+      }
+      #box {
+        width: 80px;
+        height: 40px;
+        background: #2a7;
+        transition:
+          width 0.4s ease,
+          background-color 0.4s;
+      }
+      #box.on {
+        width: 240px;
+        background: #37e;
+      }
+      #dot {
+        width: 24px;
+        height: 24px;
+        margin-top: 16px;
+        background: #e74;
+        border-radius: 12px;
+        animation: slide 0.8s ease-in-out 2;
+      }
+      @keyframes slide {
+        from {
+          margin-left: 0;
+        }
+        to {
+          margin-left: 200px;
+        }
+      }
+      pre {
+        background: #fff;
+        padding: 10px;
+        min-height: 120px;
+      }
+    </style>
+  </head>
+  <body>
+    <p>
+      transitionend / animationstart / animationend are logged below. Click the
+      green box.
+    </p>
+    <div id="box"></div>
+    <div id="dot"></div>
+    <pre id="log"></pre>
+    <script>
+      const log = (m) =>
+        (document.getElementById("log").textContent += m + "\n");
+      for (const id of ["box", "dot"]) {
+        const el = document.getElementById(id);
+        el.addEventListener("transitionend", (e) =>
+          log(`transitionend ${e.propertyName} ${e.elapsedTime.toFixed(2)}s`),
+        );
+        el.addEventListener("animationstart", (e) =>
+          log(`animationstart ${e.animationName}`),
+        );
+        el.addEventListener("animationend", (e) =>
+          log(`animationend ${e.animationName} ${e.elapsedTime.toFixed(2)}s`),
+        );
+      }
+      document.getElementById("box").addEventListener("click", (e) => {
+        log("click");
+        e.target.classList.toggle("on");
+      });
+    </script>
+  </body>
+</html>
