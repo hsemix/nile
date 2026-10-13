@@ -25,6 +25,8 @@ pub struct TextBrush {
     pub deco: u32,
     /// A padding/border spacer run: only its horizontal extent is meaningful.
     pub spacer: bool,
+    /// Baseline shift in px, positive = up (`vertical-align`).
+    pub shift: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +39,8 @@ pub struct TextStyle {
     /// See [`TextBrush::deco`].
     pub deco: u32,
     pub spacer: bool,
+    /// See [`TextBrush::shift`].
+    pub shift: f32,
     pub italic: bool,
     pub underline: bool,
     pub line_through: bool,
@@ -86,6 +90,7 @@ impl TextEngine {
             color: [0; 4],
             deco: 0,
             spacer: false,
+            shift: 0.0,
             italic: false,
             underline: false,
             line_through: false,
@@ -187,7 +192,7 @@ fn with_symbol_fallbacks(family: &str) -> String {
 }
 
 fn brush(s: &TextStyle) -> TextBrush {
-    TextBrush { color: s.color, deco: s.deco, spacer: s.spacer }
+    TextBrush { color: s.color, deco: s.deco, spacer: s.spacer, shift: s.shift }
 }
 
 fn font_style(s: &TextStyle) -> FontStyle {
@@ -237,6 +242,7 @@ mod tests {
             color: [0, 0, 0, 255],
             deco: 0,
             spacer: false,
+            shift: 0.0,
             italic: false,
             underline: false,
             line_through: false,

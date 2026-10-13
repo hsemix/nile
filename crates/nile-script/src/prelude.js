@@ -823,6 +823,8 @@
     },
   });
 
+  /*@EDIT@*/
+
   // ---- the embedder ------------------------------------------------------
   // `host.name(...args)` calls a function the embedding application registered; arguments and
   // result travel as JSON. `host.has(name)` tells whether one exists.

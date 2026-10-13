@@ -29,6 +29,17 @@ pub struct Overlay<'a> {
     pub viewport: (f32, f32),
     /// Selected page text: `(text run, from, to)` byte ranges.
     pub page_selection: &'a [(usize, usize, usize)],
+    /// The caret in `contenteditable` content (`None` while blinked off or without one).
+    pub dom_caret: Option<DomCaret>,
+}
+
+/// Where the caret of an editing host is drawn.
+#[derive(Clone, Copy, Debug)]
+pub enum DomCaret {
+    /// In a text run at a byte offset.
+    Run { run: usize, byte: usize },
+    /// In an empty element: a line-high bar at `rect` (layout coordinates) inside box `run`.
+    Empty { run: usize, rect: LRect },
 }
 
 pub struct Renderer {
@@ -52,7 +63,7 @@ impl Renderer {
 
     /// Paint the whole tree.
     pub fn paint(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, overlay: &Overlay) {
-        let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection } = *overlay;
+        let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection, dom_caret } = *overlay;
         canvas.save();
         canvas.translate((0.0, -scroll_y));
         // Boxes that wrap their subtree (an `overflow` clip, or an `opacity` layer) end
@@ -82,6 +93,11 @@ impl Renderer {
                     if let Some(m) = tree.marker(b.node) {
                         self.paint_marker(canvas, m, styles.get(b.node).color);
                     }
+                    if let Some(DomCaret::Empty { run, rect }) = dom_caret {
+                        if run == i {
+                            canvas.draw_rect(Rect::from_xywh(rect.x, rect.y, 1.0, rect.height), &fill(styles.get(b.node).color));
+                        }
+                    }
                     if let Some(list) = tree.list_box(b.node) {
                         self.paint_list(canvas, b.rect, styles.get(b.node), list);
                     }
@@ -104,6 +120,11 @@ impl Renderer {
                     self.paint_text(canvas, b.rect, content, styles);
                     if let Some((_, at)) = caret.filter(|(n, _)| content.owners.iter().any(|(_, o)| o == n)) {
                         paint_caret(canvas, b.rect, content, at, styles.get(b.node).color);
+                    }
+                    if let Some(DomCaret::Run { run, byte }) = dom_caret {
+                        if run == i {
+                            paint_caret(canvas, b.rect, content, byte, styles.get(b.node).color);
+                        }
                     }
                 }
             }
@@ -378,7 +399,7 @@ impl Renderer {
                         break;
                     }
                     glyph_ids.push(g.id as GlyphId);
-                    positions.push(Point::new(g.x, g.y));
+                    positions.push(Point::new(g.x, g.y - glyph_run.style().brush.shift));
                 }
                 if let Some((x, y)) = cut {
                     glyph_ids.push(dots);
@@ -401,7 +422,7 @@ impl Renderer {
                 paint.set_color(Color::from_argb(a, r, g, b));
 
                 let x = rect.x + glyph_run.offset();
-                let baseline = rect.y + glyph_run.baseline();
+                let baseline = rect.y + glyph_run.baseline() - style.brush.shift;
                 let fm = run.font_metrics();
                 canvas.draw_glyphs_at(&glyph_ids, positions.as_slice(), (rect.x, rect.y), &font, &paint);
 

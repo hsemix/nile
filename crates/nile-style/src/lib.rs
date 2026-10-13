@@ -317,6 +317,11 @@ pub enum VerticalAlign {
     Top,
     Middle,
     Bottom,
+    /// Inline: lowered / raised by a fraction of the font size.
+    Sub,
+    Super,
+    /// Inline: raised by this many px (negative lowers).
+    Shift(f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -717,6 +722,7 @@ const UA_STYLESHEET: &str = r#"
 head, script, style, title, meta, link, option, optgroup { display: none }
 img { display: inline-block }
 [selectable] { user-select: text }
+[contenteditable]:not([contenteditable=false]) { user-select: text; cursor: text }
 html, body, div, p, h1, h2, h3, section, header, footer, main, nav, ul { display: block }
 li { display: list-item }
 ul, ol, menu { margin: 1em 0; padding-left: 40px }
@@ -738,6 +744,8 @@ span, a, b, strong, em, i, u, s, del, br, label, code, kbd, samp, var, tt, small
   dfn, time, ins, font, bdi, bdo, data, output { display: inline }
 code, kbd, samp, tt, pre { font-family: monospace }
 small, sub, sup { font-size: 0.83em }
+sub { vertical-align: sub }
+sup { vertical-align: super }
 big { font-size: 1.17em }
 mark { background: #ffff00; color: #000000 }
 ins { text-decoration: underline }
@@ -1879,6 +1887,16 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_vertical_align_parses() {
+        let doc = Document::parse(r#"<sup id=a>1</sup><sub id=b>2</sub><span id=c style="vertical-align: 3px">3</span>"#);
+        let styles = compute_styles(&doc);
+        let va = |tag: &str| styles.get(doc.find(|n| n.attr("id") == Some(tag)).unwrap()).vertical_align;
+        assert_eq!(va("a"), VerticalAlign::Super);
+        assert_eq!(va("b"), VerticalAlign::Sub);
+        assert_eq!(va("c"), VerticalAlign::Shift(3.0));
+    }
 
     #[test]
     fn cascade_order_and_inheritance() {

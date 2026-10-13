@@ -257,7 +257,13 @@ pub(crate) fn apply(s: &mut ComputedStyle, name: &str, v: &[Value], fs: f32) -> 
                 Some("middle") => VerticalAlign::Middle,
                 Some("bottom") => VerticalAlign::Bottom,
                 Some("baseline") => VerticalAlign::Baseline,
-                _ => s.vertical_align,
+                Some("sub") => VerticalAlign::Sub,
+                Some("super") => VerticalAlign::Super,
+                _ => match first.and_then(|v| length(v, s.font_size)) {
+                    Some(Length::Px(px)) => VerticalAlign::Shift(px),
+                    Some(Length::Percent(p)) => VerticalAlign::Shift(p * s.font_size * s.line_height.max(1.0)),
+                    _ => s.vertical_align,
+                },
             }
         }
         "justify-items" => s.justify_items = align_of(first).unwrap_or(s.justify_items),

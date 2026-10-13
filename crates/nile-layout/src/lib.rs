@@ -57,8 +57,39 @@ pub struct InlineDeco {
     pub radius: f32,
 }
 
+/// A position in the DOM: a character offset in a text node, or a child index in an element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DomPoint {
+    pub node: NodeId,
+    pub offset: usize,
+}
+
+/// Where a text node's characters landed in a run's shaped text, for turning DOM positions
+/// into caret positions and back.
+#[derive(Debug, Clone)]
+pub struct TextNodeMap {
+    pub node: NodeId,
+    /// Byte range of the node's text in the run.
+    pub start: usize,
+    pub end: usize,
+    /// For each character of the node (and one past the last): its byte in the run's text.
+    /// Collapsed whitespace points at where it would have been.
+    pub offsets: Vec<usize>,
+}
+
+/// Where an inline element (or `<br>`) sits in a run's text.
+#[derive(Debug, Clone, Copy)]
+pub struct ElementMark {
+    pub node: NodeId,
+    pub start: usize,
+    pub end: usize,
+}
+
 pub struct TextContent {
     pub layout: TextLayout,
+    /// DOM text nodes and inline elements in this run, in order.
+    pub nodes: Vec<TextNodeMap>,
+    pub marks: Vec<ElementMark>,
     /// Indexed by `TextBrush::deco - 1`.
     pub decos: Vec<InlineDeco>,
     /// Which element each byte range of the run's text belongs to (for hit testing).
@@ -232,6 +263,9 @@ pub struct LayoutTree {
     lists: std::collections::HashMap<NodeId, ListBox>,
     /// Element boxes by node, for `node_rect`.
     index: std::collections::HashMap<NodeId, usize>,
+    /// Text node -> (run box index, index in that run's `nodes`); inline element -> (run, mark).
+    text_nodes: std::collections::HashMap<NodeId, (usize, usize)>,
+    elem_marks: std::collections::HashMap<NodeId, (usize, usize)>,
     /// Generated (`::before`/`::after`) box -> its element, so hits land on the element.
     origins: std::collections::HashMap<NodeId, NodeId>,
 }
@@ -546,6 +580,110 @@ impl LayoutTree {
         Some((TextPoint { run: first, byte: 0 }, TextPoint { run: last, byte: len }))
     }
 
+    // ---- DOM positions ---------------------------------------------------------------------
+
+    fn run_text(&self, run: usize) -> Option<&TextContent> {
+        match &self.boxes.get(run)?.content {
+            BoxContent::Text(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// The run and byte a node's start (or end) sits at, looking into its descendants.
+    fn leaf_position(&self, doc: &Document, node: NodeId, end: bool) -> Option<TextPoint> {
+        if let Some(&(run, k)) = self.text_nodes.get(&node) {
+            let m = &self.run_text(run)?.nodes[k];
+            return Some(TextPoint { run, byte: if end { *m.offsets.last()? } else { m.offsets[0] } });
+        }
+        if let Some(&(run, k)) = self.elem_marks.get(&node) {
+            let m = self.run_text(run)?.marks[k];
+            return Some(TextPoint { run, byte: if end { m.end } else { m.start } });
+        }
+        let kids = &doc.node(node).children;
+        if end {
+            kids.iter().rev().find_map(|c| self.leaf_position(doc, *c, true))
+        } else {
+            kids.iter().find_map(|c| self.leaf_position(doc, *c, false))
+        }
+    }
+
+    /// The run and byte a DOM position is drawn at. `None` for positions with no text near
+    /// them (an empty block).
+    pub fn text_point_of(&self, doc: &Document, p: DomPoint) -> Option<TextPoint> {
+        if let Some(&(run, k)) = self.text_nodes.get(&p.node) {
+            let m = &self.run_text(run)?.nodes[k];
+            return Some(TextPoint { run, byte: m.offsets[p.offset.min(m.offsets.len() - 1)] });
+        }
+        if matches!(doc.node(p.node).kind, NodeKind::Text(_)) {
+            return None;
+        }
+        let kids = &doc.node(p.node).children;
+        let at = p.offset.min(kids.len());
+        kids[at..]
+            .iter()
+            .find_map(|c| self.leaf_position(doc, *c, false))
+            .or_else(|| kids[..at].iter().rev().find_map(|c| self.leaf_position(doc, *c, true)))
+    }
+
+    /// The DOM position of a run position: the inverse of [`text_point_of`](Self::text_point_of).
+    pub fn dom_point_of(&self, doc: &Document, t: TextPoint) -> Option<DomPoint> {
+        let c = self.run_text(t.run)?;
+        let inside = c.nodes.iter().find(|n| n.start <= t.byte && t.byte < n.end);
+        let node = inside.or_else(|| c.nodes.iter().rev().find(|n| n.end == t.byte && n.start < n.end));
+        if let Some(n) = node {
+            let i = n.offsets.iter().position(|o| *o >= t.byte).unwrap_or(n.offsets.len() - 1);
+            return Some(DomPoint { node: n.node, offset: i.min(n.offsets.len() - 1) });
+        }
+        // On a <br>: before it, in its parent.
+        let br = c.marks.iter().find(|m| m.start == t.byte && doc.node(m.node).tag() == Some("br"))?;
+        let parent = doc.node(br.node).parent?;
+        let index = doc.node(parent).children.iter().position(|x| *x == br.node)?;
+        Some(DomPoint { node: parent, offset: index })
+    }
+
+    /// The caret rectangle of a DOM position in layout coordinates (`x`, `y` top-left, `height`)
+    /// and the index of the box it is drawn in. Positions in empty elements use the element's
+    /// content box.
+    pub fn dom_caret_rect(&self, doc: &Document, styles: &StyleMap, p: DomPoint) -> Option<(Rect, usize)> {
+        if let Some(t) = self.text_point_of(doc, p) {
+            let c = self.run_text(t.run)?;
+            let r = self.boxes[t.run].rect;
+            let g = Cursor::from_byte_index(&c.layout, t.byte.min(c.text.len()), Affinity::Downstream).geometry(&c.layout, 1.0);
+            return Some((Rect { x: r.x + g.x0 as f32, y: r.y + g.y0 as f32, width: 1.0, height: (g.y1 - g.y0) as f32 }, t.run));
+        }
+        // An empty element: the start of its content box, one line high.
+        let mut node = p.node;
+        if matches!(doc.node(node).kind, NodeKind::Text(_)) {
+            node = doc.node(node).parent?;
+        }
+        let i = *self.index.get(&node)?;
+        let r = self.boxes[i].rect;
+        let s = styles.get(node);
+        Some((
+            Rect {
+                x: r.x + s.border_width.left + s.padding.left,
+                y: r.y + s.border_width.top + s.padding.top,
+                width: 1.0,
+                height: s.font_size * s.line_height,
+            },
+            i,
+        ))
+    }
+
+    /// A DOM position's caret as `(x, y, height)` in painted coordinates (after scrolling and
+    /// transforms), for moving the caret up and down.
+    pub fn caret_painted(&self, doc: &Document, styles: &StyleMap, p: DomPoint, offsets: &ScrollOffsets) -> Option<(f32, f32, f32)> {
+        let (r, i) = self.dom_caret_rect(doc, styles, p)?;
+        let (x, y) = self.placements(offsets)[i].xf.apply(r.x, r.y);
+        Some((x, y, r.height))
+    }
+
+    /// The DOM position nearest a point in painted coordinates, among selectable text.
+    pub fn dom_point_at(&self, doc: &Document, x: f32, y: f32, offsets: &ScrollOffsets) -> Option<DomPoint> {
+        let t = self.text_point_at(x, y, offsets)?;
+        self.dom_point_of(doc, t)
+    }
+
     fn text_len(&self, run: usize) -> usize {
         match &self.boxes[run].content {
             BoxContent::Text(c) => c.text.len(),
@@ -767,6 +905,8 @@ enum NodeCtx {
         control: bool,
         user_select: nile_style::UserSelect,
         ellipsis: bool,
+        nodes: Vec<TextNodeMap>,
+        marks: Vec<ElementMark>,
         /// Never wrap (single-line text inputs).
         nowrap: bool,
     },
@@ -863,8 +1003,17 @@ pub fn layout_with(
         .map(|(i, b)| (b.node, i))
         .collect();
     let origins = styles.origins().clone();
-    let mut tree = LayoutTree { boxes, content_height, menu: None, lists: Default::default(), markers: Default::default(), index, origins };
+    let mut tree = LayoutTree { boxes, content_height, menu: None, lists: Default::default(), markers: Default::default(), index, text_nodes: Default::default(), elem_marks: Default::default(), origins };
     tree.compute_scroll_boxes(styles);
+    for (i, b) in tree.boxes.iter().enumerate() {
+        let BoxContent::Text(c) = &b.content else { continue };
+        for (k, n) in c.nodes.iter().enumerate() {
+            tree.text_nodes.insert(n.node, (i, k));
+        }
+        for (k, m) in c.marks.iter().enumerate() {
+            tree.elem_marks.insert(m.node, (i, k));
+        }
+    }
     tree.lists = build_lists(doc, styles, text, &tree, options.offsets);
     tree.markers = build_markers(doc, styles, text, &tree);
     if let Some(req) = options.menu {
@@ -1667,6 +1816,8 @@ fn build_control_text(
             control: true,
             user_select: nile_style::UserSelect::None,
             ellipsis: false,
+            nodes: Vec::new(),
+            marks: Vec::new(),
             nowrap: node.tag() != Some("textarea"),
         },
     )
@@ -1744,6 +1895,8 @@ struct InlineText {
     boxes: Vec<InlineBoxSpec>,
     decos: Vec<InlineDeco>,
     owners: Vec<(Range<usize>, NodeId)>,
+    nodes: Vec<TextNodeMap>,
+    marks: Vec<ElementMark>,
     /// Inline elements currently being collected, outermost first.
     open: Vec<NodeId>,
     /// True where a following space would be collapsed away.
@@ -1768,6 +1921,8 @@ impl InlineText {
             boxes: Vec::new(),
             decos: Vec::new(),
             owners: Vec::new(),
+            nodes: Vec::new(),
+            marks: Vec::new(),
             open: Vec::new(),
             collapse: true,
             inside: None,
@@ -1792,17 +1947,28 @@ impl InlineText {
         match &node.kind {
             NodeKind::Text(raw) => {
                 let es = styles.get(id);
-                let collapsed = transform_text(&apply_white_space(raw, es.white_space, &self.text), es.text_transform);
-                let piece = if self.collapse && !es.white_space.keeps_spaces() {
-                    collapsed.strip_prefix(' ').unwrap_or(&collapsed)
-                } else {
-                    &collapsed
-                };
+                let (collapsed, offs) = apply_white_space_mapped(raw, es.white_space, &self.text);
+                let collapsed_len = collapsed.len();
+                let collapsed = transform_text(&collapsed, es.text_transform);
+                let strip = self.collapse && !es.white_space.keeps_spaces() && collapsed.starts_with(' ');
+                let piece = if strip { &collapsed[1..] } else { &collapsed[..] };
+                let at = self.text.len();
+                // Characters of the node -> bytes of the run. (Case changes that alter the
+                // length leave positions approximate.)
+                let _ = collapsed_len;
+                let dropped = usize::from(strip);
+                self.nodes.push(TextNodeMap {
+                    node: id,
+                    start: at,
+                    end: at + piece.len(),
+                    offsets: offs.iter().map(|o| at + o.saturating_sub(dropped).min(piece.len())).collect(),
+                });
                 if !piece.is_empty() {
                     let start = self.text.len();
                     self.text.push_str(piece);
                     let mut ts = text_style(styles.get(id));
                     ts.deco = deco;
+                    ts.shift = self.open.iter().map(|&o| baseline_shift(styles.get(o))).sum();
                     self.spans.push((start..self.text.len(), ts));
                     // Innermost owner first (hit testing takes the first match);
                     // enclosing inline elements follow, so their rects cover this text.
@@ -1830,7 +1996,9 @@ impl InlineText {
                 }
                 if node.tag() == Some("br") {
                     self.trim_end();
+                    let at = self.text.len();
                     self.text.push('\n');
+                    self.marks.push(ElementMark { node: id, start: at, end: at + 1 });
                     self.collapse = true;
                     return;
                 }
@@ -1851,11 +2019,13 @@ impl InlineText {
                 }
                 // TODO: block-level descendants of an inline element should
                 // split the run; for now their text is flowed inline.
+                let mark_start = self.text.len();
                 self.open.push(id);
                 for c in kids(doc, styles, id) {
                     self.collect(doc, styles, c, deco, make_box);
                 }
                 self.open.pop();
+                self.marks.push(ElementMark { node: id, start: mark_start, end: self.text.len() });
                 if own.is_some() {
                     self.push_spacer(id, es, deco, es.padding.right + es.border_width.right);
                 }
@@ -1902,6 +2072,7 @@ impl InlineText {
             self.text.push_str(piece);
             let mut ts = text_style(es);
             ts.deco = deco;
+            ts.shift = self.open.iter().map(|&o| baseline_shift(styles.get(o))).sum::<f32>() + baseline_shift(es);
             self.spans.push((start..self.text.len(), ts));
             let range = start..self.text.len();
             self.owners.push((range.clone(), origin));
@@ -1948,20 +2119,48 @@ impl InlineText {
                 r.start = r.start.min(len);
             }
             self.owners.retain(|(r, _)| !r.is_empty());
+            for n in &mut self.nodes {
+                n.end = n.end.min(len);
+                n.start = n.start.min(len);
+                for o in &mut n.offsets {
+                    *o = (*o).min(len);
+                }
+            }
+            for m in &mut self.marks {
+                m.end = m.end.min(len);
+                m.start = m.start.min(len);
+            }
         }
     }
 }
 
-/// Text as `white-space` leaves it. `before` is the run so far, for tab stops.
-fn apply_white_space(raw: &str, ws: nile_style::WhiteSpace, before: &str) -> String {
+/// Text as `white-space` leaves it (`before` is the run so far, for tab stops), plus for each character of `raw` (and one past the end) the byte of
+/// the result where it landed; dropped whitespace points at where it would have been.
+fn apply_white_space_mapped(raw: &str, ws: nile_style::WhiteSpace, before: &str) -> (String, Vec<usize>) {
     use nile_style::WhiteSpace as W;
+    let mut out = String::with_capacity(raw.len());
+    let mut offs = Vec::with_capacity(raw.len() + 1);
     match ws {
-        W::Normal | W::Nowrap => collapse_whitespace(raw),
+        W::Normal | W::Nowrap => {
+            let mut last_space = false;
+            for c in raw.chars() {
+                offs.push(out.len());
+                if c.is_whitespace() {
+                    if !last_space {
+                        out.push(' ');
+                    }
+                    last_space = true;
+                } else {
+                    out.push(c);
+                    last_space = false;
+                }
+            }
+        }
         W::Pre | W::PreWrap => {
-            let mut out = String::with_capacity(raw.len());
             let mut column = before.rsplit('\n').next().map_or(0, |l| l.chars().count());
             let mut chars = raw.chars().peekable();
             while let Some(c) = chars.next() {
+                offs.push(out.len());
                 match c {
                     '\r' => {
                         if chars.peek() == Some(&'\n') {
@@ -1986,10 +2185,8 @@ fn apply_white_space(raw: &str, ws: nile_style::WhiteSpace, before: &str) -> Str
                     }
                 }
             }
-            out
         }
         W::PreLine => {
-            let mut out = String::with_capacity(raw.len());
             let mut last_space = false;
             for c in raw.chars() {
                 match c {
@@ -1997,24 +2194,28 @@ fn apply_white_space(raw: &str, ws: nile_style::WhiteSpace, before: &str) -> Str
                         if out.ends_with(' ') {
                             out.pop();
                         }
+                        offs.push(out.len());
                         out.push('\n');
                         last_space = true;
                     }
                     c if c.is_whitespace() => {
+                        offs.push(out.len());
                         if !last_space {
                             out.push(' ');
                         }
                         last_space = true;
                     }
                     c => {
+                        offs.push(out.len());
                         out.push(c);
                         last_space = false;
                     }
                 }
             }
-            out
         }
     }
+    offs.push(out.len());
+    (out, offs)
 }
 
 fn build_inline_run(
@@ -2091,6 +2292,8 @@ fn build_inline_run_in(
             kids,
             decos: inline.decos,
             owners: inline.owners,
+            nodes: inline.nodes,
+            marks: inline.marks,
             text: inline.text,
             spacers,
             control: false,
@@ -2139,7 +2342,7 @@ fn flatten(
             let transform = box_transform(styles.get(*id), rect);
             out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform })
         }
-        Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nowrap }) => {
+        Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
             // Taffy rounds box sizes to whole pixels, which can shave a
             // fraction off the measured width and force a spurious wrap, so
@@ -2158,6 +2361,7 @@ fn flatten(
             let decos = decos.clone();
             let owners = owners.clone();
             let (text, spacers, control, user_select, ellipsis) = (text.clone(), spacers.clone(), *control, *user_select, *ellipsis);
+            let (nodes, marks) = (nodes.clone(), marks.clone());
             let placed: Vec<_> = layout
                 .lines()
                 .flat_map(|line| line.items().collect::<Vec<_>>())
@@ -2169,7 +2373,7 @@ fn flatten(
             out.push(LayoutBox {
                 node: *node,
                 rect,
-                content: BoxContent::Text(Box::new(TextContent { layout, decos, owners, text, spacers, control, user_select, ellipsis })),
+                content: BoxContent::Text(Box::new(TextContent { layout, nodes, marks, decos, owners, text, spacers, control, user_select, ellipsis })),
                 subtree_end: 0,
                 scroll: None,
                 image: None,
@@ -2235,6 +2439,16 @@ fn transform_text(text: &str, t: TextTransform) -> String {
     }
 }
 
+/// How far an inline element's `vertical-align` lifts its text (px, up is positive).
+fn baseline_shift(s: &ComputedStyle) -> f32 {
+    match s.vertical_align {
+        VerticalAlign::Sub => -0.2 * s.font_size,
+        VerticalAlign::Super => 0.4 * s.font_size / 0.83,
+        VerticalAlign::Shift(px) => px,
+        _ => 0.0,
+    }
+}
+
 fn text_style(s: &ComputedStyle) -> TextStyle {
     TextStyle {
         font_family: s.font_family.clone(),
@@ -2244,6 +2458,7 @@ fn text_style(s: &ComputedStyle) -> TextStyle {
         color: [s.color.r, s.color.g, s.color.b, s.color.a],
         deco: 0,
         spacer: false,
+        shift: 0.0,
         italic: s.italic,
         underline: s.underline,
         line_through: s.line_through,
@@ -3155,5 +3370,40 @@ second</textarea><textarea id="e"></textarea></body>"#,
         assert!(!flag("white-space:nowrap;text-overflow:ellipsis"), "needs overflow other than visible");
         assert!(!flag("overflow:hidden;text-overflow:ellipsis"), "needs a single line");
         assert!(!flag("overflow:hidden;white-space:nowrap"));
+    }
+
+    #[test]
+    fn dom_points_map_to_the_run_and_back_through_collapsed_whitespace() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0; user-select:text"><p id="p" style="margin:0">Hello  <b id="b">big</b> <i>x</i><br>tail</p><p id="e" style="margin:0"></p></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let id = |s: &str| doc.find(|n| n.attr("id") == Some(s)).unwrap();
+        let p = id("p");
+        let hello = doc.node(p).children[0];
+        let big = doc.node(id("b")).children[0];
+        let run_text = |pt: TextPoint| match &t.boxes[pt.run].content {
+            BoxContent::Text(c) => c.text.clone(),
+            _ => unreachable!(),
+        };
+        // "Hello  " collapses to "Hello " in the run: offset 6 (the second space) sits at byte 6.
+        let at = |node, offset| t.text_point_of(&doc, DomPoint { node, offset }).unwrap();
+        assert_eq!(run_text(at(hello, 0)), "Hello big x\ntail");
+        assert_eq!((at(hello, 0).byte, at(hello, 5).byte, at(hello, 6).byte, at(hello, 7).byte), (0, 5, 6, 6));
+        assert_eq!(at(big, 0).byte, 6);
+        assert_eq!(at(big, 3).byte, 9);
+        // Element positions: before the <b>, and after the whole paragraph's last child.
+        assert_eq!(at(p, 1).byte, 6, "child 1 is the <b>");
+        assert_eq!((at(p, 3).byte, at(p, 4).byte), (10, 11), "children 3 and 4 are <i> and <br>");
+        // And back.
+        let back = |byte| t.dom_point_of(&doc, TextPoint { run: at(hello, 0).run, byte }).unwrap();
+        assert_eq!(back(3), DomPoint { node: hello, offset: 3 });
+        assert_eq!(back(7), DomPoint { node: big, offset: 1 });
+        // The caret has a line's height and moves right along the line.
+        let (c0, c1) = (t.dom_caret_rect(&doc, &styles, DomPoint { node: hello, offset: 0 }).unwrap().0, t.dom_caret_rect(&doc, &styles, DomPoint { node: hello, offset: 5 }).unwrap().0);
+        assert!(c1.x > c0.x + 20.0 && c0.height > 10.0 && c0.y == c1.y);
+        // An empty paragraph still has a place for the caret.
+        let e = t.dom_caret_rect(&doc, &styles, DomPoint { node: id("e"), offset: 0 }).unwrap().0;
+        assert!(e.height > 10.0);
     }
 }
