@@ -88,6 +88,8 @@ fn icon_of(c: nile_style::Cursor) -> CursorIcon {
         C::Grab => CursorIcon::Grab,
         C::Grabbing => CursorIcon::Grabbing,
         C::ResizeH => CursorIcon::ColResize,
+        C::ResizeNwse => CursorIcon::NwseResize,
+        C::ResizeNesw => CursorIcon::NeswResize,
         C::ResizeV => CursorIcon::RowResize,
     }
 }

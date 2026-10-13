@@ -615,6 +615,8 @@ pub struct Page {
     pub range_drag: Option<(NodeId, String)>,
     /// An editing-host drag selection: its anchor and whether it began with a double-click.
     pub edit_drag: Option<(DomPoint, bool)>,
+    /// A resize handle of the selected image being dragged.
+    pub image_drag: Option<editing::ImageDrag>,
     /// The x the caret keeps while moving up and down.
     pub edit_x: Option<f32>,
     /// The file input a chooser was last taken for.
@@ -931,6 +933,7 @@ impl Page {
             drag: None,
             range_drag: None,
             edit_drag: None,
+            image_drag: None,
             edit_x: None,
             file_target: None,
             ime_cursor: None,
@@ -1659,6 +1662,9 @@ impl Page {
         if self.bar_drag.is_some() || self.view.borrow().menu.is_some() {
             return Cursor::Default;
         }
+        if let Some(c) = self.image_handle_cursor() {
+            return c;
+        }
         match self.interaction().hover {
             Some(n) => self.view.borrow().styles.get(n).cursor,
             None => Cursor::Auto,
@@ -1699,6 +1705,9 @@ impl Page {
     }
 
     fn pointer_moved_here(&mut self, x: f32, y: f32) -> bool {
+        if self.image_drag.is_some() {
+            return self.image_drag_to(x, y);
+        }
         if self.bar_drag.is_some() {
             return self.bar_drag_to(x, y);
         }
@@ -2043,6 +2052,10 @@ impl Page {
 
     fn release_here(&mut self) -> bool {
         if self.bar_drag.take().is_some() {
+            return true;
+        }
+        if let Some(d) = self.image_drag.take() {
+            let _ = self.call("__imageEnd", &format!("[{}]", d.node.0));
             return true;
         }
         self.drag = None;
@@ -3309,6 +3322,7 @@ impl Page {
         let selection = self.selection_for_paint();
         let dom_caret = self.dom_caret_for_paint();
         let ime_underline = self.ime_underline();
+        let selected_image = if portal.is_none() { self.selected_image_rect().map(|r| nile_layout::Rect { x: r.x, y: r.y, width: r.width, height: r.height }) } else { None };
         {
         let mut view = self.view.borrow_mut();
         view.layout();
@@ -3340,7 +3354,7 @@ impl Page {
                 canvas,
                 tree,
                 &view.styles,
-                &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection, dom_caret, preedit: ime_underline, only, skip: &skip },
+                &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection, dom_caret, preedit: ime_underline, only, skip: &skip, selected_image },
             )
         });
         canvas.restore();
@@ -5458,6 +5472,112 @@ cd</textarea>
         // The pointer works in window coordinates: hovering the popup at its screen spot hits it.
         p.pointer_moved(950.0, 0.0);
         assert_eq!(p.interaction().hover, Some(node));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn table_rows_columns_and_merged_cells_are_editable() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="h" contenteditable><table id="t"><tbody>
+                 <tr><td>a1</td><td>b1</td><td>c1</td></tr>
+                 <tr><td>a2</td><td>b2</td><td>c2</td></tr>
+                 <tr><td>a3</td><td>b3</td><td>c3</td></tr></tbody></table><p>after</p></div></body>"#,
+            "table_commands",
+        );
+        // The table as text: rows by `/`, cells by `|`, spans as `[colsxrows]`.
+        let show = |p: &mut Page| js(p, "Array.from(document.querySelectorAll('#t tr')).map(tr => Array.from(tr.children).map(c => c.textContent.trim() + (c.colSpan > 1 || c.rowSpan > 1 ? '[' + c.colSpan + 'x' + c.rowSpan + ']' : '')).join('|')).join('/')");
+        let caret = |p: &mut Page, cell: &str| js(p, &format!("(() => {{ const c = Array.from(document.querySelectorAll('#t td')).find(x => x.textContent.trim().startsWith('{cell}')); const r = document.createRange(); r.setStart(c.firstChild, 1); r.collapse(true); const s = getSelection(); s.removeAllRanges(); s.addRange(r); return 0; }})()"));
+        let cmd = |p: &mut Page, name: &str| js(p, &format!("document.execCommand('{name}'); 0"));
+        caret(&mut p, "b2");
+        cmd(&mut p, "tableInsertRowBelow");
+        assert_eq!(show(&mut p), "a1|b1|c1/a2|b2|c2/||/a3|b3|c3");
+        cmd(&mut p, "tableInsertRowAbove");
+        assert_eq!(js(&mut p, "document.querySelectorAll('#t tr').length"), "5");
+        caret(&mut p, "b3");
+        cmd(&mut p, "tableDeleteRow");
+        cmd(&mut p, "tableDeleteRow");
+        assert_eq!(show(&mut p), "a1|b1|c1/a2|b2|c2/||");
+        cmd(&mut p, "tableDeleteRow");
+        caret(&mut p, "b1");
+        cmd(&mut p, "tableInsertColumnRight");
+        assert_eq!(show(&mut p), "a1|b1||c1/a2|b2||c2");
+        cmd(&mut p, "tableInsertColumnLeft");
+        assert_eq!(show(&mut p), "a1||b1||c1/a2||b2||c2");
+        caret(&mut p, "c1");
+        cmd(&mut p, "tableDeleteColumn");
+        assert_eq!(show(&mut p), "a1||b1|/a2||b2|");
+        // Merge the block from a1 to b2 (three columns, two rows) into one cell, then split it again.
+        js(&mut p, "(() => { const tds = Array.from(document.querySelectorAll('#t td')); const a = tds.find(x => x.textContent === 'a1'), b = tds.find(x => x.textContent === 'b2'); const r = document.createRange(); r.setStart(a.firstChild, 0); r.setEnd(b.firstChild, 1); const s = getSelection(); s.removeAllRanges(); s.addRange(r); return 0; })()");
+        cmd(&mut p, "tableMergeCells");
+        assert_eq!(js(&mut p, "document.querySelectorAll('#t td').length"), "3");
+        let merged = show(&mut p);
+        assert!(merged.starts_with("a1b1a2b2[3x2]") || (merged.contains("a1") && merged.contains("a2") && merged.contains("b2") && merged.contains("[3x2]")), "{merged}");
+        // A row inserted below the merged cell grows its span only when the line crosses it.
+        caret(&mut p, "a1");
+        cmd(&mut p, "tableInsertRowBelow");
+        assert_eq!(js(&mut p, "document.querySelectorAll('#t tr').length + ':' + Array.from(document.querySelectorAll('#t td')).filter(c => c.rowSpan > 1).length"), "3:1");
+        caret(&mut p, "a1");
+        cmd(&mut p, "tableSplitCell");
+        assert_eq!(js(&mut p, "document.querySelectorAll('#t tr').length + ':' + Array.from(document.querySelectorAll('#t td')).every(c => c.rowSpan === 1 && c.colSpan === 1)"), "3:true");
+        // The last row or column takes the table with it; undo brings it back.
+        cmd(&mut p, "tableDeleteTable");
+        assert_eq!(js(&mut p, "document.querySelectorAll('#t').length"), "0");
+        js(&mut p, "document.execCommand('undo'); 0");
+        assert_eq!(js(&mut p, "document.querySelectorAll('#t').length"), "1");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn images_in_the_editor_select_resize_and_delete() {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+        let (mut p, path) = page(
+            &format!(r#"<body style="margin:0"><div id="h" contenteditable style="padding:10px"><p id="a">before <img id="i" src="data:image/png;base64,{png}" style="width:100px;height:60px"> after</p></div></body>"#),
+            "editor_image",
+        );
+        let none = ModifiersState::default();
+        // A click on the image selects it: outline and eight handles.
+        let (x, y) = center(&p, "i");
+        p.pointer_moved(x, y);
+        p.press();
+        p.release();
+        let img = p.doc.borrow().find(|n| n.attr("id") == Some("i")).unwrap();
+        assert_eq!(p.selected_image(), Some(img));
+        let r = p.selected_image_rect().unwrap();
+        assert_eq!((r.width, r.height), (100.0, 60.0));
+        // Over a corner handle the cursor says so; dragging it resizes in proportion.
+        p.pointer_moved(r.x + r.width, r.y + r.height);
+        assert_eq!(p.cursor(), nile_style::Cursor::ResizeNwse);
+        p.press();
+        p.pointer_moved(r.x + r.width + 50.0, r.y + r.height + 5.0);
+        p.release();
+        let size = |p: &mut Page| js(p, "document.getElementById('i').getAttribute('width') + 'x' + document.getElementById('i').getAttribute('height')");
+        assert_eq!(size(&mut p), "129x78", "the corner keeps the proportions");
+        assert_eq!(p.selected_image(), Some(img), "still selected");
+        // An edge handle moves one side only.
+        let r = p.selected_image_rect().unwrap();
+        p.pointer_moved(r.x + r.width / 2.0, r.y + r.height);
+        assert_eq!(p.cursor(), nile_style::Cursor::ResizeV);
+        p.press();
+        p.pointer_moved(r.x + r.width / 2.0, r.y + r.height - 20.0);
+        p.release();
+        assert_eq!(size(&mut p), "129x58");
+        // Undo puts the old sizes back, step by step.
+        js(&mut p, "document.execCommand('undo'); 0");
+        assert_eq!(size(&mut p), "129x78");
+        js(&mut p, "document.execCommand('undo'); 0");
+        assert_eq!(js(&mut p, "document.getElementById('i').getAttribute('width')"), "null");
+        // Delete removes the image. (Undo rebuilt the document, so the image is a new node.)
+        let (x, y) = {
+            let c = js(&mut p, "JSON.stringify((() => { const r = document.getElementById('i').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })())");
+            let v: Vec<f32> = c.trim_matches(|ch| ch == '[' || ch == ']').split(',').map(|n| n.parse().unwrap()).collect();
+            (v[0], v[1])
+        };
+        p.pointer_moved(x, y);
+        p.press();
+        p.release();
+        assert!(p.selected_image().is_some());
+        press_key(&mut p, "Backspace", none);
+        assert_eq!(js(&mut p, "document.querySelectorAll('#h img').length + ':' + document.getElementById('a').textContent"), "0:before  after");
         let _ = std::fs::remove_file(path);
     }
 

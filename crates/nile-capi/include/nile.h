@@ -60,6 +60,14 @@ typedef enum NileCursor {
    * `cursor: none`: hide the pointer.
    */
   NILE_CURSOR_HIDDEN = 13,
+  /**
+   * Diagonal resize, top left to bottom right.
+   */
+  NILE_CURSOR_RESIZE_NWSE = 14,
+  /**
+   * Diagonal resize, top right to bottom left.
+   */
+  NILE_CURSOR_RESIZE_NESW = 15,
 } NileCursor;
 
 /**

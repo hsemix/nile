@@ -40,6 +40,26 @@ pub struct Rect {
     pub height: f32,
 }
 
+/// Side of a selection handle, in px.
+pub const HANDLE: f32 = 8.0;
+
+/// The eight resize handles of a selected box: `(dx, dy)` says which edges they move (-1 left or
+/// top, 1 right or bottom, 0 neither) and `rect` is the little square to draw and hit.
+pub fn handles_of(r: Rect) -> [((i8, i8), Rect); 8] {
+    let (x, y, w, h) = (r.x, r.y, r.width, r.height);
+    let sq = |cx: f32, cy: f32| Rect { x: cx - HANDLE / 2.0, y: cy - HANDLE / 2.0, width: HANDLE, height: HANDLE };
+    [
+        ((-1, -1), sq(x, y)),
+        ((0, -1), sq(x + w / 2.0, y)),
+        ((1, -1), sq(x + w, y)),
+        ((1, 0), sq(x + w, y + h / 2.0)),
+        ((1, 1), sq(x + w, y + h)),
+        ((0, 1), sq(x + w / 2.0, y + h)),
+        ((-1, 1), sq(x, y + h)),
+        ((-1, 0), sq(x, y + h / 2.0)),
+    ]
+}
+
 pub enum BoxContent {
     /// An element box. Padding/border are read from its style when painting.
     Element,
@@ -1444,18 +1464,22 @@ fn build_image(doc: &Document, styles: &StyleMap, tree: &mut TaffyTree<NodeCtx>,
     let image = node.attr("src").and_then(image_for);
     let mut ts = taffy_style(style);
     let attr = |name: &str| node.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
-    if style.width == Length::Auto {
+    let (mut wide, mut high) = (style.width != Length::Auto, style.height != Length::Auto);
+    if !wide {
         if let Some(w) = attr("width") {
             ts.size.width = Dimension::length(w);
+            wide = true;
         }
     }
-    if style.height == Length::Auto {
+    if !high {
         if let Some(h) = attr("height") {
             ts.size.height = Dimension::length(h);
+            high = true;
         }
     }
     let size = image.as_ref().map_or((0.0, 0.0), |i| (i.width as f32, i.height as f32));
-    if size.0 > 0.0 && size.1 > 0.0 {
+    // The picture's proportions fill in a missing dimension; two given ones are taken as they are.
+    if size.0 > 0.0 && size.1 > 0.0 && !(wide && high) {
         ts.aspect_ratio = Some(size.0 / size.1);
     }
     let n = tree.new_leaf_with_context(ts, NodeCtx::Replaced { id, size, image }).ok()?;
@@ -3757,6 +3781,25 @@ second</textarea><textarea id="e"></textarea></body>"#,
         assert_eq!((r("b").x, r("b").y), (50.0, 0.0));
         assert_eq!((r("r").x, r("r").y), (260.0, 0.0));
         assert_eq!(r("c").y, 30.0); // below the tallest float
+    }
+
+    #[test]
+    fn images_with_both_dimensions_ignore_the_pictures_proportions() {
+        const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        let html = format!(
+            r#"<body style="margin:0"><img id="a" src="{PNG}" style="width:100px;height:60px"><p style="margin:0">x <img id="b" src="{PNG}" style="width:100px;height:60px"></p>
+               <img id="c" src="{PNG}" width="80" height="20"></body>"#
+        );
+        let doc = Document::parse(&html);
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let loader = FileImages::new("/nonexistent");
+        let options = LayoutOptions { images: Some(&loader), ..Default::default() };
+        let tree = layout_with(&doc, &styles, &mut text, 600.0, 300.0, &options);
+        let size = |id: &str| tree.node_rect(doc.find(|n| n.attr("id") == Some(id)).unwrap()).map(|r| (r.width, r.height)).unwrap();
+        assert_eq!(size("a"), (100.0, 60.0));
+        assert_eq!(size("b"), (100.0, 60.0));
+        assert_eq!(size("c"), (80.0, 20.0));
     }
 
     #[test]

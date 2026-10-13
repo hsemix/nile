@@ -590,6 +590,18 @@
       get() { return this.getAttribute(attr) ?? dflt; },
       set(v) { this.setAttribute(attr, v); },
     });
+  // Table cells: `colSpan` / `rowSpan` (at least 1), and `cellIndex`.
+  for (const [prop, attr] of [["colSpan", "colspan"], ["rowSpan", "rowspan"]]) {
+    Object.defineProperty(Element.prototype, prop, {
+      configurable: true,
+      get() { return this.localName === "td" || this.localName === "th" ? Math.max(1, parseInt(this.getAttribute(attr) || "1", 10) || 1) : undefined; },
+      set(v) { this.setAttribute(attr, String(Math.max(1, v | 0))); },
+    });
+  }
+  Object.defineProperty(Element.prototype, "cellIndex", {
+    configurable: true,
+    get() { return this.localName === "td" || this.localName === "th" ? Array.from(this.parentNode.children).indexOf(this) : undefined; },
+  });
   reflect("placeholder", "placeholder");
   reflect("name", "name");
   Object.defineProperty(Element.prototype, "type", {

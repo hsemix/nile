@@ -36,6 +36,8 @@ pub struct Overlay<'a> {
     /// Paint only these boxes `[from, to)` of the paint list (an element's subtree, for a popup
     /// shown in a window of its own); no menu or page scrollbar then.
     pub only: Option<(usize, usize)>,
+    /// The selected image's box in layout coordinates: drawn with an outline and resize handles.
+    pub selected_image: Option<LRect>,
     /// Boxes `[from, to)` not to paint here (a popup that has a window of its own).
     pub skip: &'a [(usize, usize)],
 }
@@ -70,7 +72,7 @@ impl Renderer {
 
     /// Paint the whole tree.
     pub fn paint(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, overlay: &Overlay) {
-        let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection, dom_caret, preedit, only, skip } = *overlay;
+        let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection, dom_caret, preedit, only, skip, selected_image } = *overlay;
         let base = canvas.local_to_device_as_3x3();
         canvas.save();
         canvas.translate((0.0, -scroll_y));
@@ -162,6 +164,9 @@ impl Renderer {
                 paint_scrollbars(canvas, container, offsets);
             }
         }
+        if let Some(r) = selected_image.filter(|_| only.is_none()) {
+            Self::paint_selected_image(canvas, r);
+        }
         if let Some(menu) = tree.menu.as_ref().filter(|_| only.is_none()) {
             self.paint_menu(canvas, menu);
         }
@@ -171,7 +176,27 @@ impl Renderer {
         }
     }
 
-    /// A list item's bullet or number.
+    /// A selected image: an outline and eight square handles.
+fn paint_selected_image(canvas: &Canvas, r: LRect) {
+    let accent = skia_safe::Color::from_argb(255, 0x2b, 0x6c, 0xd9);
+    let mut line = skia_safe::Paint::default();
+    line.set_style(skia_safe::PaintStyle::Stroke);
+    line.set_stroke_width(2.0);
+    line.set_color(accent);
+    canvas.draw_rect(Rect::from_xywh(r.x, r.y, r.width, r.height), &line);
+    for (_, h) in nile_layout::handles_of(r) {
+        let sq = Rect::from_xywh(h.x, h.y, h.width, h.height);
+        let mut paint = skia_safe::Paint::default();
+        paint.set_color(skia_safe::Color::WHITE);
+        canvas.draw_rect(sq, &paint);
+        paint.set_style(skia_safe::PaintStyle::Stroke);
+        paint.set_stroke_width(1.5);
+        paint.set_color(accent);
+        canvas.draw_rect(sq, &paint);
+    }
+}
+
+/// A list item's bullet or number.
     fn paint_marker(&mut self, canvas: &Canvas, m: &nile_layout::ListMarker, color: CssColor) {
         use nile_layout::MarkerKind;
         let r = m.rect;

@@ -440,6 +440,215 @@ function tabInTable(back, host) {
   if (target) setPts(leafToPoint(pt(target, 0), host));
   return true;
 }
+// ---- table structure: rows, columns, merging ------------------------------------------------------
+const rowsOf = (table) => {
+  const out = [];
+  for (const c of kids(table)) {
+    if (lname(c) === "tr") out.push(c);
+    else if (["thead", "tbody", "tfoot"].includes(lname(c))) for (const r of kids(c)) if (lname(r) === "tr") out.push(r);
+  }
+  return out;
+};
+const spanOf = (cell, attr) => Math.max(1, parseInt(cell.getAttribute(attr) || "1", 10) || 1);
+// The table as a grid: `map[r][c]` is the cell covering that square (a spanning cell appears in each
+// square it covers) and `at` gives a cell's top-left square and spans.
+function gridOf(table) {
+  const rows = rowsOf(table), map = [], at = new Map();
+  rows.forEach((tr, r) => {
+    map[r] = map[r] || [];
+    let c = 0;
+    for (const cell of kids(tr).filter(isCell)) {
+      while (map[r][c]) c++;
+      const rs = spanOf(cell, "rowspan"), cs = spanOf(cell, "colspan");
+      at.set(cell, { r, c, rs, cs });
+      for (let i = 0; i < rs; i++) for (let j = 0; j < cs; j++) { (map[r + i] = map[r + i] || [])[c + j] = cell; }
+      c += cs;
+    }
+  });
+  const width = Math.max(0, ...map.map((row) => row.length));
+  return { rows, map, at, width };
+}
+const blankCell = (like) => {
+  const cell = documentObj.createElement(like && lname(like) === "th" ? "th" : "td");
+  const style = like && like.getAttribute("style");
+  if (style) cell.setAttribute("style", style);
+  cell.appendChild(documentObj.createElement("br"));
+  return cell;
+};
+const setSpan = (cell, attr, n) => { if (n > 1) cell.setAttribute(attr, String(n)); else cell.removeAttribute(attr); };
+// The cell holding the caret (or the focus end) and its table.
+function tableContext(host) {
+  const sp = getPts();
+  const cell = sp && cellOf(sp.f.node, host);
+  let table = cell;
+  while (table && lname(table) !== "table") table = table.parentNode;
+  return cell && table ? { cell, table, sp, grid: gridOf(table) } : null;
+}
+// Put a row at index `r`; cells that cross that line just grow.
+function insertRowAt(g, table, r, like) {
+  const tr = documentObj.createElement("tr");
+  const ref = g.rows[Math.min(like, g.rows.length - 1)];
+  if (ref && ref.getAttribute("style")) tr.setAttribute("style", ref.getAttribute("style"));
+  const seen = new Set();
+  for (let c = 0; c < g.width; c++) {
+    const above = r > 0 && g.map[r - 1] && g.map[r - 1][c], below = g.map[r] && g.map[r][c];
+    if (above && above === below) {
+      if (!seen.has(above)) { seen.add(above); setSpan(above, "rowspan", spanOf(above, "rowspan") + 1); }
+      continue;
+    }
+    tr.appendChild(blankCell((g.map[like] && g.map[like][c]) || above || below));
+  }
+  const anchor = g.rows[r];
+  if (anchor) anchor.parentNode.insertBefore(tr, anchor);
+  else { const last = g.rows[g.rows.length - 1]; last.parentNode.insertBefore(tr, last.nextSibling); }
+  return tr;
+}
+function insertColumnAt(g, c, like) {
+  const seen = new Set();
+  g.rows.forEach((tr, r) => {
+    const left = c > 0 && g.map[r][c - 1], right = g.map[r][c];
+    if (left && left === right) {
+      if (!seen.has(left)) { seen.add(left); setSpan(left, "colspan", spanOf(left, "colspan") + 1); }
+      return;
+    }
+    if (g.map[r][c] && g.at.get(g.map[r][c]).r !== r) return; // a cell spanning down from above starts elsewhere
+    const cell = blankCell(g.map[r][like] || left || right);
+    // Before the first cell that starts at column >= c in this row, else at the end.
+    const next = kids(tr).filter(isCell).find((x) => g.at.get(x).c >= c);
+    tr.insertBefore(cell, next || null);
+  });
+}
+function deleteRowAt(g, r) {
+  const tr = g.rows[r];
+  const moved = [];
+  for (const cell of kids(tr).filter(isCell)) {
+    const p = g.at.get(cell);
+    if (p.rs > 1) moved.push([cell, p]);
+  }
+  // Cells from earlier rows that run through this one get shorter.
+  const seen = new Set();
+  for (let c = 0; c < g.width; c++) {
+    const cell = g.map[r][c];
+    if (cell && !seen.has(cell) && g.at.get(cell).r < r) { seen.add(cell); setSpan(cell, "rowspan", spanOf(cell, "rowspan") - 1); }
+  }
+  // Cells that start here and continue move to the next row, in column order.
+  const next = g.rows[r + 1];
+  for (const [cell, p] of moved) {
+    setSpan(cell, "rowspan", p.rs - 1);
+    if (!next) continue;
+    const before = kids(next).filter(isCell).find((x) => g.at.get(x).c > p.c);
+    next.insertBefore(cell, before || null);
+  }
+  tr.remove();
+}
+function deleteColumnAt(g, c) {
+  const seen = new Set();
+  for (let r = 0; r < g.rows.length; r++) {
+    const cell = g.map[r][c];
+    if (!cell || seen.has(cell)) continue;
+    seen.add(cell);
+    const cs = spanOf(cell, "colspan");
+    if (cs > 1) setSpan(cell, "colspan", cs - 1); else cell.remove();
+  }
+}
+// Merge the cells of the rectangle between the selection's two ends into the top-left one.
+function mergeCells(host) {
+  const ctx = tableContext(host);
+  if (!ctx) return false;
+  const a = cellOf(ctx.sp.a.node, host), f = ctx.cell;
+  if (!a || a === f) return false;
+  const g = ctx.grid, pa = g.at.get(a), pf = g.at.get(f);
+  if (!pa || !pf) return false;
+  let r0 = Math.min(pa.r, pf.r), c0 = Math.min(pa.c, pf.c);
+  let r1 = Math.max(pa.r + pa.rs, pf.r + pf.rs), c1 = Math.max(pa.c + pa.cs, pf.c + pf.cs);
+  // Grow the rectangle until no cell sticks out of it.
+  for (let again = true; again;) {
+    again = false;
+    for (let r = r0; r < r1; r++) for (let c = c0; c < c1; c++) {
+      const p = g.at.get(g.map[r][c]);
+      if (p.r < r0 || p.c < c0 || p.r + p.rs > r1 || p.c + p.cs > c1) { r0 = Math.min(r0, p.r); c0 = Math.min(c0, p.c); r1 = Math.max(r1, p.r + p.rs); c1 = Math.max(c1, p.c + p.cs); again = true; }
+    }
+  }
+  const target = g.map[r0][c0];
+  const seen = new Set([target]);
+  for (let r = r0; r < r1; r++) for (let c = c0; c < c1; c++) {
+    const cell = g.map[r][c];
+    if (seen.has(cell)) continue;
+    seen.add(cell);
+    const text = kids(cell).filter((n) => !(isEl(n) && lname(n) === "br"));
+    if (text.length) {
+      // An empty target only holds its placeholder <br>; otherwise a line break separates the contents.
+      if (kids(target).every((n) => isEl(n) && lname(n) === "br")) for (const br of kids(target)) br.remove();
+      else target.appendChild(documentObj.createElement("br"));
+      for (const n of text) target.appendChild(n);
+    }
+    cell.remove();
+  }
+  setSpan(target, "rowspan", r1 - r0);
+  setSpan(target, "colspan", c1 - c0);
+  ensureContent(target, host);
+  setPts(leafToPoint(pt(target, 0), host));
+  return true;
+}
+function splitCell(host) {
+  const ctx = tableContext(host);
+  if (!ctx) return false;
+  const g = ctx.grid, p = g.at.get(ctx.cell);
+  if (!p || (p.rs === 1 && p.cs === 1)) return false;
+  setSpan(ctx.cell, "rowspan", 1);
+  setSpan(ctx.cell, "colspan", 1);
+  for (let r = p.r; r < p.r + p.rs; r++) {
+    // New cells go after the cell (or, in later rows, where the covered columns start).
+    let after = r === p.r ? ctx.cell : null;
+    let anchor = after ? after.nextSibling : null;
+    if (!after) for (const x of kids(g.rows[r]).filter(isCell)) if (g.at.get(x).c >= p.c + p.cs) { anchor = x; break; }
+    for (let c = p.c; c < p.c + p.cs; c++) {
+      if (r === p.r && c === p.c) continue;
+      g.rows[r].insertBefore(blankCell(ctx.cell), anchor);
+    }
+  }
+  return true;
+}
+// Table commands for `execCommand`; the caret ends up in the cell it was in (or a neighbour).
+function tableCommand(cmd, host) {
+  const ctx = tableContext(host);
+  if (!ctx) return false;
+  const { cell, table, grid: g } = ctx;
+  const p = g.at.get(cell);
+  const goto_ = (c) => c && setPts(leafToPoint(pt(c, 0), host));
+  switch (cmd) {
+    case "tableinsertrowabove": { const tr = insertRowAt(g, table, p.r, p.r); goto_(kids(tr).filter(isCell)[0] || cell); return true; }
+    case "tableinsertrowbelow": { const tr = insertRowAt(g, table, p.r + p.rs, p.r + p.rs - 1); goto_(kids(tr).filter(isCell)[0] || cell); return true; }
+    case "tableinsertcolumnleft": insertColumnAt(g, p.c, p.c); return true;
+    case "tableinsertcolumnright": insertColumnAt(g, p.c + p.cs, p.c + p.cs - 1); return true;
+    case "tabledeleterow": {
+      if (g.rows.length === 1) return tableCommand("tabledeletetable", host);
+      const near = g.map[p.r + 1] ? g.map[p.r + 1][p.c] : g.map[p.r - 1][p.c];
+      deleteRowAt(g, p.r);
+      goto_(near);
+      return true;
+    }
+    case "tabledeletecolumn": {
+      if (g.width === 1) return tableCommand("tabledeletetable", host);
+      const near = g.map[p.r][p.c + 1] || g.map[p.r][p.c - 1];
+      deleteColumnAt(g, p.c);
+      goto_(near);
+      return true;
+    }
+    case "tabledeletetable": {
+      const after = table.nextSibling || table.previousSibling;
+      const parent = table.parentNode;
+      table.remove();
+      if (!kids(parent).length) { const para = documentObj.createElement("p"); para.appendChild(documentObj.createElement("br")); parent.appendChild(para); }
+      const spot = after && after.parentNode ? after : kids(parent)[0];
+      setPts(leafToPoint(pt(spot, 0), host));
+      return true;
+    }
+    case "tablemergecells": return mergeCells(host);
+    case "tablesplitcell": return splitCell(host);
+  }
+  return false;
+}
 function insertTable(rows, cols, host) {
   const caret = deleteSelectionIn(host) || getPts().f;
   const table = documentObj.createElement("table");
@@ -1282,6 +1491,9 @@ function execCommand(cmd, ui, value) {
       if (isTx(c.node)) { const r = c.node.splitText(c.offset); c.node.parentNode.insertBefore(img, r); } else c.node.insertBefore(img, kids(c.node)[c.offset] || null);
       setPts(pt(img.parentNode, idx(img) + 1));
     });
+    case "tableinsertrowabove": case "tableinsertrowbelow": case "tableinsertcolumnleft": case "tableinsertcolumnright":
+    case "tabledeleterow": case "tabledeletecolumn": case "tabledeletetable": case "tablemergecells": case "tablesplitcell":
+      return edit("structure", cmd, undefined, (h) => tableCommand(cmd, h));
     case "inserttable": return edit("structure", cmd, undefined, (h) => {
       const m = /^\s*(\d+)\s*[x,*]\s*(\d+)\s*$/i.exec(String(value));
       const [r, c] = m ? [Math.min(+m[1], 50), Math.min(+m[2], 20)] : [2, 2];
@@ -1351,3 +1563,19 @@ documentObj.queryCommandValue = (cmd) => {
 };
 // The user moved the caret (mouse, up/down): typing starts a new undo step and drops a pending format.
 documentObj.addEventListener("selectionchange", () => { if (!ownEvent) { chain = false; pending = null; } });
+
+// ---- images: resizing -------------------------------------------------------------------------------
+// The engine drags the handles; these keep the undo history and set the size (attributes, so a saved
+// document carries it).
+Object.defineProperties(g, {
+  __imageStart: { value(id) { const img = wrap(id), host = hostOf(img); if (host) checkpoint(host, "format"); } },
+  __imageSet: {
+    value(id, w, h) {
+      const img = wrap(id);
+      img.setAttribute("width", String(Math.round(w)));
+      img.setAttribute("height", String(Math.round(h)));
+      if (img.style) { img.style.removeProperty("width"); img.style.removeProperty("height"); }
+    },
+  },
+  __imageEnd: { value(id) { const img = wrap(id), host = hostOf(img); if (host) fireInput(host, "formatImage"); } },
+});
