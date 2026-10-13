@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><title>Child</title>
+<style>
+  body { font: 15px sans-serif; margin: 0; padding: 14px; background: #eef6ee; }
+  button { padding: 4px 10px; margin-right: 6px; }
+  #log { margin-top: 10px; font-family: monospace; }
+</style></head>
+<body>
+  <h3 id="title">Child window</h3>
+  <p>Opened by window <b id="parent"></b>. Parameters: <code id="params"></code></p>
+  <button id="ping">Message opener</button>
+  <button id="close">Close with a value</button>
+  <div id="log"></div>
+  <script>
+    document.$('#parent').text = Window.this.parent ? Window.this.parent._id : 'none';
+    document.$('#params').text = JSON.stringify(Window.this.parameters);
+    document.$('#ping').on('click', () => Window.this.parent.postMessage({ from: 'child', n: Window.this.parameters && Window.this.parameters.n }));
+    document.$('#close').on('click', () => Window.this.close({ n: Window.this.parameters && Window.this.parameters.n, done: true }));
+    window.addEventListener('message', (e) => { document.$('#log').text = 'received ' + JSON.stringify(e.data); });
+  </script>
+</body></html>

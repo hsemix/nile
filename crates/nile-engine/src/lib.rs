@@ -17,7 +17,7 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 use nile_dom::{Document, NodeId, ScriptSource};
 use nile_layout::{DomPoint, TextPoint, FileImages, LayoutOptions, LayoutTree, MenuRequest, ScrollOffsets};
 use nile_render::{Overlay, Renderer};
-use nile_script::{Environment, ScriptHost, UiEvent, WindowCommand};
+use nile_script::{Environment, ScriptHost, UiEvent, WindowCommand, WindowInfo};
 use nile_style::{compute_styles_in, Animator, InteractionState, StyleMap};
 use nile_text::TextEngine;
 use skia_safe::{surfaces, AlphaType, Color, ColorType, ImageInfo};
@@ -190,6 +190,8 @@ pub struct View {
     pub focus_changes: Vec<(Option<NodeId>, Option<NodeId>)>,
     /// Window actions scripts and `role="window-*"` elements asked for; the window loop applies them.
     pub window_requests: Vec<WindowCommand>,
+    /// How this window was opened (its id, opener, `parameters`).
+    pub window_info: WindowInfo,
     /// A file chooser a click on `<input type=file>` asked for; the embedder answers with
     /// `Page::choose_files`.
     pub file_request: Option<FileRequest>,
@@ -504,6 +506,10 @@ impl Environment for Env {
         self.0.borrow_mut().window_requests.push(cmd);
     }
 
+    fn window_info(&self) -> WindowInfo {
+        self.0.borrow().window_info.clone()
+    }
+
     fn dialog(&self, kind: &str, args: [&str; 4]) -> Option<String> {
         use dialogs::{parse_filter, MessageKind};
         // The borrow must not be held while the dialog blocks: a click handler may be mid-flight.
@@ -695,29 +701,63 @@ impl Page {
         }
     }
 
+    /// The user asked to close the window (`reason`: 0 the title bar's button, 1 a script): fires
+    /// `closerequest` at the window's listeners. True unless one of them called `preventDefault()`.
+    pub fn close_request(&mut self, reason: u32) -> bool {
+        match self.call("__closeRequest", &format!("[{reason}]")).0 {
+            Ok(v) => v != "false",
+            Err(_) => true,
+        }
+    }
+
+    /// The window gained (`true`) or lost focus: fires `activate`.
+    pub fn window_activated(&mut self, active: bool) -> bool {
+        self.call("__windowActivate", &format!("[{}]", u32::from(active))).1
+    }
+
+    /// A `message` from another window (`from` is its id, `json` the data).
+    pub fn window_message(&mut self, from: u32, json: &str) -> bool {
+        self.call("__windowMessage", &format!("[{from},{json}]")).1
+    }
+
+    /// A window this one opened has closed, with the value it passed to `close()` (JSON).
+    pub fn window_closed(&mut self, id: u32, value_json: &str) -> bool {
+        self.call("__windowClosed", &format!("[{id},{value_json}]")).1
+    }
+
     /// Let scripts open native file choosers and message boxes.
     pub fn set_dialogs(&mut self, dialogs: Rc<dyn dialogs::Dialogs>) {
         self.view.borrow_mut().dialogs = Some(dialogs);
     }
 
     pub fn load(path: PathBuf, viewport: (f32, f32), scroll_y: f32) -> Page {
-        Page::load_in(path, viewport, scroll_y, None)
+        Page::load_in(path, viewport, scroll_y, None, WindowInfo::default())
+    }
+
+    /// A page for a window a script opened: `info` says which window it is and who opened it.
+    pub fn load_window(path: PathBuf, viewport: (f32, f32), info: WindowInfo) -> Page {
+        Page::load_in(path, viewport, 0.0, None, info)
+    }
+
+    /// Like [`Page::load_window`] for markup given as text (`new Window({ html })`).
+    pub fn html_window(html: &str, base_dir: PathBuf, viewport: (f32, f32), info: WindowInfo) -> Page {
+        Page::from_source_in(html.to_string(), base_dir.join("index.html"), Some(html.to_string()), viewport, 0.0, None, info)
     }
 
     /// A page shown inside a `<frame>`: `outbox` collects what its scripts post to `window.parent`.
     pub(crate) fn load_embedded(path: PathBuf, viewport: (f32, f32), embed: frames::Embed) -> Page {
-        Page::load_in(path, viewport, 0.0, Some(embed))
+        Page::load_in(path, viewport, 0.0, Some(embed), WindowInfo::default())
     }
 
     pub(crate) fn html_embedded(html: &str, base_dir: PathBuf, viewport: (f32, f32), embed: frames::Embed) -> Page {
-        Page::from_source_in(html.to_string(), base_dir.join("index.html"), Some(html.to_string()), viewport, 0.0, Some(embed))
+        Page::from_source_in(html.to_string(), base_dir.join("index.html"), Some(html.to_string()), viewport, 0.0, Some(embed), WindowInfo::default())
     }
 
-    fn load_in(path: PathBuf, viewport: (f32, f32), scroll_y: f32, embed: Option<frames::Embed>) -> Page {
+    fn load_in(path: PathBuf, viewport: (f32, f32), scroll_y: f32, embed: Option<frames::Embed>, info: WindowInfo) -> Page {
         let html = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             format!("<body><h1>Could not open file</h1><p>{}: {e}</p></body>", path.display())
         });
-        Page::from_source_in(html, path, None, viewport, scroll_y, embed)
+        Page::from_source_in(html, path, None, viewport, scroll_y, embed, info)
     }
 
     /// A page from HTML text. Relative `src`, `href` and `url()` paths resolve against `base_dir`.
@@ -727,10 +767,10 @@ impl Page {
 
     /// `memory`: the HTML to use again on reload, for pages that didn't come from a file.
     fn from_source(html: String, path: PathBuf, memory: Option<String>, viewport: (f32, f32), scroll_y: f32) -> Page {
-        Page::from_source_in(html, path, memory, viewport, scroll_y, None)
+        Page::from_source_in(html, path, memory, viewport, scroll_y, None, WindowInfo::default())
     }
 
-    fn from_source_in(html: String, path: PathBuf, memory: Option<String>, viewport: (f32, f32), scroll_y: f32, embed: Option<frames::Embed>) -> Page {
+    fn from_source_in(html: String, path: PathBuf, memory: Option<String>, viewport: (f32, f32), scroll_y: f32, embed: Option<frames::Embed>, info: WindowInfo) -> Page {
         // A frame's `content-style` goes on top of the document's own styles.
         let html = match embed.as_ref().and_then(|e| e.css.as_deref()) {
             Some(css) => format!("{html}<style>{css}</style>"),
@@ -778,6 +818,7 @@ impl Page {
             dialogs: None,
             resized: false,
             window_rect: None,
+            window_info: info,
         }));
         view.borrow_mut().adopt(styles);
 
@@ -893,9 +934,10 @@ impl Page {
         };
         let clipboard = std::mem::replace(&mut self.clipboard, Box::new(MemoryClipboard::default()));
         let dialogs = self.view.borrow().dialogs.clone();
+        let info = self.view.borrow().window_info.clone();
         *self = match self.memory.take() {
-            Some(html) => Page::from_source(html.clone(), self.path.clone(), Some(html), viewport, scroll),
-            None => Page::load(self.path.clone(), viewport, scroll),
+            Some(html) => Page::from_source_in(html.clone(), self.path.clone(), Some(html), viewport, scroll, None, info),
+            None => Page::load_in(self.path.clone(), viewport, scroll, None, info),
         };
         self.clipboard = clipboard;
         self.view.borrow_mut().dialogs = dialogs;
@@ -5015,7 +5057,6 @@ cd</textarea>
         assert_eq!(p.eval("Window.this.selectFolder({ caption: 'Dir' })").0.unwrap(), "file:///tmp/dir");
         assert_eq!(p.eval("Window.this.modal(JSX('question', null, ['Sure?']))").0.unwrap(), "no");
         assert_eq!(p.eval("Window.this.modal(JSX('alert', { caption: 'Hey' }, ['Careful ', 'now']))").0.unwrap(), "yes");
-        assert!(p.eval("new Window({})").0.is_err());
         assert_eq!(
             *fake.0.borrow(),
             [
@@ -5258,6 +5299,64 @@ cd</textarea>
         ev(&mut p, "w.close()");
         ev(&mut p, "document.$('#b').popup(document.$('#q'))");
         assert_eq!(ev(&mut p, "(() => { const r = document.$('#q').getBoundingClientRect(), a = document.$('#b').getBoundingClientRect(); return Math.round(r.left - (a.left + a.width / 2)) + ',' + Math.round(r.top - a.bottom); })()"), "0,0");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scripts_open_windows_and_talk_to_them() {
+        let (mut p, path) = page(r#"<body><script>globalThis.log = [];
+              window.addEventListener('message', (e) => log.push('msg:' + e.data.hi + ':' + e.source._id));
+              Window.this.on('closerequest', (e) => { log.push('closerequest:' + e.reason); if (globalThis.keep) e.preventDefault(); });</script></body>"#, "windows");
+        let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+        let take = |p: &Page| std::mem::take(&mut p.view.borrow_mut().window_requests);
+        // `new Window` asks the shell for a window and gets its id at once.
+        let id: u32 = ev(&mut p, "globalThis.w = new Window({ url: 'child.html', width: 300, height: 200, caption: 'Hi there', type: Window.TOOL_WINDOW, alignment: -5, parameters: { a: [1, 2] } }); w._id").parse().unwrap();
+        let Some(WindowCommand::Open(spec)) = take(&p).into_iter().next() else { panic!("an Open request") };
+        assert_eq!((spec.id, spec.modal), (id, false));
+        assert_eq!((spec.get("url"), spec.get("caption"), spec.get("type"), spec.get("alignment")), (Some("child.html"), Some("Hi there"), Some("tool"), Some("-5")));
+        assert_eq!((spec.get("width"), spec.get("parameters")), (Some("300"), Some(r#"{"a":[1,2]}"#)));
+        // What the opened window sends back, and its close, reach the opener.
+        p.window_message(id, r#"{"hi":"there"}"#);
+        assert_eq!(ev(&mut p, "log.join()"), format!("msg:there:{id}"));
+        ev(&mut p, "w.closed.then((v) => log.push('closed:' + JSON.stringify(v))); w.on('close', (e) => log.push('close:' + e.value))");
+        assert_eq!(ev(&mut p, "w.isValid"), "true");
+        p.window_closed(id, r#"{"ok":true}"#);
+        assert_eq!(ev(&mut p, "log.slice(1).join()"), r#"close:[object Object],closed:{"ok":true}"#);
+        assert_eq!(ev(&mut p, "w.isValid"), "false");
+        // A dialog is flagged modal and resolves a Promise.
+        ev(&mut p, "Window.this.modal({ url: 'dlg.html' }).then((v) => log.push('dialog:' + v))");
+        let Some(WindowCommand::Open(dlg)) = take(&p).into_iter().next() else { panic!("an Open request") };
+        assert!(dlg.modal);
+        assert_eq!(dlg.get("type"), Some("dialog"));
+        p.window_closed(dlg.id, "\"saved\"");
+        assert_eq!(ev(&mut p, "log.slice(3).join()"), "dialog:saved");
+        // Messages out, closing, and `closerequest`.
+        ev(&mut p, "globalThis.w2 = new Window({ html: '<p>x</p>' }); w2.postMessage({ n: 1 }); w2.close('bye'); Window.this.postMessage(5); Window.this.close(7)");
+        let cmds = take(&p);
+        assert!(matches!(&cmds[1], WindowCommand::Post { json, .. } if json == r#"{"n":1}"#));
+        assert!(matches!(&cmds[2], WindowCommand::CloseId(_)));
+        assert!(matches!(&cmds[3], WindowCommand::Post { to: 0, json } if json == "5"));
+        assert_eq!(cmds[4], WindowCommand::CloseWith("7".into()));
+        assert!(p.close_request(0));
+        ev(&mut p, "globalThis.keep = true");
+        assert!(!p.close_request(1), "a listener can keep the window open");
+        assert_eq!(ev(&mut p, "log.slice(4).join()"), "closerequest:0,closerequest:1");
+        // Window.share crosses windows as JSON.
+        ev(&mut p, "Window.share.theme = { dark: true }; Window.share.n = 3");
+        assert_eq!(ev(&mut p, "JSON.stringify([Window.share.theme, Window.share.n, 'n' in Window.share, Object.keys(Window.share).sort(), Window.share.nothing])"), r#"[{"dark":true},3,true,["n","theme"],null]"#);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_opened_window_knows_its_opener_and_parameters() {
+        let path = std::env::temp_dir().join(format!("nile-opened-{}.html", std::process::id()));
+        std::fs::write(&path, "<body><script>globalThis.seen = [Window.this.parent && Window.this.parent._id, Window.this.parameters && Window.this.parameters.x];</script></body>").unwrap();
+        let info = WindowInfo { id: 12, opener: Some(7), modal: true, parameters: r#"{"x":42}"#.into() };
+        let mut p = Page::load_window(path.clone(), (400.0, 300.0), info.clone());
+        assert_eq!(p.eval("JSON.stringify(seen)").0.unwrap(), "[7,42]");
+        p.reload();
+        assert_eq!(p.eval("JSON.stringify(seen)").0.unwrap(), "[7,42]", "reloading keeps who opened it");
+        assert_eq!(p.view.borrow().window_info, info);
         let _ = std::fs::remove_file(path);
     }
 

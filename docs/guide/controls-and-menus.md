@@ -196,8 +196,7 @@ with `-title`, `-body`, `-icon`, `-text` and `-buttons` parts, so CSS restyles i
 may be rich markup, and `<button value="save" default>` / `cancel` children replace the default OK or
 Yes/No buttons. Enter chooses the default button, Escape the `cancel` one. Because it can't block the
 script it returns a **Promise** of the clicked button's `value` (else its `id`, else its text):
-`const r = await Window.this.modal(<question inline>…</question>)`. `new Window(...)`
-and `modal({url})` for a second document aren't supported; use a `<frame>` or a popup.
+`const r = await Window.this.modal(<question inline>…</question>)`. 
 
 `element.popup(menuOrJSX, { anchorAt, popupAt, x, y })` shows an element next to `element` (placement
 points are numpad digits: 1 bottom-left … 9 top-right; the default is below the anchor), closes on a
@@ -213,6 +212,27 @@ parameters (`anchorAt`, `popupAt`, `animationType`…) win. Hovering an element 
 its `title` (text) or `tooltip` (HTML) as a `popup[role=tooltip]`; a script can answer the bubbling
 `tooltiprequest` event with `evt.source = element` to supply its own. Popups are painted inside the window, not as separate OS windows. See
 [popups example](../../examples/popups.html) and [dialogs example](../../examples/dialogs.html).
+
+## Several windows
+
+`new Window({ url, width, height, x, y, alignment, caption, type, state, parameters })` opens another
+OS window with its own page (parameters follow docs.sciter.com/docs/DOM/Window). `type` is
+`Window.FRAME_WINDOW` (default), `DIALOG_WINDOW`, `TOOL_WINDOW` or `POPUP_WINDOW` (frameless, always on
+top); `alignment` 1–9 places it on the monitor (7 8 9 / 4 5 6 / 1 2 3) and −1…−9 relative to the opener;
+`url` is relative to the opening page (`html` is an extra: markup as text). The returned object has
+`close(value)`, `postMessage(data)`, `focus()`, `isValid`, `closed` (a Promise of the close value) and
+`on("close", …)`. Inside the new window `Window.this.parent` is the opener, `Window.this.parameters`
+what it passed, `Window.this.close(value)` closes it, and `closerequest` / `activate` listeners go on
+`Window.this.on(...)` (`evt.preventDefault()` keeps the window open). Messages arrive as the usual
+`message` event (`evt.data`, `evt.source`), and `Window.share` holds JSON values every window sees.
+
+`Window.this.modal({ url, … })` opens a dialog: the opener ignores input until it closes. Unlike
+Sciter's it can't block the script, so it returns a **Promise** of the value the dialog gave
+`close(value)`. Closing a window closes the windows it opened; closing the first window quits.
+
+Windows are not nested in the OS sense (a dialog doesn't stay above its owner), `new Window(...)` can't
+be shown modally afterwards, `Window.all` lists the windows this one opened plus itself, and C hosts
+don't see the open/message commands yet. See the [windows example](../../examples/windows.html).
 
 ## Dialogs and command state
 
