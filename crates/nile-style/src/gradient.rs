@@ -112,6 +112,18 @@ pub enum TransformFn {
     Rotate(f32),
     /// Degrees along x and y.
     Skew(f32, f32),
+    /// `translate3d(x, y, z)`: z in px.
+    Translate3d(StopPos, StopPos, f32),
+    Scale3d(f32, f32, f32),
+    /// Degrees about the x axis, and about the y axis.
+    RotateX(f32),
+    RotateY(f32),
+    /// `rotate3d(x, y, z, angle)`.
+    Rotate3d([f32; 4]),
+    /// `perspective(d)`: the eye is `d` px from the screen.
+    Perspective(f32),
+    /// `matrix3d(...)`, column-major as in CSS.
+    Matrix3d([f32; 16]),
 }
 
 #[cfg(test)]

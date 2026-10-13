@@ -864,6 +864,57 @@ Object.defineProperty(g, "__editKey", {
     return false;
   },
 });
+// ---- IME composition ---------------------------------------------------------------------
+// While the user composes, the preedit text sits in the page as an underlined span (so it flows
+// and wraps like real text) without touching the undo history or firing `input`. Committing takes
+// the span out and inserts the final text as ordinary typing.
+let imeSpan = null;
+function imeRemove() {
+  if (!imeSpan) return null;
+  const span = imeSpan;
+  imeSpan = null;
+  const parent = span.parentNode;
+  if (!parent) return null;
+  const at = pt(parent, idx(span));
+  span.remove();
+  return at;
+}
+Object.defineProperty(g, "__imePreedit", {
+  value(text) {
+    text = String(text);
+    if (!text) {
+      const at = imeRemove();
+      if (at) setPts(at);
+      return true;
+    }
+    if (!imeSpan) {
+      const sp = getPts();
+      const host = sp && hostOf(sp.f.node);
+      if (!host) return false;
+      let caret = deleteSelectionIn(host) || getPts().f;
+      caret = textPointForInsert(caret);
+      const right = caret.node.splitText(caret.offset);
+      imeSpan = documentObj.createElement("span");
+      imeSpan.setAttribute("data-nile-ime", "");
+      imeSpan.setAttribute("style", "text-decoration: underline");
+      imeSpan.appendChild(documentObj.createTextNode(text));
+      caret.node.parentNode.insertBefore(imeSpan, right);
+    } else {
+      imeSpan.firstChild.data = text;
+    }
+    setPts(pt(imeSpan.firstChild, text.length));
+    return true;
+  },
+});
+Object.defineProperty(g, "__imeCommit", {
+  value(text) {
+    const at = imeRemove();
+    if (at) setPts(at);
+    return String(text) ? execCommand("insertText", false, String(text)) : true;
+  },
+});
+Object.defineProperty(g, "__imeActive", { value() { return !!imeSpan; } });
+
 Object.defineProperty(g, "__editPaste", {
   value(text) { return execCommand("insertText", false, String(text)); },
 });

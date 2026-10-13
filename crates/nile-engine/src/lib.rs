@@ -126,6 +126,9 @@ pub struct View {
     pub clock: Instant,
     /// Device pixels per logical pixel of the last paint (`devicePixelRatio`).
     pub scale: f32,
+    /// Text an input method is composing in a text input (a contenteditable host keeps its
+    /// composition in the page instead).
+    pub preedit: Option<nile_layout::Preedit>,
     pub text: TextEngine,
     pub layout: Option<(f32, f32, LayoutTree)>,
     /// Logical viewport size, so hit testing and scripts can lay out on demand.
@@ -319,6 +322,13 @@ impl View {
     }
 
     /// Open, move or close the `<select>` drop-down.
+    pub fn set_preedit(&mut self, preedit: Option<nile_layout::Preedit>) {
+        if self.preedit != preedit {
+            self.preedit = preedit;
+            self.layout = None;
+        }
+    }
+
     pub fn set_menu(&mut self, menu: Option<MenuRequest>) {
         self.menu = menu;
         self.layout = None;
@@ -340,7 +350,7 @@ impl View {
         let (width, height) = self.viewport;
         let stale = !matches!(&self.layout, Some((w, h, _)) if *w == width && *h == height);
         if stale {
-            let options = LayoutOptions { menu: self.menu, scroll_y: self.scroll_y, offsets: Some(&self.scroll_offsets), images: Some(&self.images) };
+            let options = LayoutOptions { preedit: self.preedit.clone(), menu: self.menu, scroll_y: self.scroll_y, offsets: Some(&self.scroll_offsets), images: Some(&self.images) };
             let tree = traced("layout", || nile_layout::layout_with(&self.doc.borrow(), &self.styles, &mut self.text, width, height, &options));
             self.layout = Some((width, height, tree));
         }
@@ -523,6 +533,10 @@ pub struct Page {
     pub edit_x: Option<f32>,
     /// The file input a chooser was last taken for.
     pub file_target: Option<NodeId>,
+    /// The composition's own caret, as a byte range of the composed text.
+    pub ime_cursor: Option<(usize, usize)>,
+    /// A composition is showing as a span inside a contenteditable host.
+    pub ime_host: bool,
     /// List box row the shift-range started from, and the row keys moved to last.
     pub list_anchor: Option<(NodeId, usize)>,
     /// A list box being dragged over (the button went down on a row).
@@ -644,6 +658,7 @@ impl Page {
             animator: Animator::new(),
             clock: Instant::now(),
             scale: 1.0,
+            preedit: None,
             text: TextEngine::new(),
             layout: None,
             viewport,
@@ -742,6 +757,8 @@ impl Page {
             edit_drag: None,
             edit_x: None,
             file_target: None,
+            ime_cursor: None,
+            ime_host: false,
             list_anchor: None,
             list_drag: None,
             list_press: None,
@@ -855,6 +872,9 @@ impl Page {
     /// Focus moved from `old` to `new`: end the old input's edit (firing
     /// `change` if its value changed), start the new one, and fire `blur`/`focus`.
     pub fn focus_moved(&mut self, old: Option<NodeId>, new: Option<NodeId>) {
+        if old.is_some() {
+            self.ime_cancel();
+        }
         if let Some(o) = old {
             let before = self.value_at_focus.take();
             self.commit_value(o, before.clone());
@@ -2668,19 +2688,152 @@ impl Page {
         self.apply_state(node, next)
     }
 
-    /// Caret to draw: the focused text input and the caret's byte offset in its displayed text.
+    /// Caret to draw: the focused text input and the caret's byte offset in its displayed text
+    /// (inside the composition while an input method is composing).
     pub fn caret_for_paint(&self) -> Option<(NodeId, usize)> {
         let focus = self.interaction().focus.filter(|f| self.is_text_input(*f))?;
         if !self.caret_visible {
             return None;
         }
         let doc = self.doc.borrow();
-        Some((focus, nile_layout::caret_byte(&doc, focus, self.caret())))
+        let mut byte = nile_layout::caret_byte(&doc, focus, self.caret());
+        if let Some(p) = self.view.borrow().preedit.as_ref().filter(|p| p.node == focus) {
+            byte = nile_layout::caret_byte(&doc, focus, p.at) + self.ime_cursor.map_or(p.text.len(), |c| c.1.min(p.text.len()));
+        }
+        Some((focus, byte))
+    }
+
+    /// The composition's byte range in its input's displayed text, for underlining.
+    pub fn ime_underline(&self) -> Option<(NodeId, usize, usize)> {
+        let v = self.view.borrow();
+        let p = v.preedit.as_ref()?;
+        let from = nile_layout::caret_byte(&self.doc.borrow(), p.node, p.at);
+        Some((p.node, from, from + p.text.len()))
+    }
+
+    /// Whether the focused element takes text, so the window should enable its input method.
+    pub fn ime_wanted(&self) -> bool {
+        if self.focused_host().is_some() {
+            return true;
+        }
+        self.interaction().focus.is_some_and(|f| {
+            self.is_text_input(f) && !self.is_disabled(f) && self.doc.borrow().node(f).attr("readonly").is_none()
+        })
+    }
+
+    /// Where the input method should put its candidate window: the caret, in window
+    /// coordinates `(x, y, width, height)`.
+    pub fn ime_cursor_rect(&mut self) -> Option<(f32, f32, f32, f32)> {
+        if let Some(_host) = self.focused_host() {
+            let (_, f) = self.edit_selection()?;
+            let (x, y, h) = self.edit_caret_painted(f)?;
+            let scroll = self.view.borrow().scroll_y;
+            return Some((x, y - scroll, 1.0, h));
+        }
+        let focus = self.interaction().focus.filter(|f| self.is_text_input(*f))?;
+        let byte = {
+            let doc = self.doc.borrow();
+            let v = self.view.borrow();
+            match v.preedit.as_ref().filter(|p| p.node == focus) {
+                Some(p) => nile_layout::caret_byte(&doc, focus, p.at) + self.ime_cursor.map_or(p.text.len(), |c| c.1.min(p.text.len())),
+                None => nile_layout::caret_byte(&doc, focus, self.caret()),
+            }
+        };
+        let mut v = self.view.borrow_mut();
+        let (offsets, scroll) = (v.scroll_offsets.clone(), v.scroll_y);
+        let r = v.layout().input_caret_rect(focus, byte, &offsets)?;
+        Some((r.x, r.y - scroll, r.width.max(1.0), r.height))
+    }
+
+    /// The input method is composing `text` (`cursor` is its caret as a byte range of `text`).
+    /// An empty `text` ends the composition without inserting anything.
+    pub fn ime_preedit(&mut self, text: &str, cursor: Option<(usize, usize)>) -> bool {
+        if self.focused_host().is_some() {
+            let ok = self.call("__imePreedit", &format!("[{}]", editing::json_string(text))).0.is_ok();
+            self.ime_host = !text.is_empty();
+            self.sync();
+            return ok;
+        }
+        let Some(focus) = self.interaction().focus.filter(|f| self.is_text_input(*f) && !self.is_disabled(*f)) else { return false };
+        if text.is_empty() {
+            self.ime_cursor = None;
+            self.view.borrow_mut().set_preedit(None);
+            return true;
+        }
+        // A selection is what the composition will replace: it stays until commit.
+        let len = self.value_of(focus).chars().count();
+        let (a, c) = (self.anchor().min(len), self.caret().min(len));
+        self.ime_cursor = cursor;
+        self.view.borrow_mut().set_preedit(Some(nile_layout::Preedit { node: focus, at: a.min(c), end: a.max(c), text: text.to_string() }));
+        true
+    }
+
+    /// The input method finished: `text` goes in where the composition was.
+    pub fn ime_commit(&mut self, text: &str) -> bool {
+        self.ime_cursor = None;
+        self.view.borrow_mut().set_preedit(None);
+        if self.focused_host().is_some() {
+            self.ime_host = false;
+            let ok = self.call("__imeCommit", &format!("[{}]", editing::json_string(text))).0.is_ok();
+            self.sync();
+            self.reveal_edit_caret();
+            return ok;
+        }
+        self.insert_text(text)
+    }
+
+    /// The composition was abandoned (focus moved, or the input method turned off).
+    pub fn ime_cancel(&mut self) {
+        if std::mem::take(&mut self.ime_host) {
+            // The composition lives in the page; the span goes wherever focus is now.
+            let _ = self.call("__imePreedit", "[\"\"]");
+            self.sync();
+        }
+        self.ime_cursor = None;
+        self.view.borrow_mut().set_preedit(None);
+    }
+
+    /// Replace the selection of the focused text input with `text` (filtered to what the input
+    /// takes) as one edit; an empty `text` just deletes the selection.
+    pub fn insert_text(&mut self, text: &str) -> bool {
+        let Some(focus) = self.interaction().focus.filter(|f| self.is_text_input(*f)) else { return false };
+        if self.is_disabled(focus) || self.doc.borrow().node(focus).attr("readonly").is_some() {
+            return false;
+        }
+        let kind = self.input_type(focus);
+        let multiline = self.is_textarea(focus);
+        let text: String = text
+            .chars()
+            .map(|c| if c == '\n' && !multiline { ' ' } else { c })
+            .filter(|c| (!c.is_control() || (*c == '\n' && multiline)) && inputs::accepts(&kind, *c))
+            .collect();
+        let mut chars: Vec<char> = self.value_of(focus).chars().collect();
+        let len = chars.len();
+        let (anchor, caret) = (self.anchor().min(len), self.caret().min(len));
+        let (lo, hi) = (anchor.min(caret), anchor.max(caret));
+        if text.is_empty() && lo == hi {
+            return false;
+        }
+        self.record_edit(focus, EditKind::Other, EditState { value: chars.iter().collect(), anchor, caret });
+        chars.splice(lo..hi, text.chars());
+        let value: String = chars.iter().collect();
+        self.doc.borrow_mut().set_attr(focus, "value", &value);
+        let end = lo + text.chars().count();
+        self.set_sel(end, end);
+        if let Some(h) = self.history.get_mut(&focus) {
+            h.last = None;
+        }
+        self.sync();
+        self.emit(focus, UiEvent::Plain("input"));
+        true
     }
 
     /// The focused input's selected range as byte offsets in its displayed text.
     pub fn selection_for_paint(&self) -> Option<(NodeId, usize, usize)> {
         let focus = self.interaction().focus.filter(|f| self.is_text_input(*f))?;
+        if self.view.borrow().preedit.is_some() {
+            return None; // the composition stands in for it
+        }
         let len = self.value_of(focus).chars().count();
         let (a, c) = (self.anchor().min(len), self.caret().min(len));
         if a == c {
@@ -2785,6 +2938,7 @@ impl Page {
         let caret = self.caret_for_paint();
         let selection = self.selection_for_paint();
         let dom_caret = self.dom_caret_for_paint();
+        let ime_underline = self.ime_underline();
         let mut view = self.view.borrow_mut();
         view.layout();
         let page_selection = view.page_ranges();
@@ -2803,7 +2957,7 @@ impl Page {
                 canvas,
                 tree,
                 &view.styles,
-                &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection, dom_caret },
+                &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection, dom_caret, preedit: ime_underline },
             )
         });
         canvas.restore();
@@ -4201,6 +4355,58 @@ cd</textarea>
         let sel = p.doc.borrow().find(|n| n.attr("id") == Some("s")).unwrap();
         assert_eq!(nile_layout::select_options(&p.doc.borrow(), sel).len(), 3);
         assert_eq!(nile_layout::selected_index(&p.doc.borrow(), sel), Some(1));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn input_methods_compose_in_inputs_and_editors() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><input id="i" value="ab" style="margin:0;width:200px">
+               <div id="h" contenteditable style="margin:0;width:200px"><p id="para">xy</p></div></body>"#,
+            "ime",
+        );
+        let none = ModifiersState::default();
+        assert!(!p.ime_wanted());
+        click(&mut p, "i");
+        assert!(p.ime_wanted());
+        press_key(&mut p, "Home", none);
+        press_key(&mut p, "ArrowRight", none);
+        // Composing shows in the field but isn't the value yet.
+        assert!(p.ime_preedit("ni", Some((0, 2))));
+        assert_eq!(js(&mut p, "document.getElementById('i').value"), "ab");
+        let shown = p.view.borrow_mut().layout().boxes.iter().find_map(|b| match &b.content {
+            nile_layout::BoxContent::Text(c) if c.control => Some(c.text.clone()),
+            _ => None,
+        });
+        assert_eq!(shown.as_deref(), Some("anib"));
+        let (x0, ..) = p.ime_cursor_rect().expect("a caret to put the candidate window at");
+        assert!(p.ime_underline().is_some());
+        assert!(p.ime_preedit("nin", Some((0, 3))));
+        assert!(p.ime_cursor_rect().unwrap().0 > x0, "the caret follows the composition");
+        // Commit replaces the composition with the final text, and undo takes it back as one edit.
+        assert!(p.ime_commit("你好"));
+        assert_eq!(js(&mut p, "document.getElementById('i').value"), "a你好b");
+        assert!(p.ime_underline().is_none());
+        press_key(&mut p, "z", ModifiersState::CONTROL);
+        assert_eq!(js(&mut p, "document.getElementById('i').value"), "ab");
+        // Losing focus abandons a composition.
+        click(&mut p, "i");
+        p.ime_preedit("x", None);
+        click(&mut p, "h");
+        assert!(p.ime_underline().is_none());
+        assert_eq!(js(&mut p, "document.getElementById('i').value"), "ab");
+
+        // In an editing host the composition is an underlined span that commit replaces.
+        click(&mut p, "para");
+        press_key(&mut p, "End", none);
+        assert!(p.ime_preedit("ka", None));
+        assert_eq!(js(&mut p, "document.getElementById('para').innerHTML"), r#"xy<span data-nile-ime="" style="text-decoration: underline">ka</span>"#);
+        assert!(p.ime_commit("か"));
+        assert_eq!(js(&mut p, "document.getElementById('para').textContent"), "xyか");
+        assert_eq!(js(&mut p, "document.getElementById('para').querySelectorAll('span').length"), "0");
+        p.ime_preedit("zz", None);
+        p.ime_cancel();
+        assert_eq!(js(&mut p, "document.getElementById('para').textContent"), "xyか");
         let _ = std::fs::remove_file(path);
     }
 }

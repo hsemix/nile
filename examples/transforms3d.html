@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>3D transforms</title>
+<style>
+  body { margin: 20px; font: 13px sans-serif; background: #f4f1ea; display: flex; gap: 40px; flex-wrap: wrap }
+  .stage { width: 160px; height: 120px; perspective: 400px; background: #e8e2d4; border-radius: 6px }
+  .card { width: 100px; height: 80px; margin: 20px 30px; background: #2a7fd4; color: #fff; padding: 8px; box-sizing: border-box; border-radius: 6px; transition: transform .3s }
+  .a .card { transform: rotateY(50deg) }
+  .b .card { transform: rotateX(55deg) }
+  .c .card { transform: translateZ(80px) rotateZ(10deg); background: #c0392b }
+  .d { perspective: none }
+  .d .card { transform: perspective(300px) rotateY(-45deg) translateX(10px); background: #27ae60 }
+  .e .card { transform: rotate3d(1, 1, 0, 40deg); background: #8e44ad }
+  .f .card { transform: matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,-0.004, 0,0,0,1) rotateY(20deg); background: #d35400 }
+  .card:hover { background: #111 }
+</style>
+<div class="stage a"><div class="card">rotateY 50°</div></div>
+<div class="stage b"><div class="card">rotateX 55°</div></div>
+<div class="stage c"><div class="card">translateZ</div></div>
+<div class="stage d"><div class="card">perspective()</div></div>
+<div class="stage e"><div class="card">rotate3d</div></div>
+<div class="stage f"><div class="card">matrix3d</div></div>

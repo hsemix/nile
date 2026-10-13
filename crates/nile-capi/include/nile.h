@@ -489,6 +489,54 @@ int32_t nile_view_take_file_request(struct NileView *view, int32_t *multiple, ch
 int32_t nile_view_choose_files(struct NileView *view, const char *paths);
 
 /**
+ * Whether the focused element takes text, so the host should enable its input method (IME).
+ * Returns 1 or 0.
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+int32_t nile_view_ime_wanted(struct NileView *view);
+
+/**
+ * Where the input method's candidate window should go: the caret, in logical pixels of the
+ * view. Returns 1 and fills the four outputs (any may be NULL), or 0 if there is no caret.
+ *
+ * # Safety
+ * `view` must be a live view; the outputs NULL or writable.
+ */
+int32_t nile_view_ime_cursor_area(struct NileView *view, float *x, float *y, float *w, float *h);
+
+/**
+ * The input method is composing `utf8` text. `cursor_start`/`cursor_end` are the composition's
+ * own caret as byte offsets into the text, or both -1 for none. An empty string ends the
+ * composition. Returns 1 if the page changed.
+ *
+ * # Safety
+ * `view` must be a live view and `utf8` a valid string.
+ */
+int32_t nile_view_ime_preedit(struct NileView *view,
+                              const char *utf8,
+                              int32_t cursor_start,
+                              int32_t cursor_end);
+
+/**
+ * The input method finished composing: insert `utf8` text where the composition was.
+ * Returns 1 if the page changed.
+ *
+ * # Safety
+ * `view` must be a live view and `utf8` a valid string.
+ */
+int32_t nile_view_ime_commit(struct NileView *view, const char *utf8);
+
+/**
+ * Abandon the composition (the input method was switched off or lost focus).
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+void nile_view_ime_cancel(struct NileView *view);
+
+/**
  * The `console.log`/`warn`/`error` lines written since the last call, separated by newlines
  * (empty if none), as a new string to free with [`nile_string_free`].
  *

@@ -6,6 +6,7 @@
 //!        [--hover X,Y] [--press X,Y] [--click X,Y]   simulate the pointer (logical px)
 //!        [--wheel X,Y,DY]              scroll at a point (negative DY scrolls content up)
 //!        [--type TEXT]                 type into the focused input ({Backspace}, {Shift+ArrowLeft}, {Cmd+a}, ... for keys)
+//!        [--compose TEXT]              show TEXT as an input method's composition at the caret
 //!        [--wait MS]                   let timers run this long before the snapshot
 
 mod dialogs;
@@ -17,7 +18,7 @@ use nile_script::WindowCommand;
 use skia_safe::{AlphaType, ColorType, EncodedImageFormat, ImageInfo};
 use winit::{
     application::ApplicationHandler,
-    dpi::LogicalSize,
+    dpi::{LogicalPosition, LogicalSize},
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, ModifiersState, NamedKey},
@@ -54,6 +55,8 @@ struct Snapshot {
     scale: f32,
     pointer: Option<Pointer>,
     typed: Option<String>,
+    /// `--compose TEXT`: show TEXT as an input method's composition at the caret.
+    compose: Option<String>,
     wait_ms: u64,
     settle_ms: u64,
     /// `--select X1,Y1,X2,Y2`: drag a text selection.
@@ -61,7 +64,7 @@ struct Snapshot {
 }
 
 fn render_png(page: &mut Page, snap: Snapshot) {
-    let Snapshot { out, width, height, scale, pointer, typed, wait_ms, settle_ms, select } = snap;
+    let Snapshot { out, width, height, scale, pointer, typed, compose, wait_ms, settle_ms, select } = snap;
     let out = out.as_str();
     // Let timers run (animations, setTimeout) before the snapshot.
     let wait = |page: &mut Page, ms: u64| {
@@ -127,6 +130,9 @@ fn render_png(page: &mut Page, snap: Snapshot) {
             page.key("keyup", key, mods);
         }
     }
+    if let Some(text) = compose {
+        page.ime_preedit(&text, None);
+    }
     // After the input: transitions it started, and anything it scheduled.
     wait(page, settle_ms);
     let (pw, ph) = ((width as f32 * scale) as u32, (height as f32 * scale) as u32);
@@ -158,11 +164,12 @@ struct App {
     title: String,
     /// Which window edge a frameless window's pointer is over, if any.
     edge: Option<(i8, i8)>,
+    /// Whether the window's input method is on, and where its candidate window was last put.
+    ime_on: bool,
+    ime_area: Option<(f32, f32, f32, f32)>,
 }
 
 impl App {
-    /// Apply window actions the page asked for, follow `document.title`, and tell scripts where
-    /// the window is.
     /// Answer a click on `<input type=file>` with the system's file chooser.
     fn sync_files(&mut self) {
         if let Some(request) = self.page.take_file_request() {
@@ -173,8 +180,30 @@ impl App {
         }
     }
 
+    /// Keep the window's input method in step with the page: on while a text field has focus,
+    /// with the candidate window next to the caret.
+    fn sync_ime(&mut self) {
+        let Some(window) = self.window.clone() else { return };
+        let wanted = self.page.ime_wanted();
+        if wanted != self.ime_on {
+            window.set_ime_allowed(wanted);
+            self.ime_on = wanted;
+        }
+        if wanted {
+            if let Some((x, y, w, h)) = self.page.ime_cursor_rect() {
+                if self.ime_area != Some((x, y, w, h)) {
+                    window.set_ime_cursor_area(LogicalPosition::new(x, y), LogicalSize::new(w, h));
+                    self.ime_area = Some((x, y, w, h));
+                }
+            }
+        }
+    }
+
+    /// Apply window actions the page asked for, follow `document.title`, and tell scripts where
+    /// the window is.
     fn sync_window(&mut self) {
         self.sync_files();
+        self.sync_ime();
         let Some(window) = self.window.clone() else { return };
         let requests = std::mem::take(&mut self.page.view.borrow_mut().window_requests);
         for cmd in requests {
@@ -435,6 +464,25 @@ impl App {
                 self.page.wheel(dx, dy);
                 window.request_redraw();
             }
+            WindowEvent::Ime(ime) => {
+                use winit::event::Ime;
+                match ime {
+                    Ime::Preedit(text, cursor) => {
+                        self.page.ime_preedit(&text, cursor);
+                        window.request_redraw();
+                    }
+                    Ime::Commit(text) => {
+                        self.page.ime_commit(&text);
+                        window.request_redraw();
+                    }
+                    Ime::Disabled => {
+                        self.page.ime_cancel();
+                        self.ime_on = false;
+                        window.request_redraw();
+                    }
+                    Ime::Enabled => {}
+                }
+            }
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
                 self.page.mods = mods_of(self.mods);
@@ -485,6 +533,7 @@ fn main() {
     let mut settle_ms = 0u64;
     let mut select = None;
     let mut typed = None;
+    let mut compose = None;
     let (mut width, mut height, mut scale) = (900u32, 640u32, 1.0f32);
 
     while let Some(arg) = args.next() {
@@ -506,6 +555,7 @@ fn main() {
                 }
             }
             "--type" => typed = args.next(),
+            "--compose" => compose = args.next(),
             "--select" => {
                 let v: Vec<f32> = args.next().unwrap_or_default().split(',').filter_map(|n| n.parse().ok()).collect();
                 if let [a, b, c, d] = v[..] {
@@ -528,11 +578,11 @@ fn main() {
         page.clipboard = Box::new(SystemClipboard::default());
     }
     if let Some(out) = png {
-        render_png(&mut page, Snapshot { out, width, height, scale, pointer, typed, wait_ms, settle_ms, select });
+        render_png(&mut page, Snapshot { out, width, height, scale, pointer, typed, compose, wait_ms, settle_ms, select });
         return;
     }
 
     let event_loop = EventLoop::new().expect("event loop");
-    let mut app = App { page, window: None, surface: None, mods: ModifiersState::default(), cursor: None, close_requested: false, config: WindowConfig::default(), title: String::new(), edge: None };
+    let mut app = App { page, window: None, surface: None, mods: ModifiersState::default(), cursor: None, close_requested: false, config: WindowConfig::default(), title: String::new(), edge: None, ime_on: false, ime_area: None };
     event_loop.run_app(&mut app).expect("run app");
 }

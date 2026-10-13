@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>table-layout: fixed</title>
+<style>
+  body { margin: 20px; font: 13px sans-serif; background: #f4f1ea }
+  table { border-collapse: collapse; background: #fff; margin-bottom: 18px }
+  td, th { border: 1px solid #99a; padding: 4px 6px; overflow: hidden }
+  th { background: #dde }
+  .fixed { table-layout: fixed; width: 420px }
+</style>
+<p>auto layout: columns follow their content</p>
+<table style="width:420px"><tr><th>Name</th><th>Notes</th><th>Qty</th></tr>
+<tr><td>Short</td><td>A fairly long description that makes this column wide</td><td>1</td></tr></table>
+<p>fixed, from the first row: 30% / auto / 60px</p>
+<table class="fixed"><tr><th style="width:30%">Name</th><th>Notes</th><th style="width:60px">Qty</th></tr>
+<tr><td>Short</td><td>A fairly long description that makes this column wide</td><td>1</td></tr></table>
+<p>fixed, from &lt;col&gt;</p>
+<table class="fixed"><col width="100"><col><col width="50%">
+<tr><th>One</th><th>Two</th><th>Three</th></tr><tr><td>1</td><td>2</td><td>3</td></tr></table>

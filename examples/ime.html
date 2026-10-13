@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>input methods</title>
+<style>
+  body {
+    margin: 20px;
+    font: 15px sans-serif;
+    background: #f4f1ea;
+  }
+  label {
+    display: block;
+    margin: 10px 0;
+  }
+  input,
+  textarea {
+    width: 300px;
+  }
+  #ed {
+    background: #fff;
+    border: 1px solid #aaa;
+    padding: 8px;
+    width: 300px;
+    min-height: 50px;
+  }
+</style>
+<label>Input <input id="i" value="hello " /></label>
+<label>Text area <textarea id="t"></textarea></label>
+<div id="ed" contenteditable><p>Editing host:</p></div>
+<p>
+  Compose with an input method (Chinese, Japanese, Korean, ...): the text being
+  composed is underlined and the candidate window follows the caret.
+</p>

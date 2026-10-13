@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>border-radius per corner</title>
+<style>
+  body { margin: 20px; font: 12px sans-serif; background: #f4f1ea; display: flex; flex-wrap: wrap; gap: 18px }
+  div { width: 110px; height: 70px; background: #2a7fd4; color: #fff; padding: 6px; box-sizing: border-box }
+  .a { border-radius: 20px 0 20px 0 }
+  .b { border-radius: 40px 10px }
+  .c { border-radius: 50% }
+  .d { border-radius: 30px 0 0 30px; border: 4px solid #124 }
+  .e { border-top-left-radius: 35px; border-bottom-right-radius: 35px; box-shadow: 4px 4px 8px rgba(0,0,0,.4) }
+  .f { border-radius: 50%; width: 70px; background: linear-gradient(#f90, #e33) }
+  .g { border-radius: 8px 24px 8px 24px; border: 3px dashed #124; background: #fff; color: #124 }
+</style>
+<div class="a">20 0 20 0</div><div class="b">40 10</div><div class="c">50%</div><div class="d">left pill</div>
+<div class="e">tl + br, shadow</div><div class="f"></div><div class="g">dashed</div>
