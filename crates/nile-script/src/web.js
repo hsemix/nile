@@ -1068,7 +1068,7 @@
   // this window as `position: fixed` boxes, so they can't leave the window. See
   // docs.sciter.com/docs/DOM/Element (popup, takeOff) and /docs/DOM/out-of-canvas-elements.
   const openPopups = [];
-  const SAVED = ["position", "display", "left", "top", "width", "height", "z-index", "visibility", "margin"];
+  const SAVED = ["position", "display", "left", "top", "width", "height", "z-index", "visibility", "margin", "opacity", "transform", "transform-origin", "transition"];
   // NUMPAD placement: 1 bottom-left ... 9 top-right. Offsets of that point inside a w x h box.
   const padPoint = (n, w, h) => {
     const col = (((n | 0) - 1) % 3 + 3) % 3, row = Math.floor(((n | 0) - 1) / 3);
@@ -1154,6 +1154,59 @@
     while (scratch.firstChild) holder.appendChild(scratch.firstChild);
     return [holder, true];
   };
+  const POINTS = ["bottom-left", "bottom-center", "bottom-right", "middle-left", "middle-center", "middle-right", "top-left", "top-center", "top-right"];
+  // `popup-position` and `popup-animation(type: slide, axis: vertical, heading: start-to-end, duration: 100ms)`.
+  const cssPopup = (el) => {
+    const cs = getComputedStyle(el);
+    const out = {};
+    const pos = cs.getPropertyValue("popup-position");
+    if (pos) { const [a, b] = pos.split(/\s+/).map((n) => POINTS.indexOf(n) + 1); if (a && b) out.position = [a, b]; }
+    const anim = cs.getPropertyValue("popup-animation");
+    if (anim) {
+      out.animation = {};
+      for (const m of anim.matchAll(/([a-z]+)\s*:\s*([\w.-]+)/g)) out.animation[m[1]] = m[2];
+    }
+    return out;
+  };
+  const animationParams = (p) => {
+    const a = {};
+    if (p.animationType) a.type = p.animationType;
+    if (p.animationAxis) a.axis = p.animationAxis;
+    if (p.animationHeading) a.heading = p.animationHeading;
+    if (p.animationDuration !== undefined) a.duration = typeof p.animationDuration === "number" ? p.animationDuration + "ms" : String(p.animationDuration);
+    return a;
+  };
+  const millis = (t) => { const m = /^([\d.]+)(ms|s)?$/.exec(String(t || "")); return m ? parseFloat(m[1]) * (m[2] === "s" ? 1000 : 1) : 150; };
+  // Appearance animation: blend (fade), inflate (grow from the popup's reference point), slide, roll.
+  function animateIn(rec, a, popupAt) {
+    if (!a || !a.type) return;
+    const st = rec.el.style, ms = millis(a.duration);
+    const vertical = a.axis !== "horizontal", forward = a.heading !== "end-to-start";
+    const col = (((popupAt | 0) - 1) % 3 + 3) % 3, row = Math.floor(((popupAt | 0) - 1) / 3);
+    let from = {}, to = {};
+    if (a.type === "blend") { from = { opacity: "0" }; to = { opacity: "1" }; }
+    else if (a.type === "inflate") {
+      st.setProperty("transform-origin", `${col * 50}% ${row === 0 ? 100 : row === 1 ? 50 : 0}%`);
+      from = { transform: "scale(0.2)", opacity: "0" }; to = { transform: "scale(1)", opacity: "1" };
+    } else if (a.type === "slide") {
+      const d = (forward ? -1 : 1) * 24;
+      from = { transform: vertical ? `translateY(${d}px)` : `translateX(${d}px)`, opacity: "0" }; to = { transform: "translate(0px, 0px)", opacity: "1" };
+    } else if (a.type === "roll") {
+      st.setProperty("transform-origin", vertical ? (forward ? "50% 0%" : "50% 100%") : (forward ? "0% 50%" : "100% 50%"));
+      from = { transform: vertical ? "scaleY(0.01)" : "scaleX(0.01)" }; to = { transform: "scale(1)" };
+    } else return;
+    st.setProperty("transition", "none");
+    for (const k in from) st.setProperty(k, from[k]);
+    rec.el.getBoundingClientRect();
+    st.setProperty("transition", `opacity ${ms}ms, transform ${ms}ms`);
+    for (const k in to) st.setProperty(k, to[k]);
+    setTimeout(() => {
+      if (!rec.open) return;
+      for (const k of ["transition", "transform", "transform-origin", "opacity"]) {
+        if (rec.saved[k]) st.setProperty(k, rec.saved[k]); else st.removeProperty(k);
+      }
+    }, ms + 30);
+  }
   Element.prototype.popup = function (content, params = {}) {
     const anchor = this;
     if (suppressed === anchor) { suppressed = null; return undefined; }
@@ -1171,6 +1224,9 @@
     st.setProperty("visibility", "hidden");
     const pr = el.getBoundingClientRect();
     const vw = window.innerWidth, vh = window.innerHeight;
+    // Placement: the call's parameters, else the popup's (then the anchor's) `popup-position` CSS.
+    const css = cssPopup(el) || cssPopup(anchor);
+    if (params.popupAt === undefined && css.position) params = { ...params, popupAt: css.position[0], anchorAt: params.anchorAt ?? css.position[1] };
     let left, top;
     if (params.x !== undefined || params.y !== undefined) {
       const [ox, oy] = padPoint(params.popupAt || 7, pr.width, pr.height);
@@ -1187,6 +1243,7 @@
     top = Math.max(0, Math.min(top, vh - pr.height));
     place(rec, left, top);
     st.removeProperty("visibility");
+    animateIn(rec, { ...css.animation, ...animationParams(params) }, params.popupAt || 7);
     // The UA menu look highlights `.nile-hover` (a UA `:hover` rule would make every page restyle on hover).
     let lit = null;
     el.addEventListener("mouseover", (e) => {
@@ -1242,6 +1299,51 @@
     if (params.isMousePassthrough !== undefined) win.isMousePassthrough = params.isMousePassthrough;
     return win;
   };
+  // ---- tooltips -----------------------------------------------------------------
+  // After the pointer rests on an element the engine calls `__tooltipShow`: scripts may answer the
+  // bubbling `tooltiprequest` event with `evt.source = element`; else the nearest `tooltip` (HTML) or
+  // `title` (text) attribute becomes a `popup[role=tooltip]` near the pointer.
+  let tip = null;
+  const hideTip = () => {
+    if (!tip) return;
+    const t = tip;
+    tip = null;
+    if (t.created) t.el.remove();
+    else for (const k of SAVED) { if (t.saved[k]) t.el.style.setProperty(k, t.saved[k]); else t.el.style.removeProperty(k); }
+  };
+  Object.defineProperty(g, "__tooltipHide", { value: hideTip });
+  Object.defineProperty(g, "__tooltipShow", {
+    value(id, x, y) {
+      hideTip();
+      const target = wrap(id);
+      const ask = new Event("tooltiprequest", { bubbles: true, cancelable: true });
+      ask.source = null;
+      target.dispatchEvent(ask);
+      let el = ask.source instanceof Element ? ask.source : null, created = false;
+      if (!el) {
+        let host = target;
+        while (host && host.nodeType === 1 && !host.hasAttribute("tooltip") && !host.hasAttribute("title")) host = host.parentElement;
+        if (!host || host.nodeType !== 1) return false;
+        el = document.createElement("popup");
+        el.setAttribute("role", "tooltip");
+        if (host.hasAttribute("tooltip")) el.innerHTML = host.getAttribute("tooltip"); else el.textContent = host.getAttribute("title");
+        if (!el.textContent.trim() && !el.children.length) return false;
+        created = true;
+        document.body.appendChild(el);
+      }
+      const rec = { el, created, saved: {} };
+      for (const k of SAVED) rec.saved[k] = el.style.getPropertyValue(k);
+      const st = el.style;
+      st.setProperty("position", "fixed"); st.setProperty("display", "block"); st.setProperty("margin", "0");
+      st.setProperty("z-index", "2147483200"); st.setProperty("left", "0px"); st.setProperty("top", "0px"); st.setProperty("visibility", "hidden");
+      const r = el.getBoundingClientRect();
+      const left = Math.max(0, Math.min(x + 12, window.innerWidth - r.width));
+      const top = y + 20 + r.height > window.innerHeight ? Math.max(0, y - 8 - r.height) : y + 20;
+      st.setProperty("left", Math.round(left) + "px"); st.setProperty("top", Math.round(top) + "px"); st.removeProperty("visibility");
+      tip = rec;
+      return true;
+    },
+  });
   // A right click: scripts get `contextmenu` and may answer with `evt.source = menuElement`.
   Object.defineProperty(g, "__contextMenu", {
     value(id, x, y) {

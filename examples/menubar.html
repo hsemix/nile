@@ -1,30 +1,77 @@
 <!doctype html>
-<html window-title="Nile custom menubar" window-width="720" window-height="500">
-<head><meta charset="utf-8"><title>Nile custom menubar</title>
+<html window-title="Studio notes — Nile menus" window-width="1120" window-height="800">
+<head><meta charset="utf-8"><title>Studio notes — Nile menus</title>
 <style>
   * { box-sizing: border-box }
-  body { margin: 0; font-family: sans-serif; color: #24433e; background: #eef4f2 }
-  .menubar { display: flex; gap: 4px; padding: 8px 14px; background: white; border-bottom: 1px solid #d5e3de; position: relative; z-index: 10 }
-  .menu { position: relative }
-  button { padding: 8px 14px; border: 1px solid transparent; border-radius: 4px; background: white; color: #24433e; cursor: pointer }
-  button:hover, button:focus, .menu.open > button { background: #e0f1ea; border-color: #b8d5c9 }
-  button:disabled { color: #98aaa3; cursor: default }
-  .popup { display: none; position: absolute; top: 36px; left: 0; width: 220px; padding: 5px; background: white; border: 1px solid #d5e3de; border-radius: 5px; box-shadow: 0 4px 14px #24433e22; z-index: 10 }
-  .menu.open .popup { display: block }
-  .popup button { display: block; width: 100%; text-align: left; font-size: 12px }
-  .separator { height: 1px; background: #e0e9e4; margin: 5px }
-  main { padding: 32px }
-  h1 { font-size: 25px; margin: 0 0 18px }
-  p { line-height: 1.7; user-select: text }
-  #status { padding: 14px; background: white; border: 1px solid #d5e3de; border-radius: 6px; margin-top: 24px }
+  body { margin: 0; font-family: sans-serif; font-size: 13px; color: #2b3d43; background: #f1f4f4 }
+  button { font-family: sans-serif; font-size: 12px; padding: 7px 12px; color: #4c6268; background: transparent; border: 1px solid transparent; border-radius: 5px; cursor: pointer }
+  button:hover, button:focus { background: #e3ede9; border-color: #c5d8d0 }
+  button.primary { background: #217765; color: white; border-color: #217765 }
+  button.primary:hover { background: #196351 }
+  .symbol { font-family: "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols", sans-serif }
+  .titlebar { height: 57px; background: #fff; display: flex; align-items: center; padding: 0 23px; gap: 14px; border-bottom: 1px solid #e8eeee }
+  .brand { width: 28px; height: 28px; border-radius: 7px; background: #217765; color: #fff; text-align: center; line-height: 28px; font-weight: 700; font-size: 18px }
+  .title { font-size: 13px; font-weight: 600 }
+  .saved { color: #91a1a5; font-size: 10px; padding-left: 11px }
+  .titlebar .spacer { flex: 1 }
+  .workspace-label { color: #899b9d; font-size: 10px; letter-spacing: 1px }
+  .avatar { width: 27px; height: 27px; background: #e1eee8; color: #437766; border-radius: 20px; text-align: center; line-height: 27px; font-size: 10px }
+  .menubar { display: flex; gap: 3px; padding: 6px 21px; background: #fff; height: 40px; border-bottom: 1px solid #e1e9e7 }
+  .menu-trigger { min-width: 48px; padding: 5px 11px }
+  .menu-trigger.open { background: #e0eee7; color: #17634d; border-color: #bad5c7 }
+  .toolbar { display: flex; align-items: center; gap: 8px; height: 49px; padding: 0 24px; background: #f8faf9; border-bottom: 1px solid #e0e8e5 }
+  .toolbar .divider { height: 18px; width: 1px; background: #dce6e0; margin: 0 5px }
+  .toolbar .spacer { flex: 1 }
+  .toolbar-hint { font-size: 10px; color: #8b9d98 }
+  .workspace { display: flex; height: calc(100vh - 177px); min-height: 460px }
+  .sidebar { width: 184px; padding: 25px 15px; background: #f9fbfa; border-right: 1px solid #e0e7e4; flex-shrink: 0 }
+  .section-label { color: #8b9e98; font-size: 9px; letter-spacing: 1.8px; margin: 0 10px 16px }
+  .side-item { display: grid; grid-template-columns: 20px 1fr; gap: 7px; align-items: center; text-align: left; width: 154px; padding: 11px; margin-bottom: 5px; font-size: 11px }
+  .side-item > span { display: block }
+  .side-item.selected { background: #e3efe8; color: #236e55; font-weight: 600 }
+  .side-icon { margin-right: 9px; color: #6b9482 }
+  .side-note { margin: 27px 10px; padding-top: 19px; border-top: 1px solid #dde8e0; font-size: 10px; color: #92a39b; line-height: 1.7 }
+  .canvas { flex: 1; min-width: 0; padding: 29px; overflow: auto }
+  .paper { max-width: 640px; min-height: 505px; margin: 0 auto; padding: 44px 48px; background: white; border: 1px solid #e0e7e2; border-radius: 8px; box-shadow: 0 3px 15px #293f3410 }
+  .paper:focus { outline: 1px solid #b8d7c6 }
+  .paper h1 { font-family: serif; font-size: 34px; font-weight: 400; line-height: 1.15; margin: 0 0 19px; color: #244c40 }
+  .paper h2 { font-size: 16px; font-weight: 600; margin: 27px 0 12px; color: #385e50 }
+  .paper p { font-family: serif; font-size: 15px; line-height: 1.75; color: #667770; margin: 0 0 16px }
+  .paper .eyebrow { font-family: sans-serif; font-size: 9px; letter-spacing: 2px; color: #77a28d; margin-bottom: 26px }
+  .paper .callout { border-left: 2px solid #b2d3c1; padding: 12px 17px; background: #f3f8f4; margin: 25px 0 }
+  .inspector { width: 238px; flex-shrink: 0; padding: 27px 23px; border-left: 1px solid #e1e8e4; background: #fbfcfb }
+  .inspector h3 { font-size: 12px; margin: 0 0 15px; font-weight: 600 }
+  .inspector p { font-size: 11px; color: #8d9d96; line-height: 1.7; margin: 0 0 24px }
+  .shortcut-note { display: flex; justify-content: space-between; font-size: 10px; color: #81958a; margin: 14px 0 }
+  .shortcut-note b { font-weight: 400; color: #506d5c }
+  .badge { display: inline-block; border: 1px solid #d4e5d9; background: #edf6ef; color: #5d8970; padding: 5px 8px; font-size: 9px; border-radius: 4px; margin-bottom: 20px }
+  .statusbar { height: 31px; display: flex; justify-content: space-between; align-items: center; background: #fff; border-top: 1px solid #e0e8e3; padding: 0 23px; font-size: 10px; color: #8da196 }
+  #status { color: #52826d }
+  .command-menu { display: none; width: 274px; padding: 7px; background: #fff; color: #394f44; border: 1px solid #d4e0d7; border-radius: 8px; box-shadow: 0 8px 28px #263e3224; popup-position: top-left bottom-left }
+  .command-menu.submenu { width: 234px; popup-position: top-left top-right }
+  .menu-label { font-size: 9px; letter-spacing: 1.2px; color: #97aaa0; padding: 10px 11px 7px }
+  .menu-item { display: grid; grid-template-columns: 23px 1fr auto; gap: 7px; align-items: center; height: 34px; padding: 7px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; outline: none }
+  .menu-item > span { display: block }
+  .menu-item:hover, .menu-item:focus { background: #eaf4ee; color: #1f6c4f }
+  .menu-item[disabled] { color: #b0bdb5; cursor: default; background: white }
+  .menu-icon { color: #739a84; text-align: center; font-size: 13px }
+  .menu-item[disabled] .menu-icon { color: #bcc8c0 }
+  .key-label { color: #98a99d; font-size: 10px }
+  .menu-separator { height: 1px; background: #e9eeea; margin: 6px 7px }
+  .menu-footnote { font-size: 9px; color: #9aaba0; padding: 10px 11px 6px }
   .hidden { display: none }
+  body.compact .paper { padding: 30px; min-height: 410px }
+  body.compact .paper p { font-size: 13px; line-height: 1.6 }
+  @media (max-width: 950px) { .inspector { display: none } .canvas { padding: 22px } }
 </style></head>
 <body>
-  <div class="menubar" role="menubar">
-    <div class="menu"><button data-menu="file" aria-expanded="false">File</button><div class="popup" role="menu"><button data-command="new">New draft (Ctrl/Cmd+N)</button><button disabled>Save to disk</button><div class="separator"></div><button data-command="close">Close window</button></div></div>
-    <div class="menu"><button data-menu="view" aria-expanded="false">View</button><div class="popup" role="menu"><button data-command="details"><span id="details-label">Hide details</span></button><button data-command="title">Rename window</button></div></div>
-    <div class="menu"><button data-menu="help" aria-expanded="false">Help</button><div class="popup" role="menu"><button data-command="about">About this example</button></div></div>
+  <header class="titlebar"><div class="brand">N</div><div class="title"><span id="draft-name">Studio notes</span><span class="saved" id="save-state">Local draft</span></div><span class="spacer"></span><span class="workspace-label">NORTHSTAR / WORKSPACE</span><div class="avatar">AD</div></header>
+  <nav class="menubar" role="menubar"><button class="menu-trigger" data-menu="file" aria-expanded="false">File</button><button class="menu-trigger" data-menu="edit" aria-expanded="false">Edit</button><button class="menu-trigger" data-menu="view" aria-expanded="false">View</button><button class="menu-trigger" data-menu="help" aria-expanded="false">Help</button></nav>
+  <div class="toolbar"><button data-command="undo" title="Undo"><span class="symbol">↶</span></button><button data-command="redo" title="Redo"><span class="symbol">↷</span></button><span class="divider"></span><button data-command="bold" title="Bold"><b>B</b></button><button data-command="italic" title="Italic"><i>I</i></button><span class="spacer"></span><span class="toolbar-hint">Select text to format · right-click for commands</span><button data-command="save" class="primary">Save draft</button></div>
+  <div class="workspace"><aside class="sidebar" id="sidebar"><div class="section-label">YOUR DOCUMENTS</div><button class="side-item selected" data-command="studio"><span class="symbol side-icon">▤</span><span>Studio notes</span></button><button class="side-item" data-command="brief"><span class="symbol side-icon">▧</span><span>Project brief</span></button><button class="side-item" data-command="new"><span class="side-icon">+</span><span>New draft</span></button><div class="side-note">A little space to think,<br>write, and make progress.</div></aside>
+    <main class="canvas"><article class="paper" id="editor" contenteditable="true"><p class="eyebrow">STUDIO JOURNAL / 01</p><h1>A place for good ideas.</h1><p>Small observations become better questions. Better questions become the beginning of something worth making.</p><h2>Make room for thoughtful work</h2><p>Keep your notes close, explore a new direction, and leave a little room for the unexpected.</p><p class="callout">Start with one idea. Give it a little space.</p><p>The menus above are part of this workspace. Try File for drafts, Edit for text commands, and View to make the space your own.</p></article></main>
+    <aside class="inspector" id="inspector"><span class="badge">PERSONAL WORKSPACE</span><h3>Everything within reach</h3><p>Menus follow their anchors and float above the document. Move between them with the pointer or keyboard.</p><h3>Keyboard shortcuts</h3><div class="shortcut-note"><span>New draft</span><b>Ctrl / Cmd + N</b></div><div class="shortcut-note"><span>Save draft</span><b>Ctrl / Cmd + S</b></div><div class="shortcut-note"><span>Close menu</span><b>Escape</b></div><div class="shortcut-note"><span>Move through items</span><b>↑ ↓</b></div><p style="margin-top:26px">File → Templates opens a second menu. View includes checked display options.</p></aside>
   </div>
-  <main><h1>A custom menubar</h1><p id="details">Click a menu, then use arrow keys to navigate. Escape closes it. Hover over another menu while one is open to switch. Tab still follows the regular focus order.</p><div id="status">Ready · changes stay in this session</div></main>
+  <footer class="statusbar"><span id="status">Ready · edit your notes or open a menu</span><span id="word-count"></span><span>Nile · menus drawn in the window</span></footer>
   <script src="menubar.js"></script>
 </body></html>

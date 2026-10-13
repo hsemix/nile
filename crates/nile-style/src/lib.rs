@@ -430,6 +430,11 @@ pub struct ComputedStyle {
     pub vertical_align: VerticalAlign,
     /// `cursor`; inherited.
     pub cursor: Cursor,
+    /// `popup-position`: which numpad point (1 bottom-left … 9 top-right) of the popup meets which
+    /// point of its anchor. Read by scripts (`Element.popup`), not by layout.
+    pub popup_position: Option<(u8, u8)>,
+    /// `popup-animation(type: slide, axis: vertical, duration: 100ms)`, as written.
+    pub popup_animation: Option<String>,
     pub align_self: Align,
     pub align_content: Align,
 
@@ -548,6 +553,8 @@ impl Default for ComputedStyle {
             table_fixed: false,
             vertical_align: VerticalAlign::Baseline,
             cursor: Cursor::Auto,
+            popup_position: None,
+            popup_animation: None,
             align_self: Align::Normal,
             align_content: Align::Normal,
             justify_items: Align::Normal,
@@ -694,6 +701,11 @@ impl ComputedStyle {
             "padding-right" => px(self.padding.right),
             "padding-bottom" => px(self.padding.bottom),
             "padding-left" => px(self.padding.left),
+            "popup-position" => {
+                let name = |p: u8| ["bottom-left", "bottom-center", "bottom-right", "middle-left", "middle-center", "middle-right", "top-left", "top-center", "top-right"][p as usize - 1];
+                self.popup_position.map(|(a, b)| format!("{} {}", name(a), name(b)))?
+            }
+            "popup-animation" => self.popup_animation.clone()?,
             "border-top-width" => px(self.border_width.top),
             "border-right-width" => px(self.border_width.right),
             "border-bottom-width" => px(self.border_width.bottom),
@@ -1002,6 +1014,8 @@ impl ComputedStyle {
         a.animations = other.animations.clone();
         a.transform_origin = other.transform_origin;
         a.cursor = other.cursor;
+        a.popup_position = other.popup_position;
+        a.popup_animation = other.popup_animation.clone();
         // Whether a box is faded or transformed decides its paint order; how much doesn't.
         if (a.opacity < 1.0) == (other.opacity < 1.0) {
             a.opacity = other.opacity;
@@ -1216,7 +1230,9 @@ fn apply_declarations(
             }
             // A `var()` that can't be resolved makes the declaration invalid.
             let text = substitute(&d.raw, &vars, 0)?;
-            Some(Declaration { values: parse::parse_values(&text, pcx), raw: String::new(), ..(*d).clone() })
+            // `popup-*` values are kept as text for scripts; everything else is parsed now.
+            let raw = if d.name.starts_with("popup-") { text.clone() } else { String::new() };
+            Some(Declaration { values: parse::parse_values(&text, pcx), raw, ..(*d).clone() })
         })
         .collect();
     for d in resolved.iter().filter(|d| d.name == "font-size") {
@@ -1587,6 +1603,18 @@ pub(crate) fn align(v: &Value) -> Option<Align> {
     })
 }
 
+/// A reference point of `popup-position`: `top-left` … `bottom-right` or a numpad digit.
+fn point_of(v: &Value) -> Option<u8> {
+    match v {
+        Value::Ident(i) => ["bottom-left", "bottom-center", "bottom-right", "middle-left", "middle-center", "middle-right", "top-left", "top-center", "top-right"]
+            .iter()
+            .position(|n| n == i)
+            .map(|p| p as u8 + 1),
+        Value::Number(n) if (1.0..=9.0).contains(n) && n.fract() == 0.0 => Some(*n as u8),
+        _ => None,
+    }
+}
+
 fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
     let fs = if d.name == "font-size" { parent_font_size } else { s.font_size };
     let v = &d.values;
@@ -1905,6 +1933,24 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
             }
             None => {}
         },
+        "popup-position" => {
+            if let (Some(a), Some(b)) = (v.first().and_then(point_of), v.get(1).and_then(point_of)) {
+                s.popup_position = Some((a, b));
+            }
+        }
+        "popup-reference-point" => {
+            if let Some(a) = first.and_then(point_of) {
+                s.popup_position = Some((a, s.popup_position.map_or(1, |p| p.1)));
+            }
+        }
+        "popup-anchor-reference-point" => {
+            if let Some(b) = first.and_then(point_of) {
+                s.popup_position = Some((s.popup_position.map_or(7, |p| p.0), b));
+            }
+        }
+        "popup-animation" => {
+            s.popup_animation = (!d.raw.is_empty() && d.raw != "none").then(|| d.raw.clone());
+        }
         "perspective-origin" => {
             if let Some(o) = bg_position(&v[..v.len().min(2)], fs) {
                 s.perspective_origin = o;
@@ -2632,6 +2678,18 @@ mod tests {
         let mut fainter = faded.clone();
         fainter.opacity = 0.2;
         assert!(faded.same_layout(&fainter), "but fading further doesn't");
+    }
+
+    #[test]
+    fn popup_properties_are_kept_for_scripts() {
+        let doc = Document::parse(r#"<style>#a { popup-position: top-right bottom-center; popup-animation: popup-animation(type:slide, duration:100ms) } #b { popup-reference-point: 5 }</style><p id="a"></p><p id="b"></p>"#);
+        let s = compute_styles(&doc);
+        let a = s.get(doc.find(|n| n.attr("id") == Some("a")).unwrap()).clone();
+        assert_eq!(a.popup_position, Some((9, 2)));
+        assert_eq!(a.css_value("popup-position").as_deref(), Some("top-right bottom-center"));
+        assert!(a.popup_animation.as_deref().is_some_and(|t| t.contains("type:slide")), "{:?}", a.popup_animation);
+        let b = s.get(doc.find(|n| n.attr("id") == Some("b")).unwrap()).clone();
+        assert_eq!(b.popup_position, Some((5, 1)));
     }
 
     #[test]

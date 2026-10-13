@@ -134,6 +134,8 @@ impl Clipboard for SystemClipboard {
     }
 }
 
+/// How long the pointer rests on an element before its tooltip shows.
+const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 /// Half the caret's blink period.
 pub const CARET_BLINK: Duration = Duration::from_millis(530);
 
@@ -613,6 +615,9 @@ pub struct Page {
     pub blink_at: Instant,
     /// Sub-documents of `<frame>`/`<iframe>` elements.
     pub frames: Rc<RefCell<frames::Frames>>,
+    /// When the tooltip for the hovered element shows, and whether one is showing.
+    pub tooltip_due: Option<Instant>,
+    pub tooltip_shown: bool,
     /// A frameset splitter being dragged.
     pub splitter_drag: Option<frames::SplitDrag>,
 }
@@ -876,6 +881,8 @@ impl Page {
             blink_at: Instant::now() + CARET_BLINK,
             frames,
             splitter_drag: None,
+            tooltip_due: None,
+            tooltip_shown: false,
         }
     }
 
@@ -1061,6 +1068,7 @@ impl Page {
     /// i.e. `dy > 0` is wheel-up): the innermost `overflow: auto | scroll` ancestor
     /// that can still move that way takes it, else the page does.
     pub fn wheel(&mut self, dx: f32, dy: f32) {
+        self.tooltip_hide();
         if self.frames_wheel(dx, dy) {
             return;
         }
@@ -1598,6 +1606,7 @@ impl Page {
             return false;
         }
         self.view.borrow_mut().interaction.hover = hover;
+        self.tooltip_hover_changed(hover.is_some());
         self.restyle();
         let (x, y) = self.pointer.unwrap_or_default();
         let mouse = |kind| UiEvent::Mouse { kind, x, y, button: 0 };
@@ -1719,6 +1728,39 @@ impl Page {
 
     /// Primary button down: the hovered element becomes active and focus moves
     /// to its nearest focusable ancestor (or is cleared).
+    /// The hovered element changed: drop the tooltip and wait for the pointer to rest on the new one.
+    fn tooltip_hover_changed(&mut self, over_something: bool) {
+        self.tooltip_hide();
+        self.tooltip_due = over_something.then(|| Instant::now() + TOOLTIP_DELAY);
+    }
+
+    /// Hide the tooltip and stop waiting to show one. True if one was showing.
+    fn tooltip_hide(&mut self) -> bool {
+        self.tooltip_due = None;
+        if std::mem::take(&mut self.tooltip_shown) {
+            let _ = self.call("__tooltipHide", "[]");
+            return true;
+        }
+        false
+    }
+
+    /// Show the tooltip once the pointer has rested long enough.
+    fn tooltip_tick(&mut self) -> (bool, Option<Duration>) {
+        let Some(due) = self.tooltip_due else { return (false, None) };
+        let now = Instant::now();
+        if now < due {
+            return (false, Some(due - now));
+        }
+        self.tooltip_due = None;
+        let (Some(target), Some((x, y))) = (self.interaction().hover, self.pointer) else { return (false, None) };
+        if self.view.borrow().menu.is_some() || self.pressed.is_some() {
+            return (false, None);
+        }
+        let (shown, changed) = self.call("__tooltipShow", &format!("[{},{x},{y}]", target.0));
+        self.tooltip_shown = shown.is_ok_and(|v| v == "true");
+        (changed || self.tooltip_shown, None)
+    }
+
     /// A right click at the pointer: fires `contextmenu`, and shows the menu a script hands back.
     pub fn context_menu(&mut self) -> bool {
         if self.hover_due.is_some() {
@@ -1766,7 +1808,7 @@ impl Page {
         }
         let target = self.interaction().hover;
         self.pressed = target;
-        let mut changed = false;
+        let mut changed = self.tooltip_hide();
         // A script that cancels `mousedown` keeps the focus and selection where they are (how
         // toolbar buttons avoid taking them from an editor).
         let mut keep_focus = false;
@@ -2011,7 +2053,8 @@ impl Page {
         let (c2, n2) = self.blink();
         let (c3, n3) = self.animate();
         let (c4, n4) = self.frames_tick();
-        (c0 | c1 | c2 | c3 | c4, [n0, n1, n2, n3, n4].into_iter().flatten().min())
+        let (c5, n5) = self.tooltip_tick();
+        (c0 | c1 | c2 | c3 | c4 | c5, [n0, n1, n2, n3, n4, n5].into_iter().flatten().min())
     }
 
     /// Step transitions and animations; wake again in a frame while any is running.
@@ -3104,6 +3147,7 @@ impl Page {
     /// A key event goes to the focused element, or `<body>`. Returns whether
     /// the page should keep its default handling (no `preventDefault`).
     pub fn key(&mut self, kind: &'static str, key: String, mods: ModifiersState) -> (bool, bool) {
+        self.tooltip_hide();
         if let Some(r) = self.frames_key(kind, &key, mods) {
             return r;
         }
@@ -5148,6 +5192,72 @@ cd</textarea>
         assert_eq!(ev(&mut p, "answers.slice(2).join()"), "yes");
         // `native` wins over the global setting.
         assert_eq!(ev(&mut p, "Window.this.modal(JSX('question', { native: true }, ['x']))"), "no");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tooltips_follow_title_and_tooltip_attributes() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="a" title="Plain tip" style="width:100px;height:40px"></div>
+               <div id="b" tooltip="<b>Rich</b> tip" style="width:100px;height:40px"></div>
+               <div id="c" style="width:100px;height:40px"><span id="d" title="Inherited from a child"></span>x</div>
+               <div id="e" style="width:100px;height:40px"></div>
+               <div id="f" title="Never shown" style="width:100px;height:40px"></div>
+               <div id="custom" style="width:100px;height:40px"></div>
+               <script>
+                 document.$('#custom').on('tooltiprequest', (e) => { const t = document.createElement('div'); t.id = 'mine'; t.style.display = 'none'; t.textContent = 'dynamic'; document.body.appendChild(t); e.source = t; });
+               </script></body>"#,
+            "tooltips",
+        );
+        let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+        let tip = |p: &mut Page| ev(p, "document.$('popup[role=tooltip]') ? document.$('popup[role=tooltip]').innerHTML : ''");
+        let rest = |p: &mut Page, id: &str| {
+            let (x, y) = center(p, id);
+            p.pointer_moved(x, y);
+            assert_eq!(tip(p), "", "nothing shows before the pointer has rested");
+            std::thread::sleep(TOOLTIP_DELAY + Duration::from_millis(40));
+            p.tick();
+        };
+        rest(&mut p, "a");
+        assert_eq!(tip(&mut p), "Plain tip");
+        // Near the pointer, not covering it.
+        assert_eq!(ev(&mut p, "document.$('popup[role=tooltip]').getBoundingClientRect().top > 20"), "true");
+        // Moving to another element replaces it; `tooltip` is HTML.
+        rest(&mut p, "b");
+        assert_eq!(tip(&mut p), "<b>Rich</b> tip");
+        // A press or a key hides it.
+        p.press();
+        p.release();
+        assert_eq!(tip(&mut p), "");
+        // `title` on the pointer's own element or an ancestor; none: nothing.
+        rest(&mut p, "e");
+        assert_eq!(tip(&mut p), "");
+        // A script answers `tooltiprequest` with its own element.
+        rest(&mut p, "custom");
+        assert_eq!(ev(&mut p, "document.$('#mine').getBoundingClientRect().width > 0"), "true");
+        p.pointer_moved(500.0, 290.0);
+        assert_eq!(ev(&mut p, "document.$('#mine').getBoundingClientRect().width > 0"), "false", "restored to hidden");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn popup_position_and_animation_css() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><button id="b" style="position:absolute;left:100px;top:50px;width:80px;height:20px">go</button>
+               <popup id="pp" style="popup-position: top-right bottom-right; popup-animation: popup-animation(type:slide, axis:vertical, duration:100ms)">menu text</popup>
+               <popup id="q" style="width:60px">other</popup>
+               <style>popup#q { popup-reference-point: top-left; popup-anchor-reference-point: bottom-center }</style></body>"#,
+            "popupcss",
+        );
+        let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+        assert_eq!(ev(&mut p, "getComputedStyle(document.$('#pp')).getPropertyValue('popup-position')"), "top-right bottom-right");
+        assert!(ev(&mut p, "getComputedStyle(document.$('#pp')).getPropertyValue('popup-animation')").contains("slide"));
+        ev(&mut p, "globalThis.w = document.$('#b').popup(document.$('#pp'), { animationDuration: 0 })");
+        // The popup's right edge meets the anchor's right edge, its top the anchor's bottom.
+        assert_eq!(ev(&mut p, "(() => { const r = document.$('#pp').getBoundingClientRect(), a = document.$('#b').getBoundingClientRect(); return Math.round(r.right - a.right) + ',' + Math.round(r.top - a.bottom); })()"), "0,0");
+        ev(&mut p, "w.close()");
+        ev(&mut p, "document.$('#b').popup(document.$('#q'))");
+        assert_eq!(ev(&mut p, "(() => { const r = document.$('#q').getBoundingClientRect(), a = document.$('#b').getBoundingClientRect(); return Math.round(r.left - (a.left + a.width / 2)) + ',' + Math.round(r.top - a.bottom); })()"), "0,0");
         let _ = std::fs::remove_file(path);
     }
 
