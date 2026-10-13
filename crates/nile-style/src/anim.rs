@@ -510,9 +510,23 @@ struct Running {
     timing: Timing,
 }
 
+/// A lifecycle event for the page: `transitionend`, `animationstart` or `animationend`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimEvent {
+    pub node: NodeId,
+    pub kind: &'static str,
+    /// The property (transitions) or `@keyframes` name (animations).
+    pub name: String,
+    /// Seconds into the transition or animation when it happened.
+    pub elapsed: f64,
+}
+
 /// Carries transitions and animations across restyles.
 #[derive(Default)]
 pub struct Animator {
+    events: Vec<AnimEvent>,
+    begun: HashSet<(NodeId, String)>,
+    ended: HashSet<(NodeId, String)>,
     /// Each transitioning node's target values at the previous restyle.
     last: HashMap<NodeId, Vec<(&'static str, AnimValue)>>,
     transitions: HashMap<(NodeId, &'static str), Running>,
@@ -532,6 +546,11 @@ impl Animator {
     /// page no longer animates anything.
     pub fn is_tracking(&self) -> bool {
         !self.last.is_empty() || !self.transitions.is_empty() || !self.started.is_empty()
+    }
+
+    /// The `transitionend`/`animationstart`/`animationend` events since the last call.
+    pub fn take_events(&mut self) -> Vec<AnimEvent> {
+        std::mem::take(&mut self.events)
     }
 
     /// Something is still moving: the embedder should keep calling [`Animator::update`].
@@ -569,7 +588,9 @@ impl Animator {
             self.touched.insert(*node);
         }
         for key in done {
-            self.transitions.remove(&key);
+            if let Some(run) = self.transitions.remove(&key) {
+                self.events.push(AnimEvent { node: key.0, kind: "transitionend", name: key.1.to_string(), elapsed: run.duration });
+            }
         }
         for n in 0..real {
             let node = NodeId(n);
@@ -581,7 +602,15 @@ impl Animator {
                 let Some(frames) = base.keyframes.get(&spec.name) else { continue };
                 let key = (node, spec.name.clone());
                 let start = *self.started.entry(key.clone()).or_insert(now);
-                seen.insert(key);
+                seen.insert(key.clone());
+                let local = now - start - f64::from(spec.delay);
+                let total = f64::from(spec.duration) * f64::from(spec.iterations);
+                if local >= 0.0 && self.begun.insert(key.clone()) {
+                    self.events.push(AnimEvent { node, kind: "animationstart", name: spec.name.clone(), elapsed: 0.0 });
+                }
+                if local >= total && total.is_finite() && self.ended.insert(key.clone()) {
+                    self.events.push(AnimEvent { node, kind: "animationend", name: spec.name.clone(), elapsed: total });
+                }
                 let Some((progress, running)) = animation_progress(spec, now - start) else { continue };
                 active |= running;
                 let style = &mut styles.styles[n];
@@ -592,6 +621,8 @@ impl Animator {
             }
         }
         self.started.retain(|k, _| seen.contains(k));
+        self.begun.retain(|k| seen.contains(k));
+        self.ended.retain(|k| seen.contains(k));
         self.active = active;
     }
 

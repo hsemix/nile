@@ -165,6 +165,8 @@ pub enum UiEvent {
     Key { kind: &'static str, key: String, ctrl: bool, shift: bool, alt: bool, meta: bool },
     /// `focus`, `blur`, ... with no payload.
     Plain(&'static str),
+    /// `transitionend` (`name` = property), `animationstart`/`animationend` (`name` = keyframes).
+    Animation { kind: &'static str, name: String, elapsed: f64 },
 }
 
 pub struct ScriptHost {
@@ -612,6 +614,12 @@ impl ScriptHost {
                     kind
                 }
                 UiEvent::Plain(kind) => kind,
+                UiEvent::Animation { kind, name, elapsed } => {
+                    init.set(if *kind == "transitionend" { "propertyName" } else { "animationName" }, name.as_str())?;
+                    init.set("elapsedTime", *elapsed)?;
+                    init.set("pseudoElement", "")?;
+                    kind
+                }
             };
             proceed = f.call::<_, bool>((*kind, target.0 as i32, init))?;
             Ok(())
