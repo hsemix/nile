@@ -11,6 +11,7 @@ mod anim;
 mod colors;
 mod gradient;
 mod grid;
+mod page;
 mod parse;
 mod selector;
 
@@ -24,6 +25,7 @@ use selectors::context::{
 };
 use selectors::matching::matches_selector;
 pub use anim::{AnimEvent, AnimValue, AnimationSpec, Animator, Direction, Fill, Timing, TransitionSpec};
+pub use page::{resolve as resolve_page, MarginBox, MarginPlace, PageStyle, Piece};
 pub use grid::{area_lines, Breadth, GridAutoFlow, GridLine, GridPlace, Track, TrackItem, TrackRepeat};
 pub use gradient::{TransformFn, ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
 pub use parse::{color_from_hex, Declaration, Rule, Stylesheet, Value};
@@ -160,6 +162,17 @@ pub enum UserSelect {
     Text,
     /// Selectable, and a click selects the whole run.
     All,
+}
+
+/// A `break-before` / `break-after` / `break-inside` value, reduced to what pagination needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Break {
+    #[default]
+    Auto,
+    /// `avoid`, `avoid-page`: keep together if it fits on a page.
+    Avoid,
+    /// `page`, `always`, `left`, `right`, `recto`, `verso`: force a page break.
+    Always,
 }
 
 /// `position`. `Fixed` is laid out against the viewport and stays put when the page scrolls;
@@ -508,6 +521,10 @@ pub struct ComputedStyle {
     pub underline: bool,
     pub line_through: bool,
     pub user_select: UserSelect,
+    /// `break-before`, `break-after`, `break-inside` (and the `page-break-*` spellings).
+    pub break_before: Break,
+    pub break_after: Break,
+    pub break_inside: Break,
     /// `text-selection-background-color` (Sciter); inherited.
     pub selection_bg: Option<Color>,
     pub text_transform: TextTransform,
@@ -605,6 +622,9 @@ impl Default for ComputedStyle {
             underline: false,
             line_through: false,
             user_select: UserSelect::None,
+            break_before: Break::Auto,
+            break_after: Break::Auto,
+            break_inside: Break::Auto,
             selection_bg: None,
             text_transform: TextTransform::None,
             letter_spacing: 0.0,
@@ -930,6 +950,8 @@ pub struct StyleMap {
     markers: HashMap<NodeId, MarkerStyle>,
     /// `@keyframes` by name.
     pub(crate) keyframes: HashMap<String, Vec<parse::Frame>>,
+    /// `@page` rules (selector, body) in source order.
+    pages: Vec<(String, String)>,
 }
 
 /// Which of `:hover`, `:active` and `:focus` appear in the stylesheets.
@@ -1019,6 +1041,9 @@ impl ComputedStyle {
         a.transform_origin = other.transform_origin;
         a.cursor = other.cursor;
         a.popup_position = other.popup_position;
+        a.break_before = other.break_before;
+        a.break_after = other.break_after;
+        a.break_inside = other.break_inside;
         a.popup_animation = other.popup_animation.clone();
         // Whether a box is faded or transformed decides its paint order; how much doesn't.
         if (a.opacity < 1.0) == (other.opacity < 1.0) {
@@ -1048,6 +1073,11 @@ impl StyleMap {
     /// The page has `::before`/`::after` boxes.
     pub fn has_generated(&self) -> bool {
         !self.pseudo.is_empty()
+    }
+
+    /// The `@page` style of page `index` (0-based).
+    pub fn page_style(&self, index: usize) -> PageStyle {
+        page::resolve(&self.pages, index)
     }
 
     /// Some element has a `transition` or `animation`.
@@ -1139,6 +1169,7 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
             keyframes.insert(k.name.clone(), k.frames.clone());
         }
     }
+    let pages: Vec<(String, String)> = author.iter().flat_map(|s| s.pages.iter().cloned()).collect();
     let has_pseudo = author.iter().any(|s| s.rules.iter().any(|r| r.selectors.slice().iter().any(|sel| sel.has_pseudo_element())));
     let state_deps = StateDeps::of(author.iter().chain(std::iter::once(&ua)));
     let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo };
@@ -1153,6 +1184,7 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
         contents: generated.contents,
         markers: generated.markers,
         keyframes,
+        pages,
     }
 }
 
@@ -1906,6 +1938,20 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 Some("all") => UserSelect::All,
                 // `auto` takes the parent's value, which is already inherited.
                 _ => return,
+            }
+        }
+        "break-before" | "page-break-before" | "break-after" | "page-break-after" | "break-inside" | "page-break-inside" => {
+            let kind = match first.and_then(Value::ident) {
+                Some("avoid" | "avoid-page") => Break::Avoid,
+                Some("page" | "always" | "left" | "right" | "recto" | "verso") => Break::Always,
+                _ => Break::Auto,
+            };
+            if d.name.ends_with("before") {
+                s.break_before = kind;
+            } else if d.name.ends_with("after") {
+                s.break_after = kind;
+            } else {
+                s.break_inside = kind;
             }
         }
         // Sciter's way to make an element's text selectable.

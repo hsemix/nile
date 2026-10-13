@@ -7,6 +7,8 @@
 //!        [--wheel X,Y,DY]              scroll at a point (negative DY scrolls content up)
 //!        [--type TEXT]                 type into the focused input ({Backspace}, {Shift+ArrowLeft}, {Cmd+a}, ... for keys)
 //!        [--compose TEXT]              show TEXT as an input method's composition at the caret
+//!        [--page N]                    with --png: render page N (1-based) of the paginated document instead
+//!   nile page.html --pdf out.pdf        write every page as a PDF ([--wait MS] first)
 //!        [--wait MS]                   let timers run this long before the snapshot
 
 mod access;
@@ -150,6 +152,36 @@ fn render_png(page: &mut Page, snap: Snapshot) {
     println!("wrote {out} ({pw}x{ph})");
 }
 
+/// `--pdf` and `--png --page N`: the document cut into pages.
+fn paged_output(page: &mut Page, pdf: Option<String>, png: Option<String>, page_no: Option<usize>, scale: f32, wait_ms: u64) {
+    let deadline = Instant::now() + Duration::from_millis(wait_ms);
+    while Instant::now() < deadline {
+        let (_, next) = page.tick();
+        let Some(next) = next else { break };
+        std::thread::sleep(next.min(deadline.saturating_duration_since(Instant::now())));
+    }
+    page.run_timers();
+    if let Some(out) = pdf {
+        let mut bytes = Vec::new();
+        let title = page.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let count = page.write_pdf(&mut bytes, &title);
+        std::fs::write(&out, bytes).expect("writing PDF");
+        println!("wrote {out} ({count} pages)");
+    }
+    if let (Some(out), Some(n)) = (png, page_no) {
+        let count = page.paginate();
+        let Some((pixels, w, h)) = n.checked_sub(1).filter(|i| *i < count).and_then(|i| page.render_page(i, scale)) else {
+            eprintln!("page {n} doesn't exist: the document has {count} pages");
+            std::process::exit(1);
+        };
+        let info = ImageInfo::new((w as i32, h as i32), ColorType::BGRA8888, AlphaType::Premul, None);
+        let image = skia_safe::images::raster_from_data(&info, skia_safe::Data::new_copy(&pixels), w as usize * 4).expect("pixel buffer matches image info");
+        let png = image.encode(None, EncodedImageFormat::PNG, None).expect("PNG encoding");
+        std::fs::write(&out, png.as_bytes()).expect("writing PNG");
+        println!("wrote {out} (page {n} of {count}, {w}x{h})");
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut file = None;
@@ -160,11 +192,15 @@ fn main() {
     let mut select = None;
     let mut typed = None;
     let mut compose = None;
+    let mut pdf = None;
+    let mut page_no = None;
     let (mut width, mut height, mut scale) = (900u32, 640u32, 1.0f32);
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--png" => png = args.next(),
+            "--pdf" => pdf = args.next(),
+            "--page" => page_no = args.next().and_then(|v| v.parse::<usize>().ok()),
             "--width" => width = args.next().and_then(|v| v.parse().ok()).unwrap_or(width),
             "--height" => height = args.next().and_then(|v| v.parse().ok()).unwrap_or(height),
             "--hover" | "--press" | "--click" | "--rclick" | "--wheel" => {
@@ -202,10 +238,15 @@ fn main() {
 
     // A window knows its id before its scripts run, so `new Window()` at startup can name its opener.
     let info = nile_script::WindowInfo { id: nile_script::next_window_id(), ..Default::default() };
-    let mut page = if png.is_none() { Page::load_window(file, (width as f32, height as f32), info) } else { Page::load(file, (width as f32, height as f32), 0.0) };
-    if png.is_none() {
+    let headless = png.is_some() || pdf.is_some();
+    let mut page = if !headless { Page::load_window(file, (width as f32, height as f32), info) } else { Page::load(file, (width as f32, height as f32), 0.0) };
+    if !headless {
         page.clipboard = Box::new(SystemClipboard::default());
         page.set_dialogs(Rc::new(dialogs::NativeDialogs));
+    }
+    if pdf.is_some() || (png.is_some() && page_no.is_some()) {
+        paged_output(&mut page, pdf, png, page_no, scale, wait_ms);
+        return;
     }
     if let Some(out) = png {
         render_png(&mut page, Snapshot { out, width, height, scale, pointer, typed, compose, wait_ms, settle_ms, select });

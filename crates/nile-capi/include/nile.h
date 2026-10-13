@@ -413,6 +413,16 @@ bool nile_view_accessibility_action(struct NileView *view,
                                     const char *value);
 
 /**
+ * Cut the document into pages (`@page` size and margins, `break-*`) and write them to a PDF at
+ * `path`. Returns the page count, or -1 on failure. The view's own layout is redone on the next draw.
+ *
+ * # Safety
+ * `view` must be a live view and `path` a valid string.
+ */
+int32_t nile_view_write_pdf(struct NileView *view,
+                            const char *path);
+
+/**
  * The page's current title (`document.title`); valid until the next call on the view.
  *
  * # Safety

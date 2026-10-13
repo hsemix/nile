@@ -112,6 +112,8 @@ pub struct Frame {
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
     pub keyframes: Vec<Keyframes>,
+    /// `@page` rules: the selector (`:first`, `:left`, ..., or empty) and the body text.
+    pub pages: Vec<(String, String)>,
     /// Some rule or value depended on the viewport size (`@media`, `vw`, ...).
     pub uses_viewport: bool,
 }
@@ -178,6 +180,15 @@ fn at_rule(p: &mut Parser<'_>, cx: &Cx, name: &str, sheet: &mut Stylesheet) {
             if !name.is_empty() && !frames.is_empty() {
                 sheet.keyframes.push(Keyframes { name, frames });
             }
+        } else if name == "page" {
+            let body = p
+                .parse_nested_block(|p| {
+                    let start = p.position();
+                    while p.next().is_ok() {}
+                    Ok::<_, ParseError<()>>(p.slice_from(start).to_string())
+                })
+                .unwrap_or_default();
+            sheet.pages.push((raw_prelude.clone(), body));
         } else if name == "media" {
             cx.uses_viewport.set(true);
             if media_matches(&prelude, cx.viewport) {

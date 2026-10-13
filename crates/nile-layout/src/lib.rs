@@ -19,6 +19,8 @@ use std::rc::Rc;
 mod affine;
 pub use affine::Affine;
 mod images;
+mod pagination;
+pub use pagination::paginate;
 pub use images::{FileImages, ImageData, ImageLoader};
 
 pub use nile_dom::NodeId;

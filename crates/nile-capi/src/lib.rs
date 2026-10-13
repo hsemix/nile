@@ -541,6 +541,27 @@ pub unsafe extern "C" fn nile_view_accessibility_action(view: *mut NileView, id:
     guard(false, || v.page.a11y_action(id, action))
 }
 
+// ---- paged output -----------------------------------------------------------------------------
+
+/// Cut the document into pages (`@page` size and margins, `break-*`) and write them to a PDF at
+/// `path`. Returns the page count, or -1 on failure. The view's own layout is redone on the next draw.
+///
+/// # Safety
+/// `view` must be a live view and `path` a valid string.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_write_pdf(view: *mut NileView, path: *const c_char) -> i32 {
+    let (Some(v), Some(path)) = (view_ref(view), text(path)) else { return -1 };
+    guard(-1, || {
+        let mut bytes = Vec::new();
+        let title = v.page.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let pages = v.page.write_pdf(&mut bytes, &title);
+        match std::fs::write(path, bytes) {
+            Ok(()) => pages as i32,
+            Err(_) => -1,
+        }
+    })
+}
+
 // ---- window ---------------------------------------------------------------------------------
 
 /// The page's current title (`document.title`); valid until the next call on the view.

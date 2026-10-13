@@ -9,6 +9,7 @@ pub mod a11y;
 pub mod dialogs;
 pub mod editing;
 pub mod frames;
+pub mod paged;
 mod inputs;
 mod net;
 pub mod window;
@@ -656,6 +657,8 @@ pub struct Page {
     pub tooltip_shown: bool,
     /// A frameset splitter being dragged.
     pub splitter_drag: Option<frames::SplitDrag>,
+    /// Where each page of paged output starts (see `paginate`); empty until then.
+    pub page_starts: Vec<f32>,
 }
 
 /// A scrollbar thumb held by the pointer.
@@ -954,6 +957,7 @@ impl Page {
             blink_at: Instant::now() + CARET_BLINK,
             frames,
             splitter_drag: None,
+            page_starts: Vec::new(),
             tooltip_due: None,
             tooltip_shown: false,
         }
@@ -3394,6 +3398,25 @@ mod tests {
 
     fn log(p: &Page) -> Vec<String> {
         p.scripts.as_ref().unwrap().console_output()
+    }
+
+    #[test]
+    fn documents_paginate_and_export_to_pdf() {
+        let rows: String = (0..30).map(|i| format!("<p class=r>Row {i}</p>")).collect();
+        let (mut p, path) = page(
+            &format!("<style>@page {{ size: 400px 300px; margin: 20px; @bottom-center {{ content: \"{{n}}\" counter(page) \"/\" counter(pages) }} }} body{{margin:0}} .r{{margin:0;height:30px;break-inside:avoid}} .new{{break-before:page}}</style>{rows}<p class=new>Last</p>"),
+            "paged",
+        );
+        // 260px of content per page: eight 30px rows each; 30 rows -> 4 pages, then a forced one.
+        assert_eq!(p.paginate(), 5);
+        assert_eq!(p.page_starts[1], 240.0);
+        let (pixels, w, h) = p.render_page(0, 1.0).unwrap();
+        assert_eq!((w, h), (400, 300));
+        assert!(pixels.chunks(4).any(|px| px[..3] != [255, 255, 255]), "something was drawn");
+        let mut pdf = Vec::new();
+        assert_eq!(p.write_pdf(&mut pdf, "t"), 5);
+        assert!(pdf.starts_with(b"%PDF-"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
