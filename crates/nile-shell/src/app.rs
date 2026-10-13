@@ -50,6 +50,7 @@ struct Win {
 
 pub struct App {
     wins: Vec<Win>,
+    portals: Vec<PortalWin>,
     /// The page that becomes the first window once the event loop is running.
     first: Option<Page>,
     main_id: u32,
@@ -57,7 +58,7 @@ pub struct App {
 
 impl App {
     pub fn new(page: Page) -> App {
-        App { wins: Vec::new(), first: Some(page), main_id: 0 }
+        App { wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0 }
     }
 }
 
@@ -69,6 +70,37 @@ fn dom_key(key: &Key) -> Option<String> {
         Key::Named(n) => format!("{n:?}"),
         _ => return None,
     })
+}
+
+/// The window system's pointer shape for a CSS `cursor`.
+fn icon_of(c: nile_style::Cursor) -> CursorIcon {
+    use nile_style::Cursor as C;
+    match c {
+        C::Auto | C::Default | C::None => CursorIcon::Default,
+        C::Pointer => CursorIcon::Pointer,
+        C::Text => CursorIcon::Text,
+        C::Crosshair => CursorIcon::Crosshair,
+        C::Move => CursorIcon::Move,
+        C::NotAllowed => CursorIcon::NotAllowed,
+        C::Wait => CursorIcon::Wait,
+        C::Progress => CursorIcon::Progress,
+        C::Help => CursorIcon::Help,
+        C::Grab => CursorIcon::Grab,
+        C::Grabbing => CursorIcon::Grabbing,
+        C::ResizeH => CursorIcon::ColResize,
+        C::ResizeV => CursorIcon::RowResize,
+    }
+}
+
+/// A popup the page shows in a window of its own (see `nile_engine::Portal`): the owner's page paints
+/// it and gets its pointer and keys, with the pointer translated into the owner's coordinates.
+struct PortalWin {
+    owner: u32,
+    node: nile_dom::NodeId,
+    window: Rc<Window>,
+    surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
+    /// Border box in the owner's viewport coordinates.
+    rect: (f32, f32, f32, f32),
 }
 
 impl Win {
@@ -175,23 +207,8 @@ impl Win {
             return;
         }
         self.cursor = Some(want);
-        use nile_style::Cursor as C;
-        self.window.set_cursor_visible(want != C::None);
-        self.window.set_cursor(match want {
-            C::Auto | C::Default | C::None => CursorIcon::Default,
-            C::Pointer => CursorIcon::Pointer,
-            C::Text => CursorIcon::Text,
-            C::Crosshair => CursorIcon::Crosshair,
-            C::Move => CursorIcon::Move,
-            C::NotAllowed => CursorIcon::NotAllowed,
-            C::Wait => CursorIcon::Wait,
-            C::Progress => CursorIcon::Progress,
-            C::Help => CursorIcon::Help,
-            C::Grab => CursorIcon::Grab,
-            C::Grabbing => CursorIcon::Grabbing,
-            C::ResizeH => CursorIcon::ColResize,
-            C::ResizeV => CursorIcon::RowResize,
-        });
+        self.window.set_cursor_visible(want != nile_style::Cursor::None);
+        self.window.set_cursor(icon_of(want));
     }
 
     /// One winit event for this window. True if the user asked to close it.
@@ -327,6 +344,37 @@ impl Win {
     }
 }
 
+/// Make `child` an owned window of `owner`: above it, hidden and closed with it. macOS: a child
+/// window; Windows: an owner window (set when the window is created); elsewhere winit has no way, so
+/// the two stay independent.
+#[cfg(target_os = "macos")]
+fn attach_to_owner(child: &Window, owner: &Window) {
+    use objc2_app_kit::{NSView, NSWindowOrderingMode};
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let view = |w: &Window| match w.window_handle().map(|h| h.as_raw()) {
+        // SAFETY: winit's AppKit handle is the window's live content view.
+        Ok(RawWindowHandle::AppKit(h)) => Some(unsafe { h.ns_view.cast::<NSView>().as_ref() }.window()),
+        _ => None,
+    };
+    if let (Some(Some(child)), Some(Some(owner))) = (view(child), view(owner)) {
+        // SAFETY: both are live windows of this process, used on the main thread.
+        unsafe { owner.addChildWindow_ordered(&child, NSWindowOrderingMode::Above) };
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn attach_to_owner(_child: &Window, _owner: &Window) {}
+
+/// The Win32 handle of `owner`, for `with_owner_window`.
+#[cfg(windows)]
+fn owner_hwnd(owner: &Window) -> Option<isize> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match owner.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
+
 /// `WindowSpec` numbers as Sciter's: where `a` is a numpad digit (7 8 9 / 4 5 6 / 1 2 3), the top-left
 /// of a `size` box placed in `area` (x, y, w, h).
 fn align(a: u8, size: (f32, f32), area: (f32, f32, f32, f32)) -> (f32, f32) {
@@ -359,6 +407,13 @@ impl App {
             })
             .unwrap_or((1440.0, 900.0));
         let (mut level, mut explicit_pos, mut parent_align) = (WindowLevel::Normal, None, None);
+        // The window it is owned by: the `parent` it names, else (for dialogs, tool windows, popups
+        // and `modal()`) the one that opened it.
+        let owner: Option<u32> = spec.and_then(|s| {
+            s.get("parent")
+                .and_then(|p| p.parse().ok())
+                .or_else(|| (s.modal || matches!(s.get("type"), Some("dialog" | "tool" | "popup" | "child"))).then_some(s.opener))
+        });
         if let Some(spec) = spec {
             let num = |k: &str| spec.get(k).and_then(|v| v.parse::<f32>().ok());
             if let Some(c) = spec.get("caption") {
@@ -446,7 +501,15 @@ impl App {
         {
             attrs = attrs.with_window_icon(Some(icon));
         }
+        #[cfg(windows)]
+        if let Some(hwnd) = owner.and_then(|o| self.index(o)).and_then(|i| owner_hwnd(&self.wins[i].window)) {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs = attrs.with_owner_window(hwnd);
+        }
         let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
+        if let Some(o) = owner.and_then(|o| self.index(o)) {
+            attach_to_owner(&window, &self.wins[o].window);
+        }
         let pos = explicit_pos
             .or_else(|| parent_align.zip(opener_rect).map(|(a, r)| align(a, (w, h), (r[0], r[1], r[2], r[3]))))
             .or_else(|| config.position((w, h), desktop));
@@ -551,6 +614,7 @@ impl App {
             self.close_now(child, "null");
         }
         let Some(idx) = self.index(id) else { return };
+        self.portals.retain(|p| p.owner != id);
         let win = self.wins.remove(idx);
         if let Some(opener) = win.opener.and_then(|o| self.index(o)) {
             self.wins[opener].page.window_closed(id, value);
@@ -558,13 +622,93 @@ impl App {
         }
     }
 
-    /// After anything happened in window `id`: apply its requests and refresh its cursor.
+    /// After anything happened in window `id`: apply its requests and refresh its cursor and popups.
     fn after(&mut self, event_loop: &ActiveEventLoop, id: u32) {
         if let Some(i) = self.index(id) {
             let actions = self.wins[i].sync_window();
             self.wins[i].sync_cursor();
             self.run(event_loop, id, actions);
+            self.sync_portals(event_loop, id);
         }
+    }
+
+    /// Open, move and close the OS windows of `owner`'s popups to match what its page asks for, and
+    /// repaint them (they show the owner's live page).
+    fn sync_portals(&mut self, event_loop: &ActiveEventLoop, owner: u32) {
+        let Some(oi) = self.index(owner) else {
+            self.portals.retain(|p| p.owner != owner);
+            return;
+        };
+        let wanted = self.wins[oi].page.view.borrow().portals.clone();
+        self.portals.retain(|p| p.owner != owner || wanted.iter().any(|w| w.node == p.node));
+        let scale = self.wins[oi].window.scale_factor();
+        let origin = self.wins[oi].window.inner_position().map(|p| p.to_logical::<f32>(scale)).unwrap_or_default();
+        for w in wanted {
+            let (x, y, pw, ph) = w.rect;
+            let size = LogicalSize::new(pw.max(1.0), ph.max(1.0));
+            let at = LogicalPosition::new(origin.x + x, origin.y + y);
+            match self.portals.iter_mut().find(|p| p.owner == owner && p.node == w.node) {
+                Some(p) => {
+                    if p.rect != w.rect {
+                        p.rect = w.rect;
+                        let _ = p.window.request_inner_size(size);
+                        p.window.set_outer_position(at);
+                    }
+                    p.window.request_redraw();
+                }
+                None => {
+                    let attrs = Window::default_attributes()
+                        .with_decorations(false)
+                        .with_resizable(false)
+                        .with_active(false)
+                        .with_window_level(WindowLevel::AlwaysOnTop)
+                        .with_inner_size(size)
+                        .with_position(at)
+                        .with_title("");
+                    let window = Rc::new(event_loop.create_window(attrs).expect("create popup window"));
+                    let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
+                    let surface = softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
+                    window.request_redraw();
+                    self.portals.push(PortalWin { owner, node: w.node, window, surface, rect: w.rect });
+                }
+            }
+        }
+    }
+
+    /// One winit event for a popup window.
+    fn portal_event(&mut self, event_loop: &ActiveEventLoop, pi: usize, event: WindowEvent) {
+        let (owner, rect) = (self.portals[pi].owner, self.portals[pi].rect);
+        let Some(oi) = self.index(owner) else { return };
+        match event {
+            WindowEvent::RedrawRequested => {
+                let portal = &mut self.portals[pi];
+                let size = portal.window.inner_size();
+                let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
+                portal.surface.resize(w, h).expect("resize surface");
+                let mut buffer = portal.surface.buffer_mut().expect("surface buffer");
+                let bytes = unsafe { std::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u8, buffer.len() * 4) };
+                self.wins[oi].page.paint_portal(bytes, size.width, size.height, portal.window.scale_factor() as f32, portal.node, (rect.0, rect.1));
+                buffer.present().expect("present");
+                return;
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let s = self.portals[pi].window.scale_factor();
+                if self.wins[oi].page.pointer_moved((position.x / s) as f32 + rect.0, (position.y / s) as f32 + rect.1) {
+                    self.wins[oi].window.request_redraw();
+                }
+                self.portals[pi].window.set_cursor(icon_of(self.wins[oi].page.cursor()));
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.wins[oi].page.pointer_left();
+                self.wins[oi].window.request_redraw();
+            }
+            // Presses, wheel and keys go to the owner as if they had happened there.
+            e @ (WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) | WindowEvent::Ime(_)) => {
+                self.wins[oi].handle(e);
+            }
+            _ => {}
+        }
+        self.after(event_loop, owner);
     }
 }
 
@@ -594,6 +738,10 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, wid: WindowId, event: WindowEvent) {
+        if let Some(pi) = self.portals.iter().position(|p| p.window.id() == wid) {
+            self.portal_event(event_loop, pi, event);
+            return;
+        }
         let Some(idx) = self.wins.iter().position(|w| w.window.id() == wid) else { return };
         let id = self.wins[idx].id;
         // A window with an open dialog ignores the pointer and keyboard until it closes.

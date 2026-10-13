@@ -14,6 +14,7 @@
   <button id="file">File ▼</button>
   <button id="info">Popup with content</button>
   <button id="float">takeOff</button>
+  <button id="own">popup in its own window</button>
   <button id="tip1" title="A plain title tooltip">hover me (title)</button>
   <button id="tip2" tooltip="<b>Rich</b> tooltip with <i>HTML</i>">hover me (tooltip)</button>
   <div id="area">Right-click here for a context menu</div>
@@ -33,6 +34,11 @@
       this.popup(<popup><b>Hello</b><br/>anchored at the bottom right of the button</popup>, { anchorAt: 3, popupAt: 9 });
     });
     document.$('#area').on('contextmenu', (evt) => { evt.source = document.$('#ctx'); });
+    // `window: 'popup'` gives the popup an OS window of its own: it can hang outside this window.
+    document.$('#own').on('click', function () {
+      const r = this.getBoundingClientRect();
+      this.popup(<menu class="popup"><li>Outside the window</li><li>If you drag it</li></menu>, { window: 'popup', anchorAt: 1, popupAt: 7 });
+    });
     let panel = null;
     document.$('#float').on('click', function () {
       const p = document.$('#panel');

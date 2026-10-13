@@ -993,6 +993,9 @@
       if (answer === undefined) return tag === "question" ? "no" : "yes";
       return tag === "question" ? answer : "yes";
     }
+    // Show popups (`element.popup()`) in OS windows of their own, so they can extend past this window.
+    get popupWindows() { return popupWindows; }
+    set popupWindows(v) { popupWindows = !!v; }
     get messageBoxes() { return boxMode; }
     set messageBoxes(v) { boxMode = v === "inline" ? "inline" : "native"; }
     get isActive() { return this === thisWindow ? active : this._valid; }
@@ -1095,6 +1098,7 @@
     getOwnPropertyDescriptor: (_, k) => (N.shareGet(String(k)) === undefined ? undefined : { value: JSON.parse(N.shareGet(String(k))), enumerable: true, configurable: true, writable: true }),
   });
   let boxMode = "native";
+  let popupWindows = false;
   const BOX_ICONS = { info: "i", alert: "!", error: "×", question: "?" };
   // The in-window message box: `.nile-modal` (backdrop) > `.nile-messagebox.<kind>` with a title, a body
   // (icon + content) and the buttons, all plain elements so CSS can restyle them.
@@ -1200,9 +1204,16 @@
     if (!el.parentNode || !document.body.contains(el)) document.body.appendChild(el);
     return rec;
   };
+  // A popup in an OS window of its own: tell the shell where it is (viewport coordinates, which may
+  // lie outside the window).
+  const syncPortal = (rec) => {
+    const r = rec.el.getBoundingClientRect();
+    N.portalSet(rec.el._id, r.left, r.top, r.width, r.height);
+  };
   const place = (rec, left, top) => {
     rec.el.style.left = Math.round(left) + "px";
     rec.el.style.top = Math.round(top) + "px";
+    if (rec.portal) syncPortal(rec);
     for (const cb of rec.listeners.move || []) cb({ type: "move", x: left, y: top });
   };
   function closePopup(rec) {
@@ -1213,6 +1224,7 @@
     if (rec.popup) fire(rec.el, "popup-dismissing");
     for (const cb of rec.listeners.close || []) cb({ type: "close" });
     rec.open = false;
+    if (rec.portal) N.portalClear(rec.el._id);
     const i = openPopups.indexOf(rec);
     if (i >= 0) openPopups.splice(i, 1);
     for (const k of SAVED) {
@@ -1339,8 +1351,11 @@
       // Below doesn't fit but above does: flip to the anchor's top edge.
       if (top + pr.height > vh && ar.top - pr.height >= 0 && (params.anchorAt || 1) <= 3) top = ar.top - pr.height;
     }
-    left = Math.max(0, Math.min(left, vw - pr.width));
-    top = Math.max(0, Math.min(top, vh - pr.height));
+    rec.portal = params.window === "popup" || (params.window === undefined && popupWindows);
+    if (!rec.portal) {
+      left = Math.max(0, Math.min(left, vw - pr.width));
+      top = Math.max(0, Math.min(top, vh - pr.height));
+    }
     place(rec, left, top);
     st.removeProperty("visibility");
     animateIn(rec, { ...css.animation, ...animationParams(params) }, params.popupAt || 7);
@@ -1392,6 +1407,7 @@
     }
     if (params.width !== undefined) st.setProperty("width", params.width + "px");
     if (params.height !== undefined) st.setProperty("height", params.height + "px");
+    if (params.window === "popup" || params.window === "detached") rec.portal = true;
     if (params.isTopmost !== undefined) rec.topmost = !!params.isTopmost;
     if (params.isResizable !== undefined) rec.resizable = !!params.isResizable;
     place(rec, x, y);

@@ -901,6 +901,12 @@ impl LayoutTree {
     /// Border box of `node` in document coordinates. Block-level elements have
     /// a box; an inline element's rect is the union of its text runs (without
     /// padding). `None` if it generated nothing (e.g. `display: none`, or empty).
+    /// The element's box and everything inside it as a range of `boxes`.
+    pub fn subtree_range(&self, node: NodeId) -> Option<(usize, usize)> {
+        let &i = self.index.get(&node)?;
+        Some((i, self.boxes[i].subtree_end.max(i + 1)))
+    }
+
     pub fn node_rect(&self, node: NodeId) -> Option<Rect> {
         self.node_rect_with(node, None)
     }

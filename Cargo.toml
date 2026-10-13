@@ -28,6 +28,8 @@ skia-safe = "0.93"
 rquickjs = { version = "0.14", features = ["loader"] }
 winit = "0.30"
 softbuffer = "0.4"
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSView", "NSResponder", "NSGraphics"] }
 arboard = { version = "3.6", default-features = false }
 imagesize = "0.13"
 base64 = "0.22"

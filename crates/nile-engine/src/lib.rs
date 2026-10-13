@@ -139,6 +139,14 @@ const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 /// Half the caret's blink period.
 pub const CARET_BLINK: Duration = Duration::from_millis(530);
 
+/// A popup element that the shell shows in an OS window of its own. `rect` is its border box in
+/// this window's viewport coordinates (it may lie outside the viewport).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Portal {
+    pub node: NodeId,
+    pub rect: (f32, f32, f32, f32),
+}
+
 /// Style, layout and scroll state. Shared (`Rc<RefCell<..>>`) between the page
 /// and the script host, so scripts can read layout results. Never hold a borrow
 /// across a call into scripts.
@@ -192,6 +200,8 @@ pub struct View {
     pub window_requests: Vec<WindowCommand>,
     /// How this window was opened (its id, opener, `parameters`).
     pub window_info: WindowInfo,
+    /// Popups that are shown in windows of their own (see `Portal`).
+    pub portals: Vec<Portal>,
     /// A file chooser a click on `<input type=file>` asked for; the embedder answers with
     /// `Page::choose_files`.
     pub file_request: Option<FileRequest>,
@@ -510,6 +520,23 @@ impl Environment for Env {
         self.0.borrow().window_info.clone()
     }
 
+    fn portal_set(&self, node: NodeId, rect: [f32; 4]) {
+        let mut v = self.0.borrow_mut();
+        let rect = (rect[0], rect[1], rect[2], rect[3]);
+        match v.portals.iter_mut().find(|p| p.node == node) {
+            Some(p) => p.rect = rect,
+            None => v.portals.push(Portal { node, rect }),
+        }
+        // The popup is no longer painted here: the cached layout is still right, the paint must run.
+        v.scroll_dirty = true;
+    }
+
+    fn portal_clear(&self, node: NodeId) {
+        let mut v = self.0.borrow_mut();
+        v.portals.retain(|p| p.node != node);
+        v.scroll_dirty = true;
+    }
+
     fn dialog(&self, kind: &str, args: [&str; 4]) -> Option<String> {
         use dialogs::{parse_filter, MessageKind};
         // The borrow must not be held while the dialog blocks: a click handler may be mid-flight.
@@ -819,6 +846,7 @@ impl Page {
             resized: false,
             window_rect: None,
             window_info: info,
+            portals: Vec::new(),
         }));
         view.borrow_mut().adopt(styles);
 
@@ -3249,7 +3277,16 @@ impl Page {
 
     /// Paint into a BGRA pixel buffer of `width`×`height` physical pixels.
     pub fn paint(&mut self, pixels: &mut [u8], width: u32, height: u32, scale: f32) {
-        self.view.borrow_mut().scale = scale;
+        self.paint_inner(pixels, width, height, scale, None);
+    }
+
+    /// Paint one popup that has a window of its own: `node`'s subtree, with the page point `origin`
+    /// at the buffer's top-left. The page keeps its own viewport size.
+    pub fn paint_portal(&mut self, pixels: &mut [u8], width: u32, height: u32, scale: f32, node: NodeId, origin: (f32, f32)) {
+        self.paint_inner(pixels, width, height, scale, Some((node, origin)));
+    }
+
+    fn paint_inner(&mut self, pixels: &mut [u8], width: u32, height: u32, scale: f32, portal: Option<(NodeId, (f32, f32))>) {
         let info = ImageInfo::new(
             (width as i32, height as i32),
             ColorType::BGRA8888,
@@ -3262,9 +3299,12 @@ impl Page {
         };
 
         let (lw, lh) = (width as f32 / scale, height as f32 / scale);
-        self.layout(lw, lh);
-        self.update_frames();
-        let bg = self.canvas_background();
+        if portal.is_none() {
+            self.view.borrow_mut().scale = scale;
+            self.layout(lw, lh);
+            self.update_frames();
+        }
+        let bg = if portal.is_some() { Color::WHITE } else { self.canvas_background() };
         let caret = self.caret_for_paint();
         let selection = self.selection_for_paint();
         let dom_caret = self.dom_caret_for_paint();
@@ -3273,8 +3313,10 @@ impl Page {
         let mut view = self.view.borrow_mut();
         view.layout();
         let page_selection = view.page_ranges();
-        let max_scroll = (view.layout().content_height - lh).max(0.0);
-        view.scroll_y = view.scroll_y.clamp(0.0, max_scroll);
+        if portal.is_none() {
+            let max_scroll = (view.layout().content_height - lh).max(0.0);
+            view.scroll_y = view.scroll_y.clamp(0.0, max_scroll);
+        }
         let scroll = view.scroll_y;
         let view = &*view;
 
@@ -3282,18 +3324,30 @@ impl Page {
         canvas.clear(bg);
         canvas.save();
         canvas.scale((scale, scale));
+        if let Some((_, (ox, oy))) = portal {
+            canvas.translate((-ox, -oy));
+        }
         let tree = &view.layout.as_ref().expect("laid out above").2;
+        let only = portal.and_then(|(node, _)| tree.subtree_range(node));
+        // A popup shown in its own window is not also painted in this one.
+        let skip: Vec<(usize, usize)> = if portal.is_none() { view.portals.iter().filter_map(|p| tree.subtree_range(p.node)).collect() } else { Vec::new() };
+        if portal.is_some() && only.is_none() {
+            canvas.restore();
+            return;
+        }
         traced("paint", || {
             self.renderer.paint(
                 canvas,
                 tree,
                 &view.styles,
-                &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection, dom_caret, preedit: ime_underline },
+                &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection, dom_caret, preedit: ime_underline, only, skip: &skip },
             )
         });
         canvas.restore();
         }
-        self.paint_frames(surface.canvas(), scale);
+        if portal.is_none() {
+            self.paint_frames(surface.canvas(), scale);
+        }
     }
 }
 
@@ -5357,6 +5411,53 @@ cd</textarea>
         p.reload();
         assert_eq!(p.eval("JSON.stringify(seen)").0.unwrap(), "[7,42]", "reloading keeps who opened it");
         assert_eq!(p.view.borrow().window_info, info);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn popups_can_live_in_windows_of_their_own() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0;background:#ffffff"><button id="b" style="position:absolute;left:10px;top:10px">go</button>
+               <popup id="m" style="width:100px;height:40px;background:#ff0000;border:0;padding:0;box-shadow:none"></popup></body>"#,
+            "portal",
+        );
+        let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+        let pixel = |buf: &[u8], w: u32, x: u32, y: u32| {
+            let at = ((y * w + x) * 4) as usize;
+            [buf[at + 2], buf[at + 1], buf[at]] // r, g, b
+        };
+        let paint = |p: &mut Page| {
+            let mut buf = vec![0u8; 600 * 300 * 4];
+            p.paint(&mut buf, 600, 300, 1.0);
+            buf
+        };
+        // In the window the popup is painted by the page.
+        ev(&mut p, "globalThis.w = document.$('#b').popup(document.$('#m'), { x: 200, y: 100 })");
+        assert_eq!(pixel(&paint(&mut p), 600, 220, 110), [255, 0, 0]);
+        ev(&mut p, "w.close()");
+        // With a window of its own the page leaves it out and reports where it is...
+        ev(&mut p, "globalThis.w = document.$('#b').popup(document.$('#m'), { x: 200, y: 100, window: 'popup' })");
+        let portals = p.view.borrow().portals.clone();
+        assert_eq!(portals.len(), 1);
+        assert_eq!(portals[0].rect, (200.0, 100.0, 100.0, 40.0));
+        assert_ne!(pixel(&paint(&mut p), 600, 220, 110), [255, 0, 0], "not drawn twice");
+        // ...and paints it for that window, with the page point `origin` at the corner.
+        let mut buf = vec![0u8; 100 * 40 * 4];
+        p.paint_portal(&mut buf, 100, 40, 1.0, portals[0].node, (200.0, 100.0));
+        assert_eq!(pixel(&buf, 100, 5, 5), [255, 0, 0]);
+        assert_eq!(pixel(&buf, 100, 95, 35), [255, 0, 0]);
+        // A popup may lie outside the window altogether.
+        ev(&mut p, "w.close()");
+        assert!(p.view.borrow().portals.is_empty());
+        ev(&mut p, "globalThis.w = document.$('#b').popup(document.$('#m'), { x: 900, y: -20, window: 'popup' })");
+        assert_eq!(p.view.borrow().portals[0].rect.0, 900.0);
+        let node = p.view.borrow().portals[0].node;
+        let mut buf = vec![0u8; 100 * 40 * 4];
+        p.paint_portal(&mut buf, 100, 40, 1.0, node, (900.0, -20.0));
+        assert_eq!(pixel(&buf, 100, 50, 20), [255, 0, 0]);
+        // The pointer works in window coordinates: hovering the popup at its screen spot hits it.
+        p.pointer_moved(950.0, 0.0);
+        assert_eq!(p.interaction().hover, Some(node));
         let _ = std::fs::remove_file(path);
     }
 

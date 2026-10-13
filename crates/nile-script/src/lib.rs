@@ -185,6 +185,10 @@ pub trait Environment {
     fn clipboard_request(&self, _kind: &str) {}
     /// Close, move, resize, ... the host window. Embedders without a window ignore it.
     fn window_command(&self, _cmd: WindowCommand) {}
+    /// Show the popup element `node` in an OS window of its own (`rect`: its border box in viewport
+    /// coordinates), or take it back.
+    fn portal_set(&self, _node: NodeId, _rect: [f32; 4]) {}
+    fn portal_clear(&self, _node: NodeId) {}
     /// How this window was opened.
     fn window_info(&self) -> WindowInfo {
         WindowInfo::default()
@@ -553,6 +557,22 @@ fn install_natives(
     native!("dialog", {
         let env = env.clone();
         move |kind: String, a: String, b: String, c: String, d: String| -> Option<String> { env.dialog(&kind, [&a, &b, &c, &d]) }
+    });
+    native!("portalSet", {
+        let env = env.clone();
+        move |id: i32, x: f32, y: f32, w: f32, h: f32| {
+            if let Some(n) = node(id) {
+                env.portal_set(n, [x, y, w, h]);
+            }
+        }
+    });
+    native!("portalClear", {
+        let env = env.clone();
+        move |id: i32| {
+            if let Some(n) = node(id) {
+                env.portal_clear(n);
+            }
+        }
     });
     native!("windowInfo", {
         let env = env.clone();

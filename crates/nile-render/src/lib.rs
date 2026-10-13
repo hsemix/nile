@@ -33,6 +33,11 @@ pub struct Overlay<'a> {
     pub dom_caret: Option<DomCaret>,
     /// An input method's composition in a text input: the input and the byte range of its text.
     pub preedit: Option<(NodeId, usize, usize)>,
+    /// Paint only these boxes `[from, to)` of the paint list (an element's subtree, for a popup
+    /// shown in a window of its own); no menu or page scrollbar then.
+    pub only: Option<(usize, usize)>,
+    /// Boxes `[from, to)` not to paint here (a popup that has a window of its own).
+    pub skip: &'a [(usize, usize)],
 }
 
 /// Where the caret of an editing host is drawn.
@@ -65,20 +70,24 @@ impl Renderer {
 
     /// Paint the whole tree.
     pub fn paint(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, overlay: &Overlay) {
-        let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection, dom_caret, preedit } = *overlay;
+        let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection, dom_caret, preedit, only, skip } = *overlay;
         let base = canvas.local_to_device_as_3x3();
         canvas.save();
         canvas.translate((0.0, -scroll_y));
         // Boxes that wrap their subtree (an `overflow` clip, or an `opacity` layer) end
         // where the subtree does. `None` is an opacity layer.
         let mut open: Vec<(usize, Option<&LayoutBox>)> = Vec::new();
-        for (i, b) in tree.boxes.iter().enumerate() {
+        let (from, to) = only.unwrap_or((0, tree.boxes.len()));
+        for (i, b) in tree.boxes.iter().enumerate().skip(from).take(to.saturating_sub(from)) {
             while open.last().is_some_and(|(end, _)| i >= *end) {
                 let (_, container) = open.pop().expect("checked above");
                 canvas.restore();
                 if let Some(container) = container {
                     paint_scrollbars(canvas, container, offsets);
                 }
+            }
+            if skip.iter().any(|&(s, e)| i >= s && i < e) {
+                continue;
             }
             match &b.content {
                 BoxContent::Element => {
@@ -153,11 +162,11 @@ impl Renderer {
                 paint_scrollbars(canvas, container, offsets);
             }
         }
-        if let Some(menu) = &tree.menu {
+        if let Some(menu) = tree.menu.as_ref().filter(|_| only.is_none()) {
             self.paint_menu(canvas, menu);
         }
         canvas.restore();
-        if let Some(t) = nile_layout::page_thumb(viewport, tree.content_height, scroll_y) {
+        if let Some(t) = nile_layout::page_thumb(viewport, tree.content_height, scroll_y).filter(|_| only.is_none()) {
             paint_thumb(canvas, &t);
         }
     }
