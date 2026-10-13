@@ -72,15 +72,36 @@ impl Renderer {
 
     /// Paint the whole tree.
     pub fn paint(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, overlay: &Overlay) {
-        let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection, dom_caret, preedit, only, skip, selected_image } = *overlay;
+        let Overlay { scroll_y, viewport, only, selected_image, .. } = *overlay;
         let base = canvas.local_to_device_as_3x3();
         canvas.save();
         canvas.translate((0.0, -scroll_y));
+        let (from, to) = only.unwrap_or((0, tree.boxes.len()));
+        self.paint_boxes(canvas, tree, styles, overlay, &base, from, to);
+        if let Some(r) = selected_image.filter(|_| only.is_none()) {
+            Self::paint_selected_image(canvas, r);
+        }
+        if let Some(menu) = tree.menu.as_ref().filter(|_| only.is_none()) {
+            self.paint_menu(canvas, menu);
+        }
+        canvas.restore();
+        if let Some(t) = nile_layout::page_thumb(viewport, tree.content_height, scroll_y).filter(|_| only.is_none()) {
+            paint_thumb(canvas, &t);
+        }
+    }
+
+    /// Boxes `[from, to)` of the paint list. A paged element's subtree is painted once per sheet.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_boxes(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, overlay: &Overlay, base: &skia_safe::Matrix, from: usize, to: usize) {
+        let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection, dom_caret, preedit, skip, .. } = *overlay;
         // Boxes that wrap their subtree (an `overflow` clip, or an `opacity` layer) end
         // where the subtree does. `None` is an opacity layer.
         let mut open: Vec<(usize, Option<&LayoutBox>)> = Vec::new();
-        let (from, to) = only.unwrap_or((0, tree.boxes.len()));
+        let mut jump = 0;
         for (i, b) in tree.boxes.iter().enumerate().skip(from).take(to.saturating_sub(from)) {
+            if i < jump {
+                continue;
+            }
             while open.last().is_some_and(|(end, _)| i >= *end) {
                 let (_, container) = open.pop().expect("checked above");
                 canvas.restore();
@@ -91,12 +112,17 @@ impl Renderer {
             if skip.iter().any(|&(s, e)| i >= s && i < e) {
                 continue;
             }
+            if let Some(pb) = tree.pages.iter().find(|pb| pb.index == i && pb.end <= to) {
+                self.paint_sheets(canvas, tree, styles, overlay, base, pb);
+                jump = pb.end;
+                continue;
+            }
             match &b.content {
                 BoxContent::Element => {
                     if b.fixed {
                         // Pinned to the viewport: drop the page scroll and any ancestor transform.
                         canvas.save();
-                        canvas.set_matrix(&skia_safe::M44::from(&base));
+                        canvas.set_matrix(&skia_safe::M44::from(base));
                         open.push((b.subtree_end.max(i + 1), None));
                     }
                     let dy = b.sticky_shift(scroll_y, viewport.1);
@@ -164,15 +190,62 @@ impl Renderer {
                 paint_scrollbars(canvas, container, offsets);
             }
         }
-        if let Some(r) = selected_image.filter(|_| only.is_none()) {
-            Self::paint_selected_image(canvas, r);
+    }
+
+    /// The sheets of a paged element: each is a page-sized box drawn with the element's own
+    /// background, border and shadow (white if it has none), the element's content for that
+    /// sheet clipped inside the margins, and the `@page` margin boxes (headers, footers).
+    fn paint_sheets(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, overlay: &Overlay, base: &skia_safe::Matrix, pb: &nile_layout::PagedBox) {
+        use skia_safe::QuickReject;
+        let s = styles.get(pb.node);
+        let n = pb.count();
+        for i in 0..n {
+            let top = pb.top(i);
+            let paper = LRect { x: pb.rect.x, y: top, width: pb.rect.width, height: pb.page_h };
+            if canvas.quick_reject(&skia_rect(paper)) {
+                continue;
+            }
+            let radii = s.corner_radii(paper.width, paper.height);
+            paint_shadows(canvas, skia_rect(paper), &s.box_shadow, radii);
+            let border = Border { width: s.border_width, color: s.border_color, style: s.border_style };
+            paint_decorated(canvas, skia_rect(paper), Some(s.background.unwrap_or(CssColor::rgb(255, 255, 255))), s.background_image.as_ref(), None, &border, radii);
+            let (from, to) = pb.band(i);
+            canvas.save();
+            canvas.clip_rect(Rect::from_xywh(paper.x, top + pb.margin[0], paper.width, (to - from).min(pb.content_h())), None, true);
+            canvas.translate((0.0, top + pb.margin[0] - from));
+            self.paint_boxes(canvas, tree, styles, overlay, base, pb.index + 1, pb.end);
+            canvas.restore();
+            self.paint_margin_boxes(canvas, &styles.page_style(i), paper, i, n);
         }
-        if let Some(menu) = tree.menu.as_ref().filter(|_| only.is_none()) {
-            self.paint_menu(canvas, menu);
-        }
-        canvas.restore();
-        if let Some(t) = nile_layout::page_thumb(viewport, tree.content_height, scroll_y).filter(|_| only.is_none()) {
-            paint_thumb(canvas, &t);
+    }
+
+    /// Headers and footers from `@page` margin boxes, on the sheet at `paper`.
+    fn paint_margin_boxes(&mut self, canvas: &Canvas, page: &nile_style::PageStyle, paper: LRect, index: usize, count: usize) {
+        use nile_style::MarginPlace::*;
+        for mb in &page.boxes {
+            let text = mb.text(index + 1, count);
+            let mut font = Font::default();
+            font.set_size(mb.font_size);
+            if let Some(tf) = ["Helvetica", "Arial", "DejaVu Sans", "Liberation Sans", "sans-serif"]
+                .iter()
+                .find_map(|f| self.font_mgr.match_family_style(f, skia_safe::FontStyle::normal()))
+                .or_else(|| self.font_mgr.legacy_make_typeface(None, skia_safe::FontStyle::normal()))
+            {
+                font.set_typeface(tf);
+            }
+            let (width, _) = font.measure_str(&text, None);
+            let (left, right) = (paper.x + page.margin[3], paper.x + paper.width - page.margin[1]);
+            let x = match mb.place {
+                TopLeft | BottomLeft => left,
+                TopCenter | BottomCenter => (left + right - width) / 2.0,
+                TopRight | BottomRight => right - width,
+            };
+            let y = match mb.place {
+                TopLeft | TopCenter | TopRight => paper.y + (page.margin[0] + mb.font_size * 0.7) / 2.0,
+                _ => paper.y + paper.height - (page.margin[2] - mb.font_size * 0.7) / 2.0,
+            };
+            let c = mb.color;
+            canvas.draw_str(&text, (x, y), &font, &Paint::default().set_color(Color::from_argb(c.a, c.r, c.g, c.b)).clone());
         }
     }
 

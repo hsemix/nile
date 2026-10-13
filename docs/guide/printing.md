@@ -36,6 +36,26 @@ A4 with 0.75 inch margins.
   paragraph on each side of a cut (as `orphans: 2; widows: 2` would).
 - Content taller than a page is cut at the page edge, between lines where it can.
 
+## A paged view on screen
+
+`page-view: paged` shows one element's content as the sheets it will print on, inside your own
+scrolling layout (a desk with a ribbon above it, say):
+
+```css
+@page { size: 720px 930px; margin: 57px 70px; @bottom-center { content: "Page " counter(page) " of " counter(pages) } }
+.desk  { overflow: auto; background: #edf0f5 }
+.paper { page-view: paged; margin: 0 auto; background: #fff; box-shadow: 0 2px 10px #0003 }
+```
+
+The element becomes one sheet wide and as tall as its sheets (with a 20px gap), takes the `@page`
+margins as its padding and draws its own background, border and shadow once per sheet. Everything
+else works as on a flat page: the text is still one document, so a `contenteditable` paper can be
+typed in, selected and clicked across sheet boundaries, and the arrow keys step over the margin and
+the gap. Clicking in a margin puts the caret at the nearest line. `el.pageCount` and `el.pageNumber`
+(the sheet with the caret, else the one in the middle of the window) give a status bar its
+"Page 2 of 5", and `document.execCommand("insertPageBreak")` starts a new sheet in the editor.
+`examples/print-layout.html` is the minimal page; the View tab of `examples/word-ribbon.html` turns it on.
+
 ## From a host
 
 `Page::paginate()` returns the page count, `Page::render_page(index, scale)` gives BGRA pixels,
@@ -43,7 +63,7 @@ A4 with 0.75 inch margins.
 
 ## Not yet
 
-- A paged "print layout" view in a window (pages on a grey desk with the editing caret flowing across them).
+- In the paged view: frames inside the paper, transforms on the paper itself, content taller than a sheet (it is cut at the sheet edge), and a paper that is also a scroll container.
 - Repeating a table's `<thead>` on each page; `position: fixed` headers per page; `@page` margin-box sizing beyond the six corners/edges.
 - `@media print` rules, and printing through the system's print dialog (export to PDF and print that).
 - Pages that have their own `size` or margins (`@page :first`) flow at the first page's content size.

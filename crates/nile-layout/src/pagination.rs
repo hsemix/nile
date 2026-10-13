@@ -11,13 +11,21 @@ use crate::{BoxContent, LayoutTree};
 
 /// Page start offsets (the first is 0) for `tree` cut into pages `page_h` tall.
 pub fn paginate(tree: &LayoutTree, styles: &StyleMap, page_h: f32) -> Vec<f32> {
+    paginate_boxes(&tree.boxes, styles, 0.0, tree.content_height, page_h)
+}
+
+/// Page starts for `boxes` (a subtree of the paint list) whose content runs from `origin` to
+/// `end` in the boxes' own y coordinates; the first start is `origin`.
+pub fn paginate_boxes(boxes: &[crate::LayoutBox], styles: &StyleMap, origin: f32, end: f32, page_h: f32) -> Vec<f32> {
     let page_h = page_h.max(1.0);
-    let total = tree.content_height;
+    let total = end;
     let mut forced: Vec<f32> = Vec::new();
     // Open intervals no cut may fall into, split by how important they are.
     let mut lines: Vec<(f32, f32)> = Vec::new();
     let mut blocks: Vec<(f32, f32)> = Vec::new();
-    for b in &tree.boxes {
+    // Where content can begin on a page: line tops and the tops of unbreakable boxes.
+    let mut tops: Vec<f32> = Vec::new();
+    for b in boxes {
         match &b.content {
             BoxContent::Element => {
                 let s = styles.get(b.node);
@@ -26,7 +34,7 @@ pub fn paginate(tree: &LayoutTree, styles: &StyleMap, page_h: f32) -> Vec<f32> {
                 }
                 let (y0, y1) = (b.rect.y, b.rect.y + b.rect.height);
                 match s.break_before {
-                    Break::Always if y0 > 0.5 => forced.push(y0),
+                    Break::Always if y0 > origin + 0.5 => forced.push(y0),
                     Break::Avoid => blocks.push((y0 - 0.01, y0 + 0.01)),
                     _ => {}
                 }
@@ -38,6 +46,7 @@ pub fn paginate(tree: &LayoutTree, styles: &StyleMap, page_h: f32) -> Vec<f32> {
                 let atomic = s.break_inside == Break::Avoid || s.display == Display::TableRow || b.image.is_some();
                 if atomic && b.rect.height <= page_h && b.rect.height > 0.0 {
                     blocks.push((y0, y1));
+                    tops.push(y0);
                 }
             }
             BoxContent::Text(c) => {
@@ -50,6 +59,7 @@ pub fn paginate(tree: &LayoutTree, styles: &StyleMap, page_h: f32) -> Vec<f32> {
                     })
                     .collect();
                 lines.extend(all.iter().copied());
+                tops.extend(all.iter().map(|l| l.0));
                 // Orphans and widows of two lines: keep short runs whole, and the first and last
                 // two lines of longer ones together.
                 let n = all.len();
@@ -68,13 +78,17 @@ pub fn paginate(tree: &LayoutTree, styles: &StyleMap, page_h: f32) -> Vec<f32> {
         }
     }
     forced.sort_by(f32::total_cmp);
+    tops.sort_by(f32::total_cmp);
+    // A page starts at its first line, not in the margin that preceded it.
+    let snap = |cut: f32| tops.iter().find(|&&t| t >= cut - 0.01).filter(|&&t| t - cut < page_h).copied().unwrap_or(cut);
     let inside = |set: &[(f32, f32)], y: f32| set.iter().find(|&&(a, b)| y > a + 0.01 && y < b - 0.01).copied();
 
-    let mut starts = vec![0.0f32];
-    let mut start = 0.0f32;
+    let mut starts = vec![origin];
+    let mut start = origin;
     while starts.len() < 10_000 {
         let limit = start + page_h;
         if let Some(&f) = forced.iter().find(|&&f| f > start + 0.5 && f <= limit + 0.01) {
+            let f = snap(f);
             starts.push(f);
             start = f;
             continue;
@@ -95,6 +109,7 @@ pub fn paginate(tree: &LayoutTree, styles: &StyleMap, page_h: f32) -> Vec<f32> {
             None
         };
         let cut = find(&[&lines, &blocks]).or_else(|| find(&[&lines])).unwrap_or(limit);
+        let cut = snap(cut);
         starts.push(cut);
         start = cut;
     }

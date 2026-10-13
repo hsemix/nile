@@ -1458,6 +1458,12 @@ function execCommand(cmd, ui, value) {
       });
     });
     case "insertparagraph": return edit("structure", "insertParagraph", undefined, (h) => { const c = deleteSelectionIn(h) || getPts().f; setPts(splitBlock(c, h)); pending = null; });
+    // A paragraph break whose new paragraph starts a page (`break-before: page`).
+    case "insertpagebreak": return edit("structure", "insertPageBreak", undefined, (h) => {
+      const c = deleteSelectionIn(h) || getPts().f; const caret = splitBlock(c, h); setPts(caret); pending = null;
+      const b = closestBlock(caret.node, h);
+      if (b !== h) b.setAttribute("style", ((b.getAttribute("style") || "") + ";break-before:page").replace(/^;/, ""));
+    });
     case "insertlinebreak": return edit("structure", "insertLineBreak", undefined, (h) => { const c = deleteSelectionIn(h) || getPts().f; setPts(insertLineBreak(c, h)); });
     case "delete": return edit("delete", "deleteContentBackward", undefined, (h) => backspace(h, false, false));
     case "forwarddelete": return edit("delete", "deleteContentForward", undefined, (h) => backspace(h, true, false));

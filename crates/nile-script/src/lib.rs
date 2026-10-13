@@ -164,6 +164,11 @@ pub trait Environment {
     fn set_focus(&self, node: Option<NodeId>);
     /// `[scrollLeft, scrollTop, scrollWidth, scrollHeight]` of an element that clips its content.
     fn element_scroll(&self, node: NodeId) -> Option<[f32; 4]>;
+    /// `[sheet count, current sheet (1-based)]` of a `page-view: paged` element: the sheet with the
+    /// caret, else the one at the middle of the window.
+    fn page_info(&self, _node: NodeId) -> Option<[usize; 2]> {
+        None
+    }
     /// Scroll an element (clamped to its range); fires a `scroll` event if it moved.
     fn scroll_element_to(&self, node: NodeId, x: f32, y: f32);
     /// `(start, end)` of an input's selection, in characters of its value.
@@ -633,6 +638,10 @@ fn install_natives(
     native!("elScroll", {
         let env = env.clone();
         move |id: i32| -> Option<Vec<f32>> { node(id).and_then(|n| env.element_scroll(n)).map(|r| r.to_vec()) }
+    });
+    native!("pageInfo", {
+        let env = env.clone();
+        move |id: i32| -> Option<Vec<i32>> { node(id).and_then(|n| env.page_info(n)).map(|r| r.iter().map(|&v| v as i32).collect()) }
     });
     native!("elScrollTo", {
         let env = env.clone();
