@@ -5,12 +5,13 @@
 //! `Page` is the entry point. Its fields and methods are public for those two embedders; most of
 //! them are internal plumbing, so prefer the C API (`nile-capi`) for anything else.
 
+pub mod editing;
 pub mod window;
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 
 use nile_dom::{Document, NodeId, ScriptSource};
-use nile_layout::{TextPoint, FileImages, LayoutOptions, LayoutTree, MenuRequest, ScrollOffsets};
+use nile_layout::{DomPoint, TextPoint, FileImages, LayoutOptions, LayoutTree, MenuRequest, ScrollOffsets};
 use nile_render::{Overlay, Renderer};
 use nile_script::{Environment, ScriptHost, UiEvent, WindowCommand};
 use nile_style::{compute_styles_in, Animator, InteractionState, StyleMap};
@@ -135,6 +136,10 @@ pub struct View {
     pub interaction: InteractionState,
     /// Text selected on the page itself (not in an input).
     pub page_sel: Option<PageSel>,
+    /// The caret and selection inside `contenteditable` content: (anchor, focus).
+    pub edit_sel: Option<(DomPoint, DomPoint)>,
+    /// `copy`/`cut`/`paste` asked for by scripts, for the page to do with its clipboard.
+    pub clipboard_requests: Vec<String>,
     /// Where `<img>` and `url()` backgrounds are read from: the page's folder.
     pub images: FileImages,
     /// The open `<select>` drop-down and its highlighted row.
@@ -167,6 +172,18 @@ pub struct PageSel {
 impl View {
     /// The selected text runs and byte ranges, if the selection is still current.
     pub fn page_ranges(&mut self) -> Vec<(usize, usize, usize)> {
+        if let Some((a, f)) = self.edit_sel {
+            if a == f {
+                return Vec::new();
+            }
+            let doc = self.doc.clone();
+            let doc = doc.borrow();
+            let tree = self.layout();
+            return match (tree.text_point_of(&doc, a), tree.text_point_of(&doc, f)) {
+                (Some(a), Some(f)) if a != f => tree.selection_ranges(a, f),
+                _ => Vec::new(),
+            };
+        }
         let Some(sel) = self.page_sel else { return Vec::new() };
         if sel.version != self.doc.borrow().version {
             self.page_sel = None;
@@ -393,7 +410,30 @@ impl Environment for Env {
     }
 
     fn clear_selected_text(&self) {
-        self.0.borrow_mut().page_sel = None;
+        let mut v = self.0.borrow_mut();
+        v.page_sel = None;
+        v.edit_sel = None;
+    }
+
+    fn edit_selection(&self) -> Option<[(NodeId, usize); 2]> {
+        self.0.borrow().edit_sel.map(|(a, f)| [(a.node, a.offset), (f.node, f.offset)])
+    }
+
+    fn set_edit_selection(&self, anchor: (NodeId, usize), focus: (NodeId, usize)) {
+        let mut v = self.0.borrow_mut();
+        let n = v.doc.borrow().nodes.len();
+        if anchor.0 .0 < n && focus.0 .0 < n {
+            v.edit_sel = Some((DomPoint { node: anchor.0, offset: anchor.1 }, DomPoint { node: focus.0, offset: focus.1 }));
+            v.page_sel = None;
+        }
+    }
+
+    fn clear_edit_selection(&self) {
+        self.0.borrow_mut().edit_sel = None;
+    }
+
+    fn clipboard_request(&self, kind: &str) {
+        self.0.borrow_mut().clipboard_requests.push(kind.to_string());
     }
 
     fn window_command(&self, cmd: WindowCommand) {
@@ -454,6 +494,10 @@ pub struct Page {
     pub drag: Option<NodeId>,
     /// A range slider being dragged, and its value when the drag began.
     pub range_drag: Option<(NodeId, String)>,
+    /// An editing-host drag selection: its anchor and whether it began with a double-click.
+    pub edit_drag: Option<(DomPoint, bool)>,
+    /// The x the caret keeps while moving up and down.
+    pub edit_x: Option<f32>,
     /// List box row the shift-range started from, and the row keys moved to last.
     pub list_anchor: Option<(NodeId, usize)>,
     pub list_cursor: Option<(NodeId, usize)>,
@@ -573,6 +617,8 @@ impl Page {
             pending_sel: std::collections::HashMap::new(),
             interaction,
             page_sel: None,
+            edit_sel: None,
+            clipboard_requests: Vec::new(),
             images: FileImages::new(path.parent().map(PathBuf::from).unwrap_or_default()),
             focus_changes: Vec::new(),
             window_requests: Vec::new(),
@@ -644,6 +690,8 @@ impl Page {
             mods: ModifiersState::default(),
             drag: None,
             range_drag: None,
+            edit_drag: None,
+            edit_x: None,
             list_anchor: None,
             list_cursor: None,
             last_click: None,
@@ -739,6 +787,10 @@ impl Page {
         for (old, new) in moves {
             self.focus_moved(old, new);
         }
+        let requests = std::mem::take(&mut self.view.borrow_mut().clipboard_requests);
+        for kind in requests {
+            self.clipboard_command(&kind);
+        }
         for node in scrolled {
             self.emit(node, UiEvent::Plain("scroll"));
         }
@@ -753,6 +805,14 @@ impl Page {
                 self.emit(o, UiEvent::Plain("change"));
             }
             self.emit(o, UiEvent::Plain("blur"));
+        }
+        // A host focused without a click (Tab, `focus()`) puts the caret at its start.
+        if let Some(n) = new.filter(|_| self.focused_host() == new) {
+            let inside = self.edit_selection().is_some_and(|(_, f)| editing::editing_host_of(&self.doc.borrow(), f.node) == Some(n));
+            if !inside {
+                let start = DomPoint { node: n, offset: 0 };
+                self.set_edit_selection(start, start);
+            }
         }
         if self.view.borrow().menu.is_some_and(|m| Some(m.select) != new) {
             self.close_menu();
@@ -1021,7 +1081,10 @@ impl Page {
             let focusable = match n.tag() {
                 Some("a") => n.attr("href").is_some(),
                 Some("input" | "button" | "select" | "textarea") => true,
-                _ => n.attr("tabindex").is_some(),
+                _ => {
+                    n.attr("tabindex").is_some()
+                        || n.attr("contenteditable").is_some_and(|v| !v.trim().eq_ignore_ascii_case("false"))
+                }
             };
             if focusable {
                 return Some(id);
@@ -1191,6 +1254,10 @@ impl Page {
         if let Some((node, _)) = self.range_drag.clone() {
             return self.range_from_pointer(node);
         }
+        if self.edit_drag.is_some() {
+            self.refresh_hover();
+            return self.edit_drag_to_pointer();
+        }
         if self.page_drag {
             if let Some(p) = self.page_text_point() {
                 let mut v = self.view.borrow_mut();
@@ -1289,15 +1356,27 @@ impl Page {
         let target = self.interaction().hover;
         self.pressed = target;
         let mut changed = false;
+        // A script that cancels `mousedown` keeps the focus and selection where they are (how
+        // toolbar buttons avoid taking them from an editor).
+        let mut keep_focus = false;
         if let Some(t) = target {
-            changed |= self.emit(t, self.mouse_event("mousedown")).1;
+            let (proceed, c) = self.emit(t, self.mouse_event("mousedown"));
+            changed |= c;
+            keep_focus = !proceed;
         }
         let next = InteractionState {
             active: target,
-            focus: target.and_then(|n| self.focusable(n)),
+            focus: if keep_focus { self.interaction().focus } else { target.and_then(|n| self.focusable(n)) },
             ..self.interaction()
         };
         changed |= self.set_interaction(next);
+        if keep_focus {
+            return changed;
+        }
+        // Pressing plain page content (not a control) drops an editing selection.
+        if self.interaction().focus.is_none() && self.view.borrow_mut().edit_sel.take().is_some() {
+            changed = true;
+        }
         // Clicking inside a text input places the caret; shift extends the selection,
         // a double-click selects a word and a triple-click everything.
         if let Some(f) = self.interaction().focus.filter(|f| self.is_text_input(*f)) {
@@ -1323,6 +1402,9 @@ impl Page {
                 }
                 changed |= before != (self.anchor(), self.caret());
             }
+        }
+        if let Some(host) = self.focused_host() {
+            changed |= self.begin_edit_selection(host);
         }
         if let Some(f) = self.interaction().focus.filter(|f| self.is_range(*f) && !self.is_disabled(*f)) {
             self.range_drag = Some((f, self.range_value(f).to_string()));
@@ -1388,7 +1470,7 @@ impl Page {
 
     /// Keys for the page selection when no input is being edited: copy and select all.
     pub fn page_key(&mut self, key: &str, mods: ModifiersState) -> bool {
-        if self.interaction().focus.is_some_and(|f| self.is_text_input(f)) || !(mods.control_key() || mods.super_key()) {
+        if self.interaction().focus.is_some_and(|f| self.is_text_input(f)) || self.focused_host().is_some() || !(mods.control_key() || mods.super_key()) {
             return false;
         }
         if key.eq_ignore_ascii_case("c") {
@@ -1416,6 +1498,11 @@ impl Page {
         }
         self.drag = None;
         self.page_drag = false;
+        if self.edit_drag.take().is_some() {
+            let next = InteractionState { active: None, ..self.interaction() };
+            self.set_interaction(next);
+            return true;
+        }
         if let Some((node, at_press)) = self.range_drag.take() {
             if self.range_value(node).to_string() != at_press {
                 self.emit(node, UiEvent::Plain("change"));
@@ -1455,7 +1542,7 @@ impl Page {
     /// Flip the caret when its blink is due. Returns whether the page changed
     /// and when the next flip is due (only while a text input has focus).
     pub fn blink(&mut self) -> (bool, Option<Duration>) {
-        let editing = self.interaction().focus.is_some_and(|f| self.is_text_input(f));
+        let editing = self.interaction().focus.is_some_and(|f| self.is_text_input(f)) || self.focused_host().is_some();
         if !editing {
             self.caret_visible = true;
             return (false, None);
@@ -1554,6 +1641,8 @@ impl Page {
             self.select_key(key, mods)
         } else if let Some(f) = self.interaction().focus.filter(|f| self.is_range(*f)) {
             self.range_key(f, key)
+        } else if let Some(host) = self.focused_host().filter(|_| key != "Tab") {
+            self.edit_dom_key(host, key, mods)
         } else {
             let editing = self.interaction().focus.is_some_and(|f| self.is_text_input(f));
             self.edit_key(key, mods) || (!editing && self.scroll_key(key, mods))
@@ -2394,6 +2483,7 @@ impl Page {
         let bg = self.canvas_background();
         let caret = self.caret_for_paint();
         let selection = self.selection_for_paint();
+        let dom_caret = self.dom_caret_for_paint();
         let mut view = self.view.borrow_mut();
         view.layout();
         let page_selection = view.page_ranges();
@@ -2412,7 +2502,7 @@ impl Page {
                 canvas,
                 tree,
                 &view.styles,
-                &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection },
+                &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection, dom_caret },
             )
         });
         canvas.restore();
@@ -3327,6 +3417,212 @@ cd</textarea>
         assert_eq!(log(&p).last().map(String::as_str), Some("change:0"));
         let (fraction, _) = nile_style::control_fraction(&p.doc.borrow(), id);
         assert_eq!(fraction, Some(0.0));
+        let _ = std::fs::remove_file(path);
+    }
+
+    const EDITOR: &str = r#"<body style="margin:0;font-family:sans-serif;font-size:16px"><div id="h" contenteditable="true" style="width:400px"><p id="p1" style="margin:0">Hello</p><p id="p2" style="margin:0">World</p></div></body>"#;
+
+    fn js(p: &mut Page, code: &str) -> String {
+        p.eval(code).0.unwrap_or_else(|e| format!("ERR {e}"))
+    }
+
+    fn html(p: &mut Page) -> String {
+        js(p, "document.getElementById('h').innerHTML")
+    }
+
+    fn type_keys(p: &mut Page, keys: &str) {
+        for c in keys.chars() {
+            let k = c.to_string();
+            let (proceed, _) = p.key("keydown", k.clone(), ModifiersState::default());
+            if proceed {
+                p.default_key(&k, ModifiersState::default());
+            }
+        }
+    }
+
+    /// Click at the end of paragraph `id`'s text.
+    fn click_end_of(p: &mut Page, id: &str) {
+        // (Detached nodes keep their ids, so look only at what is in the document.)
+        let node = {
+            let doc = p.doc.borrow();
+            doc.descendants(Document::ROOT).into_iter().find(|n| doc.node(*n).attr("id") == Some(id)).unwrap()
+        };
+        let r = p.view.borrow_mut().layout().node_rect(node).unwrap();
+        p.pointer_moved(r.x + r.width - 2.0, r.y + r.height / 2.0);
+        p.press();
+        p.release();
+    }
+
+    #[test]
+    fn contenteditable_takes_typing_enter_and_backspace() {
+        let (mut p, path) = page(EDITOR, "edit-typing");
+        click_end_of(&mut p, "p1");
+        assert!(p.focused_host().is_some(), "the host has focus");
+        let sel = p.edit_selection().expect("a caret");
+        assert_eq!(sel.0, sel.1);
+        type_keys(&mut p, "!?");
+        assert_eq!(html(&mut p), r#"<p id="p1" style="margin:0">Hello!?</p><p id="p2" style="margin:0">World</p>"#);
+        press_key(&mut p, "Backspace", ModifiersState::default());
+        assert_eq!(js(&mut p, "document.getElementById('p1').textContent"), "Hello!");
+        press_key(&mut p, "Enter", ModifiersState::default());
+        type_keys(&mut p, "ab");
+        assert_eq!(js(&mut p, "document.getElementById('h').children.map(c => c.textContent).join('|')"), "Hello!|ab|World");
+        // Backspace at the start of a paragraph joins it with the one before.
+        press_key(&mut p, "ArrowLeft", ModifiersState::default());
+        press_key(&mut p, "ArrowLeft", ModifiersState::default());
+        press_key(&mut p, "Backspace", ModifiersState::default());
+        assert_eq!(js(&mut p, "document.getElementById('h').children.map(c => c.textContent).join('|')"), "Hello!ab|World");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Select `from..to` (character offsets) of paragraph `id`'s first text node.
+    fn select_in(p: &mut Page, id: &str, from: usize, to: usize) {
+        let code = format!("var t = document.getElementById('{id}').firstChild; document.getElementById('h').focus(); getSelection().setBaseAndExtent(t, {from}, t, {to});");
+        js(p, &code);
+        // `focus()` is a script call; let the page notice.
+        p.sync();
+        js(p, &format!("var t = document.getElementById('{id}').firstChild; getSelection().setBaseAndExtent(t, {from}, t, {to});"));
+    }
+
+    fn inner(p: &mut Page, id: &str) -> String {
+        js(p, &format!("document.getElementById('{id}').innerHTML"))
+    }
+
+    #[test]
+    fn execcommand_formats_ranges_and_reports_state() {
+        let (mut p, path) = page(EDITOR, "edit-format");
+        select_in(&mut p, "p1", 1, 4);
+        assert_eq!(js(&mut p, "document.execCommand('bold')"), "true");
+        assert_eq!(inner(&mut p, "p1"), "H<b>ell</b>o");
+        assert_eq!(js(&mut p, "document.queryCommandState('bold')"), "true");
+        assert_eq!(js(&mut p, "document.queryCommandState('italic')"), "false");
+        // Part of the bold run turns it off again: "e" and "o" stay as they are.
+        js(&mut p, "var b = document.querySelector('b').firstChild; getSelection().setBaseAndExtent(b, 1, b, 2)");
+        js(&mut p, "document.execCommand('bold')");
+        assert_eq!(inner(&mut p, "p1"), "H<b>e</b>l<b>l</b>o");
+        // Across paragraphs: both get italics; colours and sizes use spans.
+        js(&mut p, "var a = document.getElementById('p1'), b = document.getElementById('p2'); getSelection().setBaseAndExtent(a.lastChild, 0, b.firstChild, 3)");
+        js(&mut p, "document.execCommand('italic'); document.execCommand('foreColor', false, '#ff0000')");
+        assert_eq!(inner(&mut p, "p1"), r##"H<b>e</b>l<b>l</b><i><span style="color: #ff0000">o</span></i>"##);
+        assert_eq!(inner(&mut p, "p2"), r##"<i><span style="color: #ff0000">Wor</span></i>ld"##);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn editing_undo_lists_blocks_pending_format_and_selection_deletes() {
+        let (mut p, path) = page(EDITOR, "edit-more");
+        // Typing after Bold with a caret types bold text.
+        click_end_of(&mut p, "p1");
+        js(&mut p, "document.execCommand('bold')");
+        type_keys(&mut p, "XY");
+        assert_eq!(inner(&mut p, "p1"), "Hello<b>XY</b>");
+        js(&mut p, "document.execCommand('bold')");
+        type_keys(&mut p, "z");
+        assert_eq!(inner(&mut p, "p1"), "Hello<b>XY</b>z");
+        // Undo steps back through the edits, redo returns.
+        assert_eq!(js(&mut p, "document.execCommand('undo')"), "true");
+        assert_eq!(js(&mut p, "document.getElementById('p1').textContent"), "HelloXY");
+        js(&mut p, "document.execCommand('undo'); document.execCommand('undo')");
+        assert_eq!(inner(&mut p, "p1"), "Hello");
+        js(&mut p, "document.execCommand('redo')");
+        assert_eq!(js(&mut p, "document.getElementById('p1').textContent"), "HelloXY");
+        js(&mut p, "document.execCommand('undo')");
+        // Blocks: alignment, headings, lists.
+        select_in(&mut p, "p2", 1, 3);
+        js(&mut p, "document.execCommand('justifyCenter'); document.execCommand('formatBlock', false, 'h2')");
+        assert_eq!(js(&mut p, "document.getElementById('h').lastChild.outerHTML"), r#"<h2 style="margin: 0; text-align: center">World</h2>"#);
+        js(&mut p, "document.execCommand('insertUnorderedList')");
+        assert_eq!(js(&mut p, "document.getElementById('h').lastChild.tagName"), "UL");
+        assert_eq!(js(&mut p, "document.queryCommandState('insertUnorderedList')"), "true");
+        js(&mut p, "document.execCommand('insertUnorderedList')");
+        assert_eq!(js(&mut p, "document.getElementById('h').lastChild.tagName"), "P");
+        // Deleting a selection across paragraphs joins them.
+        js(&mut p, "var a = document.getElementById('p1').firstChild, b = document.getElementById('h').lastChild.firstChild; getSelection().setBaseAndExtent(a, 3, b, 2)");
+        js(&mut p, "document.execCommand('delete')");
+        assert_eq!(js(&mut p, "document.getElementById('h').children.map(c => c.textContent).join('|')"), "Helrld");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_word_example_formats_the_document_from_its_ribbon() {
+        let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/word-ribbon.html");
+        let mut p = Page::load(file, (1200.0, 800.0), 0.0);
+        p.layout(1200.0, 800.0);
+        let q = |p: &mut Page, code: &str| js(p, code);
+        // Select "clear purpose" in the Overview paragraph and use the ribbon like a person would.
+        q(&mut p, "var t = document.getElementById('sample').firstChild; document.getElementById('paper').focus(); var i = t.data.indexOf('clear purpose'); getSelection().setBaseAndExtent(t, i, t, i + 13)");
+        p.sync();
+        q(&mut p, "var t = document.getElementById('sample').firstChild; var i = t.data.indexOf('clear purpose'); getSelection().setBaseAndExtent(t, i, t, i + 13)");
+        click(&mut p, "bold");
+        click(&mut p, "italic");
+        let sample = q(&mut p, "document.getElementById('sample').innerHTML");
+        assert!(sample.contains("<i><b>clear purpose</b></i>") || sample.contains("<b><i>clear purpose</i></b>"), "{sample}");
+        assert_eq!(q(&mut p, "document.getElementById('bold').classList.contains('selected')"), "true", "the Bold button shows its state");
+        // Undo from the title bar, then redo, then change the paragraph alignment.
+        let undo = p.doc.borrow().find(|n| n.attr("data-action") == Some("undo")).unwrap();
+        let r = p.view.borrow_mut().layout().node_rect(undo).unwrap();
+        for _ in 0..2 {
+            p.pointer_moved(r.x + 3.0, r.y + 3.0);
+            p.press();
+            p.release();
+        }
+        assert!(!q(&mut p, "document.getElementById('sample').innerHTML").contains("<b>"), "two undos remove both commands");
+        let align = p.doc.borrow().find(|n| n.attr("data-align") == Some("center")).unwrap();
+        let r = p.view.borrow_mut().layout().node_rect(align).unwrap();
+        p.pointer_moved(r.x + 3.0, r.y + 3.0);
+        p.press();
+        p.release();
+        assert!(q(&mut p, "document.getElementById('sample').style.textAlign") == "center");
+        assert!(q(&mut p, "document.getElementById('word-count').textContent").ends_with("words"));
+    }
+
+    #[test]
+    fn editing_with_the_mouse_clipboard_arrows_and_lists() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0;font-family:sans-serif;font-size:16px"><div id="h" contenteditable="true" style="width:400px"><p id="p1" style="margin:0">Hello</p><p id="p2" style="margin:0">World</p><ul id="u"><li id="l1">one</li></ul></div></body>"#,
+            "edit-mouse",
+        );
+        let rect = |p: &mut Page, id: &str| {
+            let n = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+            p.view.borrow_mut().layout().node_rect(n).unwrap()
+        };
+        // Drag from inside "Hello" to inside "World": the selection covers the line break.
+        let _ = rect(&mut p, "p1");
+        let caret_at = |p: &mut Page, id: &str, offset: usize| {
+            let t = p.doc.borrow().find(|n| n.attr("id") == Some(id)).map(|n| p.doc.borrow().node(n).children[0]).unwrap();
+            p.edit_caret_painted(DomPoint { node: t, offset }).unwrap()
+        };
+        let (a, b) = (caret_at(&mut p, "p1", 3), caret_at(&mut p, "p2", 3));
+        p.pointer_moved(a.0 + 0.5, a.1 + a.2 / 2.0);
+        p.press();
+        p.pointer_moved(b.0 + 0.5, b.1 + b.2 / 2.0);
+        p.release();
+        assert_eq!(p.edit_selected_text(), "lo\nWor");
+        let ctrl = ModifiersState::CONTROL;
+        press_key(&mut p, "c", ctrl);
+        assert_eq!(p.clipboard.text().as_deref(), Some("lo\nWor"));
+        // Typing replaces the selection; paste puts the text (and the line break) back.
+        type_keys(&mut p, "X");
+        assert_eq!(js(&mut p, "document.getElementById('h').children.map(c => c.textContent).join('|')"), "HelXld|one");
+        press_key(&mut p, "v", ctrl);
+        assert_eq!(js(&mut p, "document.getElementById('h').children.map(c => c.textContent).join('|')"), "HelXlo|World|one");
+        // Select all, then cut: nothing but an empty line remains.
+        press_key(&mut p, "a", ctrl);
+        press_key(&mut p, "x", ctrl);
+        assert_eq!(p.clipboard.text().as_deref(), Some("HelXlo\nWorld\none"));
+        assert_eq!(js(&mut p, "document.getElementById('h').textContent"), "");
+        // Undo brings it all back.
+        press_key(&mut p, "z", ctrl);
+        assert_eq!(js(&mut p, "document.getElementById('h').children.length"), "3");
+        // Lists: Enter makes a new item, Enter on the empty item leaves the list.
+        click_end_of(&mut p, "l1");
+        press_key(&mut p, "Enter", ModifiersState::default());
+        type_keys(&mut p, "two");
+        assert_eq!(js(&mut p, "document.getElementById('u').children.map(c => c.textContent).join('|')"), "one|two");
+        press_key(&mut p, "Enter", ModifiersState::default());
+        press_key(&mut p, "Enter", ModifiersState::default());
+        assert_eq!(js(&mut p, "document.getElementById('h').lastChild.tagName"), "P");
+        assert_eq!(js(&mut p, "document.getElementById('u').children.length"), "2");
         let _ = std::fs::remove_file(path);
     }
 }

@@ -28,7 +28,11 @@ use rquickjs::{
 
 mod jsx;
 
-const PRELUDE: &str = include_str!("prelude.js");
+const EDIT: &str = include_str!("edit.js");
+
+fn prelude() -> String {
+    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT)
+}
 
 /// Something a script asks the host window to do.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +79,15 @@ pub trait Environment {
         String::new()
     }
     fn clear_selected_text(&self) {}
+    /// The editing selection (anchor, focus) as DOM positions: character offsets in text
+    /// nodes, child indices in elements.
+    fn edit_selection(&self) -> Option<[(NodeId, usize); 2]> {
+        None
+    }
+    fn set_edit_selection(&self, _anchor: (NodeId, usize), _focus: (NodeId, usize)) {}
+    fn clear_edit_selection(&self) {}
+    /// `execCommand('copy' | 'cut' | 'paste')`: the host does it with its clipboard.
+    fn clipboard_request(&self, _kind: &str) {}
     /// Close, move, resize, ... the host window. Embedders without a window ignore it.
     fn window_command(&self, _cmd: WindowCommand) {}
     /// Window `[screenX, screenY, outerWidth, outerHeight, fullscreen (0/1)]`.
@@ -165,6 +178,32 @@ pub struct ScriptHost {
 /// Functions the embedder exposes to scripts as `host.name(...)`: each takes the call's
 /// arguments as a JSON array and returns a JSON value (or an empty string for `undefined`).
 type HostFns = Rc<RefCell<std::collections::HashMap<String, Rc<dyn Fn(&str) -> String>>>>;
+
+/// Character offset `chars` of a text node as UTF-16 units (element offsets are child indices).
+fn to_utf16(doc: &Document, node: NodeId, chars: usize) -> usize {
+    match &doc.node(node).kind {
+        nile_dom::NodeKind::Text(t) => t.chars().take(chars).map(char::len_utf16).sum(),
+        _ => chars,
+    }
+}
+
+/// The inverse of [`to_utf16`]: a position inside a surrogate pair rounds down.
+fn from_utf16(doc: &Document, node: NodeId, units: usize) -> usize {
+    match &doc.node(node).kind {
+        nile_dom::NodeKind::Text(t) => {
+            let (mut chars, mut u) = (0, 0);
+            for c in t.chars() {
+                if u + c.len_utf16() > units {
+                    break;
+                }
+                u += c.len_utf16();
+                chars += 1;
+            }
+            chars
+        }
+        _ => units,
+    }
+}
 
 fn node(id: i32) -> Option<NodeId> {
     usize::try_from(id).ok().map(NodeId)
@@ -337,6 +376,27 @@ fn install_natives(
             vec![w, h]
         }
     });
+    // The editing selection. JS counts text offsets in UTF-16 units, the engine in characters.
+    native!("selGet", with_doc!(d => { let env = env.clone(); move || -> Vec<f64> {
+        let Some([(an, ao), (fnode, fo)]) = env.edit_selection() else { return Vec::new() };
+        let d = d.borrow();
+        vec![an.0 as f64, to_utf16(&d, an, ao) as f64, fnode.0 as f64, to_utf16(&d, fnode, fo) as f64]
+    } }));
+    native!("selSet", with_doc!(d => { let env = env.clone(); move |an: i32, ao: f64, fnode: i32, fo: f64| {
+        let (Some(an), Some(fnode)) = (node(an), node(fnode)) else { return };
+        let d = d.borrow();
+        let (ao, fo) = (from_utf16(&d, an, ao.max(0.0) as usize), from_utf16(&d, fnode, fo.max(0.0) as usize));
+        drop(d);
+        env.set_edit_selection((an, ao), (fnode, fo));
+    } }));
+    native!("clipboardRequest", {
+        let env = env.clone();
+        move |kind: String| env.clipboard_request(&kind)
+    });
+    native!("selClear", {
+        let env = env.clone();
+        move || env.clear_edit_selection()
+    });
     native!("windowCommand", {
         let env = env.clone();
         move |name: String, a: f64, b: f64| {
@@ -450,7 +510,7 @@ impl ScriptHost {
 
         context.with(|ctx| -> rquickjs::Result<()> {
             install_natives(&ctx, doc, log.clone(), start, env, host_fns.clone())?;
-            ctx.eval::<(), _>(PRELUDE).catch(&ctx).map_err(|e| {
+            ctx.eval::<(), _>(prelude()).catch(&ctx).map_err(|e| {
                 eprintln!("[js] prelude failed: {e}");
                 rquickjs::Error::Unknown
             })
