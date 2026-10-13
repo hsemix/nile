@@ -588,6 +588,8 @@ pub struct Page {
     pub blink_at: Instant,
     /// Sub-documents of `<frame>`/`<iframe>` elements.
     pub frames: Rc<RefCell<frames::Frames>>,
+    /// A frameset splitter being dragged.
+    pub splitter_drag: Option<frames::SplitDrag>,
 }
 
 /// A scrollbar thumb held by the pointer.
@@ -668,19 +670,19 @@ impl Page {
     }
 
     /// A page shown inside a `<frame>`: `outbox` collects what its scripts post to `window.parent`.
-    pub(crate) fn load_embedded(path: PathBuf, viewport: (f32, f32), outbox: Rc<RefCell<Vec<String>>>) -> Page {
-        Page::load_in(path, viewport, 0.0, Some(outbox))
+    pub(crate) fn load_embedded(path: PathBuf, viewport: (f32, f32), embed: frames::Embed) -> Page {
+        Page::load_in(path, viewport, 0.0, Some(embed))
     }
 
-    pub(crate) fn html_embedded(html: &str, base_dir: PathBuf, viewport: (f32, f32), outbox: Rc<RefCell<Vec<String>>>) -> Page {
-        Page::from_source_in(html.to_string(), base_dir.join("index.html"), Some(html.to_string()), viewport, 0.0, Some(outbox))
+    pub(crate) fn html_embedded(html: &str, base_dir: PathBuf, viewport: (f32, f32), embed: frames::Embed) -> Page {
+        Page::from_source_in(html.to_string(), base_dir.join("index.html"), Some(html.to_string()), viewport, 0.0, Some(embed))
     }
 
-    fn load_in(path: PathBuf, viewport: (f32, f32), scroll_y: f32, outbox: Option<Rc<RefCell<Vec<String>>>>) -> Page {
+    fn load_in(path: PathBuf, viewport: (f32, f32), scroll_y: f32, embed: Option<frames::Embed>) -> Page {
         let html = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             format!("<body><h1>Could not open file</h1><p>{}: {e}</p></body>", path.display())
         });
-        Page::from_source_in(html, path, None, viewport, scroll_y, outbox)
+        Page::from_source_in(html, path, None, viewport, scroll_y, embed)
     }
 
     /// A page from HTML text. Relative `src`, `href` and `url()` paths resolve against `base_dir`.
@@ -693,7 +695,13 @@ impl Page {
         Page::from_source_in(html, path, memory, viewport, scroll_y, None)
     }
 
-    fn from_source_in(html: String, path: PathBuf, memory: Option<String>, viewport: (f32, f32), scroll_y: f32, outbox: Option<Rc<RefCell<Vec<String>>>>) -> Page {
+    fn from_source_in(html: String, path: PathBuf, memory: Option<String>, viewport: (f32, f32), scroll_y: f32, embed: Option<frames::Embed>) -> Page {
+        // A frame's `content-style` goes on top of the document's own styles.
+        let html = match embed.as_ref().and_then(|e| e.css.as_deref()) {
+            Some(css) => format!("{html}<style>{css}</style>"),
+            None => html,
+        };
+        let outbox = embed.map(|e| e.outbox);
         // `<include>` fragments are spliced in as text before parsing; paths are the page's folder's.
         let folder = path.parent().map(PathBuf::from).unwrap_or_default();
         let html = nile_dom::expand_includes(&html, &mut |src| {
@@ -836,6 +844,7 @@ impl Page {
             caret_visible: true,
             blink_at: Instant::now() + CARET_BLINK,
             frames,
+            splitter_drag: None,
         }
     }
 
@@ -1570,6 +1579,9 @@ impl Page {
 
     pub fn pointer_moved(&mut self, x: f32, y: f32) -> bool {
         self.pointer = Some((x, y));
+        if self.splitter_drag.is_some() {
+            return self.splitter_drag_to(x, y);
+        }
         let in_frames = self.frames_pointer_moved(x, y);
         in_frames | self.pointer_moved_here(x, y)
     }
@@ -1675,6 +1687,12 @@ impl Page {
     /// Primary button down: the hovered element becomes active and focus moves
     /// to its nearest focusable ancestor (or is cleared).
     pub fn press(&mut self) -> bool {
+        if self.hover_due.is_some() {
+            self.refresh_hover();
+        }
+        if self.splitter_press() {
+            return true;
+        }
         let here = self.press_here();
         self.frames_press() | here
     }
@@ -1848,6 +1866,9 @@ impl Page {
     /// Primary button up: `mouseup`, then `click` on the common ancestor of the
     /// pressed and released elements.
     pub fn release(&mut self) -> bool {
+        if self.splitter_drag.take().is_some() {
+            return true;
+        }
         let there = self.frames_release();
         self.release_here() | there
     }
@@ -4816,6 +4837,36 @@ cd</textarea>
         assert_eq!(ev(&mut p, "f.document.$('#b').text"), "Go");
         assert_eq!(ev(&mut p, "f.document.$('#nope') === null"), "true");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn framesets_split_panes_and_splitters_resize_them() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><frameset id="fs" cols="100px,*,50px" style="height:200px">
+                 <div id="a">a</div><splitter id="s1"/><div id="b">b</div><splitter id="s2"></splitter><div id="c">c</div>
+               </frameset></body>"#,
+            "frameset",
+        );
+        let rect = |p: &mut Page, id: &str| {
+            let n = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+            let r = p.view.borrow_mut().layout().node_rect(n).unwrap();
+            (r.x, r.width)
+        };
+        assert_eq!(rect(&mut p, "a"), (0.0, 100.0));
+        assert_eq!(rect(&mut p, "s1"), (100.0, 6.0));
+        assert_eq!(rect(&mut p, "b").0, 106.0);
+        assert_eq!(rect(&mut p, "c"), (550.0, 50.0));
+        // Dragging the first splitter 40px right widens the first pane and leaves the flexible one to absorb it.
+        p.pointer_moved(103.0, 50.0);
+        p.press();
+        p.pointer_moved(143.0, 50.0);
+        p.release();
+        assert_eq!(rect(&mut p, "a"), (0.0, 140.0));
+        assert_eq!(p.eval("document.$('#fs').getAttribute('cols')").0.unwrap(), "140px,*,50px");
+        assert_eq!(p.eval("document.$('#fs').frameset.state.map(Math.round).join()").0.unwrap(), "140,398,50");
+        p.eval("document.$('#fs').frameset.state = [60, 300, 80]").0.unwrap();
+        assert_eq!(rect(&mut p, "a"), (0.0, 60.0));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

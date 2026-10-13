@@ -911,6 +911,23 @@
   frameMethod("postMessage", function (data) {
     if (isFrame(this)) host.__framePost(this._id, JSON.stringify(data) ?? "null");
   });
+  // `frameset.state`: the panes' current sizes (widths for `cols`, heights for `rows`), settable.
+  frameProp("frameset", {
+    get() {
+      if (this.localName !== "frameset") return undefined;
+      const el = this;
+      const panes = () => Array.from(el.children).filter((c) => c.localName !== "splitter");
+      return {
+        get state() {
+          const wide = el.hasAttribute("cols");
+          return panes().map((p) => { const r = p.getBoundingClientRect(); return wide ? r.width : r.height; });
+        },
+        set state(sizes) {
+          el.setAttribute(el.hasAttribute("cols") ? "cols" : "rows", Array.from(sizes, (n) => n + "px").join(","));
+        },
+      };
+    },
+  });
   // Inside a frame, `window.parent` can post messages up; at the top it is the window itself.
   const parentWindow = { postMessage: (data) => { host.__parentPost(JSON.stringify(data) ?? "null"); } };
   const upward = { configurable: true, get() { return host.has("__parentPost") ? parentWindow : g; } };

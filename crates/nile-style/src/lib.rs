@@ -808,6 +808,11 @@ th { font-weight: bold; text-align: center }
 caption { display: table-caption; text-align: center }
 col, colgroup { display: none }
 frame { display: block; height: 150px; border: 0 }
+frameset { display: grid; height: 100%; min-height: 150px }
+frameset > * { min-width: 0; min-height: 0 }
+frameset > frame { height: auto }
+splitter { display: block; background: #c8c8c8; cursor: col-resize }
+frameset[rows] > splitter { cursor: row-resize }
 iframe { display: inline-block; width: 300px; height: 150px; border: 0 }
 article, aside, address, blockquote, figure, figcaption, details, summary, fieldset, legend, dl, dt, dd, ol, pre,
   h4, h5, h6, hgroup, menu { display: block }

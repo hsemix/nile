@@ -1096,6 +1096,18 @@ pub fn layout_with(
     root_style.size.width = Dimension::length(viewport_width);
     root_style.min_size.height = LengthPercentageAuto::length(viewport_height);
     tree.set_style(root, root_style).unwrap();
+    // `html { height: 100% }` is a percentage of the viewport (the initial containing block), which
+    // Taffy only knows as a minimum; give such a root element a definite height so `body` can use it.
+    let mut definite_root = false;
+    for child in tree.children(root).unwrap_or_default() {
+        let Some(NodeCtx::Element(e)) = tree.get_node_context(child) else { continue };
+        if let Length::Percent(pct) = styles.get(*e).height {
+            let mut st = tree.style(child).unwrap().clone();
+            st.size.height = Dimension::length(pct * viewport_height);
+            tree.set_style(child, st).unwrap();
+            definite_root = true;
+        }
+    }
 
     let compute = |tree: &mut TaffyTree<NodeCtx>| {
         tree.compute_layout_with_measure(
@@ -1120,7 +1132,21 @@ pub fn layout_with(
     compute_static_positions(&tree, doc, styles, root);
     let mut boxes = Vec::new();
     flatten(&mut tree, styles, root, 0.0, 0.0, &mut boxes);
-    let content_height = tree.layout(root).map(|l| l.size.height).unwrap_or(0.0);
+    let mut content_height = tree.layout(root).map(|l| l.size.height).unwrap_or(0.0);
+    if definite_root {
+        // A fixed-height root no longer grows with its content: the page scrolls as far as the
+        // content reaches (not into clipped boxes or `fixed` ones).
+        let mut i = 0;
+        while i < boxes.len() {
+            let b = &boxes[i];
+            if b.fixed {
+                i = b.subtree_end.max(i + 1);
+                continue;
+            }
+            content_height = content_height.max(b.rect.y + b.rect.height);
+            i = if b.scroll.is_some() { b.subtree_end.max(i + 1) } else { i + 1 };
+        }
+    }
     let index = boxes
         .iter()
         .enumerate()
@@ -1466,6 +1492,9 @@ fn build(
                 }
             });
             let mut ts = taffy_style(style);
+            if node.tag() == Some("frameset") {
+                frameset_tracks(doc, styles, id, &mut ts);
+            }
             if let Some(rows) = list_rows(doc, id) {
                 ts.size.height = Dimension::length(rows as f32 * option_row_height(style));
             }
@@ -2980,6 +3009,55 @@ fn align_items(a: Align) -> Option<AlignItems> {
     })
 }
 
+/// Size of the strip a `<splitter>` takes, in px.
+pub const SPLITTER: f32 = 6.0;
+
+/// One entry of a frameset's `cols`/`rows` list: `120px`, `30%`, `2*`, a bare number (px), else `*`.
+pub fn frameset_track(entry: &str) -> Track {
+    let e = entry.trim();
+    let flex = |f: f32| Track { min: Breadth::Px(0.0), max: Breadth::Fr(f) };
+    if let Some(n) = e.strip_suffix('*') {
+        return flex(if n.trim().is_empty() { 1.0 } else { n.trim().parse().unwrap_or(1.0) });
+    }
+    if let Some(p) = e.strip_suffix('%').and_then(|n| n.trim().parse::<f32>().ok()) {
+        return Track { min: Breadth::Percent(p / 100.0), max: Breadth::Percent(p / 100.0) };
+    }
+    match e.trim_end_matches("px").trim_end_matches("dip").trim().parse::<f32>() {
+        Ok(px) => Track { min: Breadth::Px(px), max: Breadth::Px(px) },
+        Err(_) => flex(1.0),
+    }
+}
+
+/// A `<frameset>` is a grid: one track per pane from `cols` (or `rows`), and a thin one for each
+/// `<splitter>` between them.
+fn frameset_tracks(doc: &Document, styles: &StyleMap, id: NodeId, ts: &mut Style) {
+    let (list, vertical) = match (doc.node(id).attr("cols"), doc.node(id).attr("rows")) {
+        (Some(c), _) => (c, false),
+        (None, Some(r)) => (r, true),
+        _ => return,
+    };
+    let entries: Vec<&str> = list.split(',').collect();
+    let mut pane = 0;
+    let tracks: Vec<_> = kids(doc, styles, id)
+        .into_iter()
+        .filter(|k| doc.node(*k).tag().is_some())
+        .map(|k| {
+            let t = if doc.node(k).tag() == Some("splitter") {
+                Track { min: Breadth::Px(SPLITTER), max: Breadth::Px(SPLITTER) }
+            } else {
+                pane += 1;
+                entries.get(pane - 1).map_or(frameset_track("*"), |e| frameset_track(e))
+            };
+            taffy::GridTemplateComponent::Single(track_fn(t))
+        })
+        .collect();
+    if vertical {
+        ts.grid_template_rows = tracks;
+    } else {
+        ts.grid_template_columns = tracks;
+    }
+}
+
 fn track_fn(t: Track) -> taffy::TrackSizingFunction {
     let min = match t.min {
         Breadth::Px(p) => taffy::MinTrackSizingFunction::length(p),
@@ -3141,6 +3219,22 @@ mod tests {
         };
         assert_eq!(find("a"), Rect { x: 0.0, y: 0.0, width: 100.0, height: 20.0 });
         assert_eq!(find("b").x, 110.0);
+    }
+
+    #[test]
+    fn full_height_root_fills_the_viewport_and_still_scrolls() {
+        let doc = Document::parse(
+            r#"<html style="height:100%"><body style="margin:0;height:100%;display:flex;flex-direction:column">
+                 <div style="height:30px"></div><div id="a" style="flex:1"></div></body></html>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 200.0, 300.0);
+        let a = doc.find(|n| n.attr("id") == Some("a")).unwrap();
+        assert_eq!(tree.boxes.iter().find(|b| b.node == a).unwrap().rect.height, 270.0);
+        let tall = Document::parse(r#"<html style="height:100%"><body style="margin:0;height:100%"><div style="height:900px"></div></body></html>"#);
+        let tree = layout(&tall, &compute_styles(&tall), &mut text, 200.0, 300.0);
+        assert_eq!(tree.content_height, 900.0);
     }
 
     fn text_boxes(tree: &LayoutTree) -> Vec<&LayoutBox> {

@@ -83,7 +83,11 @@ impl Document {
             NodeData::Document => NodeKind::Document,
             NodeData::Element { name, attrs, .. } => NodeKind::Element {
                 // `rewrite_frames` hid `<frame>` from the HTML parser behind this name.
-                tag: if &*name.local == "nile-frame" { "frame".to_string() } else { name.local.to_string() },
+                tag: match &*name.local {
+                    "nile-frame" => "frame".to_string(),
+                    "nile-frameset" => "frameset".to_string(),
+                    other => other.to_string(),
+                },
                 attrs: attrs
                     .borrow()
                     .iter()

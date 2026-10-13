@@ -170,10 +170,45 @@ fn comparison(term: &str) -> bool {
     }
 }
 
+/// `<splitter>` and `<splitter/>` become `<splitter></splitter>`.
+fn close_splitters(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut at = 0;
+    while let Some(i) = lower[at..].find("<splitter").map(|i| i + at) {
+        let after = i + "<splitter".len();
+        let delimited = html.as_bytes().get(after).is_some_and(|b| b.is_ascii_whitespace() || *b == b'/' || *b == b'>');
+        let Some(end) = tag_end(html, after).filter(|_| delimited) else {
+            out.push_str(&html[at..after]);
+            at = after;
+            continue;
+        };
+        out.push_str(&html[at..i]);
+        out.push_str("<splitter");
+        out.push_str(html[after..end].trim_end().trim_end_matches('/'));
+        out.push_str("></splitter>");
+        at = end + 1;
+        let rest = &lower[at..];
+        let trimmed = rest.trim_start();
+        if trimmed.starts_with("</splitter>") {
+            at += rest.len() - trimmed.len() + "</splitter>".len();
+        }
+    }
+    out.push_str(&html[at..]);
+    out
+}
+
 /// The HTML parser drops `<frame>` outside a `<frameset>`, but Sciter allows it wherever a block
 /// goes (and `<frame src=...>` needs no closing tag). So `<frame ...>` becomes
 /// `<nile-frame ...></nile-frame>`, which `Document::parse` turns back into a `frame` element.
 pub(crate) fn rewrite_frames(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    if !lower.contains("<frame") && !lower.contains("<splitter") {
+        return html.to_string();
+    }
+    // `<frameset>` is dropped by the parser in a body too; `<splitter/>` would swallow its siblings.
+    let html = &html.replace("<frameset", "<nile-frameset").replace("</frameset", "</nile-frameset").replace("<FRAMESET", "<nile-frameset").replace("</FRAMESET", "</nile-frameset");
+    let html = &close_splitters(html);
     let lower = html.to_ascii_lowercase();
     if !lower.contains("<frame") {
         return html.to_string();
@@ -240,8 +275,14 @@ mod tests {
     #[test]
     fn frames_become_closed_custom_elements() {
         assert_eq!(rewrite_frames("<div><frame src=a.htm><p>x</p></div>"), "<div><nile-frame src=a.htm></nile-frame><p>x</p></div>");
-        assert_eq!(rewrite_frames("<FRAME src='a'/> </frame><frameset>"), "<nile-frame src='a'></nile-frame><frameset>");
+        assert_eq!(rewrite_frames("<FRAME src='a'/> </frame><frameset>"), "<nile-frame src='a'></nile-frame><nile-frameset>");
         assert_eq!(rewrite_frames("<frame src=a></frame>z"), "<nile-frame src=a></nile-frame>z");
+    }
+
+    #[test]
+    fn framesets_and_splitters_survive_the_parser() {
+        assert_eq!(rewrite_frames("<frameset cols='1,*'><div></div><splitter/><frame src=a></frameset>"), "<nile-frameset cols='1,*'><div></div><splitter></splitter><nile-frame src=a></nile-frame></nile-frameset>");
+        assert_eq!(rewrite_frames("<splitter></splitter>"), "<splitter></splitter>");
     }
 
     #[test]

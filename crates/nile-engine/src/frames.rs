@@ -10,6 +10,24 @@ use skia_safe::{images, AlphaType, ColorType, Data, ImageInfo, Rect};
 
 use crate::{ModifiersState, Page};
 
+/// A splitter being dragged: the two panes on either side and their sizes when it began.
+pub struct SplitDrag {
+    frameset: NodeId,
+    /// Positions of the two panes in the frameset's pane list (splitters not counted).
+    panes: (usize, usize),
+    vertical: bool,
+    start: f32,
+    sizes: (f32, f32),
+}
+
+/// What a nested page needs to know about being in a frame.
+pub struct Embed {
+    /// Where `window.parent.postMessage` goes.
+    pub outbox: Rc<RefCell<Vec<String>>>,
+    /// The frame's `content-style` stylesheet, appended after the document's own.
+    pub css: Option<String>,
+}
+
 /// One frame element's sub-document.
 pub struct FrameSlot {
     pub page: Box<Page>,
@@ -46,6 +64,62 @@ fn is_frame(tag: Option<&str>) -> bool {
 }
 
 impl Page {
+    /// The element children of a frameset, in order, and which of them are splitters.
+    fn frameset_children(&self, frameset: NodeId) -> Vec<(NodeId, bool)> {
+        let doc = self.doc.borrow();
+        doc.node(frameset)
+            .children
+            .iter()
+            .filter(|c| doc.node(**c).tag().is_some())
+            .map(|&c| (c, doc.node(c).tag() == Some("splitter")))
+            .collect()
+    }
+
+    /// A press on a `<splitter>` starts resizing the panes next to it.
+    pub(crate) fn splitter_press(&mut self) -> bool {
+        let Some(target) = self.interaction().hover else { return false };
+        let Some((frameset, vertical)) = ({
+            let doc = self.doc.borrow();
+            doc.node(target).parent.filter(|p| doc.node(*p).tag() == Some("frameset")).filter(|_| doc.node(target).tag() == Some("splitter")).map(|p| (p, doc.node(p).attr("cols").is_none()))
+        }) else {
+            return false;
+        };
+        let kids = self.frameset_children(frameset);
+        let Some(at) = kids.iter().position(|(c, _)| *c == target) else { return false };
+        let (Some(before), Some(after)) = (kids[..at].iter().rposition(|(_, s)| !s), kids[at..].iter().position(|(_, s)| !s)) else { return false };
+        let pane_index = |k: usize| kids[..=k].iter().filter(|(_, s)| !s).count() - 1;
+        let (a, b) = (kids[before].0, kids[at + after].0);
+        let (Some((x, y)), size) = (self.pointer, |p: &mut Page, n: NodeId| p.view.borrow_mut().layout().node_rect(n).map(|r| if vertical { r.height } else { r.width })) else { return false };
+        let sizes = (size(self, a).unwrap_or(0.0), size(self, b).unwrap_or(0.0));
+        let scroll = self.view.borrow().scroll_y;
+        self.splitter_drag = Some(SplitDrag { frameset, panes: (pane_index(before), pane_index(at + after)), vertical, start: if vertical { y + scroll } else { x }, sizes });
+        true
+    }
+
+    /// Move the splitter with the pointer: the pane before it grows by what the pane after loses.
+    pub(crate) fn splitter_drag_to(&mut self, x: f32, y: f32) -> bool {
+        let Some(d) = &self.splitter_drag else { return false };
+        let at = if d.vertical { y + self.view.borrow().scroll_y } else { x };
+        let total = d.sizes.0 + d.sizes.1;
+        let first = (d.sizes.0 + at - d.start).clamp(24.0_f32.min(total / 2.0), (total - 24.0).max(total / 2.0));
+        let (frameset, panes, vertical) = (d.frameset, d.panes, d.vertical);
+        let attr = if vertical { "rows" } else { "cols" };
+        let mut entries: Vec<String> = self.doc.borrow().node(frameset).attr(attr).unwrap_or("").split(',').map(|e| e.trim().to_string()).collect();
+        let count = self.frameset_children(frameset).iter().filter(|(_, s)| !s).count();
+        entries.resize(count, "*".to_string());
+        entries[panes.0] = format!("{}px", first.round());
+        if !entries[panes.1].ends_with('*') {
+            entries[panes.1] = format!("{}px", (total - first).round());
+        }
+        let joined = entries.join(",");
+        if self.doc.borrow().node(frameset).attr(attr) == Some(joined.as_str()) {
+            return false;
+        }
+        self.doc.borrow_mut().set_attr(frameset, attr, &joined);
+        self.sync();
+        true
+    }
+
     /// Find frame elements, load or drop their documents and refresh their rectangles. Cheap when
     /// the page has no frames: the document is only scanned after it changed.
     pub fn update_frames(&mut self) {
@@ -71,7 +145,7 @@ impl Page {
         let known = self.frames.borrow().known.clone();
         let mut created = Vec::new();
         for id in known {
-            let (source, border, pad) = {
+            let (source, style_url, border, pad) = {
                 let doc = self.doc.borrow();
                 let v = self.view.borrow();
                 let s = v.styles.get(id);
@@ -80,7 +154,7 @@ impl Page {
                     Some(html) => FrameSource::Html(html.to_string(), node.attr("nile-base").map(str::to_string)),
                     None => FrameSource::File(node.attr("src").unwrap_or("").to_string()),
                 };
-                (source, s.border_width, s.padding)
+                (source, node.attr("content-style").map(str::to_string), s.border_width, s.padding)
             };
             let rect = self.view.borrow_mut().layout().node_rect_scrolled(id, &offsets);
             let Some(r) = rect else {
@@ -90,14 +164,15 @@ impl Page {
             let (x, y) = (r.x + border.left + pad.left, r.y - scroll + border.top + pad.top);
             let w = (r.width - border.left - border.right - pad.left - pad.right).max(0.0);
             let h = (r.height - border.top - border.bottom - pad.top - pad.bottom).max(0.0);
-            let key = source.key();
+            let key = format!("{}|{}", source.key(), style_url.as_deref().unwrap_or(""));
             let existing = self.frames.borrow().slots.get(&id).map(|s| s.src.clone());
             if existing.as_deref() != Some(key.as_str()) {
                 if existing.is_none() && matches!(&source, FrameSource::File(f) if f.is_empty()) {
                     continue;
                 }
                 let outbox = Rc::new(RefCell::new(Vec::new()));
-                let mut page = self.load_frame_document(&source, (w, h), outbox.clone());
+                let css = style_url.as_deref().and_then(|u| std::fs::read_to_string(self.resolve_path(u)).ok());
+                let mut page = self.load_frame_document(&source, (w, h), Embed { outbox: outbox.clone(), css });
                 page.clipboard = Box::new(crate::MemoryClipboard::default());
                 self.frames.borrow_mut().slots.insert(id, FrameSlot { page: Box::new(page), src: key, rect: (x, y, w, h), outbox, buf: Vec::new() });
                 created.push(id);
@@ -115,17 +190,22 @@ impl Page {
         }
     }
 
-    fn load_frame_document(&self, source: &FrameSource, viewport: (f32, f32), outbox: Rc<RefCell<Vec<String>>>) -> Page {
-        let dir = self.path.parent().map(PathBuf::from).unwrap_or_default();
-        let resolve = |src: &str| {
-            let rel = src.strip_prefix("file://").unwrap_or(src);
-            if std::path::Path::new(rel).is_absolute() { PathBuf::from(rel) } else { dir.join(rel) }
-        };
+    /// A path from the document, relative to the page's folder.
+    fn resolve_path(&self, src: &str) -> PathBuf {
+        let rel = src.strip_prefix("file://").unwrap_or(src);
+        if std::path::Path::new(rel).is_absolute() {
+            PathBuf::from(rel)
+        } else {
+            self.path.parent().map(PathBuf::from).unwrap_or_default().join(rel)
+        }
+    }
+
+    fn load_frame_document(&self, source: &FrameSource, viewport: (f32, f32), embed: Embed) -> Page {
         match source {
-            FrameSource::File(src) => Page::load_embedded(resolve(src), viewport, outbox),
+            FrameSource::File(src) => Page::load_embedded(self.resolve_path(src), viewport, embed),
             FrameSource::Html(html, base) => {
-                let base = base.as_deref().map(resolve).unwrap_or_else(|| dir.clone());
-                Page::html_embedded(html, base, viewport, outbox)
+                let base = base.as_deref().map(|b| self.resolve_path(b)).unwrap_or_else(|| self.path.parent().map(PathBuf::from).unwrap_or_default());
+                Page::html_embedded(html, base, viewport, embed)
             }
         }
     }
