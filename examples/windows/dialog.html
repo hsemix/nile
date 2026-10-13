@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><title>Name</title>
+<style>
+  body { font: 15px sans-serif; margin: 0; padding: 18px; }
+  input { width: 100%; padding: 4px; box-sizing: border-box; margin: 8px 0 14px; }
+  button { padding: 4px 14px; margin-right: 6px; }
+</style></head>
+<body>
+  <label for="n">Your name</label>
+  <input id="n">
+  <button id="ok">OK</button><button id="cancel">Cancel</button>
+  <script>
+    const input = document.$('#n');
+    input.value = (Window.this.parameters && Window.this.parameters.initial) || '';
+    input.focus();
+    document.$('#ok').on('click', () => Window.this.close(input.value));
+    document.$('#cancel').on('click', () => Window.this.close(null));
+  </script>
+</body></html>

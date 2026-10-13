@@ -563,9 +563,19 @@ pub unsafe extern "C" fn nile_view_window_config(view: *mut NileView, desktop_wi
 #[no_mangle]
 pub unsafe extern "C" fn nile_view_take_window_command(view: *mut NileView, out: *mut NileWindowCommand) -> bool {
     let none = NileWindowCommand { kind: NileWindowCommandKind::None, a: 0.0, b: 0.0 };
+    // TODO: `new Window()` and window messages (`Open`, `Post`, `CloseId`, `FocusId`) have no C
+    // equivalent yet; a C host that wants several windows needs calls to take and answer them.
+    // They are dropped here rather than stalling the queue.
     let cmd = view_ref(view).and_then(|v| {
         let mut view = v.page.view.borrow_mut();
-        (!view.window_requests.is_empty()).then(|| view.window_requests.remove(0))
+        while !view.window_requests.is_empty() {
+            match view.window_requests.remove(0) {
+                WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) => {}
+                WindowCommand::CloseWith(_) => return Some(WindowCommand::Close),
+                other => return Some(other),
+            }
+        }
+        None
     });
     let (found, result) = match cmd {
         None => (false, none),
@@ -580,6 +590,8 @@ pub unsafe extern "C" fn nile_view_take_window_command(view: *mut NileView, out:
                 WindowCommand::Fullscreen(on) => (K::Fullscreen, f32::from(on), 0.0),
                 WindowCommand::MoveTo(x, y) => (K::MoveTo, x, y),
                 WindowCommand::ResizeTo(w, h) => (K::ResizeTo, w, h),
+                // Filtered out above.
+                WindowCommand::CloseWith(_) | WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) => (K::None, 0.0, 0.0),
             };
             (true, NileWindowCommand { kind, a, b })
         }

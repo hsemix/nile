@@ -39,10 +39,96 @@ fn prelude() -> String {
     include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", WEB)
 }
 
+/// Window ids are unique within the process (the main window, then each `new Window()`).
+static NEXT_WINDOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+thread_local! {
+    /// `Window.share`: JSON text by key, shared by the windows of one thread.
+    static SHARE: RefCell<std::collections::HashMap<String, String>> = RefCell::default();
+}
+
+pub fn next_window_id() -> u32 {
+    NEXT_WINDOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A window a script asked for with `new Window({...})` or `Window.this.modal({...})`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowSpec {
+    pub id: u32,
+    /// The window that asked.
+    pub opener: u32,
+    /// Shown as a dialog: its opener is blocked until it closes.
+    pub modal: bool,
+    /// `type`, `url`, `html`, `caption`, `x`, `y`, `width`, `height`, `alignment`, `state`, `parent`
+    /// and the rest, as the script wrote them (`parameters` is JSON text).
+    pub fields: Vec<(String, String)>,
+}
+
+impl WindowSpec {
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.fields.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    }
+}
+
+/// What a window knows about how it was opened (`Window.this.parent`, `parameters`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WindowInfo {
+    pub id: u32,
+    pub opener: Option<u32>,
+    pub modal: bool,
+    /// The `parameters` the opener passed, as JSON text.
+    pub parameters: String,
+}
+
+/// `a=1&b=%20x` as pairs.
+pub fn parse_fields(query: &str) -> Vec<(String, String)> {
+    let decode = |s: &str| {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'%' if i + 2 < bytes.len() => {
+                    if let Some(v) = std::str::from_utf8(&bytes[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                        out.push(v);
+                        i += 3;
+                        continue;
+                    }
+                    out.push(b'%');
+                    i += 1;
+                }
+                b'+' => {
+                    out.push(b' ');
+                    i += 1;
+                }
+                b => {
+                    out.push(b);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    query.split('&').filter(|p| !p.is_empty()).map(|p| match p.split_once('=') {
+        Some((k, v)) => (decode(k), decode(v)),
+        None => (decode(p), String::new()),
+    }).collect()
+}
+
 /// Something a script asks the host window to do.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowCommand {
     Close,
+    /// Close this window; the text is the value for the opener's `modal()` (JSON).
+    CloseWith(String),
+    /// Open another window.
+    Open(WindowSpec),
+    /// Deliver `json` to window `to` as a `message` event.
+    Post { to: u32, json: String },
+    /// Close another window by id.
+    CloseId(u32),
+    /// Bring another window to the front.
+    FocusId(u32),
     Minimize,
     Maximize,
     /// Back from maximized, minimized or full screen.
@@ -99,6 +185,10 @@ pub trait Environment {
     fn clipboard_request(&self, _kind: &str) {}
     /// Close, move, resize, ... the host window. Embedders without a window ignore it.
     fn window_command(&self, _cmd: WindowCommand) {}
+    /// How this window was opened.
+    fn window_info(&self) -> WindowInfo {
+        WindowInfo::default()
+    }
     /// A native dialog (`open`, `save`, `folder`, `message`) with four text arguments; the
     /// answer as text, "" when cancelled, `None` when the host has no dialogs.
     fn dialog(&self, _kind: &str, _args: [&str; 4]) -> Option<String> {
@@ -463,6 +553,42 @@ fn install_natives(
     native!("dialog", {
         let env = env.clone();
         move |kind: String, a: String, b: String, c: String, d: String| -> Option<String> { env.dialog(&kind, [&a, &b, &c, &d]) }
+    });
+    native!("windowInfo", {
+        let env = env.clone();
+        move || -> String {
+            let i = env.window_info();
+            format!("{}\t{}\t{}\t{}", i.id, i.opener.map_or(String::new(), |o| o.to_string()), i32::from(i.modal), i.parameters)
+        }
+    });
+    // `new Window(...)`: ask for a window and get its id at once.
+    native!("windowOpen", {
+        let env = env.clone();
+        move |query: String, modal: bool| -> u32 {
+            let id = next_window_id();
+            let opener = env.window_info().id;
+            env.window_command(WindowCommand::Open(WindowSpec { id, opener, modal, fields: parse_fields(&query) }));
+            id
+        }
+    });
+    native!("windowClose", {
+        let env = env.clone();
+        move |id: u32, value: String| {
+            let me = env.window_info().id;
+            env.window_command(if id == 0 || id == me { WindowCommand::CloseWith(value) } else { WindowCommand::CloseId(id) });
+        }
+    });
+    native!("windowPost", {
+        let env = env.clone();
+        move |to: u32, json: String| env.window_command(WindowCommand::Post { to, json })
+    });
+    native!("shareGet", move |k: String| -> Option<String> { SHARE.with(|s| s.borrow().get(&k).cloned()) });
+    native!("shareSet", move |k: String, v: String| { SHARE.with(|s| s.borrow_mut().insert(k, v)); });
+    native!("shareDel", move |k: String| { SHARE.with(|s| s.borrow_mut().remove(&k)); });
+    native!("shareKeys", move || -> String { SHARE.with(|s| s.borrow().keys().cloned().collect::<Vec<_>>().join("\n")) });
+    native!("windowFocus", {
+        let env = env.clone();
+        move |id: u32| env.window_command(WindowCommand::FocusId(id))
     });
     native!("windowRect", {
         let env = env.clone();

@@ -1,0 +1,37 @@
+<!doctype html>
+<html><head><title>Windows</title>
+<style>
+  body { font: 15px sans-serif; margin: 0; padding: 16px; }
+  button { margin: 0 6px 8px 0; padding: 4px 10px; }
+  #log { font-family: monospace; background: #f3f5f9; border: 1px solid #ccd; padding: 8px; min-height: 90px; white-space: pre-wrap; }
+</style></head>
+<body>
+  <h3>Several windows</h3>
+  <button id="open">New window</button>
+  <button id="tool">Tool window</button>
+  <button id="dialog">Modal dialog</button>
+  <button id="msg">Message the last window</button>
+  <button id="share">Window.share</button>
+  <div id="log">…</div>
+  <script>
+    const log = document.$('#log');
+    const say = (t) => { log.text = (log.text === '…' ? '' : log.text + '\n') + t; };
+    let last = null, n = 0;
+    document.$('#open').on('click', () => {
+      last = new Window({ url: 'windows/child.html', width: 380, height: 260, caption: 'Child ' + (++n), parameters: { n } });
+      last.on('close', (e) => say('child closed with ' + JSON.stringify(e.value)));
+    });
+    document.$('#tool').on('click', () => {
+      last = new Window({ url: 'windows/child.html', type: Window.TOOL_WINDOW, width: 300, height: 200, alignment: -9, caption: 'Tool', parameters: { n: ++n } });
+    });
+    document.$('#dialog').on('click', async () => {
+      const answer = await Window.this.modal({ url: 'windows/dialog.html', width: 360, height: 200, caption: 'Name?', parameters: { initial: 'Ada' } });
+      say('dialog answered ' + JSON.stringify(answer));
+    });
+    document.$('#msg').on('click', () => { if (last && last.isValid) last.postMessage({ hello: 'from ' + document.title }); else say('open a window first'); });
+    document.$('#share').on('click', () => { Window.share.clicks = (Window.share.clicks || 0) + 1; say('Window.share.clicks = ' + Window.share.clicks); });
+    window.addEventListener('message', (e) => say('message: ' + JSON.stringify(e.data)));
+    Window.this.on('closerequest', (e) => { if (!confirmed && Window.all.length > 1) { say('close the other windows first'); e.preventDefault(); } });
+    let confirmed = false;
+  </script>
+</body></html>

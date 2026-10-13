@@ -946,14 +946,14 @@
   });
 
   // ---- Window: native dialogs -----------------------------------------------------
-  // Shapes follow docs.sciter.com/docs/DOM/Window. `Window.this` is this document's window;
-  // `new Window(...)` and `modal({...})` with a document aren't supported yet.
+  // Shapes follow docs.sciter.com/docs/DOM/Window. `Window.this` is this document's window and
+  // `new Window({ url, ... })` opens another one (the shell creates it; see `WindowCommand::Open`).
   const dialog = (kind, a = "", b = "", c = "", d = "") => N.dialog(kind, String(a), String(b), String(c), String(d));
   const textOf = (n) => (Array.isArray(n) ? n.map(textOf).join("") : n == null || typeof n === "boolean" ? "" : typeof n === "object" ? "" : String(n));
   class Window {
-    constructor() { throw new Error("new Window() is not supported yet: Nile has one window per page (use <frame> or a popup)"); }
+    constructor(params = {}) { openWindow(this, params, false); }
     static get this() { return thisWindow; }
-    static get all() { return [thisWindow]; }
+    static get all() { return [thisWindow, ...[...known.values()].filter((w) => w._valid && w !== thisWindow)]; }
     static get share() { return shared; }
     // selectFile({ mode: "open" | "open-multiple" | "save", filter, extension, caption, path })
     selectFile(params = {}) {
@@ -975,6 +975,13 @@
     // one can't block the script, so it returns a Promise (`await` works for both). `native` forces the
     // system box. What Sciter returns isn't documented.
     modal(arg) {
+      // modal({ url, ... }) opens a dialog window; it returns a Promise of what the dialog passes to
+      // `window.close(value)` (the script can't block, unlike Sciter's).
+      if (arg && !Array.isArray(arg) && typeof arg === "object") {
+        const w = Object.create(Window.prototype);
+        openWindow(w, { type: Window.DIALOG_WINDOW, ...arg }, true);
+        return w.closed;
+      }
       const vnode = Array.isArray(arg) && typeof arg[0] === "string" ? arg : Array.isArray(arg) ? arg.find((v) => Array.isArray(v)) : null;
       if (!vnode) throw new Error("Window.modal() supports the message boxes <info>, <alert>, <error> and <question> only");
       const [tag, attrs, kids] = vnode;
@@ -988,11 +995,105 @@
     }
     get messageBoxes() { return boxMode; }
     set messageBoxes(v) { boxMode = v === "inline" ? "inline" : "native"; }
-    get isActive() { return true; }
-    close(value) { N.windowCommand("close", 0, 0); return true; }
-    get caption() { return document.title; }
-    set caption(v) { document.title = String(v); }
+    get isActive() { return this === thisWindow ? active : this._valid; }
+    get isValid() { return this === thisWindow || this._valid; }
+    // Asks the window to close; a `closerequest` listener may cancel it. `value` is what the opener's
+    // `modal()` resolves with.
+    close(value) { N.windowClose(this === thisWindow ? 0 : this._id, JSON.stringify(value === undefined ? null : value)); return true; }
+    focus() { N.windowFocus(this === thisWindow ? 0 : this._id); }
+    postMessage(data) { N.windowPost(this === thisWindow ? 0 : this._id, JSON.stringify(data) ?? "null"); }
+    get parent() { return this === thisWindow ? (info().opener === undefined ? null : refWindow(info().opener)) : this._parent || null; }
+    get parameters() { return this === thisWindow ? info().parameters : this._parameters; }
+    get caption() { return this === thisWindow ? document.title : this._caption; }
+    set caption(v) { if (this === thisWindow) document.title = String(v); }
+    // Events: `closerequest` (preventDefault() keeps it open) and `activate` on `Window.this`;
+    // `close` on a window you opened.
+    on(type, fn) { ((this._listeners ||= {})[type] ||= []).push(fn); return this; }
+    off(type, fn) { const l = this._listeners && this._listeners[type]; if (l) l.splice(l.indexOf(fn) >>> 0, 1); return this; }
+    addEventListener(type, fn) { return this.on(type, fn); }
+    removeEventListener(type, fn) { return this.off(type, fn); }
   }
+  Object.assign(Window, {
+    POPUP_WINDOW: 1, TOOL_WINDOW: 2, CHILD_WINDOW: 3, FRAME_WINDOW: 4, DIALOG_WINDOW: 5,
+    WINDOW_SHOWN: 1, WINDOW_MINIMIZED: 2, WINDOW_MAXIMIZED: 3, WINDOW_HIDDEN: 4, WINDOW_FULL_SCREEN: 5,
+    CLOSE_BY_CHROME: 0, CLOSE_BY_CODE: 1, CLOSE_BY_LOAD: 2,
+  });
+  const TYPES = ["", "popup", "tool", "child", "frame", "dialog"], STATES = ["", "shown", "minimized", "maximized", "hidden", "fullscreen"];
+  // How this window was opened: its id, the window that opened it, and its `parameters`.
+  let infoCache = null;
+  const info = () => {
+    if (!infoCache) {
+      const [id, opener, , parameters] = String(N.windowInfo() || "").split("\t");
+      let params;
+      try { params = parameters ? JSON.parse(parameters) : undefined; } catch { params = undefined; }
+      infoCache = { id: +id || 0, opener: opener ? +opener : undefined, parameters: params };
+    }
+    return infoCache;
+  };
+  const known = new Map();
+  let active = true;
+  // A handle for another window by id (messages come from it, `parent` returns it).
+  const refWindow = (id) => {
+    let w = known.get(id);
+    if (!w) {
+      w = Object.create(Window.prototype);
+      Object.assign(w, { _id: id, _valid: true, _listeners: {} });
+      w.closed = new Promise((resolve) => { w._resolve = resolve; });
+      known.set(id, w);
+    }
+    return w;
+  };
+  function openWindow(w, p, modal) {
+    const q = [];
+    const put = (k, v) => { if (v !== undefined && v !== null) q.push(encodeURIComponent(k) + "=" + encodeURIComponent(String(v))); };
+    for (const k of ["url", "html", "caption", "x", "y", "width", "height", "alignment", "screen", "client"]) put(k, p[k]);
+    put("type", TYPES[p.type] || (typeof p.type === "string" ? p.type : "frame"));
+    put("state", STATES[p.state] || (typeof p.state === "string" ? p.state : undefined));
+    put("parent", p.parent && p.parent._id !== undefined ? p.parent._id : undefined);
+    if (p.parameters !== undefined) put("parameters", JSON.stringify(p.parameters));
+    const id = N.windowOpen(q.join("&"), !!modal);
+    Object.assign(w, { _id: id, _valid: true, _listeners: {}, _parent: thisWindow, _parameters: p.parameters, _caption: p.caption });
+    w.closed = new Promise((resolve) => { w._resolve = resolve; });
+    known.set(id, w);
+    return w;
+  }
+  const fireWindow = (w, type, props) => {
+    const e = { type, defaultPrevented: false, ...props, preventDefault() { e.defaultPrevented = true; } };
+    for (const fn of [...((w._listeners && w._listeners[type]) || [])]) fn.call(w, e);
+    return e;
+  };
+  Object.defineProperties(g, {
+    // From the shell: the user (or `close()`) wants this window closed.
+    __closeRequest: { value: (reason) => !fireWindow(thisWindow, "closerequest", { reason }).defaultPrevented },
+    __windowActivate: { value: (on) => { active = !!on; fireWindow(thisWindow, "activate", { reason: on ? 1 : 0 }); } },
+    __windowMessage: {
+      value(from, data) {
+        const e = new Event("message");
+        e.data = data; e.origin = ""; e.source = refWindow(from);
+        g.dispatchEvent(e);
+      },
+    },
+    // A window this one opened has closed.
+    __windowClosed: {
+      value(id, value) {
+        const w = known.get(id);
+        if (!w) return;
+        w._valid = false;
+        fireWindow(w, "close", { value });
+        w._resolve(value);
+      },
+    },
+  });
+  // `Window.share`: values shared by every window of the process. They cross as JSON, so only plain
+  // data (no functions or elements) can be stored.
+  const shared = new Proxy({}, {
+    get: (_, k) => { if (typeof k === "symbol") return undefined; const v = N.shareGet(String(k)); return v === undefined ? undefined : JSON.parse(v); },
+    set: (_, k, v) => { N.shareSet(String(k), JSON.stringify(v) ?? "null"); return true; },
+    deleteProperty: (_, k) => { N.shareDel(String(k)); return true; },
+    has: (_, k) => N.shareGet(String(k)) !== undefined,
+    ownKeys: () => String(N.shareKeys() || "").split("\n").filter(Boolean),
+    getOwnPropertyDescriptor: (_, k) => (N.shareGet(String(k)) === undefined ? undefined : { value: JSON.parse(N.shareGet(String(k))), enumerable: true, configurable: true, writable: true }),
+  });
   let boxMode = "native";
   const BOX_ICONS = { info: "i", alert: "!", error: "×", question: "?" };
   // The in-window message box: `.nile-modal` (backdrop) > `.nile-messagebox.<kind>` with a title, a body
@@ -1058,7 +1159,6 @@
       (specs.find((x) => x.isDefault) || specs[0]).el.focus();
     });
   }
-  const shared = {};
   const thisWindow = Object.create(Window.prototype);
   g.Window = Window;
 
