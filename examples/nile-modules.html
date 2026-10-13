@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>@nile and @env</title>
+<style>
+  body { font: 14px sans-serif; margin: 24px; background: #f4f1ea }
+  pre { background: #fff; padding: 12px; line-height: 1.5 }
+</style>
+<pre id="out"></pre>
+<script type="module">
+  import { $, md5, crc32, toBase64, encode, uuid, parseValue, devicePixels, VERSION } from "@nile";
+  import * as env from "@env";
+
+  const lines = [
+    `@nile ${VERSION}  (@sciter is an alias)`,
+    `md5("Nile") = ${md5("Nile")}`,
+    `crc32("Nile") = ${crc32("Nile")}`,
+    `base64 = ${toBase64(encode("Nile"))}`,
+    `uuid = ${uuid()}`,
+    `parseValue = ${JSON.stringify(parseValue("{foo-bar: zap; n: 0xFF; list: [1, 2]}"))}`,
+    `devicePixels("1in") = ${devicePixels("1in")}`,
+    ``,
+    `@env  OS ${env.OS} / ${env.PLATFORM} / ${env.DEVICE}`,
+    `user ${env.userName()} on ${env.machineName()}, ${env.language()}-${env.country()}`,
+    `documents = ${env.path("documents")}`,
+    `drives = ${env.drives().join(", ")}`,
+  ];
+  $("#out").textContent = lines.join("\n");
+</script>

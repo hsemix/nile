@@ -9,6 +9,10 @@ description = "C ABI for the Nile UI engine"
 name = "nile"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
+[features]
+# `fetch`/`XMLHttpRequest` over http(s). Off by default to keep the library small.
+net = ["nile-engine/net"]
+
 [dependencies]
 nile-engine.workspace = true
 nile-script.workspace = true

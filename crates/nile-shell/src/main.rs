@@ -8,6 +8,8 @@
 //!        [--type TEXT]                 type into the focused input ({Backspace}, {Shift+ArrowLeft}, {Cmd+a}, ... for keys)
 //!        [--wait MS]                   let timers run this long before the snapshot
 
+mod dialogs;
+
 use std::{num::NonZeroU32, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 
 use nile_engine::{window, window::{Frame, InitialState, Resizable, WindowConfig}, ModifiersState as Mods, Page, SystemClipboard};
@@ -161,7 +163,18 @@ struct App {
 impl App {
     /// Apply window actions the page asked for, follow `document.title`, and tell scripts where
     /// the window is.
+    /// Answer a click on `<input type=file>` with the system's file chooser.
+    fn sync_files(&mut self) {
+        if let Some(request) = self.page.take_file_request() {
+            let paths = dialogs::pick_files(request.multiple, &request.accept);
+            if !paths.is_empty() {
+                self.page.choose_files(request.node, &paths);
+            }
+        }
+    }
+
     fn sync_window(&mut self) {
+        self.sync_files();
         let Some(window) = self.window.clone() else { return };
         let requests = std::mem::take(&mut self.page.view.borrow_mut().window_requests);
         for cmd in requests {

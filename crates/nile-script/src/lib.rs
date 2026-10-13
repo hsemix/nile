@@ -26,12 +26,17 @@ use rquickjs::{
     CatchResultExt, Context, Ctx, Exception, Function, Module, Object, Runtime,
 };
 
+mod envmod;
 mod jsx;
+mod net;
+
+pub use net::{FetchRequest, FetchResponse, Fetcher, LocalFetcher};
 
 const EDIT: &str = include_str!("edit.js");
+const WEB: &str = include_str!("web.js");
 
 fn prelude() -> String {
-    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT)
+    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", WEB)
 }
 
 /// Something a script asks the host window to do.
@@ -61,6 +66,10 @@ pub trait Environment {
     fn computed_style(&self, node: NodeId, property: &str) -> Option<String>;
     /// Viewport size in CSS px.
     fn viewport(&self) -> (f32, f32);
+    /// Device pixels per logical pixel (`devicePixelRatio`).
+    fn scale(&self) -> f32 {
+        1.0
+    }
     fn scroll_y(&self) -> f32;
     fn scroll_to(&self, y: f32);
     /// Hover/active/focus, for `:hover` etc. in selectors scripts evaluate.
@@ -109,6 +118,10 @@ impl Resolver for FileResolver {
         _attributes: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<String> {
         let path = std::path::Path::new(name);
+        if matches!(name, "@nile" | "@sciter" | "@env") {
+            // `@sciter` is the same module under the name Sciter apps use.
+            return Ok(if name == "@sciter" { "@nile".to_string() } else { name.to_string() });
+        }
         if name.starts_with("./") || name.starts_with("../") {
             // Inline modules are named `page.html#moduleN`; imports resolve from the page's folder.
             let base_file = base.split('#').next().unwrap_or(base);
@@ -150,6 +163,19 @@ impl Loader for FileLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<Module<'js, Declared>> {
+        // Built-in modules are thin wrappers over objects the prelude defines.
+        let builtin = match name {
+            "@nile" => Some(
+                "const m = globalThis.__sciterModule;\nexport const { VERSION, REVISION, QUICKJS_VERSION, setModuleUrlResolver, loadLibrary, parseValue, devicePixels, on, off, once, onGlobalEvent, offGlobalEvent, $, $$, uuid, encode, decode, compress, decompress, toBase64, fromBase64, md5, crc32 } = m;\nconst imp = m.import;\nexport { imp as import };\nexport default m;",
+            ),
+            "@env" => Some(
+                "const m = globalThis.__envModule;\nexport const { language, country, userName, machineName, domainName, arguments: args, launch, home, homeURL, path, pathURL, drives, variable, exec, DEVICE } = m;\nexport { args as arguments };\nexport const OS = m.OS, PLATFORM = m.PLATFORM;\nexport default m;",
+            ),
+            _ => None,
+        };
+        if let Some(source) = builtin {
+            return Module::declare(ctx.clone(), name, source);
+        }
         let source = std::fs::read_to_string(name).map_err(|_| rquickjs::Error::new_loading(name))?;
         let source = jsx::transform(&source).unwrap_or(source);
         Module::declare(ctx.clone(), name, source)
@@ -175,6 +201,9 @@ pub struct ScriptHost {
     log: Arc<Mutex<Vec<String>>>,
     start: Instant,
     host_fns: HostFns,
+    net: net::NetState,
+    observing: Rc<std::cell::Cell<bool>>,
+    storage: Rc<RefCell<Option<std::path::PathBuf>>>,
 }
 
 /// Functions the embedder exposes to scripts as `host.name(...)`: each takes the call's
@@ -215,14 +244,23 @@ fn id_out(id: Option<NodeId>) -> i32 {
     id.map_or(-1, |n| n.0 as i32)
 }
 
+/// State the natives share with the [`ScriptHost`].
+struct Shared {
+    host_fns: HostFns,
+    net: net::NetState,
+    observing: Rc<std::cell::Cell<bool>>,
+    storage: Rc<RefCell<Option<std::path::PathBuf>>>,
+}
+
 fn install_natives(
     ctx: &Ctx<'_>,
     doc: Rc<RefCell<Document>>,
     log: Arc<Mutex<Vec<String>>>,
     start: Instant,
     env: Rc<dyn Environment>,
-    host_fns: HostFns,
+    shared: Shared,
 ) -> rquickjs::Result<()> {
+    let Shared { host_fns, net, observing, storage } = shared;
     let n = Object::new(ctx.clone())?;
 
     macro_rules! native {
@@ -486,6 +524,28 @@ fn install_natives(
     native!("hostHas", {
         move |name: String| host_fns.borrow().contains_key(&name)
     });
+    native!("storageSave", move |json: String| {
+        if let Some(path) = storage.borrow().as_ref() {
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, path)).is_err() {
+                eprintln!("[js] could not save localStorage to {}", path.display());
+            }
+        }
+    });
+    native!("envCall", |op: String, args: Vec<String>| envmod::call(&op, &args));
+    native!("fileSize", |path: String| std::fs::metadata(path).map_or(-1.0, |m| m.len() as f64));
+    native!("scale", {
+        let env = env.clone();
+        move || env.scale()
+    });
+    native!("observing", {
+        let flag = observing.clone();
+        move |on: bool| flag.set(on)
+    });
+    native!("fetchStart", move |id: u32, method: String, url: String, headers: Vec<String>, body: String| {
+        let headers = headers.chunks(2).filter(|c| c.len() == 2).map(|c| (c[0].clone(), c[1].clone())).collect();
+        net.start(id, FetchRequest { method, url, headers, body: net::unb64(&body) });
+    });
     native!("now", move || start.elapsed().as_secs_f64() * 1000.0);
     native!("log", move |level: String, msg: String| {
         match level.as_str() {
@@ -499,6 +559,13 @@ fn install_natives(
     Ok(())
 }
 
+impl Drop for ScriptHost {
+    fn drop(&mut self) {
+        // A change still waiting for its save timer.
+        self.call_global("__storageFlush", |_, f| f.call::<_, ()>(()));
+    }
+}
+
 impl ScriptHost {
     /// A runtime whose `document` is `doc`. Scripts mutate it in place; the
     /// owner compares `doc.version` after each call to see if anything changed.
@@ -509,15 +576,57 @@ impl ScriptHost {
         let log = Arc::new(Mutex::new(Vec::new()));
         let start = Instant::now();
         let host_fns: HostFns = Rc::default();
+        let net = net::NetState::new();
+        let observing: Rc<std::cell::Cell<bool>> = Rc::default();
+        let storage: Rc<RefCell<Option<std::path::PathBuf>>> = Rc::default();
 
         context.with(|ctx| -> rquickjs::Result<()> {
-            install_natives(&ctx, doc, log.clone(), start, env, host_fns.clone())?;
+            install_natives(&ctx, doc, log.clone(), start, env, Shared { host_fns: host_fns.clone(), net: net.clone(), observing: observing.clone(), storage: storage.clone() })?;
             ctx.eval::<(), _>(prelude()).catch(&ctx).map_err(|e| {
                 eprintln!("[js] prelude failed: {e}");
                 rquickjs::Error::Unknown
             })
         })?;
-        Ok(ScriptHost { runtime, context, log, start, host_fns })
+        Ok(ScriptHost { runtime, context, log, start, host_fns, net, observing, storage })
+    }
+
+    /// The loader behind `fetch` and `XMLHttpRequest` (by default: files next to the page and
+    /// `data:` URLs). It runs on a worker thread per request.
+    pub fn set_fetcher(&self, fetcher: Arc<dyn Fetcher>) {
+        *self.net.fetcher.borrow_mut() = fetcher;
+    }
+
+    /// Keep `localStorage` in this file: read now, written shortly after each change and on drop.
+    pub fn set_storage_file(&self, path: impl Into<std::path::PathBuf>) {
+        let path = path.into();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let saved = std::fs::read_to_string(&path).ok();
+        *self.storage.borrow_mut() = Some(path);
+        if let Some(json) = saved {
+            self.call_global("__storageLoad", |_, f| f.call::<_, ()>((json.as_str(),)));
+        }
+    }
+
+    /// Tell `window.location` where the page lives.
+    pub fn set_location(&self, url: &str) {
+        self.call_global("__setLocation", |_, f| f.call::<_, ()>((url,)));
+    }
+
+    /// Some script watches sizes or visibility (`ResizeObserver`, `IntersectionObserver`).
+    pub fn observing(&self) -> bool {
+        self.observing.get()
+    }
+
+    /// Let those observers look at the current layout.
+    pub fn check_observers(&self) {
+        self.call_global("__observeCheck", |_, f| f.call::<_, ()>(()));
+    }
+
+    /// Requests still in flight; the embedder should keep ticking while there are any.
+    pub fn fetches_pending(&self) -> bool {
+        self.net.pending.get() > 0
     }
 
     /// Run promise jobs queued by the last call.
@@ -635,7 +744,25 @@ impl ScriptHost {
             next = f.call::<_, f64>((now,))?;
             Ok(())
         });
-        (next >= 0.0).then(|| Duration::from_secs_f64(next / 1000.0))
+        // Hand finished requests to their promises.
+        for (id, result) in self.net.take_done() {
+            self.call_global("__fetchDone", |_, f| {
+                match &result {
+                    Ok(r) => {
+                        let headers: Vec<String> = r.headers.iter().flat_map(|(k, v)| [k.clone(), v.clone()]).collect();
+                        f.call::<_, ()>((id, r.status, r.status_text.as_str(), r.url.as_str(), headers, net::b64(&r.body), ""))?;
+                    }
+                    Err(e) => f.call::<_, ()>((id, 0u16, "", "", Vec::<String>::new(), "", e.as_str()))?,
+                }
+                Ok(())
+            });
+        }
+        let poll = self.net.pending.get() > 0;
+        match ((next >= 0.0).then(|| Duration::from_secs_f64(next / 1000.0)), poll) {
+            (Some(d), true) => Some(d.min(Duration::from_millis(16))),
+            (None, true) => Some(Duration::from_millis(16)),
+            (d, false) => d,
+        }
     }
 
     /// Everything passed to `console.*` so far.
@@ -779,6 +906,138 @@ mod tests {
     }
 
     #[test]
+    fn web_platform_helpers_work() {
+        let (host, _) = host(r#"<ul id="l"><li>a</li></ul>"#);
+        host.run(
+            r#"
+            console.log(btoa('Hello, World!'), atob('SGVsbG8sIFdvcmxkIQ=='), btoa('ab'), atob('YWI'));
+            const bytes = new TextEncoder().encode('héllo €😀');
+            console.log(bytes.length, new TextDecoder().decode(bytes));
+            const u = new URL('../x/y.html?a=1&b=two%20words#top', 'https://user@Example.com:8080/p/q/r.html');
+            console.log(u.href, u.origin, u.pathname, u.searchParams.get('b'), u.hash, u.host);
+            u.searchParams.set('c', 'a b'); u.searchParams.append('a', '2');
+            console.log(u.search, u.searchParams.getAll('a').join('|'));
+            console.log(new URLSearchParams({ q: 'x y', n: 1 }).toString());
+            const o = { d: new Date(5), m: new Map([[1, { z: [1, 2] }]]), list: [1, { k: 2 }] };
+            o.self = o;
+            const c = structuredClone(o);
+            console.log(c !== o, c.self === c, c.d.getTime(), c.m.get(1).z.length, c.list[1].k);
+            localStorage.setItem('k', 'v'); localStorage.n = 5;
+            console.log(localStorage.getItem('k'), localStorage.n, localStorage.length, sessionStorage.length);
+            console.log(matchMedia('(min-width: 1px)').matches, matchMedia('(max-width: 1px)').matches, matchMedia('(prefers-color-scheme: light)').matches);
+            window.seen = [];
+            const ul = document.getElementById('l');
+            new MutationObserver((recs) => { for (const r of recs) seen.push(r.type + ':' + (r.attributeName || r.addedNodes.length + '/' + r.removedNodes.length)); })
+              .observe(ul, { childList: true, attributes: true, subtree: true });
+            const li = document.createElement('li');
+            ul.appendChild(li);
+            ul.setAttribute('data-x', '1');
+            li.setAttribute('class', 'new');
+            ul.removeChild(li);
+            "#,
+        )
+        .unwrap();
+        host.run("console.log(seen.join(','))").unwrap();
+        let out = host.console_output();
+        assert_eq!(out[0], "SGVsbG8sIFdvcmxkIQ== Hello, World! YWI= ab");
+        assert_eq!(out[1], "14 héllo €😀");
+        assert_eq!(out[2], "https://user@example.com:8080/p/x/y.html?a=1&b=two%20words#top https://example.com:8080 /p/x/y.html two words #top example.com:8080");
+        assert_eq!(out[3], "?a=1&b=two+words&c=a+b&a=2 1|2");
+        assert_eq!(out[4], "q=x+y&n=1");
+        assert_eq!(out[5], "true true 5 2 2");
+        assert_eq!(out[6], "v 5 2 0");
+        assert_eq!(out[7], "true false true");
+        assert_eq!(out[8], "childList:1/0,attributes:data-x,attributes:class,childList:0/1");
+    }
+
+    #[test]
+    fn fetch_and_xhr_load_local_files_and_data_urls() {
+        let dir = std::env::temp_dir().join(format!("nile-fetch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("d.json"), r#"{"n":7,"s":"héllo"}"#).unwrap();
+        let (host, _) = host("<p></p>");
+        host.set_fetcher(Arc::new(LocalFetcher::new(&dir)));
+        host.run(
+            r#"
+            window.out = [];
+            fetch('d.json').then(r => { out.push(r.status + ' ' + r.ok + ' ' + r.headers.get('content-type')); return r.json(); })
+              .then(j => out.push(j.n + j.s));
+            fetch('nope.txt').then(r => out.push(r.status + ' ' + r.ok));
+            fetch('data:text/plain;base64,SGk=').then(r => r.text()).then(t => out.push(t));
+            fetch('https://example.com/').catch(e => out.push('rejected'));
+            const x = new XMLHttpRequest();
+            x.open('GET', 'd.json'); x.responseType = 'json';
+            x.onload = () => out.push('xhr ' + x.status + ' ' + x.response.n);
+            x.send();
+            const ac = new AbortController();
+            fetch('d.json', { signal: ac.signal }).catch(e => out.push('aborted'));
+            ac.abort();
+            "#,
+        )
+        .unwrap();
+        for _ in 0..200 {
+            host.tick();
+            if !host.fetches_pending() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        host.tick();
+        host.run("console.log(out.slice().sort().join('|'))").unwrap();
+        let out = host.console_output();
+        assert_eq!(out[0], "200 true application/json|404 false|7héllo|Hi|aborted|rejected|xhr 200 7");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn local_storage_persists_to_the_chosen_file() {
+        let file = std::env::temp_dir().join(format!("nile-storage-{}", std::process::id())).join("ls.json");
+        let _ = std::fs::remove_file(&file);
+        {
+            let (host, _) = host("<p></p>");
+            host.set_storage_file(&file);
+            host.run("localStorage.setItem('name', 'Nile'); localStorage.n = 2; localStorage.removeItem('n'); localStorage.k = 'é\"x'").unwrap();
+        } // dropping flushes
+        assert_eq!(std::fs::read_to_string(&file).unwrap().replace(' ', ""), r#"{"name":"Nile","k":"é\"x"}"#);
+        let (host, _) = host("<p></p>");
+        host.set_storage_file(&file);
+        host.run("console.log(localStorage.name, localStorage.length, localStorage.getItem('k'))").unwrap();
+        assert_eq!(host.console_output(), vec!["Nile 2 é\"x"]);
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn sciter_and_env_modules_load() {
+        let (host, _) = host(r#"<p id="p" class="a">x</p>"#);
+        host.run_module(
+            "page.html#module1",
+            r##"
+            import { $, $$, md5, crc32, toBase64, fromBase64, uuid, encode, decode, parseValue, devicePixels, VERSION } from "@nile";
+            import * as env from "@env";
+            import sctr, { on } from "@sciter";
+            console.log($("#p").className, $$("p").length, typeof VERSION, typeof on, sctr.crc32 === crc32);
+            console.log(md5("hello"), crc32("hello"), toBase64(encode("Nile")), decode(fromBase64("TmlsZQ==")), uuid().length);
+            console.log(JSON.stringify(parseValue("{foo-bar: zap; n: 0xFF, list: [1, 2n], ok: true; s: 'q'}", 0), (k, v) => typeof v === "bigint" ? v + "n" : v));
+            console.log(devicePixels("1in"), devicePixels(10));
+            console.log(["OSX", "Windows", "Linux"].includes(env.PLATFORM) || env.PLATFORM, env.DEVICE, env.language().length, env.path("home", "x").endsWith("x"), Array.isArray(env.arguments()), env.drives().length > 0);
+            env.variable("NILE_MODULE_TEST", "7");
+            console.log(env.variable("NILE_MODULE_TEST"));
+            env.variable("NILE_MODULE_TEST", null);
+            console.log(JSON.stringify(env.variable("NILE_MODULE_TEST")));
+            "##,
+        )
+        .unwrap();
+        let out = host.console_output();
+        assert_eq!(out[0], "a 1 string function true");
+        assert_eq!(out[1], "5d41402abc4b2a76b9719d911017c592 907060870 TmlsZQ== Nile 36");
+        assert_eq!(out[2], r#"{"foo-bar":"zap","n":255,"list":[1,"2n"],"ok":true,"s":"q"}"#);
+        assert_eq!(out[3], "96 10");
+        assert!(out[4].starts_with("true desktop 2 true true true"), "{}", out[4]);
+        assert_eq!(out[5], "7");
+        assert_eq!(out[6], "\"\"");
+    }
+
+    #[test]
     fn missing_attributes_are_null() {
         let (host, _) = host("<p id='p'></p>");
         host.run("const p = document.getElementById('p'); console.log(p.getAttribute('nope') === null, p.hasAttribute('id'), p.hasAttribute('nope'))").unwrap();
@@ -788,7 +1047,7 @@ mod tests {
     #[test]
     fn selector_errors_throw() {
         let (host, _) = host("<p></p>");
-        host.run("try { document.querySelector('p::marker') } catch (e) { console.log(String(e).includes('SyntaxError')) }")
+        host.run("try { document.querySelector('p::first-line') } catch (e) { console.log(String(e).includes('SyntaxError')) }")
             .unwrap();
         assert_eq!(host.console_output(), vec!["true"]);
     }

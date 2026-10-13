@@ -1,0 +1,89 @@
+<!doctype html>
+<html>
+  <head>
+    <style>
+      body {
+        margin: 0;
+        font: 15px sans-serif;
+        background: #f4f1ea;
+      }
+      .bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 36px;
+        background: #234;
+        color: #fff;
+        padding: 0 16px;
+        line-height: 36px;
+        z-index: 10;
+      }
+      .foot {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 28px;
+        background: #e74;
+        color: #fff;
+        padding: 0 16px;
+        line-height: 28px;
+      }
+      .fab {
+        position: fixed;
+        right: 20px;
+        bottom: 50px;
+        width: 48px;
+        height: 48px;
+        border-radius: 24px;
+        background: #2a7;
+        color: #fff;
+        text-align: center;
+        line-height: 48px;
+        font-size: 24px;
+      }
+      .card {
+        margin: 14px 16px;
+        padding: 14px;
+        background: #fff;
+        border-radius: 6px;
+      }
+      body {
+        padding-top: 36px;
+      }
+      .sticky {
+        position: sticky;
+        top: 36px;
+        background: #fd5;
+        padding: 6px 16px;
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bar">Fixed header (scroll the page)</div>
+    <div class="card">Card 1</div>
+    <div class="card">Card 2</div>
+    <div class="sticky">Sticky heading</div>
+    <div class="card">Card 3</div>
+    <div class="card">Card 4</div>
+    <div class="card">Card 5</div>
+    <div class="card">Card 6</div>
+    <div class="card">Card 7</div>
+    <div class="card">Card 8</div>
+    <div class="card">Card 9</div>
+    <div class="card">Card 10</div>
+    <div class="card">Card 11</div>
+    <div class="foot">Fixed footer</div>
+    <div class="fab">+</div>
+    <script>
+      document
+        .querySelector(".fab")
+        .addEventListener(
+          "click",
+          () => (document.querySelector(".foot").textContent = "FAB clicked"),
+        );
+    </script>
+  </body>
+</html>

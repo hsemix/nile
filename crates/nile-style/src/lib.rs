@@ -26,7 +26,7 @@ use selectors::matching::matches_selector;
 pub use anim::{AnimEvent, AnimValue, AnimationSpec, Animator, Direction, Fill, Timing, TransitionSpec};
 pub use grid::{area_lines, Breadth, GridAutoFlow, GridLine, GridPlace, Track, TrackItem, TrackRepeat};
 pub use gradient::{TransformFn, ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
-pub use parse::{Declaration, Rule, Stylesheet, Value};
+pub use parse::{color_from_hex, Declaration, Rule, Stylesheet, Value};
 use parse::Cx;
 pub use selector::{ElementRef, InteractionState, NileImpl, PseudoClass, PseudoElement, Query};
 
@@ -139,7 +139,8 @@ pub enum UserSelect {
     All,
 }
 
-/// `position`. `Fixed` is laid out like `Absolute` (against the parent, scrolling with the page).
+/// `position`. `Fixed` is laid out against the viewport and stays put when the page scrolls;
+/// `Sticky` is in flow and slides within its parent while the page scrolls past its inset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Position {
     #[default]
@@ -147,6 +148,7 @@ pub enum Position {
     Relative,
     Absolute,
     Fixed,
+    Sticky,
 }
 
 impl Position {
@@ -207,6 +209,10 @@ pub enum Appearance {
     Progress,
     Meter,
     Range,
+    /// `<input type=number>`: up/down spin arrows in the right padding.
+    Spinner,
+    /// `<input type=color>`: a colour swatch in the left padding.
+    Swatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -377,6 +383,8 @@ pub struct ComputedStyle {
     pub checked: bool,
     /// How full a progress bar, meter or slider is (0..=1); `None` for an indeterminate progress.
     pub control_fraction: Option<f32>,
+    /// The colour of an `<input type=color>`.
+    pub swatch: Option<Color>,
     /// A `<meter>` outside its low/high range, drawn in a warning color.
     pub meter_warn: bool,
 
@@ -452,6 +460,8 @@ pub struct ComputedStyle {
     pub text_ellipsis: bool,
     /// `list-style-type`; inherited.
     pub list_style_type: ListStyleType,
+    /// `list-style-position: inside`.
+    pub list_style_inside: bool,
     /// `white-space`; inherited.
     pub white_space: WhiteSpace,
     pub italic: bool,
@@ -491,6 +501,7 @@ impl Default for ComputedStyle {
             overflow_y: OverflowKind::Visible,
             checked: false,
             control_fraction: None,
+            swatch: None,
             meter_warn: false,
             flex_direction: FlexDirection::Row,
             flex_wrap: false,
@@ -542,6 +553,7 @@ impl Default for ComputedStyle {
             text_align: TextAlign::Start,
             white_space: WhiteSpace::Normal,
             list_style_type: ListStyleType::Disc,
+            list_style_inside: false,
             text_ellipsis: false,
             italic: false,
             underline: false,
@@ -616,6 +628,8 @@ impl ComputedStyle {
                 Appearance::Progress => "progress",
                 Appearance::Meter => "meter",
                 Appearance::Range => "range",
+                Appearance::Spinner => "spinner",
+                Appearance::Swatch => "swatch",
             }
             .into(),
             "box-sizing" => if self.border_box { "border-box" } else { "content-box" }.into(),
@@ -698,6 +712,7 @@ impl ComputedStyle {
             text_align: parent.text_align,
             white_space: parent.white_space,
             list_style_type: parent.list_style_type,
+            list_style_inside: parent.list_style_inside,
             italic: parent.italic,
             // TODO: decorations aren't really inherited in CSS; they propagate
             // to inline descendants, which this approximates.
@@ -795,6 +810,9 @@ input[type=radio] { border-radius: 7px; appearance: radio }
 progress { display: inline-block; width: 160px; height: 16px; margin: 2px; border: 0; padding: 0; background: transparent; appearance: progress }
 meter { display: inline-block; width: 80px; height: 16px; margin: 2px; border: 0; padding: 0; background: transparent; appearance: meter }
 input[type=range] { width: 129px; height: 16px; min-height: 0; margin: 2px; padding: 0; border: 0; background: transparent; appearance: range }
+input[type=file] { width: auto; background: #efefef; text-align: left; cursor: default }
+input[type=number] { padding-right: 20px; appearance: spinner }
+input[type=color] { width: 86px; padding-left: 30px; appearance: swatch }
 input[type=checkbox]:checked, input[type=radio]:checked { background: #1d4ed8; border-color: #1d4ed8; color: #ffffff }
 input[type=button], input[type=submit], input[type=reset] { width: auto; background: #efefef }
 "#;
@@ -811,6 +829,8 @@ pub struct StyleMap {
     pseudo: HashMap<(NodeId, PseudoElement), NodeId>,
     origins: HashMap<NodeId, NodeId>,
     contents: HashMap<NodeId, String>,
+    /// `::marker` styles of list items that have one.
+    markers: HashMap<NodeId, MarkerStyle>,
     /// `@keyframes` by name.
     pub(crate) keyframes: HashMap<String, Vec<parse::Frame>>,
 }
@@ -853,6 +873,18 @@ struct Generated {
     pseudo: HashMap<(NodeId, PseudoElement), NodeId>,
     origins: HashMap<NodeId, NodeId>,
     contents: HashMap<NodeId, String>,
+    markers: HashMap<NodeId, MarkerStyle>,
+}
+
+/// What a `::marker` rule sets for a list item's marker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkerStyle {
+    /// The marker's own style: the item's, with the rule's declarations on top.
+    pub style: ComputedStyle,
+    /// Colour set by the rule (otherwise the item's live colour is used).
+    pub color: Option<Color>,
+    /// `content`: `Some("")` hides the marker, text replaces it.
+    pub content: Option<String>,
 }
 
 impl ComputedStyle {
@@ -909,6 +941,7 @@ impl StyleMap {
         self.styles.len() == other.styles.len()
             && self.pseudo == other.pseudo
             && self.contents == other.contents
+            && self.markers == other.markers
             && self.styles.iter().zip(&other.styles).all(|(a, b)| a.same_layout_with(b, color_is_paint))
     }
 
@@ -923,6 +956,11 @@ impl StyleMap {
     }
 
     /// The generated `::before` / `::after` box of `element`, if it has one.
+    /// The `::marker` rules of a list item, if any.
+    pub fn marker(&self, item: NodeId) -> Option<&MarkerStyle> {
+        self.markers.get(&item)
+    }
+
     pub fn pseudo(&self, element: NodeId, kind: PseudoElement) -> Option<NodeId> {
         self.pseudo.get(&(element, kind)).copied()
     }
@@ -1013,6 +1051,7 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
         pseudo: generated.pseudo,
         origins: generated.origins,
         contents: generated.contents,
+        markers: generated.markers,
         keyframes,
     }
 }
@@ -1150,6 +1189,35 @@ fn content_text(decls: &[Declaration], doc: &Document, id: NodeId) -> Option<Str
 
 /// Style a `::before`/`::after` of `id`, if some rule gives it `content`. Its style
 /// goes at the end of `out`, and the new id is returned.
+/// A list item's `::marker` rules, if any apply.
+fn marker_style(cx: &CascadeInput, id: NodeId, element: &ComputedStyle, extra: &mut Generated) {
+    let el = ElementRef::new(cx.doc, id, cx.state);
+    let mut caches = SelectorCaches::default();
+    let mut ctx = MatchingContext::new(
+        MatchingMode::ForStatelessPseudoElement,
+        None,
+        &mut caches,
+        QuirksMode::NoQuirks,
+        NeedsSelectorFlags::No,
+        MatchingForInvalidation::No,
+    );
+    let wanted = |p: &PseudoElement| *p == PseudoElement::Marker;
+    ctx.pseudo_element_matching_fn = Some(&wanted);
+    let decls = matching_decls(cx, &el, &mut ctx, true);
+    if decls.is_empty() {
+        return;
+    }
+    let mut style = ComputedStyle::inherit(element);
+    style.display = Display::Inline;
+    let pcx = Cx { viewport: cx.viewport, uses_viewport: cx.uses_viewport };
+    let color_set = decls.iter().any(|d| d.name == "color");
+    let applied = apply_declarations(&mut style, decls, element.font_size, &pcx);
+    let declared = applied.iter().rev().find(|d| d.name == "content");
+    let content = declared.map(|_| content_text(&applied, cx.doc, id).unwrap_or_default());
+    let color = color_set.then_some(style.color);
+    extra.markers.insert(id, MarkerStyle { style, color, content });
+}
+
 fn pseudo_style(
     cx: &CascadeInput,
     id: NodeId,
@@ -1188,6 +1256,16 @@ fn pseudo_style(
 
 /// The fill of a `<progress>`, `<meter>` or `<input type=range>`, and whether a meter is out of
 /// its comfortable range.
+/// The colour an `<input type=color>` holds (`#rrggbb`, black when unset or invalid).
+fn swatch_color(doc: &Document, id: NodeId) -> Option<Color> {
+    let n = doc.node(id);
+    if n.tag() != Some("input") || !n.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("color")) {
+        return None;
+    }
+    let v = n.attr("value").unwrap_or("#000000").trim();
+    Some(v.strip_prefix('#').and_then(color_from_hex).unwrap_or(Color::BLACK))
+}
+
 pub fn control_fraction(doc: &Document, id: NodeId) -> (Option<f32>, bool) {
     let n = doc.node(id);
     let num = |name: &str| n.attr(name).and_then(|v| v.trim().parse::<f32>().ok());
@@ -1232,11 +1310,15 @@ fn cascade(
         decls.extend(inline.iter());
         style.checked = doc.has_state(id, "checked");
         (style.control_fraction, style.meter_warn) = control_fraction(doc, id);
+        style.swatch = swatch_color(doc, id);
         apply_declarations(&mut style, decls, parent.font_size, &pcx);
     }
 
     out[id.0] = style.clone();
     if cx.has_pseudo && matches!(node.kind, NodeKind::Element { .. }) {
+        if style.display == Display::ListItem {
+            marker_style(cx, id, &style, extra);
+        }
         pseudo_style(cx, id, &style, PseudoElement::Before, out, extra);
         pseudo_style(cx, id, &style, PseudoElement::After, out, extra);
     }
@@ -1485,6 +1567,8 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 Some("progress-bar" | "progress") => Appearance::Progress,
                 Some("meter") => Appearance::Meter,
                 Some("slider-horizontal" | "range") => Appearance::Range,
+                Some("spinner" | "number-input") => Appearance::Spinner,
+                Some("swatch" | "color-well") => Appearance::Swatch,
                 Some("none") | Some("auto") => Appearance::None,
                 _ => return,
             }
@@ -1515,7 +1599,8 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         "position" => {
             s.position = match first.and_then(Value::ident) {
                 Some("static") => Position::Static,
-                Some("relative" | "sticky") => Position::Relative,
+                Some("relative") => Position::Relative,
+                Some("sticky") => Position::Sticky,
                 Some("absolute") => Position::Absolute,
                 Some("fixed") => Position::Fixed,
                 _ => return,
@@ -1781,8 +1866,20 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.list_style_type = t;
             }
         }
-        // `list-style: <type> || <position> || <image>`: only the type is used.
+        "list-style-position" => match first.and_then(Value::ident) {
+            Some("inside") => s.list_style_inside = true,
+            Some("outside") => s.list_style_inside = false,
+            _ => {}
+        },
+        // `list-style: <type> || <position> || <image>`: the image is ignored.
         "list-style" => {
+            for pos in v.iter().filter_map(Value::ident) {
+                match pos {
+                    "inside" => s.list_style_inside = true,
+                    "outside" => s.list_style_inside = false,
+                    _ => {}
+                }
+            }
             if let Some(t) = v.iter().filter_map(Value::ident).find_map(ListStyleType::parse) {
                 s.list_style_type = t;
             }
@@ -2030,7 +2127,7 @@ mod tests {
         assert_eq!(all.len(), 3);
         assert_eq!(Query::parse("li.a").unwrap().select_all(&doc, ul).len(), 2);
         assert!(Query::parse("li:hover").unwrap().select_all(&doc, ul).is_empty());
-        assert!(Query::parse("li::marker").is_err());
+        assert!(Query::parse("li::first-line").is_err());
         assert!(Query::parse("<<").is_err());
     }
 

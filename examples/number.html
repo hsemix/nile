@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+  <head>
+    <style>
+      body {
+        margin: 20px;
+        font: 14px sans-serif;
+        background: #f4f1ea;
+      }
+      label {
+        display: block;
+        margin: 8px 0;
+      }
+      input {
+        width: 120px;
+      }
+    </style>
+  </head>
+  <body>
+    <label
+      >Quantity <input id="q" type="number" value="3" min="0" max="10"
+    /></label>
+    <label>Price <input id="p" type="number" value="9.95" step="0.05" /></label>
+    <label>Empty <input id="e" type="number" placeholder="0" /></label>
+    <p id="out">
+      Click the field, then use ArrowUp/ArrowDown or the spin arrows. Letters
+      are ignored.
+    </p>
+    <script>
+      for (const el of document.querySelectorAll("input"))
+        el.addEventListener(
+          "change",
+          () =>
+            (document.getElementById("out").textContent =
+              el.id + " = " + el.value),
+        );
+    </script>
+  </body>
+</html>

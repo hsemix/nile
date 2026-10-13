@@ -31,3 +31,4 @@ softbuffer = "0.4"
 arboard = { version = "3.6", default-features = false }
 imagesize = "0.13"
 base64 = "0.22"
+ureq = "3.4.2"

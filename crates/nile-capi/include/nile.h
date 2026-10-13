@@ -458,6 +458,37 @@ bool nile_view_register_function(struct NileView *view,
                                  void *user);
 
 /**
+ * Keep the page's `localStorage` in the file at `path` (created if missing). Pages created from
+ * a file already persist into the user's data directory; set `NILE_STORAGE_DIR` (`off` to
+ * disable) to move that. Returns 0 on success.
+ *
+ * # Safety
+ * `view` must be a live view and `path` a valid string.
+ */
+int32_t nile_view_set_storage_file(struct NileView *view, const char *path);
+
+/**
+ * A click on `<input type=file>` asks the host for a file chooser. If one is waiting, returns 1,
+ * sets `*multiple` (0 or 1) and `*accept` (the `accept` attribute, free it with
+ * [`nile_string_free`]; either may be NULL), and remembers the input; answer with
+ * [`nile_view_choose_files`]. Returns 0 if nothing is waiting.
+ *
+ * # Safety
+ * `view` must be a live view; `multiple` and `accept` NULL or writable.
+ */
+int32_t nile_view_take_file_request(struct NileView *view, int32_t *multiple, char **accept);
+
+/**
+ * Answer the request from [`nile_view_take_file_request`] with the chosen files, one path per
+ * line (`"a.txt\nb.txt"`); an empty string clears the input. Returns 0 on success, 1 if no
+ * request was taken.
+ *
+ * # Safety
+ * `view` must be a live view and `paths` a valid string.
+ */
+int32_t nile_view_choose_files(struct NileView *view, const char *paths);
+
+/**
  * The `console.log`/`warn`/`error` lines written since the last call, separated by newlines
  * (empty if none), as a new string to free with [`nile_string_free`].
  *

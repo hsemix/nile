@@ -512,6 +512,7 @@
       if (!VALUE_TAGS.has(t)) return undefined;
       const v = this.getAttribute("value");
       if (v === null && t === "textarea") return this.textContent;
+      if (v === null && t === "input" && this.type === "color") return "#000000";
       if (v === null && t === "input" && this.type === "range") {
         const lo = +(this.getAttribute("min") ?? 0), hi = +(this.getAttribute("max") ?? 100);
         return String(Math.min(Math.max((lo + hi) / 2, lo), Math.max(lo, hi)));
@@ -755,7 +756,7 @@
     pageYOffset: { get: () => N.scrollY() },
     scrollX: { value: 0 },
     pageXOffset: { value: 0 },
-    devicePixelRatio: { value: 1 },
+    devicePixelRatio: { get: () => N.scale() },
   });
   // The host window (desktop, so these really move and resize it).
   const wr = (i) => N.windowRect()[i];
@@ -824,6 +825,8 @@
   });
 
   /*@EDIT@*/
+
+  /*@WEB@*/
 
   // ---- the embedder ------------------------------------------------------
   // `host.name(...args)` calls a function the embedding application registered; arguments and

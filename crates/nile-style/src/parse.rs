@@ -942,6 +942,11 @@ fn calc_factor(p: &mut Parser<'_>, cx: &Cx) -> PResult<Quantity> {
     })
 }
 
+/// `rrggbb`/`rgb` (and the alpha forms) without the `#`.
+pub fn color_from_hex(h: &str) -> Option<Color> {
+    h.is_ascii().then(|| hex_color(h)).flatten()
+}
+
 fn hex_color(h: &str) -> Option<Color> {
     let digit = |i: usize| u8::from_str_radix(&h[i..i + 1], 16).ok();
     let byte = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
@@ -969,7 +974,7 @@ mod tests {
     fn parses_rules_and_skips_unsupported() {
         let sheet = Stylesheet::parse(
             "h1, .title { color: #333; margin: 0 auto } div > p:first-child { color: red } \
-             a:hover { color: blue } p::marker { color: red } @import url(x.css); \
+             a:hover { color: blue } p::first-line { color: red } @import url(x.css); \
              li:unknown { color: red } #x.y[data-a=b] { gap: 4px }",
         );
         assert_eq!(sheet.rules.len(), 4);

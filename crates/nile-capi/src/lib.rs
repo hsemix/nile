@@ -676,6 +676,60 @@ pub unsafe extern "C" fn nile_view_register_function(view: *mut NileView, name: 
     })
 }
 
+/// Keep the page's `localStorage` in the file at `path` (created if missing). Pages created from
+/// a file already persist into the user's data directory; set `NILE_STORAGE_DIR` (`off` to
+/// disable) to move that. Returns 0 on success.
+///
+/// # Safety
+/// `view` must be a live view and `path` a valid string.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_set_storage_file(view: *mut NileView, path: *const c_char) -> i32 {
+    let (Some(v), Some(path)) = (view_ref(view), text(path)) else { return 2 };
+    guard(2, || {
+        v.page.set_storage_file(std::path::Path::new(path));
+        0
+    })
+}
+
+/// A click on `<input type=file>` asks the host for a file chooser. If one is waiting, returns 1,
+/// sets `*multiple` (0 or 1) and `*accept` (the `accept` attribute, free it with
+/// [`nile_string_free`]; either may be NULL), and remembers the input; answer with
+/// [`nile_view_choose_files`]. Returns 0 if nothing is waiting.
+///
+/// # Safety
+/// `view` must be a live view; `multiple` and `accept` NULL or writable.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_take_file_request(view: *mut NileView, multiple: *mut i32, accept: *mut *mut c_char) -> i32 {
+    let Some(v) = view_ref(view) else { return 0 };
+    guard(0, || match v.page.take_file_request() {
+        Some(r) => {
+            if !multiple.is_null() {
+                unsafe { *multiple = i32::from(r.multiple) };
+            }
+            if !accept.is_null() {
+                unsafe { *accept = into_c(r.accept) };
+            }
+            1
+        }
+        None => 0,
+    })
+}
+
+/// Answer the request from [`nile_view_take_file_request`] with the chosen files, one path per
+/// line (`"a.txt\nb.txt"`); an empty string clears the input. Returns 0 on success, 1 if no
+/// request was taken.
+///
+/// # Safety
+/// `view` must be a live view and `paths` a valid string.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_choose_files(view: *mut NileView, paths: *const c_char) -> i32 {
+    let (Some(v), Some(paths)) = (view_ref(view), text(paths)) else { return 2 };
+    guard(2, || {
+        let list: Vec<String> = paths.lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
+        i32::from(!v.page.choose_files_for_request(&list))
+    })
+}
+
 /// The `console.log`/`warn`/`error` lines written since the last call, separated by newlines
 /// (empty if none), as a new string to free with [`nile_string_free`].
 ///

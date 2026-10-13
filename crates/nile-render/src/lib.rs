@@ -64,6 +64,7 @@ impl Renderer {
     /// Paint the whole tree.
     pub fn paint(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, overlay: &Overlay) {
         let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection, dom_caret } = *overlay;
+        let base = canvas.local_to_device_as_3x3();
         canvas.save();
         canvas.translate((0.0, -scroll_y));
         // Boxes that wrap their subtree (an `overflow` clip, or an `opacity` layer) end
@@ -79,6 +80,18 @@ impl Renderer {
             }
             match &b.content {
                 BoxContent::Element => {
+                    if b.fixed {
+                        // Pinned to the viewport: drop the page scroll and any ancestor transform.
+                        canvas.save();
+                        canvas.set_matrix(&skia_safe::M44::from(&base));
+                        open.push((b.subtree_end.max(i + 1), None));
+                    }
+                    let dy = b.sticky_shift(scroll_y, viewport.1);
+                    if dy != 0.0 {
+                        canvas.save();
+                        canvas.translate((0.0, dy));
+                        open.push((b.subtree_end.max(i + 1), None));
+                    }
                     let opacity = styles.get(b.node).opacity;
                     if opacity < 1.0 {
                         canvas.save_layer_alpha_f(None, opacity);
@@ -91,7 +104,7 @@ impl Renderer {
                     }
                     self.paint_box(canvas, b, styles);
                     if let Some(m) = tree.marker(b.node) {
-                        self.paint_marker(canvas, m, styles.get(b.node).color);
+                        self.paint_marker(canvas, m, m.color.unwrap_or(styles.get(b.node).color));
                     }
                     if let Some(DomCaret::Empty { run, rect }) = dom_caret {
                         if run == i {
@@ -192,8 +205,8 @@ impl Renderer {
                 canvas.draw_rect(Rect::from_xywh(r.x + b.left, top, r.width - b.left - b.right, l.row_height), &fill(CssColor::rgb(29, 78, 216)));
             }
             let line_h = item.text.height();
-            let at = LRect { x: r.x + b.left + l.pad_x, y: top + (l.row_height - line_h) / 2.0, width: r.width, height: line_h };
-            let tint = if item.selected { Some([255, 255, 255, 255]) } else if item.disabled { Some([150, 150, 150, 255]) } else { Some([s.color.r, s.color.g, s.color.b, s.color.a]) };
+            let at = LRect { x: r.x + b.left + l.pad_x + if item.indent { 12.0 } else { 0.0 }, y: top + (l.row_height - line_h) / 2.0, width: r.width, height: line_h };
+            let tint = if item.selected { Some([255, 255, 255, 255]) } else if item.header { Some([70, 70, 70, 255]) } else if item.disabled { Some([150, 150, 150, 255]) } else { Some([s.color.r, s.color.g, s.color.b, s.color.a]) };
             self.paint_text_tinted(canvas, at, &item.text, tint);
         }
         canvas.restore();
@@ -229,9 +242,9 @@ impl Renderer {
                 canvas.draw_rect(Rect::from_xywh(r.x + 1.0, top, r.width - 2.0, m.row_height), &fill(CssColor::rgb(29, 78, 216)));
             }
             let line_h = item.text.height();
-            let at = LRect { x: r.x + m.pad_x, y: top + (m.row_height - line_h) / 2.0, width: r.width, height: line_h };
+            let at = LRect { x: r.x + m.pad_x + if item.indent { 12.0 } else { 0.0 }, y: top + (m.row_height - line_h) / 2.0, width: r.width, height: line_h };
             // Text carries its own color; selected-row and disabled rows are tinted by an overlay.
-            self.paint_text_tinted(canvas, at, &item.text, if on { Some([255, 255, 255, 255]) } else if item.disabled { Some([150, 150, 150, 255]) } else { None });
+            self.paint_text_tinted(canvas, at, &item.text, if on { Some([255, 255, 255, 255]) } else if item.header { Some([70, 70, 70, 255]) } else if item.disabled { Some([150, 150, 150, 255]) } else { None });
             if m.selected == Some(i) && !on {
                 canvas.draw_rect(Rect::from_xywh(r.x + 2.0, top + 2.0, 2.0, m.row_height - 4.0), &fill(CssColor::rgb(29, 78, 216)));
             }
@@ -700,7 +713,7 @@ fn paint_decorated(
 /// The check or radio dot for `appearance: checkbox | radio` when checked.
 fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) {
     // Checkbox and radio marks show only when checked; a select's chevron always does.
-    if !s.checked && !matches!(s.appearance, Appearance::Select | Appearance::Progress | Appearance::Meter | Appearance::Range) {
+    if !s.checked && !matches!(s.appearance, Appearance::Select | Appearance::Progress | Appearance::Meter | Appearance::Range | Appearance::Spinner | Appearance::Swatch) {
         return;
     }
     let mut paint = fill(s.color);
@@ -752,6 +765,30 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
                 canvas.clip_rrect(RRect::new_rect_xy(bar, radius, radius), skia_safe::ClipOp::Intersect, true);
                 canvas.draw_rect(Rect::from_xywh(bar.left, bar.top, bar.width() * f.clamp(0.0, 1.0), bar.height()), &paint);
                 canvas.restore();
+            }
+        }
+        Appearance::Swatch => {
+            let c = s.swatch.unwrap_or(CssColor::BLACK);
+            let chip = Rect::from_xywh(r.x + 6.0, r.y + r.height / 2.0 - 7.0, 18.0, 14.0);
+            let mut p = Paint::default();
+            p.set_anti_alias(true);
+            p.set_color(Color::from_argb(255, c.r, c.g, c.b));
+            canvas.draw_rrect(RRect::new_rect_xy(chip, 2.0, 2.0), &p);
+            p.set_style(skia_safe::PaintStyle::Stroke);
+            p.set_stroke_width(1.0);
+            p.set_color(Color::from_argb(255, 118, 118, 118));
+            canvas.draw_rrect(RRect::new_rect_xy(chip, 2.0, 2.0), &p);
+        }
+        Appearance::Spinner => {
+            // Up and down arrows stacked in the right padding.
+            let cx = r.x + r.width - 11.0;
+            let mid = r.y + r.height / 2.0;
+            paint.set_anti_alias(true);
+            paint.set_color(Color::from_argb(255, 90, 90, 90));
+            for (dy, dir) in [(-4.0, -1.0), (4.0, 1.0)] {
+                let mut builder = skia_safe::PathBuilder::new();
+                builder.move_to((cx - 3.5, mid + dy - 1.5 * dir)).line_to((cx + 3.5, mid + dy - 1.5 * dir)).line_to((cx, mid + dy + 2.0 * dir)).close();
+                canvas.draw_path(&builder.detach(), &paint);
             }
         }
         Appearance::Range => {

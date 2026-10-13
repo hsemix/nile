@@ -139,6 +139,35 @@ pub struct LayoutBox {
     /// `transform` of the element, as layout coordinates to layout coordinates (the
     /// origin is already folded in). Applies to the box and its subtree.
     pub transform: Option<Affine>,
+    /// `position: fixed`: the box and its subtree stay put while the page scrolls.
+    pub fixed: bool,
+    /// `position: sticky`: the box slides while the page scrolls (see `StickyBox::shift`).
+    pub sticky: Option<StickyBox>,
+}
+
+/// What a sticky box needs to compute its shift: its insets and its parent's vertical extent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StickyBox {
+    pub top: Option<f32>,
+    pub bottom: Option<f32>,
+    pub parent_top: f32,
+    pub parent_bottom: f32,
+}
+
+impl LayoutBox {
+    /// How far a sticky box is pushed down (negative: up) for a page scrolled by `scroll`
+    /// in a viewport `viewport_h` tall. Zero for other boxes.
+    // TODO: only the page's scroll counts, not an `overflow` ancestor's; horizontal insets are ignored.
+    pub fn sticky_shift(&self, scroll: f32, viewport_h: f32) -> f32 {
+        let Some(s) = self.sticky else { return 0.0 };
+        let (y, bottom) = (self.rect.y, self.rect.y + self.rect.height);
+        let dy = match (s.top, s.bottom) {
+            (Some(top), _) => (scroll + top - y).max(0.0),
+            (None, Some(b)) => (scroll + viewport_h - b - bottom).min(0.0),
+            _ => 0.0,
+        };
+        dy.min(s.parent_bottom - bottom).max(s.parent_top - y)
+    }
 }
 
 /// Clipping and scroll extent of an `overflow` box.
@@ -268,6 +297,10 @@ pub struct LayoutTree {
     elem_marks: std::collections::HashMap<NodeId, (usize, usize)>,
     /// Generated (`::before`/`::after`) box -> its element, so hits land on the element.
     origins: std::collections::HashMap<NodeId, NodeId>,
+    /// How far the page is scrolled; `position: fixed` boxes are shifted by it. Set by the
+    /// embedder (`set_page_scroll`) before anything asks for placements.
+    page_scroll: f32,
+    viewport_h: f32,
 }
 
 /// Ask for a `<select>`'s drop-down to be laid out under it.
@@ -295,6 +328,10 @@ pub struct LayoutOptions<'a> {
 pub struct MenuItem {
     pub text: TextLayout,
     pub disabled: bool,
+    /// An `<optgroup>` heading (bold, not a choice).
+    pub header: bool,
+    /// Inside an `<optgroup>`.
+    pub indent: bool,
 }
 
 /// An open `<select>` list in document coordinates.
@@ -328,6 +365,8 @@ impl MenuBox {
 /// A list item's marker, positioned in document coordinates.
 pub struct ListMarker {
     pub kind: MarkerKind,
+    /// Colour from a `::marker` rule; otherwise the item's own (live) colour is used.
+    pub color: Option<Color>,
     /// Where the marker goes: the glyph text's box, or the bullet's bounding square.
     pub rect: Rect,
 }
@@ -346,6 +385,8 @@ pub struct ListItem {
     pub text: TextLayout,
     pub disabled: bool,
     pub selected: bool,
+    pub header: bool,
+    pub indent: bool,
 }
 
 /// The rows of a list-box `<select>`, painted inside its box and scrolled by `scroll`.
@@ -390,15 +431,36 @@ fn option_row_height(style: &ComputedStyle) -> f32 {
     (style.font_size * style.line_height + 6.0).ceil()
 }
 
-/// The `<option>` elements of a `<select>`, in document order.
+/// The rows of a `<select>` in document order: its `<option>`s, and an `<optgroup>`'s heading
+/// as a row of its own (a disabled one, so selecting and stepping skip it). Row indices are
+/// what the list, the menu and the keyboard use.
 pub fn select_options(doc: &Document, select: NodeId) -> Vec<NodeId> {
-    doc.descendants(select).into_iter().filter(|n| doc.node(*n).tag() == Some("option")).collect()
+    doc.descendants(select).into_iter().filter(|n| matches!(doc.node(*n).tag(), Some("option" | "optgroup"))).collect()
 }
 
-/// An option's visible text: its `label`, else its text with whitespace collapsed.
+/// An `<optgroup>` heading row.
+pub fn is_group(doc: &Document, row: NodeId) -> bool {
+    doc.node(row).tag() == Some("optgroup")
+}
+
+/// Whether a row can't be chosen: a heading, a disabled option, or one in a disabled group.
+pub fn option_disabled(doc: &Document, row: NodeId) -> bool {
+    is_group(doc, row)
+        || doc.has_state(row, "disabled")
+        || doc.node(row).parent.is_some_and(|p| is_group(doc, p) && doc.node(p).attr("disabled").is_some())
+}
+
+/// An option inside an `<optgroup>` is drawn indented.
+pub fn option_indented(doc: &Document, row: NodeId) -> bool {
+    !is_group(doc, row) && doc.node(row).parent.is_some_and(|p| is_group(doc, p))
+}
+
+/// A row's visible text: an option's `label`, else its text with whitespace collapsed; a
+/// group's `label`.
 pub fn option_label(doc: &Document, option: NodeId) -> String {
     match doc.node(option).attr("label") {
         Some(l) if !l.is_empty() => l.to_string(),
+        _ if is_group(doc, option) => String::new(),
         _ => collapse_whitespace(&doc.text_content(option)).trim().to_string(),
     }
 }
@@ -409,9 +471,9 @@ pub fn selected_index(doc: &Document, select: NodeId) -> Option<usize> {
     let options = select_options(doc, select);
     options
         .iter()
-        .position(|o| doc.has_state(*o, "selected"))
-        .or_else(|| options.iter().position(|o| !doc.has_state(*o, "disabled")))
-        .or((!options.is_empty()).then_some(0))
+        .position(|o| !is_group(doc, *o) && doc.has_state(*o, "selected"))
+        .or_else(|| options.iter().position(|o| !option_disabled(doc, *o)))
+        .or_else(|| options.iter().position(|o| !is_group(doc, *o)))
 }
 
 /// An `inline-block` inside a text run: its Taffy subtree (sized already, not
@@ -502,6 +564,11 @@ impl LayoutTree {
         self.lists.get(&select)
     }
 
+    /// Tell the tree how far the page is scrolled (see `LayoutTree::page_scroll`).
+    pub fn set_page_scroll(&mut self, y: f32) {
+        self.page_scroll = y;
+    }
+
     pub fn placements(&self, offsets: &ScrollOffsets) -> Vec<Placement> {
         let mut out = Vec::with_capacity(self.boxes.len());
         let mut stack: Vec<(usize, Placement)> = Vec::new();
@@ -509,17 +576,26 @@ impl LayoutTree {
             while stack.last().is_some_and(|(end, _)| i >= *end) {
                 stack.pop();
             }
-            let cur = stack.last().map_or(Placement::default(), |(_, p)| *p);
+            let mut cur = stack.last().map_or(Placement::default(), |(_, p)| *p);
+            if b.fixed {
+                // Anchored to the viewport: ignore every ancestor's scroll, clip and transform.
+                cur = Placement { xf: Affine::translate(0.0, self.page_scroll), clip: None };
+                stack.push((b.subtree_end.max(i + 1), cur));
+            }
             // A transform applies to the box itself and everything inside it.
-            let own = Placement { xf: b.transform.map_or(cur.xf, |t| cur.xf.then_after(t)), clip: cur.clip };
+            let base = match b.sticky_shift(self.page_scroll, self.viewport_h) {
+                dy if dy != 0.0 => cur.xf.then_after(Affine::translate(0.0, dy)),
+                _ => cur.xf,
+            };
+            let own = Placement { xf: b.transform.map_or(base, |t| base.then_after(t)), clip: cur.clip };
             out.push(own);
             if let Some(sb) = &b.scroll {
                 let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
                 let clip = intersect(own.clip, own.xf.bounds(sb.clip));
                 let xf = own.xf.then_after(Affine::translate(-ox, -oy));
                 stack.push((b.subtree_end, Placement { xf, clip: Some(clip) }));
-            } else if b.transform.is_some() {
-                stack.push((b.subtree_end, own));
+            } else if b.transform.is_some() || b.sticky.is_some() {
+                stack.push((b.subtree_end.max(i + 1), own));
             }
         }
         out
@@ -958,6 +1034,7 @@ pub fn layout_with(
     let html = doc.find(|n| n.tag() == Some("html")).unwrap_or(Document::ROOT);
     // Absolute boxes with no positioned ancestor use the root as their containing block.
     CONTAINING_BLOCKS.with(|s| s.borrow_mut().push(Vec::new()));
+    FIXED_BLOCKS.with(|f| f.borrow_mut().clear());
     let was = PARENT_IS_CB.replace(false);
     let root = build(doc, styles, text, &mut tree, html).unwrap_or_else(|| {
         tree.new_leaf_with_context(Style::default(), NodeCtx::Element(html)).unwrap()
@@ -965,6 +1042,24 @@ pub fn layout_with(
     PARENT_IS_CB.set(was);
     for abs in CONTAINING_BLOCKS.with(|s| s.borrow_mut().pop()).unwrap_or_default() {
         tree.add_child(root, abs).unwrap();
+    }
+
+    // Fixed boxes share an invisible viewport-sized containing block.
+    let fixed = FIXED_BLOCKS.with(|f| std::mem::take(&mut *f.borrow_mut()));
+    if !fixed.is_empty() {
+        let layer = tree
+            .new_with_children(
+                Style {
+                    display: taffy::Display::Block,
+                    position: taffy::Position::Absolute,
+                    inset: taffy::Rect { left: LengthPercentageAuto::length(0.0), top: LengthPercentageAuto::length(0.0), right: LengthPercentageAuto::auto(), bottom: LengthPercentageAuto::auto() },
+                    size: Size { width: Dimension::length(viewport_width), height: Dimension::length(viewport_height) },
+                    ..Style::default()
+                },
+                &fixed,
+            )
+            .unwrap();
+        tree.add_child(root, layer).unwrap();
     }
 
     // The root fills the viewport, like a browser's initial containing block.
@@ -1003,7 +1098,7 @@ pub fn layout_with(
         .map(|(i, b)| (b.node, i))
         .collect();
     let origins = styles.origins().clone();
-    let mut tree = LayoutTree { boxes, content_height, menu: None, lists: Default::default(), markers: Default::default(), index, text_nodes: Default::default(), elem_marks: Default::default(), origins };
+    let mut tree = LayoutTree { page_scroll: options.scroll_y, viewport_h: viewport_height, boxes, content_height, menu: None, lists: Default::default(), markers: Default::default(), index, text_nodes: Default::default(), elem_marks: Default::default(), origins };
     tree.compute_scroll_boxes(styles);
     for (i, b) in tree.boxes.iter().enumerate() {
         let BoxContent::Text(c) = &b.content else { continue };
@@ -1133,6 +1228,8 @@ thread_local! {
     /// Absolutely positioned boxes waiting to be attached to their containing block: one
     /// list per positioned ancestor being built, the root's at the bottom.
     static CONTAINING_BLOCKS: std::cell::RefCell<Vec<Vec<taffy::NodeId>>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// `position: fixed` boxes, whose containing block is the viewport.
+    static FIXED_BLOCKS: std::cell::RefCell<Vec<taffy::NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The element whose children are being built is itself a containing block.
     static PARENT_IS_CB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -1160,6 +1257,10 @@ fn with_containing_block(
 // TODO: with `auto` insets such a box sits at its containing block's corner, not at its
 // static position in the flow.
 fn hand_off_absolute(style: &ComputedStyle, n: taffy::NodeId) -> Option<taffy::NodeId> {
+    if style.position == Position::Fixed {
+        FIXED_BLOCKS.with(|f| f.borrow_mut().push(n));
+        return None;
+    }
     if style.position.out_of_flow() && !PARENT_IS_CB.get() {
         let taken = CONTAINING_BLOCKS.with(|s| s.borrow_mut().last_mut().map(|list| list.push(n)).is_some());
         if taken {
@@ -1495,7 +1596,7 @@ fn is_value_control(node: &nile_dom::Node) -> bool {
     node.tag() == Some("textarea")
         || node.tag() == Some("select")
         || node.tag() == Some("input")
-        && !matches!(node.attr("type").map(str::to_ascii_lowercase).as_deref(), Some("checkbox" | "radio" | "hidden" | "file" | "image" | "range"))
+        && !matches!(node.attr("type").map(str::to_ascii_lowercase).as_deref(), Some("checkbox" | "radio" | "hidden" | "image" | "range"))
 }
 
 fn is_password(node: &nile_dom::Node) -> bool {
@@ -1509,6 +1610,7 @@ pub fn control_value(doc: &Document, id: NodeId) -> String {
     match n.attr("value") {
         Some(v) => v.to_string(),
         None if n.tag() == Some("textarea") => doc.text_content(id),
+        None if n.tag() == Some("input") && n.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("color")) => "#000000".into(),
         None => String::new(),
     }
 }
@@ -1522,6 +1624,15 @@ fn control_display(doc: &Document, id: NodeId) -> (String, bool) {
     if node.tag() == Some("select") {
         let label = selected_index(doc, id).map(|i| option_label(doc, select_options(doc, id)[i])).unwrap_or_default();
         return (if label.is_empty() { "\u{200b}".into() } else { label }, false);
+    }
+    if node.tag() == Some("input") && node.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("file")) {
+        let names: Vec<&str> = node.attr("nile-files").unwrap_or("").lines().filter(|p| !p.is_empty()).map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p)).collect();
+        let shown = match names.len() {
+            0 => "No file chosen".to_string(),
+            1 => names[0].to_string(),
+            n => format!("{n} files"),
+        };
+        return (format!("Choose File  {shown}"), false);
     }
     let multiline = node.tag() == Some("textarea");
     let value = control_value(doc, id);
@@ -1606,6 +1717,18 @@ fn roman(n: i64, upper: bool) -> String {
 }
 
 /// The text of a counter-style marker for item number `n`, or `None` for bullets and `none`.
+/// Room an `inside` marker takes at the start of its item: its shape plus a gap. The text
+/// of a numbered marker (or a `::marker { content }`) isn't known when styles become Taffy
+/// boxes, so those get an estimate.
+fn inside_marker_width(s: &ComputedStyle) -> f32 {
+    use nile_style::ListStyleType as L;
+    match s.list_style_type {
+        L::None | L::DisclosureClosed | L::DisclosureOpen => 0.0,
+        L::Disc | L::Circle | L::Square => (s.font_size * 0.34).round().max(3.0) + s.font_size * 0.5,
+        _ => s.font_size * 1.9,
+    }
+}
+
 fn marker_text(t: nile_style::ListStyleType, n: i64) -> Option<String> {
     use nile_style::ListStyleType as L;
     Some(match t {
@@ -1654,16 +1777,31 @@ fn build_markers(
             continue;
         }
         let style = styles.get(b.node);
-        if style.display != Display::ListItem || style.list_style_type == nile_style::ListStyleType::None {
+        // A `::marker` rule can restyle the marker, replace it (`content`) or hide it.
+        let ms = styles.marker(b.node);
+        let content = ms.and_then(|m| m.content.as_deref());
+        if style.display != Display::ListItem || (style.list_style_type == nile_style::ListStyleType::None && content.is_none_or(str::is_empty)) || content == Some("") {
             continue;
         }
-        let fs = style.font_size;
-        let line_h = fs * style.line_height;
+        let mstyle = ms.map_or(style, |m| &m.style);
+        let fs = mstyle.font_size;
+        let line_h = style.font_size * style.line_height;
         let top = b.rect.y + style.border_width.top + style.padding.top;
+        // `list-style-position: inside` puts the marker at the content's left edge; the item
+        // reserves room for it in its padding (see `inside_marker_width`).
+        let inside_x = b.rect.x + style.border_width.left + style.padding.left;
         let kind_and_rect = match style.list_style_type {
+            _ if content.is_some() => {
+                let mut l = text.shape(content.unwrap_or_default(), &text_style(mstyle), 1.0);
+                break_lines(&mut l, None, Alignment::Start);
+                let (w, h) = (l.full_width(), l.height());
+                let x = if style.list_style_inside { inside_x } else { b.rect.x - fs * 0.3 - w };
+                Some((MarkerKind::Text(Box::new(l)), Rect { x, y: top + (line_h - h) / 2.0, width: w, height: h }))
+            }
             t @ (nile_style::ListStyleType::Disc | nile_style::ListStyleType::Circle | nile_style::ListStyleType::Square) => {
                 let d = (fs * 0.34).round().max(3.0);
-                let rect = Rect { x: b.rect.x - fs * 0.5 - d, y: top + (line_h - d) / 2.0 + fs * 0.05, width: d, height: d };
+                let x = if style.list_style_inside { inside_x } else { b.rect.x - fs * 0.5 - d };
+                let rect = Rect { x, y: top + (line_h - d) / 2.0 + fs * 0.05, width: d, height: d };
                 let kind = match t {
                     nile_style::ListStyleType::Disc => MarkerKind::Disc,
                     nile_style::ListStyleType::Circle => MarkerKind::Circle,
@@ -1683,15 +1821,16 @@ fn build_markers(
                     .map(|p| *numbers.entry(p).or_insert_with(|| list_numbers(doc, styles, p)).get(&b.node).unwrap_or(&1))
                     .unwrap_or(1);
                 marker_text(t, n).map(|label| {
-                    let mut l = text.shape(&label, &text_style(style), 1.0);
+                    let mut l = text.shape(&label, &text_style(mstyle), 1.0);
                     break_lines(&mut l, None, Alignment::Start);
                     let (w, h) = (l.full_width(), l.height());
-                    (MarkerKind::Text(Box::new(l)), Rect { x: b.rect.x - fs * 0.3 - w, y: top + (line_h - h) / 2.0, width: w, height: h })
+                    let x = if style.list_style_inside { inside_x } else { b.rect.x - fs * 0.3 - w };
+                    (MarkerKind::Text(Box::new(l)), Rect { x, y: top + (line_h - h) / 2.0, width: w, height: h })
                 })
             }
         };
         if let Some((kind, rect)) = kind_and_rect {
-            out.insert(b.node, ListMarker { kind, rect });
+            out.insert(b.node, ListMarker { kind, rect, color: ms.and_then(|m| m.color) });
         }
     }
     out
@@ -1716,9 +1855,10 @@ fn build_lists(
         let items: Vec<ListItem> = select_options(doc, b.node)
             .into_iter()
             .map(|o| {
-                let mut l = text.shape(&option_label(doc, o), &ts, 1.0);
+                let header = is_group(doc, o);
+                let mut l = text.shape(&option_label(doc, o), &if header { TextStyle { font_weight: 700.0, ..ts.clone() } } else { ts.clone() }, 1.0);
                 break_lines(&mut l, None, Alignment::Start);
-                ListItem { text: l, disabled: doc.has_state(o, "disabled"), selected: doc.has_state(o, "selected") }
+                ListItem { text: l, disabled: option_disabled(doc, o), selected: !header && doc.has_state(o, "selected"), header, indent: option_indented(doc, o) }
             })
             .collect();
         let inset_top = style.border_width.top + style.padding.top;
@@ -1749,16 +1889,17 @@ fn build_menu(
     let items: Vec<MenuItem> = select_options(doc, req.select)
         .into_iter()
         .map(|o| {
-            let mut l = text.shape(&option_label(doc, o), &ts, 1.0);
+            let header = is_group(doc, o);
+            let mut l = text.shape(&option_label(doc, o), &if header { TextStyle { font_weight: 700.0, ..ts.clone() } } else { ts.clone() }, 1.0);
             break_lines(&mut l, None, Alignment::Start);
-            MenuItem { text: l, disabled: doc.has_state(o, "disabled") }
+            MenuItem { text: l, disabled: option_disabled(doc, o), header, indent: option_indented(doc, o) }
         })
         .collect();
     if items.is_empty() {
         return None;
     }
     let pad_x = 8.0;
-    let widest = items.iter().map(|i| i.text.full_width()).fold(0.0, f32::max);
+    let widest = items.iter().map(|i| i.text.full_width() + if i.indent { 12.0 } else { 0.0 }).fold(0.0, f32::max);
     let row_height = (style.font_size * style.line_height + 6.0).ceil();
     // Open below the select; if the list doesn't fit there, use whichever side has more
     // room and scroll the rest.
@@ -2331,16 +2472,22 @@ fn flatten(
         height: l.size.height,
     };
 
+    let sticky = match tree.get_node_context(n) {
+        Some(NodeCtx::Element(id) | NodeCtx::Replaced { id, .. }) => sticky_box(tree, styles, n, *id, parent_y),
+        _ => None,
+    };
     match tree.get_node_context_mut(n) {
         Some(NodeCtx::Element(id)) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect);
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform })
+            let fixed = styles.get(*id).position == Position::Fixed;
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, fixed, sticky })
         }
         Some(NodeCtx::Replaced { id, image, .. }) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect);
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform })
+            let fixed = styles.get(*id).position == Position::Fixed;
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, fixed, sticky })
         }
         Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
@@ -2379,6 +2526,8 @@ fn flatten(
                 image: None,
                 bg_image: None,
                 transform: None,
+                fixed: false,
+                sticky: None,
             });
             for b in placed {
                 let kid = kids[b.id as usize];
@@ -2465,6 +2614,21 @@ fn text_style(s: &ComputedStyle) -> TextStyle {
         letter_spacing: s.letter_spacing,
         align: alignment(s.text_align),
     }
+}
+
+/// A `position: sticky` element's insets and the vertical extent of its parent.
+fn sticky_box(tree: &TaffyTree<NodeCtx>, styles: &StyleMap, n: taffy::NodeId, id: NodeId, parent_y: f32) -> Option<StickyBox> {
+    let st = styles.get(id);
+    if st.position != Position::Sticky {
+        return None;
+    }
+    let px = |l: Length| match l {
+        Length::Px(v) => Some(v),
+        _ => None,
+    };
+    let parent = tree.parent(n)?;
+    let height = tree.layout(parent).ok()?.size.height;
+    Some(StickyBox { top: px(st.inset.top), bottom: px(st.inset.bottom), parent_top: parent_y, parent_bottom: parent_y + height })
 }
 
 fn alignment(a: TextAlign) -> Alignment {
@@ -2592,10 +2756,10 @@ fn taffy_style(s: &ComputedStyle) -> Style {
         item_is_table: s.display == Display::Table,
         position: match s.position {
             Position::Static => taffy::Position::Relative,
-            Position::Relative => taffy::Position::Relative,
+            Position::Relative | Position::Sticky => taffy::Position::Relative,
             Position::Absolute | Position::Fixed => taffy::Position::Absolute,
         },
-        inset: if s.position == Position::Static {
+        inset: if matches!(s.position, Position::Static | Position::Sticky) {
             taffy::Rect::auto()
         } else {
             taffy::Rect { top: lpa(s.inset.top), right: lpa(s.inset.right), bottom: lpa(s.inset.bottom), left: lpa(s.inset.left) }
@@ -2621,7 +2785,13 @@ fn taffy_style(s: &ComputedStyle) -> Style {
             bottom: lpa(s.margin.bottom),
             left: lpa(s.margin.left),
         },
-        padding: rect_px(s.padding),
+        padding: {
+            let mut p = rect_px(s.padding);
+            if s.display == Display::ListItem && s.list_style_inside {
+                p.left = taffy::LengthPercentage::length(s.padding.left + inside_marker_width(s));
+            }
+            p
+        },
         border: rect_px(s.border_width),
         overflow: taffy::Point {
             x: if s.overflow_x != OverflowKind::Visible { taffy::Overflow::Clip } else { taffy::Overflow::Visible },
@@ -3321,6 +3491,30 @@ second</textarea><textarea id="e"></textarea></body>"#,
         let (line, _) = lines("pre-line");
         assert_eq!(line, "a b\nc d", "spaces collapse, the newline stays and eats the spaces after it");
         assert_eq!(lines("pre-wrap").0, pre);
+    }
+
+    #[test]
+    fn marker_rules_and_inside_position() {
+        let (doc, t) = rects(
+            r#"<style>
+                 #c::marker { color: #ff0000 }
+                 #t::marker { content: ">> " }
+                 #h::marker { content: "" }
+                 .in { list-style-position: inside }
+               </style>
+               <body style="margin:0"><ul style="margin:0;padding:0 0 0 40px"><li id="c">c</li><li id="t">t</li><li id="h">h</li><li id="p">p</li><li id="o" class="in">o</li></ul></body>"#,
+        );
+        let id = |s: &str| doc.find(|n| n.attr("id") == Some(s)).unwrap();
+        assert_eq!(t.marker(id("c")).unwrap().color, Some(nile_style::Color::rgb(255, 0, 0)));
+        assert_eq!(t.marker(id("p")).unwrap().color, None, "no rule: the item's own colour is used live");
+        assert!(matches!(t.marker(id("t")).unwrap().kind, MarkerKind::Text(_)), "content replaces the bullet");
+        assert!(t.marker(id("h")).is_none(), "content: \"\" hides it");
+        // Outside, the marker hangs left of the item; inside, it starts at the item's content edge
+        // and the text is pushed past it.
+        let (plain, inside) = (rect_of(&doc, &t, "p"), rect_of(&doc, &t, "o"));
+        assert!(t.marker(id("p")).unwrap().rect.x < plain.x);
+        let m = t.marker(id("o")).unwrap().rect;
+        assert!(m.x >= inside.x && m.x + m.width <= inside.x + 10.0, "{m:?} in {inside:?}");
     }
 
     #[test]

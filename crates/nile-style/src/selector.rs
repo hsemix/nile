@@ -95,6 +95,8 @@ impl NonTSPseudoClass for PseudoClass {
 pub enum PseudoElement {
     Before,
     After,
+    /// A list item's marker: styled, but not a box.
+    Marker,
 }
 
 impl ToCss for PseudoElement {
@@ -102,6 +104,7 @@ impl ToCss for PseudoElement {
         dest.write_str(match self {
             PseudoElement::Before => "::before",
             PseudoElement::After => "::after",
+            PseudoElement::Marker => "::marker",
         })
     }
 }
@@ -149,6 +152,7 @@ impl<'i> Parser<'i> for NileParser {
         match_ignore_ascii_case! { &name,
             "before" => Ok(PseudoElement::Before),
             "after" => Ok(PseudoElement::After),
+            "marker" => Ok(PseudoElement::Marker),
             _ => Err(ParseError::custom(SelectorParseErrorKind::UnsupportedPseudoClassOrElement)),
         }
     }
