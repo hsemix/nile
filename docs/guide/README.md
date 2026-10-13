@@ -16,8 +16,10 @@ Nile is not a browser or a drop-in implementation of Sciter.
 6. [Load data and persist drafts](data-and-services.md).
 7. [Compose pages with includes, frames and splitters](composition.md).
 8. [Configure a window or embed Nile](embedding.md).
-9. [Render and simulate input with the CLI](cli.md).
-10. [Troubleshoot common problems](troubleshooting.md).
+9. [Make pages accessible to screen readers](accessibility.md).
+10. [Print to PDF and control page breaks](printing.md).
+11. [Render and simulate input with the CLI](cli.md).
+12. [Troubleshoot common problems](troubleshooting.md).
 
 All shell commands in this guide assume your current directory is the repository
 root. Examples are source files you can edit and reload. No npm build is needed

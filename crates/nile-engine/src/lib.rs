@@ -5,9 +5,11 @@
 //! `Page` is the entry point. Its fields and methods are public for those two embedders; most of
 //! them are internal plumbing, so prefer the C API (`nile-capi`) for anything else.
 
+pub mod a11y;
 pub mod dialogs;
 pub mod editing;
 pub mod frames;
+pub mod paged;
 mod inputs;
 mod net;
 pub mod window;
@@ -655,6 +657,8 @@ pub struct Page {
     pub tooltip_shown: bool,
     /// A frameset splitter being dragged.
     pub splitter_drag: Option<frames::SplitDrag>,
+    /// Where each page of paged output starts (see `paginate`); empty until then.
+    pub page_starts: Vec<f32>,
 }
 
 /// A scrollbar thumb held by the pointer.
@@ -953,6 +957,7 @@ impl Page {
             blink_at: Instant::now() + CARET_BLINK,
             frames,
             splitter_drag: None,
+            page_starts: Vec::new(),
             tooltip_due: None,
             tooltip_shown: false,
         }
@@ -3396,6 +3401,25 @@ mod tests {
     }
 
     #[test]
+    fn documents_paginate_and_export_to_pdf() {
+        let rows: String = (0..30).map(|i| format!("<p class=r>Row {i}</p>")).collect();
+        let (mut p, path) = page(
+            &format!("<style>@page {{ size: 400px 300px; margin: 20px; @bottom-center {{ content: \"{{n}}\" counter(page) \"/\" counter(pages) }} }} body{{margin:0}} .r{{margin:0;height:30px;break-inside:avoid}} .new{{break-before:page}}</style>{rows}<p class=new>Last</p>"),
+            "paged",
+        );
+        // 260px of content per page: eight 30px rows each; 30 rows -> 4 pages, then a forced one.
+        assert_eq!(p.paginate(), 5);
+        assert_eq!(p.page_starts[1], 240.0);
+        let (pixels, w, h) = p.render_page(0, 1.0).unwrap();
+        assert_eq!((w, h), (400, 300));
+        assert!(pixels.chunks(4).any(|px| px[..3] != [255, 255, 255]), "something was drawn");
+        let mut pdf = Vec::new();
+        assert_eq!(p.write_pdf(&mut pdf, "t"), 5);
+        assert!(pdf.starts_with(b"%PDF-"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn checkbox_radio_and_label_clicks() {
         let (mut p, path) = page(
             r#"<body style="margin:0"><input id="c" type="checkbox"><label id="lab" for="c">Check</label>
@@ -5578,6 +5602,71 @@ cd</textarea>
         assert!(p.selected_image().is_some());
         press_key(&mut p, "Backspace", none);
         assert_eq!(js(&mut p, "document.querySelectorAll('#h img').length + ':' + document.getElementById('a').textContent"), "0:before  after");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_accessibility_tree_names_roles_and_states() {
+        use a11y::{A11yAction, A11yRole as R};
+        let (mut p, path) = page(
+            r#"<html><head><title>Sign in</title></head><body style="margin:0">
+                 <h2>Welcome back</h2>
+                 <label for="u">User name</label><input id="u" value="ada" required>
+                 <input id="pw" type="password" value="secret" aria-label="Password">
+                 <label><input id="rem" type="checkbox" checked> Remember me</label>
+                 <button id="go">Sign <b>in</b></button> <a id="lnk" href="/help">Help</a>
+                 <img alt="Company logo" src="x.png"><div style="display:none">hidden text</div><p aria-hidden="true">also hidden</p>
+                 <div role="alert">Careful</div>
+                 <select id="s" aria-label="Colour"><option>Red</option><option selected>Green</option></select>
+                 <input id="r" type="range" min="0" max="10" value="4" aria-label="Volume">
+                 <table><tr><th>Name</th><td>Ada</td></tr></table>
+                 <button id="off" disabled>Nope</button>
+                 <details open><summary>More</summary>content</details>
+               </body></html>"#,
+            "a11y",
+        );
+        let tree = p.a11y_tree();
+        let find = |name: &str, role: R| tree.nodes.iter().find(|n| n.role == role && n.name == name).unwrap_or_else(|| panic!("{role:?} {name:?} in {:#?}", tree.nodes.iter().map(|n| (n.role, &n.name)).collect::<Vec<_>>()));
+        assert_eq!(tree.nodes[0].role, R::Window);
+        assert_eq!(tree.nodes[0].name, "Sign in");
+        assert_eq!(find("Welcome back", R::Heading).level, 2);
+        let user = find("User name", R::TextInput);
+        assert_eq!((user.value.as_deref(), user.required, user.focusable), (Some("ada"), true, true));
+        assert_eq!(find("Password", R::PasswordInput).value.as_deref(), Some("••••••"));
+        assert_eq!(find("Remember me", R::CheckBox).checked, Some(Some(true)));
+        let button = find("Sign in", R::Button);
+        assert!(button.clickable && button.children.is_empty(), "a text-only button is named by its text");
+        assert_eq!(find("Help", R::Link).link_target, "/help");
+        find("Company logo", R::Image);
+        find("Careful", R::StaticText);
+        assert!(tree.nodes.iter().all(|n| !n.name.contains("hidden")), "hidden content is left out");
+        assert_eq!(find("Colour", R::ComboBox).value.as_deref(), Some("Green"));
+        assert_eq!(find("Volume", R::Slider).numeric, Some((4.0, 0.0, 10.0, 1.0)));
+        find("Name", R::ColumnHeader);
+        assert!(find("Nope", R::Button).disabled);
+        let details = tree.nodes.iter().find(|n| n.role == R::Details).unwrap();
+        assert_eq!(details.expanded, Some(true));
+        // Every child is listed, bounds sit inside the window, and focus defaults to the root.
+        for n in &tree.nodes {
+            for c in &n.children {
+                assert!(tree.nodes.iter().any(|x| x.id == *c), "child {c} of {:?} exists", n.role);
+            }
+        }
+        assert_eq!(tree.focus, tree.root);
+        let json = tree.to_json();
+        assert!(json.starts_with(r#"{"root":1,"focus":1,"nodes":[{"id":1,"role":"Window","name":"Sign in""#) && json.contains(r#""role":"CheckBox""#) && json.contains(r#""checked":true"#), "{json}");
+        // Requests from assistive technology: focus, type, click.
+        let id = user.id;
+        assert!(p.a11y_action(id, A11yAction::Focus));
+        assert_eq!(p.a11y_tree().focus, id);
+        assert!(p.a11y_action(id, A11yAction::SetValue("grace".into())));
+        assert_eq!(js(&mut p, "document.getElementById('u').value"), "grace");
+        let rem = find("Remember me", R::CheckBox).id;
+        assert!(p.a11y_action(rem, A11yAction::Click));
+        assert_eq!(p.a11y_tree().nodes.iter().find(|n| n.id == rem).unwrap().checked, Some(Some(false)));
+        let vol = find("Volume", R::Slider).id;
+        p.a11y_action(vol, A11yAction::Increment);
+        assert_eq!(js(&mut p, "document.getElementById('r').value"), "5");
         let _ = std::fs::remove_file(path);
     }
 

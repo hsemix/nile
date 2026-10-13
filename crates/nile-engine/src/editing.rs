@@ -44,6 +44,10 @@ impl Page {
     }
 
     /// An element's box where it paints, in page coordinates.
+    pub(crate) fn painted_rect_pub(&self, node: NodeId) -> Option<nile_layout::Rect> {
+        self.painted_rect(node)
+    }
+
     fn painted_rect(&self, node: NodeId) -> Option<nile_layout::Rect> {
         let mut v = self.view.borrow_mut();
         let offsets = v.scroll_offsets.clone();
