@@ -651,4 +651,188 @@
     }
   };
   Object.defineProperty(g, "__observeCheck", { value() { for (const w of [...watchers]) w._check(); } });
+
+  // ---- File objects for <input type=file> --------------------------------------
+  const MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
+    txt: "text/plain", json: "application/json", html: "text/html", css: "text/css", js: "text/javascript", csv: "text/csv", pdf: "application/pdf" };
+  g.File = class File {
+    constructor(path) {
+      this.path = path;
+      this.name = path.split(/[\\/]/).pop();
+      this.type = MIME[(this.name.split(".").pop() || "").toLowerCase()] || "";
+      this.lastModified = 0;
+    }
+    get size() { return N.fileSize(this.path); }
+    text() { return fetch(this.path).then((r) => r.text()); }
+    arrayBuffer() { return fetch(this.path).then((r) => r.arrayBuffer()); }
+  };
+  Object.defineProperty(Element.prototype, "files", {
+    configurable: true,
+    get() {
+      if (this.localName !== "input" || this.type !== "file") return undefined;
+      const list = (this.getAttribute("nile-files") || "").split("\n").filter(Boolean).map((p) => new File(p));
+      list.item = (i) => list[i] || null;
+      return list;
+    },
+  });
+
+  // ---- the `@sciter` and `@env` modules (see docs.sciter.com/docs/JS.runtime) -----
+  const toBytes = (b) => (b instanceof ArrayBuffer ? new Uint8Array(b) : ArrayBuffer.isView(b) ? new Uint8Array(b.buffer, b.byteOffset, b.byteLength) : new TextEncoder().encode(String(b)));
+  const bufferOf = (u8) => u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+  const crcTable = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+    return t;
+  })();
+  const crc32 = (data) => {
+    let c = 0xffffffff;
+    for (const b of toBytes(data)) c = crcTable[(c ^ b) & 255] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const md5 = (data) => {
+    const bytes = toBytes(data);
+    const K = Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) >>> 0);
+    const S = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+    const total = ((bytes.length + 8) >> 6) + 1;
+    const words = new Uint32Array(total * 16);
+    for (let i = 0; i < bytes.length; i++) words[i >> 2] |= bytes[i] << ((i % 4) * 8);
+    words[bytes.length >> 2] |= 0x80 << ((bytes.length % 4) * 8);
+    words[total * 16 - 2] = (bytes.length * 8) >>> 0;
+    words[total * 16 - 1] = Math.floor((bytes.length * 8) / 4294967296);
+    let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+    for (let o = 0; o < words.length; o += 16) {
+      let a = a0, b = b0, c = c0, d = d0;
+      for (let i = 0; i < 64; i++) {
+        let f, gi;
+        if (i < 16) { f = (b & c) | (~b & d); gi = i; }
+        else if (i < 32) { f = (d & b) | (~d & c); gi = (5 * i + 1) % 16; }
+        else if (i < 48) { f = b ^ c ^ d; gi = (3 * i + 5) % 16; }
+        else { f = c ^ (b | ~d); gi = (7 * i) % 16; }
+        const sum = (a + f + K[i] + words[o + gi]) | 0;
+        const sh = S[(i >> 4) * 4 + (i % 4)];
+        a = d; d = c; c = b;
+        b = (b + ((sum << sh) | (sum >>> (32 - sh)))) | 0;
+      }
+      a0 = (a0 + a) | 0; b0 = (b0 + b) | 0; c0 = (c0 + c) | 0; d0 = (d0 + d) | 0;
+    }
+    return [a0, b0, c0, d0].map((w) => [0, 8, 16, 24].map((s) => ((w >>> s) & 255).toString(16).padStart(2, "0")).join("")).join("");
+  };
+  // "JSON++": JSON plus unquoted names and strings, `;` separators, hex numbers, bigints, dates.
+  const parseValue = (text) => {
+    const src = String(text);
+    let i = 0;
+    const ws = () => { while (i < src.length && /\s/.test(src[i])) i++; };
+    const fail = () => { throw new SyntaxError("parseValue: unexpected input at " + i); };
+    const word = () => { const m = /^[^\s,;:{}\[\]"']+/.exec(src.slice(i)); if (!m) fail(); i += m[0].length; return m[0]; };
+    const value = () => {
+      ws();
+      const c = src[i];
+      if (c === "{") {
+        i++;
+        const o = {};
+        for (;;) {
+          ws();
+          if (src[i] === "}") { i++; return o; }
+          const k = src[i] === '"' || src[i] === "'" ? str() : word();
+          ws();
+          if (src[i] !== ":") fail();
+          i++;
+          o[k] = value();
+          ws();
+          if (src[i] === "," || src[i] === ";") i++;
+        }
+      }
+      if (c === "[") {
+        i++;
+        const a = [];
+        for (;;) {
+          ws();
+          if (src[i] === "]") { i++; return a; }
+          a.push(value());
+          ws();
+          if (src[i] === ",") i++;
+        }
+      }
+      if (c === '"' || c === "'") return str();
+      const w = word();
+      if (w === "true") return true;
+      if (w === "false") return false;
+      if (w === "null") return null;
+      if (w === "undefined") return undefined;
+      if (/^-?(0x[0-9a-f]+|\d+\.?\d*(e[+-]?\d+)?)$/i.test(w)) return Number(w);
+      if (/^-?\d+n$/.test(w)) return BigInt(w.slice(0, -1));
+      const d = /^0d(\d{4})-(\d{2})-(\d{2})$/.exec(w);
+      if (d) return new Date(Date.UTC(+d[1], d[2] - 1, +d[3]));
+      return w; // other bare words (lengths like `12px`, names) stay text
+    };
+    const str = () => {
+      const q = src[i++];
+      let out = "";
+      while (i < src.length && src[i] !== q) {
+        if (src[i] === "\\") { i++; out += { n: "\n", t: "\t", r: "\r" }[src[i]] ?? src[i]; } else out += src[i];
+        i++;
+      }
+      i++;
+      return out;
+    };
+    const v = value();
+    ws();
+    if (i < src.length) fail();
+    return v;
+  };
+  const LENGTH_UNITS = { px: 1, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, pt: 96 / 72, pc: 16 };
+  const unsupported = (what) => () => { throw new Error(what + " is not available in Nile"); };
+  const sciterModule = {
+    VERSION: "1.0.0.0", REVISION: "0", QUICKJS_VERSION: "2024-01-13",
+    import: unsupported("import() (use `await import(...)`)"),
+    setModuleUrlResolver() { /* bare names are not resolved yet */ },
+    loadLibrary: unsupported("loadLibrary"),
+    parseValue,
+    devicePixels(len, axis) {
+      const m = typeof len === "number" ? [0, len, "px"] : /^\s*(-?[\d.]+)\s*([a-z%]*)\s*$/i.exec(String(len)) || [0, 0, "px"];
+      return Math.round(parseFloat(m[1]) * (LENGTH_UNITS[m[2] || "px"] ?? 1) * g.devicePixelRatio);
+    },
+    on: (...a) => document.on(...a),
+    off: (...a) => document.off(...a),
+    once: (...a) => document.once(...a),
+    onGlobalEvent: (name, handler) => { g.addEventListener(name, handler); return g; },
+    offGlobalEvent: (what) => { if (typeof what === "function") for (const n of []) g.removeEventListener(n, what); return g; },
+    $: (sel) => document.querySelector(sel),
+    $$: (sel) => Array.from(document.querySelectorAll(sel)),
+    uuid() {
+      const h = (n) => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+      return `${h(8)}-${h(4)}-4${h(3)}-${"89ab"[Math.floor(Math.random() * 4)]}${h(3)}-${h(12)}`;
+    },
+    encode: (text, enc = "utf-8") => bufferOf(/^(latin1|iso-8859-1|ascii|us-ascii)$/i.test(enc) ? Uint8Array.from(String(text), (c) => c.charCodeAt(0) & 255) : new TextEncoder().encode(text)),
+    decode: (bytes, enc = "utf-8") => (/^(latin1|iso-8859-1|ascii|us-ascii)$/i.test(enc) ? String.fromCharCode(...toBytes(bytes)) : new TextDecoder().decode(toBytes(bytes))),
+    compress: unsupported("compress"),
+    decompress: unsupported("decompress"),
+    toBase64: (buf) => bytesToB64(toBytes(buf)),
+    fromBase64: (s) => bufferOf(b64ToBytes(String(s))),
+    md5, crc32,
+  };
+  const call = (op, ...args) => N.envCall(op, args);
+  const lines = (s) => (s ? s.split("\n") : []);
+  const toUrl = (p) => "file://" + (p.startsWith("/") ? "" : "/") + p.replace(/\\/g, "/").split("/").map(encodeURIComponent).join("/").replace(/%3A/g, ":");
+  const envModule = {
+    get OS() { return call("os"); },
+    get PLATFORM() { return call("platform"); },
+    DEVICE: "desktop",
+    language: () => call("language"),
+    country: () => call("country"),
+    userName: () => call("userName"),
+    machineName: () => call("machineName"),
+    domainName: () => call("domainName"),
+    arguments: () => lines(call("arguments")),
+    launch: (path) => { call("launch", String(path)); },
+    home: (rel = "") => call("home", rel),
+    homeURL: (rel = "") => toUrl(call("home", rel)),
+    path: (name, rel = "") => call("path", name, rel),
+    pathURL: (name, rel = "") => toUrl(call("path", name, rel)),
+    drives: () => lines(call("drives")),
+    variable: (name, set) => (set === undefined ? call("variable", String(name)) : call("variable", String(name), set === null ? "\u0000" : String(set))),
+    exec: (...args) => { call("exec", ...args.map(String)); },
+  };
+  Object.defineProperty(g, "__sciterModule", { value: sciterModule });
+  Object.defineProperty(g, "__envModule", { value: envModule });
   }

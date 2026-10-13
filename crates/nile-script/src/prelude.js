@@ -512,6 +512,7 @@
       if (!VALUE_TAGS.has(t)) return undefined;
       const v = this.getAttribute("value");
       if (v === null && t === "textarea") return this.textContent;
+      if (v === null && t === "input" && this.type === "color") return "#000000";
       if (v === null && t === "input" && this.type === "range") {
         const lo = +(this.getAttribute("min") ?? 0), hi = +(this.getAttribute("max") ?? 100);
         return String(Math.min(Math.max((lo + hi) / 2, lo), Math.max(lo, hi)));

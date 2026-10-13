@@ -6,6 +6,7 @@
 //! them are internal plumbing, so prefer the C API (`nile-capi`) for anything else.
 
 pub mod editing;
+mod inputs;
 mod net;
 pub mod window;
 
@@ -157,6 +158,9 @@ pub struct View {
     pub focus_changes: Vec<(Option<NodeId>, Option<NodeId>)>,
     /// Window actions scripts and `role="window-*"` elements asked for; the window loop applies them.
     pub window_requests: Vec<WindowCommand>,
+    /// A file chooser a click on `<input type=file>` asked for; the embedder answers with
+    /// `Page::choose_files`.
+    pub file_request: Option<FileRequest>,
     /// The viewport changed since `resize` last fired.
     pub resized: bool,
     /// Where the window is: `[screenX, screenY, outerWidth, outerHeight, fullscreen]`, kept
@@ -351,6 +355,15 @@ impl View {
 /// to date, so a script reads what it just wrote.
 pub struct Env(Rc<RefCell<View>>);
 
+/// A click on a file input: which one, and what it accepts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileRequest {
+    pub node: NodeId,
+    pub multiple: bool,
+    /// The `accept` attribute (extensions like `.png` are honoured, MIME types are not).
+    pub accept: String,
+}
+
 impl Environment for Env {
     fn bounding_rect(&self, node: NodeId) -> Option<[f32; 4]> {
         let mut v = self.0.borrow_mut();
@@ -508,8 +521,14 @@ pub struct Page {
     pub edit_drag: Option<(DomPoint, bool)>,
     /// The x the caret keeps while moving up and down.
     pub edit_x: Option<f32>,
+    /// The file input a chooser was last taken for.
+    pub file_target: Option<NodeId>,
     /// List box row the shift-range started from, and the row keys moved to last.
     pub list_anchor: Option<(NodeId, usize)>,
+    /// A list box being dragged over (the button went down on a row).
+    pub list_drag: Option<NodeId>,
+    /// The list box whose press already selected a row, so its click doesn't do it twice.
+    pub list_press: Option<NodeId>,
     pub list_cursor: Option<(NodeId, usize)>,
     /// Time, position and count of the last primary click, for double/triple-click.
     pub last_click: Option<(Instant, (f32, f32), u32)>,
@@ -590,6 +609,16 @@ fn word_end(chars: &[char], mut at: usize) -> usize {
 }
 
 impl Page {
+    /// Keep the page's `localStorage` in `file`. Pages loaded from a file already use one in the
+    /// user's data directory (`NILE_STORAGE_DIR` moves it, `off` disables it) and their first
+    /// scripts have run by the time this returns, so values read at startup come from there;
+    /// what is in `file` is merged in over them.
+    pub fn set_storage_file(&mut self, file: &std::path::Path) {
+        if let Some(host) = &self.scripts {
+            host.set_storage_file(file);
+        }
+    }
+
     pub fn load(path: PathBuf, viewport: (f32, f32), scroll_y: f32) -> Page {
         let html = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             format!("<body><h1>Could not open file</h1><p>{}: {e}</p></body>", path.display())
@@ -633,6 +662,7 @@ impl Page {
             images: FileImages::new(path.parent().map(PathBuf::from).unwrap_or_default()),
             focus_changes: Vec::new(),
             window_requests: Vec::new(),
+            file_request: None,
             resized: false,
             window_rect: None,
         }));
@@ -645,6 +675,11 @@ impl Page {
                 host.set_fetcher(std::sync::Arc::new(net::PageFetcher::new(dir)));
                 let url = std::fs::canonicalize(&path).ok().map(|p| format!("file://{}", p.to_string_lossy().replace('\\', "/")));
                 host.set_location(url.as_deref().unwrap_or("about:blank"));
+                if memory.is_none() {
+                    if let Some(file) = net::default_storage_file(&path) {
+                        host.set_storage_file(file);
+                    }
+                }
                 let read = |rel: &str| -> Option<(String, String)> {
                     let file = dir.join(rel);
                     match std::fs::read_to_string(&file) {
@@ -706,7 +741,10 @@ impl Page {
             range_drag: None,
             edit_drag: None,
             edit_x: None,
+            file_target: None,
             list_anchor: None,
+            list_drag: None,
+            list_press: None,
             list_cursor: None,
             last_click: None,
             clipboard: Box::new(MemoryClipboard::default()),
@@ -818,7 +856,9 @@ impl Page {
     /// `change` if its value changed), start the new one, and fire `blur`/`focus`.
     pub fn focus_moved(&mut self, old: Option<NodeId>, new: Option<NodeId>) {
         if let Some(o) = old {
-            if self.value_at_focus.take().is_some_and(|v| v != self.value_of(o)) {
+            let before = self.value_at_focus.take();
+            self.commit_value(o, before.clone());
+            if before.is_some_and(|v| v != self.value_of(o)) {
                 self.emit(o, UiEvent::Plain("change"));
             }
             self.emit(o, UiEvent::Plain("blur"));
@@ -1128,6 +1168,87 @@ impl Page {
         n.tag() == Some("input") && n.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("range"))
     }
 
+    /// The lowercase `type` of an `<input>` ("" for other elements or when unset).
+    pub fn input_type(&self, id: NodeId) -> String {
+        let doc = self.doc.borrow();
+        let n = doc.node(id);
+        if n.tag() == Some("input") { n.attr("type").map(|t| t.trim().to_ascii_lowercase()).unwrap_or_default() } else { String::new() }
+    }
+
+    /// Step the date/time field under the caret; fires `input` and `change`.
+    fn temporal_step(&mut self, id: NodeId, dir: i32) -> bool {
+        let kind = self.input_type(id);
+        let value = self.value_of(id);
+        let Some(next) = inputs::step(&kind, &value, self.caret(), dir) else { return false };
+        let within = {
+            let doc = self.doc.borrow();
+            let n = doc.node(id);
+            n.attr("min").is_none_or(|m| next.as_str() >= m) && n.attr("max").is_none_or(|m| next.as_str() <= m)
+        };
+        if !within || next == value {
+            return false;
+        }
+        self.doc.borrow_mut().set_attr(id, "value", &next);
+        self.value_at_focus = Some(next);
+        self.sync();
+        self.emit(id, UiEvent::Plain("input"));
+        self.emit(id, UiEvent::Plain("change"));
+        true
+    }
+
+    /// A finished edit of a colour input: `#rgb` becomes `#rrggbb`, anything invalid goes back
+    /// to what it was when editing started.
+    fn commit_value(&mut self, id: NodeId, before: Option<String>) {
+        if self.input_type(id) != "color" {
+            return;
+        }
+        let now = self.value_of(id);
+        let fixed = inputs::normalize_color(&now).or_else(|| before.as_deref().and_then(inputs::normalize_color)).unwrap_or_else(|| "#000000".into());
+        if fixed != now {
+            self.doc.borrow_mut().set_attr(id, "value", &fixed);
+            self.sync();
+        }
+    }
+
+    /// The file chooser a click asked for, if any (see `View::file_request`).
+    pub fn take_file_request(&mut self) -> Option<FileRequest> {
+        let request = self.view.borrow_mut().file_request.take();
+        if let Some(r) = &request {
+            self.file_target = Some(r.node);
+        }
+        request
+    }
+
+    /// Answer the request last returned by `take_file_request`.
+    pub fn choose_files_for_request(&mut self, paths: &[String]) -> bool {
+        match self.file_target.take() {
+            Some(node) => {
+                self.choose_files(node, paths);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Give a file input the files the user picked (an empty list clears it) and fire
+    /// `input` and `change`.
+    pub fn choose_files(&mut self, node: NodeId, paths: &[String]) {
+        let joined = paths.join("\n");
+        {
+            let mut doc = self.doc.borrow_mut();
+            if paths.is_empty() {
+                doc.remove_attr(node, "value");
+                doc.remove_attr(node, "nile-files");
+            } else {
+                doc.set_attr(node, "value", &paths[0]);
+                doc.set_attr(node, "nile-files", &joined);
+            }
+        }
+        self.sync();
+        self.emit(node, UiEvent::Plain("input"));
+        self.emit(node, UiEvent::Plain("change"));
+    }
+
     pub fn is_number(&self, id: NodeId) -> bool {
         let doc = self.doc.borrow();
         let n = doc.node(id);
@@ -1339,6 +1460,9 @@ impl Page {
         if let Some((node, _)) = self.range_drag.clone() {
             return self.range_from_pointer(node);
         }
+        if let Some(select) = self.list_drag {
+            return self.list_drag_to_pointer(select);
+        }
         if self.edit_drag.is_some() {
             self.refresh_hover();
             return self.edit_drag_to_pointer();
@@ -1495,6 +1619,18 @@ impl Page {
         if let Some(host) = self.focused_host() {
             changed |= self.begin_edit_selection(host);
         }
+        // A press on a list box row selects it now, so dragging can extend the choice.
+        self.list_press = None;
+        let list = self
+            .interaction()
+            .hover
+            .and_then(|h| self.select_at_or_above(h))
+            .filter(|s| nile_layout::list_rows(&self.doc.borrow(), *s).is_some() && !self.is_disabled(*s));
+        if let Some(select) = list {
+            changed |= self.list_click(select);
+            self.list_drag = Some(select);
+            self.list_press = Some(select);
+        }
         if let Some(f) = self.interaction().focus.filter(|f| self.is_range(*f) && !self.is_disabled(*f)) {
             self.range_drag = Some((f, self.range_value(f).to_string()));
             changed |= self.range_from_pointer(f);
@@ -1586,6 +1722,7 @@ impl Page {
             return true;
         }
         self.drag = None;
+        self.list_drag = None;
         self.page_drag = false;
         if self.edit_drag.take().is_some() {
             let next = InteractionState { active: None, ..self.interaction() };
@@ -1784,7 +1921,7 @@ impl Page {
     pub fn menu_options(&self) -> Vec<(NodeId, bool)> {
         let Some(m) = self.view.borrow().menu else { return Vec::new() };
         let doc = self.doc.borrow();
-        nile_layout::select_options(&doc, m.select).into_iter().map(|o| (o, doc.has_state(o, "disabled"))).collect()
+        nile_layout::select_options(&doc, m.select).into_iter().map(|o| (o, nile_layout::option_disabled(&doc, o))).collect()
     }
 
     /// The menu row at a viewport point, if the point is inside the menu.
@@ -1880,7 +2017,7 @@ impl Page {
     /// Options of a list box as (node, disabled).
     pub fn list_options(&self, select: NodeId) -> Vec<(NodeId, bool)> {
         let doc = self.doc.borrow();
-        nile_layout::select_options(&doc, select).into_iter().map(|o| (o, doc.has_state(o, "disabled"))).collect()
+        nile_layout::select_options(&doc, select).into_iter().map(|o| (o, nile_layout::option_disabled(&doc, o))).collect()
     }
 
     /// Make exactly the options for which `want` is true the selected ones, firing
@@ -1918,6 +2055,52 @@ impl Page {
         let want = if top < scroll { top } else if bottom > scroll + view { bottom - view } else { scroll };
         if want != scroll {
             v.set_element_scroll(select, 0.0, want);
+        }
+    }
+
+    /// The pointer moved with the button down on a list box: select from the pressed row to the
+    /// one under the pointer (a single-choice list just follows it), scrolling when it leaves
+    /// the box at the top or bottom.
+    fn list_drag_to_pointer(&mut self, select: NodeId) -> bool {
+        let Some((_, y)) = self.pointer else { return false };
+        let Some((anchor_select, anchor)) = self.list_anchor else { return false };
+        if anchor_select != select {
+            return false;
+        }
+        let row = {
+            let mut v = self.view.borrow_mut();
+            let offsets = v.scroll_offsets.clone();
+            let top = v.scroll_y;
+            let Some(rect) = v.layout().node_rect_scrolled(select, &offsets) else { return false };
+            let Some((rh, inset, view_h, scroll, max, count)) =
+                v.layout().list_box(select).map(|l| (l.row_height, l.inset_top, l.view_height, l.scroll, l.max_scroll, l.items.len()))
+            else {
+                return false;
+            };
+            let rel = y + top - rect.y;
+            // Past an edge: scroll a little each move.
+            let mut scroll = scroll;
+            if rel < inset {
+                scroll = (scroll - rh / 2.0).max(0.0);
+            } else if rel > inset + view_h {
+                scroll = (scroll + rh / 2.0).min(max);
+            }
+            if scroll != v.layout().list_box(select).map_or(0.0, |l| l.scroll) {
+                v.set_element_scroll(select, 0.0, scroll);
+            }
+            (((rel.clamp(inset, inset + view_h - 1.0) - inset + scroll) / rh).floor().max(0.0) as usize).min(count.saturating_sub(1))
+        };
+        let multiple = self.doc.borrow().node(select).attr("multiple").is_some();
+        let disabled: Vec<bool> = self.list_options(select).iter().map(|o| o.1).collect();
+        if disabled.get(row).copied().unwrap_or(true) {
+            return false;
+        }
+        self.list_cursor = Some((select, row));
+        if multiple {
+            let (lo, hi) = (anchor.min(row), anchor.max(row));
+            self.set_list_selection(select, |i| i >= lo && i <= hi && !disabled[i])
+        } else {
+            self.set_list_selection(select, |i| i == row)
         }
     }
 
@@ -2019,7 +2202,7 @@ impl Page {
         let options = nile_layout::select_options(&doc, select);
         let n = options.len();
         (1..=n).map(|k| (from.map_or(0, |f| f + k)) % n.max(1)).find(|&i| {
-            !doc.has_state(options[i], "disabled")
+            !nile_layout::option_disabled(&doc, options[i])
                 && nile_layout::option_label(&doc, options[i]).chars().next().is_some_and(|f| f.eq_ignore_ascii_case(&c))
         })
     }
@@ -2078,7 +2261,7 @@ impl Page {
         }
         let options: Vec<(NodeId, bool)> = {
             let doc = self.doc.borrow();
-            nile_layout::select_options(&doc, select).into_iter().map(|o| (o, doc.has_state(o, "disabled"))).collect()
+            nile_layout::select_options(&doc, select).into_iter().map(|o| (o, nile_layout::option_disabled(&doc, o))).collect()
         };
         let current = nile_layout::selected_index(&self.doc.borrow(), select);
         let target = match key {
@@ -2169,7 +2352,7 @@ impl Page {
                 let node = doc.node(n);
                 let ty = node.attr("type").map(str::to_ascii_lowercase);
                 match node.tag() {
-                    Some("input") if matches!(ty.as_deref(), Some("checkbox" | "radio")) => {
+                    Some("input") if matches!(ty.as_deref(), Some("checkbox" | "radio" | "file")) => {
                         found = Some((n, false));
                         break;
                     }
@@ -2186,6 +2369,9 @@ impl Page {
         // A click on a <select> opens its drop-down.
         if let Some(select) = self.select_at_or_above(target) {
             if nile_layout::list_rows(&self.doc.borrow(), select).is_some() {
+                if self.list_press.take() == Some(select) {
+                    return false; // the press already chose the row
+                }
                 return !self.is_disabled(select) && self.list_click(select);
             }
             if !self.is_disabled(select) {
@@ -2228,6 +2414,14 @@ impl Page {
             return changed;
         }
         if self.is_disabled(n) {
+            return false;
+        }
+        if self.input_type(n) == "file" {
+            let doc = self.doc.borrow();
+            let node = doc.node(n);
+            let request = FileRequest { node: n, multiple: node.attr("multiple").is_some(), accept: node.attr("accept").unwrap_or("").to_string() };
+            drop(doc);
+            self.view.borrow_mut().file_request = Some(request);
             return false;
         }
         let (is_radio, was_checked, name) = {
@@ -2324,7 +2518,8 @@ impl Page {
             k if command && k.eq_ignore_ascii_case("v") => {
                 if let (false, Some(text)) = (readonly, self.clipboard.text()) {
                     let text = if multiline { text.replace("\r\n", "\n") } else { text.replace("\r\n", " ").replace(['\r', '\n'], " ") };
-                    let text = if self.is_number(focus) { text.chars().filter(|c| "0123456789+-.eE".contains(*c)).collect() } else { text };
+                    let kind = self.input_type(focus);
+                    let text = if kind.is_empty() { text } else { text.chars().filter(|c| inputs::accepts(&kind, *c)).collect() };
                     edit = Some((lo, hi, text));
                 }
             }
@@ -2380,8 +2575,13 @@ impl Page {
             "ArrowUp" | "ArrowDown" if !multiline && self.is_number(focus) => {
                 return self.number_step(focus, if key == "ArrowUp" { 1.0 } else { -1.0 });
             }
+            "ArrowUp" | "ArrowDown" if !multiline && !readonly && inputs::is_temporal(&self.input_type(focus)) => {
+                return self.temporal_step(focus, if key == "ArrowUp" { 1 } else { -1 });
+            }
             "Enter" if multiline && !readonly => edit = Some((lo, hi, "\n".into())),
             "Enter" => {
+                let before = self.value_at_focus.clone();
+                self.commit_value(focus, before);
                 // Commit: fire `change` if the value moved since focus.
                 if self.value_at_focus.as_ref().is_some_and(|v| *v != self.value_of(focus)) {
                     self.value_at_focus = Some(self.value_of(focus));
@@ -2391,7 +2591,7 @@ impl Page {
             }
             k if !readonly && !command && k.chars().count() == 1 => {
                 let c = k.chars().next().unwrap();
-                if !c.is_control() && (!self.is_number(focus) || "0123456789+-.eE".contains(c)) {
+                if !c.is_control() && inputs::accepts(&self.input_type(focus), c) {
                     edit = Some((lo, hi, c.to_string()));
                 }
             }
@@ -3899,6 +4099,108 @@ cd</textarea>
         assert!(js(&mut p, "log.join(',')").ends_with("hash #two"));
         js(&mut p, "history.pushState({ a: 1 }, '', '?q=1#three'); 0");
         assert_eq!(js(&mut p, "location.search + location.hash + history.state.a + history.length"), "?q=1#three12");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn color_date_and_time_inputs_filter_step_and_normalize() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><input id="c" type="color" style="margin:0"><input id="d" type="date" value="2024-01-31" style="margin:0">
+               <input id="t" type="time" value="23:59" style="margin:0"></body>"##,
+            "temporal",
+        );
+        let none = ModifiersState::default();
+        let val = |p: &mut Page, id: &str| js(p, &format!("document.getElementById('{id}').value"));
+        assert_eq!(val(&mut p, "c"), "#000000");
+        click(&mut p, "c");
+        press_key(&mut p, "a", ModifiersState::CONTROL);
+        type_keys(&mut p, "#AbCz");
+        press_key(&mut p, "Enter", none);
+        assert_eq!(val(&mut p, "c"), "#aabbcc");
+        press_key(&mut p, "a", ModifiersState::CONTROL);
+        type_keys(&mut p, "#12");
+        press_key(&mut p, "Tab", none); // invalid: back to the old colour
+        assert_eq!(val(&mut p, "c"), "#aabbcc");
+        // Dates step the field under the caret.
+        click(&mut p, "d");
+        press_key(&mut p, "Home", none);
+        for _ in 0..5 {
+            press_key(&mut p, "ArrowRight", none);
+        }
+        press_key(&mut p, "ArrowUp", none);
+        assert_eq!(val(&mut p, "d"), "2024-02-29"); // month 1 -> 2, the day clamps
+        type_keys(&mut p, "x");
+        assert_eq!(val(&mut p, "d"), "2024-02-29");
+        click(&mut p, "t");
+        press_key(&mut p, "Home", none);
+        press_key(&mut p, "ArrowUp", none);
+        assert_eq!(val(&mut p, "t"), "00:59"); // hours wrap
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_inputs_ask_for_files_and_expose_them() {
+        let dir = std::env::temp_dir().join(format!("nile-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let (mut p, path) = page(r#"<body style="margin:0"><input id="f" type="file" accept=".txt" multiple>"#, "file_input");
+        click(&mut p, "f");
+        let request = p.take_file_request().expect("a click asks for a chooser");
+        assert!(request.multiple && request.accept == ".txt");
+        assert!(p.take_file_request().is_none());
+        let named = file.to_string_lossy().to_string();
+        assert!(p.choose_files_for_request(std::slice::from_ref(&named)));
+        assert_eq!(js(&mut p, "document.getElementById('f').files.length + ' ' + document.getElementById('f').files[0].name + ' ' + document.getElementById('f').files[0].size"), "1 note.txt 5");
+        assert_eq!(js(&mut p, "document.getElementById('f').value"), named);
+        js(&mut p, "window.t = ''; document.getElementById('f').files[0].text().then(s => { window.t = s; }); 0");
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            p.tick();
+            if js(&mut p, "window.t") == "hello" {
+                break;
+            }
+        }
+        assert_eq!(js(&mut p, "window.t"), "hello");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn optgroups_are_headings_and_list_boxes_select_by_dragging() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><select id="m" multiple size="7" style="margin:0;width:160px">
+                 <optgroup label="G1"><option>a</option><option>b</option><option>c</option></optgroup>
+                 <optgroup label="G2"><option>d</option><option>e</option></optgroup>
+               </select><select id="s" style="margin:0"><optgroup label="G"><option>x</option><option>y</option></optgroup></select></body>"#,
+            "optgroup",
+        );
+        let picked = |p: &mut Page| js(p, "Array.from(document.getElementById('m').querySelectorAll('option')).filter(o => o.selected).map(o => o.text).join('')");
+        // Rows: G1 a b c G2 d e. Press on "a" (row 1), drag down through G2's heading to "d" (row 5).
+        let node = p.doc.borrow().find(|n| n.attr("id") == Some("m")).unwrap();
+        let r = p.view.borrow_mut().layout().node_rect(node).unwrap();
+        let (rh, inset) = {
+            let mut v = p.view.borrow_mut();
+            let l = v.layout().list_box(node).unwrap();
+            (l.row_height, l.inset_top)
+        };
+        let row_y = |i: usize| r.y + inset + rh * (i as f32 + 0.5);
+        p.pointer_moved(r.x + 20.0, row_y(0)); // the heading: not a choice
+        p.press();
+        p.release();
+        assert_eq!(picked(&mut p), "");
+        p.pointer_moved(r.x + 20.0, row_y(1));
+        p.press();
+        p.pointer_moved(r.x + 20.0, row_y(3));
+        assert_eq!(picked(&mut p), "abc");
+        p.pointer_moved(r.x + 20.0, row_y(5));
+        assert_eq!(picked(&mut p), "abcd"); // G2's heading is skipped
+        p.release();
+        assert_eq!(picked(&mut p), "abcd");
+        // The drop-down: the heading takes a row but can't be chosen, and arrows skip it.
+        let sel = p.doc.borrow().find(|n| n.attr("id") == Some("s")).unwrap();
+        assert_eq!(nile_layout::select_options(&p.doc.borrow(), sel).len(), 3);
+        assert_eq!(nile_layout::selected_index(&p.doc.borrow(), sel), Some(1));
         let _ = std::fs::remove_file(path);
     }
 }

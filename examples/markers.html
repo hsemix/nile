@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>::marker and list-style-position</title>
+<style>
+  body { font: 15px sans-serif; margin: 24px; display: flex; gap: 40px; background: #f4f1ea }
+  h3 { margin: 0 0 6px; font-size: 13px; color: #666 }
+  ul, ol { margin: 0; padding-left: 28px }
+  li { margin: 3px 0 }
+  .colored li::marker { color: #d33; font-size: 20px }
+  .numbers li::marker { color: #27a; font-weight: bold }
+  .custom li::marker { content: "→ "; color: #2a7 }
+  .inside { list-style-position: inside; background: #fff; padding: 6px 6px 6px 6px; width: 170px }
+  .hidden li::marker { content: "" }
+</style>
+<div class="colored"><h3>coloured bullets</h3><ul><li>One</li><li>Two</li><li>Three</li></ul></div>
+<div class="numbers"><h3>bold numbers</h3><ol><li>First</li><li>Second</li><li>Third</li></ol></div>
+<div class="custom"><h3>content</h3><ul><li>Arrow</li><li>Arrow</li></ul></div>
+<div><h3>inside</h3><ul class="inside"><li>Marker inside the box</li><li>Wraps like text does when it is long enough</li></ul></div>
+<div class="hidden"><h3>hidden</h3><ul><li>No marker</li><li>No marker</li></ul></div>

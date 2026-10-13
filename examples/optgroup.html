@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>optgroup and list drag</title>
+<style>
+  body { font-family: sans-serif; margin: 24px; display: flex; gap: 32px; align-items: flex-start; background: #f4f1ea }
+  h3 { margin: 0 0 8px; font-size: 14px }
+  select { font-size: 14px }
+  p { color: #555; font-size: 12px; max-width: 220px }
+</style>
+<div>
+  <h3>drop-down</h3>
+  <select id="d">
+    <optgroup label="Fruit"><option>Apple</option><option selected>Banana</option></optgroup>
+    <optgroup label="Vegetables"><option>Carrot</option><option disabled>Daikon (n/a)</option><option>Endive</option></optgroup>
+    <option>Everything else</option>
+  </select>
+</div>
+<div>
+  <h3>list, drag to select</h3>
+  <select id="m" multiple size="7">
+    <optgroup label="Fruit"><option>Apple</option><option>Banana</option><option>Cherry</option></optgroup>
+    <optgroup label="Vegetables"><option>Carrot</option><option>Daikon</option><option>Endive</option></optgroup>
+  </select>
+  <p>Press on a row and drag to select a range; group headings aren't choices.</p>
+</div>

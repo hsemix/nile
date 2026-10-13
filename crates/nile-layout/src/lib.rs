@@ -328,6 +328,10 @@ pub struct LayoutOptions<'a> {
 pub struct MenuItem {
     pub text: TextLayout,
     pub disabled: bool,
+    /// An `<optgroup>` heading (bold, not a choice).
+    pub header: bool,
+    /// Inside an `<optgroup>`.
+    pub indent: bool,
 }
 
 /// An open `<select>` list in document coordinates.
@@ -361,6 +365,8 @@ impl MenuBox {
 /// A list item's marker, positioned in document coordinates.
 pub struct ListMarker {
     pub kind: MarkerKind,
+    /// Colour from a `::marker` rule; otherwise the item's own (live) colour is used.
+    pub color: Option<Color>,
     /// Where the marker goes: the glyph text's box, or the bullet's bounding square.
     pub rect: Rect,
 }
@@ -379,6 +385,8 @@ pub struct ListItem {
     pub text: TextLayout,
     pub disabled: bool,
     pub selected: bool,
+    pub header: bool,
+    pub indent: bool,
 }
 
 /// The rows of a list-box `<select>`, painted inside its box and scrolled by `scroll`.
@@ -423,15 +431,36 @@ fn option_row_height(style: &ComputedStyle) -> f32 {
     (style.font_size * style.line_height + 6.0).ceil()
 }
 
-/// The `<option>` elements of a `<select>`, in document order.
+/// The rows of a `<select>` in document order: its `<option>`s, and an `<optgroup>`'s heading
+/// as a row of its own (a disabled one, so selecting and stepping skip it). Row indices are
+/// what the list, the menu and the keyboard use.
 pub fn select_options(doc: &Document, select: NodeId) -> Vec<NodeId> {
-    doc.descendants(select).into_iter().filter(|n| doc.node(*n).tag() == Some("option")).collect()
+    doc.descendants(select).into_iter().filter(|n| matches!(doc.node(*n).tag(), Some("option" | "optgroup"))).collect()
 }
 
-/// An option's visible text: its `label`, else its text with whitespace collapsed.
+/// An `<optgroup>` heading row.
+pub fn is_group(doc: &Document, row: NodeId) -> bool {
+    doc.node(row).tag() == Some("optgroup")
+}
+
+/// Whether a row can't be chosen: a heading, a disabled option, or one in a disabled group.
+pub fn option_disabled(doc: &Document, row: NodeId) -> bool {
+    is_group(doc, row)
+        || doc.has_state(row, "disabled")
+        || doc.node(row).parent.is_some_and(|p| is_group(doc, p) && doc.node(p).attr("disabled").is_some())
+}
+
+/// An option inside an `<optgroup>` is drawn indented.
+pub fn option_indented(doc: &Document, row: NodeId) -> bool {
+    !is_group(doc, row) && doc.node(row).parent.is_some_and(|p| is_group(doc, p))
+}
+
+/// A row's visible text: an option's `label`, else its text with whitespace collapsed; a
+/// group's `label`.
 pub fn option_label(doc: &Document, option: NodeId) -> String {
     match doc.node(option).attr("label") {
         Some(l) if !l.is_empty() => l.to_string(),
+        _ if is_group(doc, option) => String::new(),
         _ => collapse_whitespace(&doc.text_content(option)).trim().to_string(),
     }
 }
@@ -442,9 +471,9 @@ pub fn selected_index(doc: &Document, select: NodeId) -> Option<usize> {
     let options = select_options(doc, select);
     options
         .iter()
-        .position(|o| doc.has_state(*o, "selected"))
-        .or_else(|| options.iter().position(|o| !doc.has_state(*o, "disabled")))
-        .or((!options.is_empty()).then_some(0))
+        .position(|o| !is_group(doc, *o) && doc.has_state(*o, "selected"))
+        .or_else(|| options.iter().position(|o| !option_disabled(doc, *o)))
+        .or_else(|| options.iter().position(|o| !is_group(doc, *o)))
 }
 
 /// An `inline-block` inside a text run: its Taffy subtree (sized already, not
@@ -1567,7 +1596,7 @@ fn is_value_control(node: &nile_dom::Node) -> bool {
     node.tag() == Some("textarea")
         || node.tag() == Some("select")
         || node.tag() == Some("input")
-        && !matches!(node.attr("type").map(str::to_ascii_lowercase).as_deref(), Some("checkbox" | "radio" | "hidden" | "file" | "image" | "range"))
+        && !matches!(node.attr("type").map(str::to_ascii_lowercase).as_deref(), Some("checkbox" | "radio" | "hidden" | "image" | "range"))
 }
 
 fn is_password(node: &nile_dom::Node) -> bool {
@@ -1581,6 +1610,7 @@ pub fn control_value(doc: &Document, id: NodeId) -> String {
     match n.attr("value") {
         Some(v) => v.to_string(),
         None if n.tag() == Some("textarea") => doc.text_content(id),
+        None if n.tag() == Some("input") && n.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("color")) => "#000000".into(),
         None => String::new(),
     }
 }
@@ -1594,6 +1624,15 @@ fn control_display(doc: &Document, id: NodeId) -> (String, bool) {
     if node.tag() == Some("select") {
         let label = selected_index(doc, id).map(|i| option_label(doc, select_options(doc, id)[i])).unwrap_or_default();
         return (if label.is_empty() { "\u{200b}".into() } else { label }, false);
+    }
+    if node.tag() == Some("input") && node.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("file")) {
+        let names: Vec<&str> = node.attr("nile-files").unwrap_or("").lines().filter(|p| !p.is_empty()).map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p)).collect();
+        let shown = match names.len() {
+            0 => "No file chosen".to_string(),
+            1 => names[0].to_string(),
+            n => format!("{n} files"),
+        };
+        return (format!("Choose File  {shown}"), false);
     }
     let multiline = node.tag() == Some("textarea");
     let value = control_value(doc, id);
@@ -1678,6 +1717,18 @@ fn roman(n: i64, upper: bool) -> String {
 }
 
 /// The text of a counter-style marker for item number `n`, or `None` for bullets and `none`.
+/// Room an `inside` marker takes at the start of its item: its shape plus a gap. The text
+/// of a numbered marker (or a `::marker { content }`) isn't known when styles become Taffy
+/// boxes, so those get an estimate.
+fn inside_marker_width(s: &ComputedStyle) -> f32 {
+    use nile_style::ListStyleType as L;
+    match s.list_style_type {
+        L::None | L::DisclosureClosed | L::DisclosureOpen => 0.0,
+        L::Disc | L::Circle | L::Square => (s.font_size * 0.34).round().max(3.0) + s.font_size * 0.5,
+        _ => s.font_size * 1.9,
+    }
+}
+
 fn marker_text(t: nile_style::ListStyleType, n: i64) -> Option<String> {
     use nile_style::ListStyleType as L;
     Some(match t {
@@ -1726,16 +1777,31 @@ fn build_markers(
             continue;
         }
         let style = styles.get(b.node);
-        if style.display != Display::ListItem || style.list_style_type == nile_style::ListStyleType::None {
+        // A `::marker` rule can restyle the marker, replace it (`content`) or hide it.
+        let ms = styles.marker(b.node);
+        let content = ms.and_then(|m| m.content.as_deref());
+        if style.display != Display::ListItem || (style.list_style_type == nile_style::ListStyleType::None && content.is_none_or(str::is_empty)) || content == Some("") {
             continue;
         }
-        let fs = style.font_size;
-        let line_h = fs * style.line_height;
+        let mstyle = ms.map_or(style, |m| &m.style);
+        let fs = mstyle.font_size;
+        let line_h = style.font_size * style.line_height;
         let top = b.rect.y + style.border_width.top + style.padding.top;
+        // `list-style-position: inside` puts the marker at the content's left edge; the item
+        // reserves room for it in its padding (see `inside_marker_width`).
+        let inside_x = b.rect.x + style.border_width.left + style.padding.left;
         let kind_and_rect = match style.list_style_type {
+            _ if content.is_some() => {
+                let mut l = text.shape(content.unwrap_or_default(), &text_style(mstyle), 1.0);
+                break_lines(&mut l, None, Alignment::Start);
+                let (w, h) = (l.full_width(), l.height());
+                let x = if style.list_style_inside { inside_x } else { b.rect.x - fs * 0.3 - w };
+                Some((MarkerKind::Text(Box::new(l)), Rect { x, y: top + (line_h - h) / 2.0, width: w, height: h }))
+            }
             t @ (nile_style::ListStyleType::Disc | nile_style::ListStyleType::Circle | nile_style::ListStyleType::Square) => {
                 let d = (fs * 0.34).round().max(3.0);
-                let rect = Rect { x: b.rect.x - fs * 0.5 - d, y: top + (line_h - d) / 2.0 + fs * 0.05, width: d, height: d };
+                let x = if style.list_style_inside { inside_x } else { b.rect.x - fs * 0.5 - d };
+                let rect = Rect { x, y: top + (line_h - d) / 2.0 + fs * 0.05, width: d, height: d };
                 let kind = match t {
                     nile_style::ListStyleType::Disc => MarkerKind::Disc,
                     nile_style::ListStyleType::Circle => MarkerKind::Circle,
@@ -1755,15 +1821,16 @@ fn build_markers(
                     .map(|p| *numbers.entry(p).or_insert_with(|| list_numbers(doc, styles, p)).get(&b.node).unwrap_or(&1))
                     .unwrap_or(1);
                 marker_text(t, n).map(|label| {
-                    let mut l = text.shape(&label, &text_style(style), 1.0);
+                    let mut l = text.shape(&label, &text_style(mstyle), 1.0);
                     break_lines(&mut l, None, Alignment::Start);
                     let (w, h) = (l.full_width(), l.height());
-                    (MarkerKind::Text(Box::new(l)), Rect { x: b.rect.x - fs * 0.3 - w, y: top + (line_h - h) / 2.0, width: w, height: h })
+                    let x = if style.list_style_inside { inside_x } else { b.rect.x - fs * 0.3 - w };
+                    (MarkerKind::Text(Box::new(l)), Rect { x, y: top + (line_h - h) / 2.0, width: w, height: h })
                 })
             }
         };
         if let Some((kind, rect)) = kind_and_rect {
-            out.insert(b.node, ListMarker { kind, rect });
+            out.insert(b.node, ListMarker { kind, rect, color: ms.and_then(|m| m.color) });
         }
     }
     out
@@ -1788,9 +1855,10 @@ fn build_lists(
         let items: Vec<ListItem> = select_options(doc, b.node)
             .into_iter()
             .map(|o| {
-                let mut l = text.shape(&option_label(doc, o), &ts, 1.0);
+                let header = is_group(doc, o);
+                let mut l = text.shape(&option_label(doc, o), &if header { TextStyle { font_weight: 700.0, ..ts.clone() } } else { ts.clone() }, 1.0);
                 break_lines(&mut l, None, Alignment::Start);
-                ListItem { text: l, disabled: doc.has_state(o, "disabled"), selected: doc.has_state(o, "selected") }
+                ListItem { text: l, disabled: option_disabled(doc, o), selected: !header && doc.has_state(o, "selected"), header, indent: option_indented(doc, o) }
             })
             .collect();
         let inset_top = style.border_width.top + style.padding.top;
@@ -1821,16 +1889,17 @@ fn build_menu(
     let items: Vec<MenuItem> = select_options(doc, req.select)
         .into_iter()
         .map(|o| {
-            let mut l = text.shape(&option_label(doc, o), &ts, 1.0);
+            let header = is_group(doc, o);
+            let mut l = text.shape(&option_label(doc, o), &if header { TextStyle { font_weight: 700.0, ..ts.clone() } } else { ts.clone() }, 1.0);
             break_lines(&mut l, None, Alignment::Start);
-            MenuItem { text: l, disabled: doc.has_state(o, "disabled") }
+            MenuItem { text: l, disabled: option_disabled(doc, o), header, indent: option_indented(doc, o) }
         })
         .collect();
     if items.is_empty() {
         return None;
     }
     let pad_x = 8.0;
-    let widest = items.iter().map(|i| i.text.full_width()).fold(0.0, f32::max);
+    let widest = items.iter().map(|i| i.text.full_width() + if i.indent { 12.0 } else { 0.0 }).fold(0.0, f32::max);
     let row_height = (style.font_size * style.line_height + 6.0).ceil();
     // Open below the select; if the list doesn't fit there, use whichever side has more
     // room and scroll the rest.
@@ -2716,7 +2785,13 @@ fn taffy_style(s: &ComputedStyle) -> Style {
             bottom: lpa(s.margin.bottom),
             left: lpa(s.margin.left),
         },
-        padding: rect_px(s.padding),
+        padding: {
+            let mut p = rect_px(s.padding);
+            if s.display == Display::ListItem && s.list_style_inside {
+                p.left = taffy::LengthPercentage::length(s.padding.left + inside_marker_width(s));
+            }
+            p
+        },
         border: rect_px(s.border_width),
         overflow: taffy::Point {
             x: if s.overflow_x != OverflowKind::Visible { taffy::Overflow::Clip } else { taffy::Overflow::Visible },
@@ -3416,6 +3491,30 @@ second</textarea><textarea id="e"></textarea></body>"#,
         let (line, _) = lines("pre-line");
         assert_eq!(line, "a b\nc d", "spaces collapse, the newline stays and eats the spaces after it");
         assert_eq!(lines("pre-wrap").0, pre);
+    }
+
+    #[test]
+    fn marker_rules_and_inside_position() {
+        let (doc, t) = rects(
+            r#"<style>
+                 #c::marker { color: #ff0000 }
+                 #t::marker { content: ">> " }
+                 #h::marker { content: "" }
+                 .in { list-style-position: inside }
+               </style>
+               <body style="margin:0"><ul style="margin:0;padding:0 0 0 40px"><li id="c">c</li><li id="t">t</li><li id="h">h</li><li id="p">p</li><li id="o" class="in">o</li></ul></body>"#,
+        );
+        let id = |s: &str| doc.find(|n| n.attr("id") == Some(s)).unwrap();
+        assert_eq!(t.marker(id("c")).unwrap().color, Some(nile_style::Color::rgb(255, 0, 0)));
+        assert_eq!(t.marker(id("p")).unwrap().color, None, "no rule: the item's own colour is used live");
+        assert!(matches!(t.marker(id("t")).unwrap().kind, MarkerKind::Text(_)), "content replaces the bullet");
+        assert!(t.marker(id("h")).is_none(), "content: \"\" hides it");
+        // Outside, the marker hangs left of the item; inside, it starts at the item's content edge
+        // and the text is pushed past it.
+        let (plain, inside) = (rect_of(&doc, &t, "p"), rect_of(&doc, &t, "o"));
+        assert!(t.marker(id("p")).unwrap().rect.x < plain.x);
+        let m = t.marker(id("o")).unwrap().rect;
+        assert!(m.x >= inside.x && m.x + m.width <= inside.x + 10.0, "{m:?} in {inside:?}");
     }
 
     #[test]

@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><style>
+body { margin: 20px; font: 14px sans-serif; background: #f4f1ea }
+label { display: block; margin: 8px 0 }
+label span { display: inline-block; width: 120px }
+</style></head><body>
+<label><span>Colour</span><input id="c" type="color" value="#2a7fd4"></label>
+<label><span>Date</span><input id="d" type="date" value="2024-02-29"></label>
+<label><span>Time</span><input id="t" type="time" value="09:30"></label>
+<label><span>Month</span><input id="m" type="month" value="2024-05"></label>
+<label><span>Date and time</span><input id="dt" type="datetime-local" value="2024-05-06T07:08" style="width:170px"></label>
+<label><span>File</span><input id="f" type="file" multiple></label>
+<p id="out">Type in the colour field (#rgb or #rrggbb); Up/Down steps the date or time field under the caret.</p>
+<script>
+  for (const el of document.querySelectorAll("input"))
+    el.addEventListener("change", () => document.getElementById("out").textContent = el.id + " = " + el.value);
+</script></body></html>

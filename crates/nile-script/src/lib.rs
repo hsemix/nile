@@ -26,6 +26,7 @@ use rquickjs::{
     CatchResultExt, Context, Ctx, Exception, Function, Module, Object, Runtime,
 };
 
+mod envmod;
 mod jsx;
 mod net;
 
@@ -117,6 +118,10 @@ impl Resolver for FileResolver {
         _attributes: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<String> {
         let path = std::path::Path::new(name);
+        if matches!(name, "@nile" | "@sciter" | "@env") {
+            // `@sciter` is the same module under the name Sciter apps use.
+            return Ok(if name == "@sciter" { "@nile".to_string() } else { name.to_string() });
+        }
         if name.starts_with("./") || name.starts_with("../") {
             // Inline modules are named `page.html#moduleN`; imports resolve from the page's folder.
             let base_file = base.split('#').next().unwrap_or(base);
@@ -158,6 +163,19 @@ impl Loader for FileLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<Module<'js, Declared>> {
+        // Built-in modules are thin wrappers over objects the prelude defines.
+        let builtin = match name {
+            "@nile" => Some(
+                "const m = globalThis.__sciterModule;\nexport const { VERSION, REVISION, QUICKJS_VERSION, setModuleUrlResolver, loadLibrary, parseValue, devicePixels, on, off, once, onGlobalEvent, offGlobalEvent, $, $$, uuid, encode, decode, compress, decompress, toBase64, fromBase64, md5, crc32 } = m;\nconst imp = m.import;\nexport { imp as import };\nexport default m;",
+            ),
+            "@env" => Some(
+                "const m = globalThis.__envModule;\nexport const { language, country, userName, machineName, domainName, arguments: args, launch, home, homeURL, path, pathURL, drives, variable, exec, DEVICE } = m;\nexport { args as arguments };\nexport const OS = m.OS, PLATFORM = m.PLATFORM;\nexport default m;",
+            ),
+            _ => None,
+        };
+        if let Some(source) = builtin {
+            return Module::declare(ctx.clone(), name, source);
+        }
         let source = std::fs::read_to_string(name).map_err(|_| rquickjs::Error::new_loading(name))?;
         let source = jsx::transform(&source).unwrap_or(source);
         Module::declare(ctx.clone(), name, source)
@@ -514,6 +532,8 @@ fn install_natives(
             }
         }
     });
+    native!("envCall", |op: String, args: Vec<String>| envmod::call(&op, &args));
+    native!("fileSize", |path: String| std::fs::metadata(path).map_or(-1.0, |m| m.len() as f64));
     native!("scale", {
         let env = env.clone();
         move || env.scale()
@@ -970,6 +990,54 @@ mod tests {
     }
 
     #[test]
+    fn local_storage_persists_to_the_chosen_file() {
+        let file = std::env::temp_dir().join(format!("nile-storage-{}", std::process::id())).join("ls.json");
+        let _ = std::fs::remove_file(&file);
+        {
+            let (host, _) = host("<p></p>");
+            host.set_storage_file(&file);
+            host.run("localStorage.setItem('name', 'Nile'); localStorage.n = 2; localStorage.removeItem('n'); localStorage.k = 'é\"x'").unwrap();
+        } // dropping flushes
+        assert_eq!(std::fs::read_to_string(&file).unwrap().replace(' ', ""), r#"{"name":"Nile","k":"é\"x"}"#);
+        let (host, _) = host("<p></p>");
+        host.set_storage_file(&file);
+        host.run("console.log(localStorage.name, localStorage.length, localStorage.getItem('k'))").unwrap();
+        assert_eq!(host.console_output(), vec!["Nile 2 é\"x"]);
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn sciter_and_env_modules_load() {
+        let (host, _) = host(r#"<p id="p" class="a">x</p>"#);
+        host.run_module(
+            "page.html#module1",
+            r##"
+            import { $, $$, md5, crc32, toBase64, fromBase64, uuid, encode, decode, parseValue, devicePixels, VERSION } from "@nile";
+            import * as env from "@env";
+            import sctr, { on } from "@sciter";
+            console.log($("#p").className, $$("p").length, typeof VERSION, typeof on, sctr.crc32 === crc32);
+            console.log(md5("hello"), crc32("hello"), toBase64(encode("Nile")), decode(fromBase64("TmlsZQ==")), uuid().length);
+            console.log(JSON.stringify(parseValue("{foo-bar: zap; n: 0xFF, list: [1, 2n], ok: true; s: 'q'}", 0), (k, v) => typeof v === "bigint" ? v + "n" : v));
+            console.log(devicePixels("1in"), devicePixels(10));
+            console.log(["OSX", "Windows", "Linux"].includes(env.PLATFORM) || env.PLATFORM, env.DEVICE, env.language().length, env.path("home", "x").endsWith("x"), Array.isArray(env.arguments()), env.drives().length > 0);
+            env.variable("NILE_MODULE_TEST", "7");
+            console.log(env.variable("NILE_MODULE_TEST"));
+            env.variable("NILE_MODULE_TEST", null);
+            console.log(JSON.stringify(env.variable("NILE_MODULE_TEST")));
+            "##,
+        )
+        .unwrap();
+        let out = host.console_output();
+        assert_eq!(out[0], "a 1 string function true");
+        assert_eq!(out[1], "5d41402abc4b2a76b9719d911017c592 907060870 TmlsZQ== Nile 36");
+        assert_eq!(out[2], r#"{"foo-bar":"zap","n":255,"list":[1,"2n"],"ok":true,"s":"q"}"#);
+        assert_eq!(out[3], "96 10");
+        assert!(out[4].starts_with("true desktop 2 true true true"), "{}", out[4]);
+        assert_eq!(out[5], "7");
+        assert_eq!(out[6], "\"\"");
+    }
+
+    #[test]
     fn missing_attributes_are_null() {
         let (host, _) = host("<p id='p'></p>");
         host.run("const p = document.getElementById('p'); console.log(p.getAttribute('nope') === null, p.hasAttribute('id'), p.hasAttribute('nope'))").unwrap();
@@ -979,7 +1047,7 @@ mod tests {
     #[test]
     fn selector_errors_throw() {
         let (host, _) = host("<p></p>");
-        host.run("try { document.querySelector('p::marker') } catch (e) { console.log(String(e).includes('SyntaxError')) }")
+        host.run("try { document.querySelector('p::first-line') } catch (e) { console.log(String(e).includes('SyntaxError')) }")
             .unwrap();
         assert_eq!(host.console_output(), vec!["true"]);
     }

@@ -4,6 +4,30 @@
 use nile_script::{FetchRequest, FetchResponse, Fetcher, LocalFetcher};
 use std::path::PathBuf;
 
+/// Where `localStorage` for the page file `page` is kept: a file in the user's data
+/// directory named after the page's path. `NILE_STORAGE_DIR` picks another directory, and
+/// `off` turns persistence off.
+pub fn default_storage_file(page: &std::path::Path) -> Option<PathBuf> {
+    let dir = match std::env::var("NILE_STORAGE_DIR") {
+        Ok(d) if d == "off" => return None,
+        Ok(d) => PathBuf::from(d),
+        Err(_) => {
+            let home = || std::env::var_os("HOME").map(PathBuf::from);
+            if cfg!(target_os = "macos") {
+                home()?.join("Library/Application Support/Nile/storage")
+            } else if cfg!(windows) {
+                PathBuf::from(std::env::var_os("APPDATA")?).join("Nile").join("storage")
+            } else {
+                std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".local/share")))?.join("nile/storage")
+            }
+        }
+    };
+    let full = std::fs::canonicalize(page).ok()?;
+    // FNV-1a of the path keeps one file per page without odd characters in names.
+    let hash = full.to_string_lossy().bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
+    Some(dir.join(format!("{hash:016x}.json")))
+}
+
 pub struct PageFetcher {
     local: LocalFetcher,
 }
