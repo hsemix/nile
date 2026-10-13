@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>stacking contexts</title>
+<style>
+  body { margin: 20px; font: 12px sans-serif; background: #f4f1ea }
+  .box { width: 110px; height: 70px; color: #fff; padding: 6px; box-sizing: border-box }
+  .row { position: relative; height: 110px; margin-bottom: 14px }
+  .row .box { position: absolute }
+  .r1 { background: #2a7fd4; left: 0; top: 0 }
+  .r2 { background: #e67e22; left: 60px; top: 30px; z-index: 1 }
+  /* the wrapper isn't positioned: its child still takes part in the page's order */
+  .wrap .pop { position: absolute; left: 130px; top: 10px; z-index: 10; background: #27ae60 }
+  /* a stacking context confines its child's huge z-index */
+  .ctx { position: absolute; left: 260px; top: 0; z-index: 1; background: #8e44ad }
+  .ctx .inner { position: absolute; left: 50px; top: 30px; z-index: 999; background: #c0392b }
+  .other { position: absolute; left: 300px; top: 30px; z-index: 2; background: #16a085 }
+  .flex { display: flex; margin-top: 8px }
+  .flex .box { width: 90px }
+  .fa { background: #34495e; z-index: 2 } .fb { background: #d35400; z-index: 1; margin-left: -40px }
+</style>
+<div class="row">
+  <div class="box r1">1: z auto</div><div class="box r2">2: z 1</div>
+  <div class="wrap"><div class="box pop">3: z 10 in a plain wrapper</div></div>
+  <div class="box ctx">4: context<div class="box inner">z 999 inside</div></div><div class="box other">5: z 2</div>
+</div>
+<div class="flex"><div class="box fa">flex item z 2</div><div class="box fb">flex item z 1</div></div>

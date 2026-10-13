@@ -139,6 +139,8 @@ pub struct LayoutBox {
     /// `transform` of the element, as layout coordinates to layout coordinates (the
     /// origin is already folded in). Applies to the box and its subtree.
     pub transform: Option<Affine>,
+    /// The container's perspective `(distance, origin x, origin y)` baked into `transform`.
+    pub persp: Option<(f32, f32, f32)>,
     /// `position: fixed`: the box and its subtree stay put while the page scrolls.
     pub fixed: bool,
     /// `position: sticky`: the box slides while the page scrolls (see `StickyBox::shift`).
@@ -313,9 +315,21 @@ pub struct MenuRequest {
     pub scroll: f32,
 }
 
+/// Text an input method is composing, shown in place of characters `at..end` of the input's
+/// value (the selection it will replace; `at == end` at a bare caret).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Preedit {
+    pub node: NodeId,
+    pub at: usize,
+    pub end: usize,
+    pub text: String,
+}
+
 /// Inputs to layout beyond the document and styles.
 #[derive(Default)]
 pub struct LayoutOptions<'a> {
+    /// Composition in progress in a text input.
+    pub preedit: Option<Preedit>,
     pub menu: Option<MenuRequest>,
     /// The page's scroll position: the drop-down opens upward when it doesn't fit below.
     pub scroll_y: f32,
@@ -549,7 +563,7 @@ impl LayoutTree {
     pub fn refresh_paint(&mut self, styles: &StyleMap) {
         for b in &mut self.boxes {
             if matches!(b.content, BoxContent::Element) {
-                b.transform = box_transform(styles.get(b.node), b.rect);
+                b.transform = box_transform(styles.get(b.node), b.rect, b.persp);
             }
         }
     }
@@ -858,6 +872,17 @@ impl LayoutTree {
 
     /// The caret one line up (`dir < 0`) or down from byte offset `at` of
     /// `node`'s text, keeping its x position. `None` if there is no such line.
+    /// The caret of input `node` at byte `at` of its displayed text, in painted coordinates.
+    pub fn input_caret_rect(&self, node: NodeId, at: usize, offsets: &ScrollOffsets) -> Option<Rect> {
+        let i = self.boxes.iter().position(|b| matches!(&b.content, BoxContent::Text(c) if c.control && c.owners.iter().any(|(_, n)| *n == node)))?;
+        let BoxContent::Text(c) = &self.boxes[i].content else { return None };
+        let g = Cursor::from_byte_index(&c.layout, at.min(c.text.len()), Affinity::Downstream).geometry(&c.layout, 1.0);
+        let r = self.boxes[i].rect;
+        let xf = self.placements(offsets)[i].xf;
+        let (x, y) = xf.apply(r.x + g.x0 as f32, r.y + g.y0 as f32);
+        Some(Rect { x, y, width: (g.x1 - g.x0) as f32, height: (g.y1 - g.y0) as f32 })
+    }
+
     pub fn move_caret_vertically(&self, node: NodeId, at: usize, dir: i32) -> Option<usize> {
         let b = self.boxes.iter().find(|b| match &b.content {
             BoxContent::Text(c) => c.owners.iter().any(|(_, n)| *n == node),
@@ -1035,6 +1060,10 @@ pub fn layout_with(
     // Absolute boxes with no positioned ancestor use the root as their containing block.
     CONTAINING_BLOCKS.with(|s| s.borrow_mut().push(Vec::new()));
     FIXED_BLOCKS.with(|f| f.borrow_mut().clear());
+    HOISTED.with(|h| h.borrow_mut().clear());
+    ABS_HANDED.with(|a| a.borrow_mut().clear());
+    STATIC_AT.with(|a| a.borrow_mut().clear());
+    PREEDIT.with(|p| *p.borrow_mut() = options.preedit.clone());
     let was = PARENT_IS_CB.replace(false);
     let root = build(doc, styles, text, &mut tree, html).unwrap_or_else(|| {
         tree.new_leaf_with_context(Style::default(), NodeCtx::Element(html)).unwrap()
@@ -1088,6 +1117,7 @@ pub fn layout_with(
         }
     }
 
+    compute_static_positions(&tree, doc, styles, root);
     let mut boxes = Vec::new();
     flatten(&mut tree, styles, root, 0.0, 0.0, &mut boxes);
     let content_height = tree.layout(root).map(|l| l.size.height).unwrap_or(0.0);
@@ -1229,6 +1259,14 @@ thread_local! {
     /// list per positioned ancestor being built, the root's at the bottom.
     static CONTAINING_BLOCKS: std::cell::RefCell<Vec<Vec<taffy::NodeId>>> = const { std::cell::RefCell::new(Vec::new()) };
     /// `position: fixed` boxes, whose containing block is the viewport.
+    /// Boxes `flatten` has set aside to paint at their stacking context's turn.
+    /// The composition being laid out (see `LayoutOptions::preedit`).
+    static PREEDIT: std::cell::RefCell<Option<Preedit>> = const { std::cell::RefCell::new(None) };
+    /// Absolute boxes moved to a containing block above their parent, and where `auto`-inset ones
+    /// belong (absolute page coordinates of the border box) once layout has run.
+    static ABS_HANDED: std::cell::RefCell<Vec<taffy::NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
+    static STATIC_AT: std::cell::RefCell<std::collections::HashMap<taffy::NodeId, StaticAt>> = std::cell::RefCell::default();
+    static HOISTED: std::cell::RefCell<std::collections::HashSet<taffy::NodeId>> = std::cell::RefCell::default();
     static FIXED_BLOCKS: std::cell::RefCell<Vec<taffy::NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The element whose children are being built is itself a containing block.
     static PARENT_IS_CB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1254,8 +1292,8 @@ fn with_containing_block(
 
 /// An absolutely positioned box whose containing block is above its parent goes to that
 /// block's list. `None` if it was handed off, else the node to place as usual.
-// TODO: with `auto` insets such a box sits at its containing block's corner, not at its
-// static position in the flow.
+// With `auto` insets such a box belongs at its static position; `compute_static_positions`
+// finds it after layout.
 fn hand_off_absolute(style: &ComputedStyle, n: taffy::NodeId) -> Option<taffy::NodeId> {
     if style.position == Position::Fixed {
         FIXED_BLOCKS.with(|f| f.borrow_mut().push(n));
@@ -1264,10 +1302,75 @@ fn hand_off_absolute(style: &ComputedStyle, n: taffy::NodeId) -> Option<taffy::N
     if style.position.out_of_flow() && !PARENT_IS_CB.get() {
         let taken = CONTAINING_BLOCKS.with(|s| s.borrow_mut().last_mut().map(|list| list.push(n)).is_some());
         if taken {
+            ABS_HANDED.with(|a| a.borrow_mut().push(n));
             return None;
         }
     }
     Some(n)
+}
+
+/// A box's static position on the axes where its insets are `auto` (absolute page coordinates).
+type StaticAt = (Option<f32>, Option<f32>);
+
+/// Where each absolute box with `auto` insets sits when its containing block isn't its parent:
+/// at the start of its parent's content box, below the previous element sibling that is in
+/// flow (Taffy, which only sees the containing block, would put it at that block's corner).
+fn compute_static_positions(tree: &TaffyTree<NodeCtx>, doc: &Document, styles: &StyleMap, root: taffy::NodeId) {
+    let handed = ABS_HANDED.with(|a| a.borrow().clone());
+    if handed.is_empty() {
+        return;
+    }
+    // DOM element -> its Taffy node.
+    let mut by_dom = std::collections::HashMap::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if let Some(NodeCtx::Element(id) | NodeCtx::Replaced { id, .. }) = tree.get_node_context(n) {
+            by_dom.insert(*id, n);
+        }
+        stack.extend(tree.children(n).unwrap_or_default());
+    }
+    let origin = |mut n: taffy::NodeId| {
+        let (mut x, mut y) = (0.0, 0.0);
+        loop {
+            if let Ok(l) = tree.layout(n) {
+                x += l.location.x;
+                y += l.location.y;
+            }
+            match tree.parent(n) {
+                Some(p) => n = p,
+                None => return (x, y),
+            }
+        }
+    };
+    let px = |l: Length| if let Length::Px(v) = l { v } else { 0.0 };
+    for n in handed {
+        let Some(NodeCtx::Element(id) | NodeCtx::Replaced { id, .. }) = tree.get_node_context(n) else { continue };
+        let st = styles.get(*id);
+        if styles.is_pseudo(*id) || st.position != Position::Absolute {
+            continue;
+        }
+        let auto_x = st.inset.left == Length::Auto && st.inset.right == Length::Auto;
+        let auto_y = st.inset.top == Length::Auto && st.inset.bottom == Length::Auto;
+        if !auto_x && !auto_y {
+            continue;
+        }
+        let Some(parent) = doc.node(*id).parent else { continue };
+        let Some(&pn) = by_dom.get(&parent) else { continue };
+        let ps = styles.get(parent);
+        let (ox, oy) = origin(pn);
+        let x = ox + ps.border_width.left + ps.padding.left + px(st.margin.left);
+        // Below the previous element sibling that is laid out in flow, else the parent's top.
+        let before = doc.node(parent).children.iter().take_while(|c| **c != *id).filter_map(|c| by_dom.get(c).map(|t| (*c, *t)));
+        let flow_bottom = before
+            .filter(|(c, _)| !styles.get(*c).position.out_of_flow() && styles.get(*c).float == nile_style::Float::None && styles.get(*c).display != Display::Inline)
+            .last()
+            .and_then(|(c, t)| {
+                let (_, sy) = origin(t);
+                tree.layout(t).ok().map(|l| sy + l.size.height + px(styles.get(c).margin.bottom))
+            });
+        let y = flow_bottom.unwrap_or(oy + ps.border_width.top + ps.padding.top) + px(st.margin.top);
+        STATIC_AT.with(|a| a.borrow_mut().insert(n, (auto_x.then_some(x), auto_y.then_some(y))));
+    }
 }
 
 /// Ask `loader` for every image the document and styles name.
@@ -1541,6 +1644,70 @@ fn build_table(
     }
 
     let mut ts = taffy_style(style);
+    let fixed = style.table_fixed && style.width != Length::Auto;
+    if fixed {
+        // Column widths come from `<col>`s, else the first row's cells; the rest share what's left.
+        let breadth = |l: Length| match l {
+            Length::Px(p) => Some(Breadth::Px(p)),
+            Length::Percent(p) => Some(Breadth::Percent(p)),
+            _ => None,
+        };
+        let attr_width = |n: NodeId| {
+            doc.node(n).attr("width").and_then(|w| {
+                let w = w.trim();
+                match w.strip_suffix('%') {
+                    Some(p) => p.trim().parse::<f32>().ok().map(|p| Breadth::Percent(p / 100.0)),
+                    None => w.trim_end_matches("px").trim().parse::<f32>().ok().map(Breadth::Px),
+                }
+            })
+        };
+        let mut widths: Vec<Option<Breadth>> = Vec::new();
+        let push_col = |col: NodeId, widths: &mut Vec<Option<Breadth>>| {
+            let w = breadth(styles.get(col).width).or_else(|| attr_width(col));
+            widths.extend(std::iter::repeat_n(w, span(col, "span").min(columns)));
+        };
+        for c in kids(doc, styles, id) {
+            match doc.node(c).tag() {
+                Some("colgroup") => {
+                    for col in kids(doc, styles, c).into_iter().filter(|k| doc.node(*k).tag() == Some("col")) {
+                        push_col(col, &mut widths);
+                    }
+                }
+                Some("col") => push_col(c, &mut widths),
+                _ => {}
+            }
+        }
+        widths.resize(columns, None);
+        for cell in cells.iter().filter(|c| c.row == 0) {
+            let w = breadth(styles.get(cell.node).width).or_else(|| attr_width(cell.node));
+            let end = (cell.col + cell.cols).min(columns);
+            for slot in widths[cell.col..end].iter_mut().filter(|s| s.is_none()) {
+                *slot = w.map(|b| match b {
+                    Breadth::Px(p) => Breadth::Px(p / cell.cols as f32),
+                    Breadth::Percent(p) => Breadth::Percent(p / cell.cols as f32),
+                    other => other,
+                });
+            }
+        }
+        ts.grid_template_columns = widths
+            .iter()
+            .map(|w| {
+                let t = match w {
+                    Some(b) => Track { min: *b, max: *b },
+                    None => Track { min: Breadth::Px(0.0), max: Breadth::Fr(1.0) },
+                };
+                taffy::GridTemplateComponent::Single(track_fn(t))
+            })
+            .collect();
+        // Cells fill their column instead of asking for their own width.
+        for cell in &cells {
+            if let Some(n) = items.iter().copied().find(|n| matches!(tree.get_node_context(*n), Some(NodeCtx::Element(e)) if *e == cell.node)) {
+                let mut cst = tree.style(n).ok()?.clone();
+                cst.size.width = Dimension::auto();
+                tree.set_style(n, cst).ok()?;
+            }
+        }
+    }
     ts.grid_auto_columns = vec![taffy::style_helpers::auto()];
     ts.grid_auto_rows = vec![taffy::style_helpers::auto()];
     if !style.border_collapse {
@@ -1636,6 +1803,15 @@ fn control_display(doc: &Document, id: NodeId) -> (String, bool) {
     }
     let multiline = node.tag() == Some("textarea");
     let value = control_value(doc, id);
+    let composing = PREEDIT.with(|p| p.borrow().clone()).filter(|p| p.node == id);
+    if let Some(p) = &composing {
+        // Composing: the in-progress text goes at the caret; a password hides only what's typed.
+        let chars: Vec<char> = value.chars().collect();
+        let at = p.at.min(chars.len());
+        let end = p.end.clamp(at, chars.len());
+        let hide = |s: &[char]| if is_password(node) { "\u{2022}".repeat(s.len()) } else { s.iter().collect() };
+        return (format!("{}{}{}", hide(&chars[..at]), p.text, hide(&chars[end..])).replace('\n', if multiline { "\n" } else { " " }), false);
+    }
     if value.is_empty() {
         let ph = node.attr("placeholder").unwrap_or("");
         let ph = if multiline { ph.to_string() } else { ph.replace('\n', " ") };
@@ -2150,7 +2326,7 @@ impl InlineText {
                         border_style: es.border_style,
                         border: es.border_width,
                         padding: es.padding,
-                        radius: es.border_radius,
+                        radius: es.border_radius.max(),
                     });
                     self.decos.len() - 1
                 });
@@ -2198,7 +2374,7 @@ impl InlineText {
                 border_style: es.border_style,
                 border: es.border_width,
                 padding: es.padding,
-                radius: es.border_radius,
+                radius: es.border_radius.max(),
             });
             self.decos.len() - 1
         });
@@ -2465,13 +2641,18 @@ fn flatten(
 ) {
     let first = out.len();
     let l = *tree.layout(n).unwrap();
-    let rect = Rect {
+    let mut rect = Rect {
         x: parent_x + l.location.x,
         y: parent_y + l.location.y,
         width: l.size.width,
         height: l.size.height,
     };
+    if let Some((sx, sy)) = STATIC_AT.with(|a| a.borrow().get(&n).copied()) {
+        rect.x = sx.unwrap_or(rect.x);
+        rect.y = sy.unwrap_or(rect.y);
+    }
 
+    let persp = parent_perspective(tree, styles, n, parent_x, parent_y);
     let sticky = match tree.get_node_context(n) {
         Some(NodeCtx::Element(id) | NodeCtx::Replaced { id, .. }) => sticky_box(tree, styles, n, *id, parent_y),
         _ => None,
@@ -2479,15 +2660,15 @@ fn flatten(
     match tree.get_node_context_mut(n) {
         Some(NodeCtx::Element(id)) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
-            let transform = box_transform(styles.get(*id), rect);
+            let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, fixed, sticky })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky })
         }
         Some(NodeCtx::Replaced { id, image, .. }) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
-            let transform = box_transform(styles.get(*id), rect);
+            let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, fixed, sticky })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky })
         }
         Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
@@ -2526,6 +2707,7 @@ fn flatten(
                 image: None,
                 bg_image: None,
                 transform: None,
+                persp: None,
                 fixed: false,
                 sticky: None,
             });
@@ -2540,31 +2722,138 @@ fn flatten(
     // Only a node that pushed its own box (at `first`) owns a subtree.
     let pushed_self = matches!(out.get(first), Some(b) if b.subtree_end == 0);
     let mut children = tree.children(n).unwrap();
-    // Paint order inside a stacking context: negative `z-index`, then ordinary boxes,
-    // then positioned ones (`z-index` auto or 0) in tree order, then positive `z-index`.
-    // Only siblings are reordered, so every subtree stays contiguous.
+    let (self_style, flex_parent) = match tree.get_node_context(n) {
+        Some(NodeCtx::Element(id)) => (Some(styles.get(*id)), is_flex_or_grid(styles.get(*id))),
+        _ => (None, false),
+    };
+    // A stacking context (the root, or a box that forms one) paints its positioned and
+    // z-indexed descendants in its own order, wherever they sit in the tree: negative
+    // `z-index` first, then the ordinary boxes, then positioned ones (`z-index` auto or 0) in
+    // tree order, then positive `z-index`. Descendants under a clipping, faded, transformed
+    // or sticky box stay inside that box, which is the only place they can be clipped.
+    let mut late: Vec<(taffy::NodeId, f32, f32, (u8, i32))> = Vec::new();
+    let mut early: Vec<(taffy::NodeId, f32, f32, (u8, i32))> = Vec::new();
+    let item_of_flex = tree.parent(n).is_some_and(|p| matches!(tree.get_node_context(p), Some(NodeCtx::Element(id)) if is_flex_or_grid(styles.get(*id))));
+    let is_context = pushed_self && (tree.parent(n).is_none() || self_style.is_some_and(|s| forms_context(s, item_of_flex)));
+    if is_context {
+        let mut found = Vec::new();
+        collect_hoisted(tree, styles, n, rect.x, rect.y, true, &mut found);
+        HOISTED.with(|h| h.borrow_mut().extend(found.iter().map(|f| f.0)));
+        for f in found {
+            if f.3 .0 == 0 {
+                early.push(f);
+            } else {
+                late.push(f);
+            }
+        }
+        early.sort_by_key(|f| f.3);
+        late.sort_by_key(|f| f.3);
+    }
+    // Siblings left in place are still ordered among themselves.
+    children.retain(|c| !HOISTED.with(|h| h.borrow().contains(c)));
     children.sort_by_key(|c| match tree.get_node_context(*c) {
-        Some(NodeCtx::Element(id)) => paint_layer(styles.get(*id)),
+        Some(NodeCtx::Element(id)) => paint_layer(styles.get(*id), flex_parent),
         _ => (1, 0),
     });
+    for (c, px, py, _) in early {
+        HOISTED.with(|h| h.borrow_mut().remove(&c));
+        flatten(tree, styles, c, px, py, out);
+    }
     for child in children {
         flatten(tree, styles, child, rect.x, rect.y, out);
+    }
+    for (c, px, py, _) in late {
+        HOISTED.with(|h| h.borrow_mut().remove(&c));
+        flatten(tree, styles, c, px, py, out);
     }
     if pushed_self {
         out[first].subtree_end = out.len();
     }
 }
 
-fn box_transform(s: &ComputedStyle, rect: Rect) -> Option<Affine> {
-    (!s.transform.is_empty()).then(|| Affine::from_style(&s.transform, s.transform_origin, rect))
+fn is_flex_or_grid(s: &ComputedStyle) -> bool {
+    matches!(s.display, Display::Flex | Display::Grid)
+}
+
+/// Whether a box is a stacking context: positioned with a `z-index` (or a flex/grid item with
+/// one), faded, transformed or `fixed`. Its descendants are painted as a unit.
+fn forms_context(s: &ComputedStyle, flex_item: bool) -> bool {
+    (s.z_index.is_some() && (s.position != Position::Static || flex_item)) || s.opacity < 1.0 || !s.transform.is_empty() || s.position == Position::Fixed
+}
+
+/// Boxes that clip, fade, transform or stick their contents: a positioned descendant inside
+/// one can't be painted outside it, so it isn't hoisted past it.
+fn confines(s: &ComputedStyle) -> bool {
+    s.clips() || s.opacity < 1.0 || !s.transform.is_empty() || s.position == Position::Sticky
+}
+
+/// The descendants of `n` that belong in the paint order of the stacking context `n` is (or
+/// is part of), with the origin of their parent and their paint layer. `x`, `y` are `n`'s
+/// absolute position; `safe` says nothing between the context and `n` confines them.
+fn collect_hoisted(
+    tree: &TaffyTree<NodeCtx>,
+    styles: &StyleMap,
+    n: taffy::NodeId,
+    x: f32,
+    y: f32,
+    safe: bool,
+    out: &mut Vec<(taffy::NodeId, f32, f32, (u8, i32))>,
+) {
+    let flex = match tree.get_node_context(n) {
+        Some(NodeCtx::Element(id)) => is_flex_or_grid(styles.get(*id)),
+        _ => false,
+    };
+    for c in tree.children(n).unwrap_or_default() {
+        let Ok(l) = tree.layout(c) else { continue };
+        let (cx, cy) = (x + l.location.x, y + l.location.y);
+        match tree.get_node_context(c) {
+            Some(NodeCtx::Element(id)) => {
+                let s = styles.get(*id);
+                let layer = paint_layer(s, flex);
+                if layer.0 != 1 {
+                    if safe {
+                        out.push((c, x, y, layer));
+                        // Positioned but not a context: what's inside it is part of this context too.
+                        if !forms_context(s, flex) {
+                            collect_hoisted(tree, styles, c, cx, cy, !confines(s), out);
+                        }
+                    }
+                } else {
+                    collect_hoisted(tree, styles, c, cx, cy, safe && !confines(s), out);
+                }
+            }
+            Some(_) => {}
+            None => collect_hoisted(tree, styles, c, cx, cy, safe, out),
+        }
+    }
+}
+
+fn box_transform(s: &ComputedStyle, rect: Rect, persp: Option<(f32, f32, f32)>) -> Option<Affine> {
+    (!s.transform.is_empty()).then(|| Affine::from_style_in(&s.transform, s.transform_origin, rect, persp))
+}
+
+/// The perspective a box's parent gives it: `(distance, origin x, origin y)` in page
+/// coordinates, the origin resolved against the parent's border box.
+fn parent_perspective(tree: &TaffyTree<NodeCtx>, styles: &StyleMap, n: taffy::NodeId, parent_x: f32, parent_y: f32) -> Option<(f32, f32, f32)> {
+    let parent = tree.parent(n)?;
+    let Some(NodeCtx::Element(pid)) = tree.get_node_context(parent) else { return None };
+    let ps = styles.get(*pid);
+    let d = ps.perspective?;
+    let size = tree.layout(parent).ok()?.size;
+    let along = |p: nile_style::StopPos, whole: f32| match p {
+        nile_style::StopPos::Px(v) => v,
+        nile_style::StopPos::Fraction(f) => f * whole,
+    };
+    Some((d, parent_x + along(ps.perspective_origin.0, size.width), parent_y + along(ps.perspective_origin.1, size.height)))
 }
 
 /// (layer, z-index) for sorting siblings into paint order.
-fn paint_layer(s: &ComputedStyle) -> (u8, i32) {
+fn paint_layer(s: &ComputedStyle, flex_item: bool) -> (u8, i32) {
     let positioned = s.position != Position::Static;
     match s.z_index {
-        Some(z) if positioned && z < 0 => (0, z),
-        Some(z) if positioned && z > 0 => (3, z),
+        Some(z) if (positioned || flex_item) && z < 0 => (0, z),
+        Some(z) if (positioned || flex_item) && z > 0 => (3, z),
+        Some(_) if flex_item => (2, 0),
         _ if positioned || s.opacity < 1.0 || !s.transform.is_empty() => (2, 0),
         _ => (1, 0),
     }
@@ -3011,7 +3300,7 @@ second</textarea><textarea id="e"></textarea></body>"#,
         assert!(e.height > 16.0, "an empty select still has a line");
         assert!(tree.menu.is_none());
 
-        let opts = LayoutOptions { menu: Some(MenuRequest { select: id("s"), highlight: Some(0), scroll: 0.0 }), scroll_y: 0.0, offsets: None, images: None };
+        let opts = LayoutOptions { preedit: None, menu: Some(MenuRequest { select: id("s"), highlight: Some(0), scroll: 0.0 }), scroll_y: 0.0, offsets: None, images: None };
         let tree = layout_with(&doc, &styles, &mut text, 800.0, 400.0, &opts);
         let m = tree.menu.as_ref().unwrap();
         assert_eq!((m.rect.x, m.rect.y), (s.x, s.y + s.height), "opens right under the select");
@@ -3034,6 +3323,7 @@ second</textarea><textarea id="e"></textarea></body>"#,
             let styles = compute_styles(&doc);
             let s = doc.find(|n| n.attr("id") == Some("s")).unwrap();
             let opts = LayoutOptions {
+                preedit: None,
                 menu: Some(MenuRequest { select: s, highlight: None, scroll }),
                 scroll_y: 0.0,
                 offsets: None,
@@ -3427,6 +3717,75 @@ second</textarea><textarea id="e"></textarea></body>"#,
 
     fn rect_of(doc: &Document, tree: &LayoutTree, id: &str) -> Rect {
         tree.node_rect(doc.find(|n| n.attr("id") == Some(id)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn three_d_transforms_move_hit_testing_and_bounds() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><div style="perspective:200px; width:200px; height:100px">
+                 <div id="c" style="width:100px; height:100px; transform: rotateY(70deg)"></div></div></body>"#,
+        );
+        let id = doc.find(|n| n.attr("id") == Some("c")).unwrap();
+        let none = ScrollOffsets::default();
+        // The 100px-wide square turned 70 degrees is narrow: its centre is still hit, the old
+        // left edge is not.
+        assert_eq!(t.hit_test_scrolled(50.0, 50.0, &none), Some(id));
+        assert_ne!(t.hit_test_scrolled(2.0, 50.0, &none), Some(id));
+        let r = t.node_rect_scrolled(id, &none).unwrap();
+        assert!(r.width < 70.0 && r.width > 10.0, "{r:?}");
+    }
+
+    #[test]
+    fn absolute_boxes_without_insets_stay_at_their_static_position() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><div style="position:relative; padding:5px">
+                 <div id="wrap" style="padding:10px; margin-left:20px"><p id="p" style="margin:0; height:30px">one</p>
+                   <div id="a" style="position:absolute; width:10px; height:10px; margin-left:4px"></div>
+                   <div id="b" style="position:absolute; width:10px; height:10px; left:7px; top:9px"></div></div></div></body>"#,
+        );
+        let (p, a, b) = (rect_of(&doc, &t, "p"), rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"));
+        assert_eq!(a.y, p.y + p.height, "below the paragraph that precedes it: {a:?} vs {p:?}");
+        assert_eq!(a.x, p.x + 4.0, "at its parent's content edge plus its margin");
+        assert_eq!((b.x, b.y), (7.0, 9.0), "explicit insets still win, from the padding edge");
+    }
+
+    #[test]
+    fn stacking_contexts_order_descendants_by_z_index() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0">
+               <div id="a"><div id="pa" style="position:absolute; z-index:10; width:10px; height:10px"></div></div>
+               <div id="b" style="position:relative; z-index:1; height:10px"></div>
+               <div id="c" style="position:relative; z-index:1"><div id="pc" style="position:absolute; z-index:99; width:10px; height:10px"></div></div>
+               <div id="d" style="position:relative; z-index:2; height:10px"></div>
+               <div style="display:flex"><div id="f1" style="z-index:2; width:20px; height:10px"></div><div id="f2" style="z-index:1; margin-left:-10px; width:20px; height:10px"></div></div>
+               <div style="overflow:hidden; position:relative"><div id="pe" style="position:absolute; z-index:10; width:10px; height:10px"></div></div>
+               <div id="g" style="position:relative; z-index:1; height:10px"></div></body>"#,
+        );
+        let at = |id: &str| t.boxes.iter().position(|b| matches!(b.content, BoxContent::Element) && doc.node(b.node).attr("id") == Some(id)).unwrap_or_else(|| panic!("no box for {id}"));
+        // A positioned box inside a plain wrapper competes in the page's context: above `b`.
+        assert!(at("pa") > at("b"), "pa should paint after b");
+        // Inside a stacking context a high z-index stays inside it: `d` is above `pc`.
+        assert!(at("pc") < at("d"), "pc is confined to c");
+        // z-index applies to flex items even when static.
+        assert!(at("f1") > at("f2"), "f1 has the higher z-index");
+        // A clipping ancestor that is the child's containing block keeps it in place (`g` paints later).
+        assert!(at("pe") < at("g"));
+    }
+
+    #[test]
+    fn fixed_tables_take_column_widths_from_cols_and_the_first_row() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><table id="t" style="table-layout:fixed; width:300px; border-spacing:0; border-collapse:separate">
+                 <col width="60"><col><col width="50%">
+                 <tr><td id="a" style="padding:0">a very long cell that would widen an auto column</td><td id="b" style="padding:0">b</td><td id="c" style="padding:0">c</td></tr>
+               </table>
+               <table style="table-layout:fixed; width:200px; border-spacing:0"><tr><td id="d" style="padding:0;width:20%">d</td><td id="e" style="padding:0">e</td><td id="f" style="padding:0">f</td></tr></table></body>"#,
+        );
+        let (a, b, c) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"), rect_of(&doc, &t, "c"));
+        assert_eq!((a.width, c.width), (60.0, 150.0), "from <col>: {a:?} {c:?}");
+        assert_eq!(b.width, 90.0, "the unsized column takes what's left");
+        let (d, e, f) = (rect_of(&doc, &t, "d"), rect_of(&doc, &t, "e"), rect_of(&doc, &t, "f"));
+        assert_eq!((d.width, e.width, f.width), (40.0, 80.0, 80.0), "first-row width, then equal shares");
     }
 
     #[test]

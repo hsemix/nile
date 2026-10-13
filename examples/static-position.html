@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>static positions</title>
+<style>
+  body { margin: 20px; font: 14px sans-serif; background: #f4f1ea }
+  .outer { position: relative; width: 300px; border: 2px solid #99a; padding: 8px; margin-bottom: 20px; background: #fff }
+  .inner { padding: 6px; border: 1px dashed #aaa }
+  .badge { position: absolute; background: #e67e22; color: #fff; padding: 2px 6px; border-radius: 4px }
+  .plain { position: absolute; margin-left: 10px; background: #2a7fd4; color: #fff; padding: 2px 6px }
+</style>
+<div class="outer">
+  <p style="margin:0">Heading in the outer box</p>
+  <div class="inner">
+    <p style="margin:0">first paragraph</p>
+    <span class="badge">no insets: stays where it is in the flow</span>
+    <p style="margin:0">second paragraph (the badge sits between)</p>
+  </div>
+</div>
+<div class="outer">
+  <div class="inner"><span class="plain">margin-left 10px, no insets</span></div>
+  <div class="badge" style="top: 6px; right: 6px">top/right set: unchanged</div>
+</div>

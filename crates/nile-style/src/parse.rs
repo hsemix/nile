@@ -486,7 +486,8 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
                     Value::Url(url)
                 }
                 "matrix" | "translate" | "translatex" | "translatey" | "translate3d" | "scale" | "scalex" | "scaley" | "scale3d"
-                | "rotate" | "rotatez" | "skew" | "skewx" | "skewy" => {
+                | "rotate" | "rotatez" | "skew" | "skewx" | "skewy" | "rotatex" | "rotatey" | "rotate3d" | "translatez" | "scalez"
+                | "perspective" | "matrix3d" => {
                     let args = p.parse_nested_block(|p| gradient_items(p, cx))?;
                     match transform_fn(&name, &args) {
                         Some(t) => Value::Transform(t),
@@ -683,10 +684,37 @@ fn transform_fn(name: &str, args: &[Vec<Value>]) -> Option<TransformFn> {
             }
             TransformFn::Matrix(m)
         }
-        "translate" | "translate3d" => TransformFn::Translate(len(one(0)?)?, one(1).map_or(Some(zero), len)?),
+        "matrix3d" if args.len() == 16 => {
+            let mut m = [0.0; 16];
+            for (i, slot) in m.iter_mut().enumerate() {
+                *slot = num(one(i)?)?;
+            }
+            TransformFn::Matrix3d(m)
+        }
+        "translate3d" if args.len() == 3 => {
+            let z = match len(one(2)?)? {
+                StopPos::Px(p) => p,
+                StopPos::Fraction(_) => return None,
+            };
+            TransformFn::Translate3d(len(one(0)?)?, len(one(1)?)?, z)
+        }
+        "translatez" => match len(one(0)?)? {
+            StopPos::Px(p) => TransformFn::Translate3d(zero, zero, p),
+            StopPos::Fraction(_) => return None,
+        },
+        "scale3d" if args.len() == 3 => TransformFn::Scale3d(num(one(0)?)?, num(one(1)?)?, num(one(2)?)?),
+        "scalez" => TransformFn::Scale3d(1.0, 1.0, num(one(0)?)?),
+        "rotatex" => TransformFn::RotateX(angle(one(0)?)?),
+        "rotatey" => TransformFn::RotateY(angle(one(0)?)?),
+        "rotate3d" if args.len() == 4 => TransformFn::Rotate3d([num(one(0)?)?, num(one(1)?)?, num(one(2)?)?, angle(one(3)?)?]),
+        "perspective" => match len(one(0)?)? {
+            StopPos::Px(p) if p > 0.0 => TransformFn::Perspective(p),
+            _ => return None,
+        },
+        "translate" => TransformFn::Translate(len(one(0)?)?, one(1).map_or(Some(zero), len)?),
         "translatex" => TransformFn::Translate(len(one(0)?)?, zero),
         "translatey" => TransformFn::Translate(zero, len(one(0)?)?),
-        "scale" | "scale3d" => {
+        "scale" => {
             let x = num(one(0)?)?;
             TransformFn::Scale(x, one(1).map_or(Some(x), num)?)
         }

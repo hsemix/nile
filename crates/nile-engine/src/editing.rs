@@ -148,20 +148,11 @@ impl Page {
                 true
             }
             "c" | "C" | "x" | "X" if command => {
-                let text = self.edit_selected_text();
-                if !text.is_empty() {
-                    self.clipboard.set_text(&text);
-                    if key.eq_ignore_ascii_case("x") {
-                        let _ = self.call("document.execCommand", r#"["delete"]"#);
-                    }
-                }
+                self.copy_selection(key.eq_ignore_ascii_case("x"));
                 true
             }
             "v" | "V" if command => {
-                if let Some(t) = self.clipboard.text() {
-                    let arg = format!("[{}]", json_string(&t));
-                    let _ = self.call("__editPaste", &arg);
-                }
+                self.paste_clipboard();
                 true
             }
             _ => false,
@@ -183,21 +174,40 @@ impl Page {
     /// `execCommand("copy" | "cut" | "paste")` on the editing selection.
     pub fn clipboard_command(&mut self, kind: &str) {
         match kind {
-            "copy" | "cut" => {
-                let text = self.edit_selected_text();
-                if !text.is_empty() {
-                    self.clipboard.set_text(&text);
-                    if kind == "cut" {
-                        let _ = self.call("document.execCommand", r#"["delete"]"#);
-                    }
-                }
-            }
-            "paste" => {
-                if let Some(t) = self.clipboard.text() {
-                    let _ = self.call("__editPaste", &format!("[{}]", json_string(&t)));
-                }
-            }
+            "copy" | "cut" => self.copy_selection(kind == "cut"),
+            "paste" => self.paste_clipboard(),
             _ => {}
+        }
+    }
+
+    /// Copy the editing selection as text and HTML; `cut` deletes it afterwards.
+    fn copy_selection(&mut self, cut: bool) {
+        let text = self.edit_selected_text();
+        if text.is_empty() {
+            return;
+        }
+        let html = self.call("__selectionHtml", "[]").0.ok().and_then(|j| unjson_string(&j)).filter(|h| !h.is_empty());
+        match html {
+            Some(h) => self.clipboard.set_html(&h, &text),
+            None => self.clipboard.set_text(&text),
+        }
+        if cut {
+            let _ = self.call("document.execCommand", r#"["delete"]"#);
+        }
+    }
+
+    /// Paste the clipboard into the editor: its HTML (cleaned to what the editor knows) when it
+    /// has some, else its text.
+    fn paste_clipboard(&mut self) {
+        let text = self.clipboard.text().unwrap_or_default();
+        if let Some(html) = self.clipboard.html().filter(|h| !h.trim().is_empty()) {
+            let (r, _) = self.call("__editPasteHtml", &format!("[{},{}]", json_string(&html), json_string(&text)));
+            if matches!(r.as_deref(), Ok("true")) {
+                return;
+            }
+        }
+        if !text.is_empty() {
+            let _ = self.call("__editPaste", &format!("[{}]", json_string(&text)));
         }
     }
 
@@ -271,6 +281,43 @@ impl Page {
             v.scroll_y = c.y + c.height - h;
         }
     }
+}
+
+/// The string a JSON string literal holds (`"a\\nb"` -> `a<newline>b`).
+pub fn unjson_string(json: &str) -> Option<String> {
+    let inner = json.trim().strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    let mut pending_high: Option<u32> = None;
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let e = chars.next()?;
+        let ch = match e {
+            'n' => '\n',
+            't' => '\t',
+            'r' => '\r',
+            'b' => '\u{8}',
+            'f' => '\u{c}',
+            'u' => {
+                let hex: String = chars.by_ref().take(4).collect();
+                let u = u32::from_str_radix(&hex, 16).ok()?;
+                if (0xd800..0xdc00).contains(&u) {
+                    pending_high = Some(u);
+                    continue;
+                }
+                match pending_high.take() {
+                    Some(h) if (0xdc00..0xe000).contains(&u) => char::from_u32(0x10000 + ((h - 0xd800) << 10) + (u - 0xdc00))?,
+                    _ => char::from_u32(u).unwrap_or('\u{fffd}'),
+                }
+            }
+            other => other,
+        };
+        out.push(ch);
+    }
+    Some(out)
 }
 
 /// A string as a JSON literal.

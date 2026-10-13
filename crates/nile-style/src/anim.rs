@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::gradient::{StopPos, TransformFn};
 use crate::parse::{Declaration, Value};
-use crate::{apply, Color, ComputedStyle, Length, NodeId, StyleMap};
+use crate::{apply, Color, ComputedStyle, Corners, Length, NodeId, StyleMap};
 
 /// An easing curve.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -326,7 +326,7 @@ fn get(s: &ComputedStyle, prop: &str) -> Option<AnimValue> {
         "border-right-width" => N(s.border_width.right),
         "border-bottom-width" => N(s.border_width.bottom),
         "border-left-width" => N(s.border_width.left),
-        "border-radius" => N(s.border_radius),
+        "border-radius" => N(s.border_radius.max()),
         "top" => L(s.inset.top),
         "right" => L(s.inset.right),
         "bottom" => L(s.inset.bottom),
@@ -369,7 +369,7 @@ fn set(s: &mut ComputedStyle, prop: &str, v: AnimValue) {
         ("border-right-width", AnimValue::Number(n)) => s.border_width.right = n.max(0.0),
         ("border-bottom-width", AnimValue::Number(n)) => s.border_width.bottom = n.max(0.0),
         ("border-left-width", AnimValue::Number(n)) => s.border_width.left = n.max(0.0),
-        ("border-radius", AnimValue::Number(n)) => s.border_radius = n.max(0.0),
+        ("border-radius", AnimValue::Number(n)) => s.border_radius = Corners::all(n.max(0.0)),
         ("top", AnimValue::Length(l)) => s.inset.top = l,
         ("right", AnimValue::Length(l)) => s.inset.right = l,
         ("bottom", AnimValue::Length(l)) => s.inset.bottom = l,
@@ -418,6 +418,17 @@ fn identity_like(f: &TransformFn) -> TransformFn {
         TransformFn::Scale(..) => TransformFn::Scale(1.0, 1.0),
         TransformFn::Rotate(_) => TransformFn::Rotate(0.0),
         TransformFn::Skew(..) => TransformFn::Skew(0.0, 0.0),
+        TransformFn::Translate3d(x, y, _) => TransformFn::Translate3d(
+            match x { StopPos::Px(_) => StopPos::Px(0.0), StopPos::Fraction(_) => StopPos::Fraction(0.0) },
+            match y { StopPos::Px(_) => StopPos::Px(0.0), StopPos::Fraction(_) => StopPos::Fraction(0.0) },
+            0.0,
+        ),
+        TransformFn::Scale3d(..) => TransformFn::Scale3d(1.0, 1.0, 1.0),
+        TransformFn::RotateX(_) => TransformFn::RotateX(0.0),
+        TransformFn::RotateY(_) => TransformFn::RotateY(0.0),
+        TransformFn::Rotate3d([x, y, z, _]) => TransformFn::Rotate3d([*x, *y, *z, 0.0]),
+        TransformFn::Perspective(_) => TransformFn::Perspective(1e9),
+        TransformFn::Matrix3d(_) => TransformFn::Matrix3d([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
     }
 }
 
@@ -434,6 +445,21 @@ fn lerp_fn(a: &TransformFn, b: &TransformFn, t: f32) -> Option<TransformFn> {
         (TransformFn::Scale(ax, ay), TransformFn::Scale(bx, by)) => TransformFn::Scale(lerp(*ax, *bx, t), lerp(*ay, *by, t)),
         (TransformFn::Rotate(x), TransformFn::Rotate(y)) => TransformFn::Rotate(lerp(*x, *y, t)),
         (TransformFn::Skew(ax, ay), TransformFn::Skew(bx, by)) => TransformFn::Skew(lerp(*ax, *bx, t), lerp(*ay, *by, t)),
+        (TransformFn::Translate3d(ax, ay, az), TransformFn::Translate3d(bx, by, bz)) => {
+            TransformFn::Translate3d(lerp_stop(*ax, *bx, t)?, lerp_stop(*ay, *by, t)?, lerp(*az, *bz, t))
+        }
+        (TransformFn::Scale3d(ax, ay, az), TransformFn::Scale3d(bx, by, bz)) => TransformFn::Scale3d(lerp(*ax, *bx, t), lerp(*ay, *by, t), lerp(*az, *bz, t)),
+        (TransformFn::RotateX(x), TransformFn::RotateX(y)) => TransformFn::RotateX(lerp(*x, *y, t)),
+        (TransformFn::RotateY(x), TransformFn::RotateY(y)) => TransformFn::RotateY(lerp(*x, *y, t)),
+        (TransformFn::Rotate3d(x), TransformFn::Rotate3d(y)) if x[..3] == y[..3] => TransformFn::Rotate3d([x[0], x[1], x[2], lerp(x[3], y[3], t)]),
+        (TransformFn::Perspective(x), TransformFn::Perspective(y)) => TransformFn::Perspective(lerp(*x, *y, t)),
+        (TransformFn::Matrix3d(x), TransformFn::Matrix3d(y)) => {
+            let mut m = [0.0; 16];
+            for (i, slot) in m.iter_mut().enumerate() {
+                *slot = lerp(x[i], y[i], t);
+            }
+            TransformFn::Matrix3d(m)
+        }
         _ => return None,
     })
 }

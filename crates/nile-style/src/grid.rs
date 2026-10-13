@@ -246,6 +246,11 @@ pub(crate) fn apply(s: &mut ComputedStyle, name: &str, v: &[Value], fs: f32) -> 
                 s.cursor = c;
             }
         }
+        "table-layout" => match first.and_then(Value::ident) {
+            Some("fixed") => s.table_fixed = true,
+            Some("auto") => s.table_fixed = false,
+            _ => {}
+        },
         "border-collapse" => match first.and_then(Value::ident) {
             Some("collapse") => s.border_collapse = true,
             Some("separate") => s.border_collapse = false,

@@ -93,6 +93,24 @@ function currentSize() {
   const node = sel.focusNode && (sel.focusNode.nodeType === 3 ? sel.focusNode.parentNode : sel.focusNode);
   return node ? parseFloat(getComputedStyle(node).fontSize) || 15 : 15;
 }
+// The ribbon tabs: Home is built into the page, the others are filled in when chosen.
+const menus = {
+  File: [['Document', [['▤', 'New copy', 'new'], ['▣', 'Save', 'save'], ['▧', 'Print preview', 'preview']]], ['About', [['W', 'Ribbon demo', 'about']]]],
+  Insert: [['Pages', [['▤', 'Cover page', 'cover'], ['+', 'Page break', 'page-break']]], ['Illustrations', [['▦', 'Table', 'table'], ['▧', 'Picture', 'picture'], ['○', 'Shapes', 'shapes']]], ['Text', [['Aa', 'Text box', 'text-box'], ['Ω', 'Symbol', 'symbol']]]],
+  Layout: [['Page setup', [['▤', 'Margins', 'margins'], ['▯', 'Orientation', 'orientation'], ['↔', 'Page width', 'page-width']]], ['Paragraph', [['≡›', 'Indent', 'indent'], ['↕', 'Spacing', 'spacing']]]],
+  References: [['Table of contents', [['▤', 'Contents', 'contents']]], ['Footnotes', [['¹', 'Footnote', 'footnote']]], ['Citations', [['“ ”', 'Citation', 'citation']]]],
+  Review: [['Proofing', [['Aa', 'Word count', 'word-count']]], ['Comments', [['▤', 'Comment', 'comments']]], ['Tracking', [['▧', 'Track changes', 'track']]]],
+  View: [['Show', [['▤', 'Navigation', 'navigation'], ['↔', 'Ruler', 'ruler']]], ['Zoom', [['−', 'Zoom out', 'zoom-out'], ['+', 'Zoom in', 'zoom-in'], ['▯', '100%', 'zoom-reset']]]]
+};
+document.querySelectorAll('[data-tab]').forEach((button) => button.addEventListener('click', () => {
+  const tab = button.dataset.tab;
+  document.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('active', b === button));
+  document.getElementById('home-ribbon').classList.toggle('hidden', tab !== 'Home');
+  const other = document.getElementById('other-ribbon');
+  other.classList.toggle('hidden', tab === 'Home');
+  if (tab !== 'Home') other.innerHTML = menus[tab].map(([name, commands]) => '<div class="group"><div class="group-body">' + commands.map(([icon, label, action]) => '<button class="large" data-action="' + action + '"><span class="large-icon">' + icon + '</span><span>' + label + '</span></button>').join('') + '</div><div class="group-label">' + name + '</div></div>').join('');
+  report(tab + ' tab');
+}));
 document.addEventListener('click', (e) => {
   const button = e.target.closest('[data-action]'); if (!button) return;
   const action = button.dataset.action;
@@ -118,6 +136,10 @@ document.addEventListener('click', (e) => {
     if (action === 'find') document.getElementById('find-input').focus(); report('Navigation');
   } else if (action === 'ruler') {
     document.querySelector('.ruler').classList.toggle('hidden'); report('Ruler toggled');
+  } else if (action === 'table') {
+    cmd('insertTable', '3x3'); report('Inserted a 3 x 3 table (Tab moves between cells)');
+  } else if (action === 'page-break') {
+    cmd('insertHorizontalRule'); report('Page break');
   } else if (action === 'word-count') report(words() + ' words in document');
   else report(button.textContent.trim() + ' · not in this demo');
 });

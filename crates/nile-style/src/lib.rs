@@ -64,6 +64,29 @@ pub enum Length {
     Calc { px: f32, pct: f32 },
 }
 
+/// A value per corner of a box (`border-radius`), clockwise from the top left.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Corners {
+    pub tl: f32,
+    pub tr: f32,
+    pub br: f32,
+    pub bl: f32,
+}
+
+impl Corners {
+    pub const fn all(v: f32) -> Corners {
+        Corners { tl: v, tr: v, br: v, bl: v }
+    }
+
+    pub fn max(self) -> f32 {
+        self.tl.max(self.tr).max(self.br).max(self.bl)
+    }
+
+    pub fn is_zero(self) -> bool {
+        self == Corners::default()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Edges<T> {
     pub top: T,
@@ -401,6 +424,8 @@ pub struct ComputedStyle {
     /// `border-spacing` (horizontal, vertical) and `border-collapse: collapse`; inherited.
     pub border_spacing: (f32, f32),
     pub border_collapse: bool,
+    /// `table-layout: fixed`.
+    pub table_fixed: bool,
     /// `vertical-align` for table cells.
     pub vertical_align: VerticalAlign,
     /// `cursor`; inherited.
@@ -439,13 +464,19 @@ pub struct ComputedStyle {
     /// What the author set: `None` follows `color` (CSS `currentColor`, the initial value).
     pub border_color_set: Edges<Option<Color>>,
     pub border_style: Edges<BorderStyle>,
-    pub border_radius: f32,
+    /// Fixed part of each corner's radius, and the fraction of the box's width/height that
+    /// `%` radii add (see [`ComputedStyle::corner_radii`]).
+    pub border_radius: Corners,
+    pub border_radius_pct: Corners,
     pub opacity: f32,
     pub transform: Vec<TransformFn>,
     pub transitions: Vec<TransitionSpec>,
     pub animations: Vec<AnimationSpec>,
     /// Origin of `transform` within the border box.
     pub transform_origin: (StopPos, StopPos),
+    /// `perspective` of a container: its children's 3D transforms are seen from this far away.
+    pub perspective: Option<f32>,
+    pub perspective_origin: (StopPos, StopPos),
     /// Outer shadows, first = topmost. `inset` ones are parsed but not painted yet.
     pub box_shadow: Vec<BoxShadow>,
 
@@ -514,6 +545,7 @@ impl Default for ComputedStyle {
             column_gap: 0.0,
             border_spacing: (0.0, 0.0),
             border_collapse: false,
+            table_fixed: false,
             vertical_align: VerticalAlign::Baseline,
             cursor: Cursor::Auto,
             align_self: Align::Normal,
@@ -538,12 +570,15 @@ impl Default for ComputedStyle {
             border_color: Edges::all(Color::BLACK),
             border_color_set: Edges::all(None),
             border_style: Edges::all(BorderStyle::None),
-            border_radius: 0.0,
+            border_radius: Corners::all(0.0),
+            border_radius_pct: Corners::all(0.0),
             opacity: 1.0,
             transform: Vec::new(),
             transitions: Vec::new(),
             animations: Vec::new(),
             transform_origin: (StopPos::Fraction(0.5), StopPos::Fraction(0.5)),
+            perspective: None,
+            perspective_origin: (StopPos::Fraction(0.5), StopPos::Fraction(0.5)),
             box_shadow: Vec::new(),
             color: Color::BLACK,
             font_size: 16.0,
@@ -568,6 +603,18 @@ impl Default for ComputedStyle {
 }
 
 impl ComputedStyle {
+    /// The `(horizontal, vertical)` radius of each corner (top left, top right, bottom right,
+    /// bottom left) for a border box of `w` by `h`, `%` resolved.
+    pub fn corner_radii(&self, w: f32, h: f32) -> [(f32, f32); 4] {
+        let (r, q) = (self.border_radius, self.border_radius_pct);
+        [(r.tl + q.tl * w, r.tl + q.tl * h), (r.tr + q.tr * w, r.tr + q.tr * h), (r.br + q.br * w, r.br + q.br * h), (r.bl + q.bl * w, r.bl + q.bl * h)]
+    }
+
+    /// Whether any corner is rounded.
+    pub fn has_rounding(&self) -> bool {
+        !self.border_radius.is_zero() || !self.border_radius_pct.is_zero()
+    }
+
     /// True if content is clipped (and so can be scrolled) on either axis.
     pub fn clips(&self) -> bool {
         self.overflow_x != OverflowKind::Visible || self.overflow_y != OverflowKind::Visible
@@ -655,7 +702,14 @@ impl ComputedStyle {
             "border-right-color" => color(self.border_color.right),
             "border-bottom-color" => color(self.border_color.bottom),
             "border-left-color" => color(self.border_color.left),
-            "border-radius" => px(self.border_radius),
+            "border-radius" => {
+                let r = self.border_radius;
+                if r.tl == r.tr && r.tl == r.br && r.tl == r.bl && self.border_radius_pct.is_zero() {
+                    px(r.tl)
+                } else {
+                    format!("{} {} {} {}", px(r.tl), px(r.tr), px(r.br), px(r.bl))
+                }
+            }
             "background-color" => color(self.background.unwrap_or(Color::TRANSPARENT)),
             "color" => color(self.color),
             "opacity" => self.opacity.to_string(),
@@ -907,6 +961,7 @@ impl ComputedStyle {
             a.border_color_set = other.border_color_set;
             a.border_style = other.border_style;
             a.border_radius = other.border_radius;
+            a.border_radius_pct = other.border_radius_pct;
         }
         if color_is_paint {
             a.color = other.color;
@@ -1716,7 +1771,42 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         "border-right-width" => s.border_width.right = p(first).unwrap_or(s.border_width.right),
         "border-bottom-width" => s.border_width.bottom = p(first).unwrap_or(s.border_width.bottom),
         "border-left-width" => s.border_width.left = p(first).unwrap_or(s.border_width.left),
-        "border-radius" => s.border_radius = p(first).unwrap_or(s.border_radius),
+        // `border-radius: <h-radii> [/ <v-radii>]`: one to four values, px or %; the vertical
+        // radii after a `/` are read as the same as the horizontal ones.
+        "border-radius" => {
+            let parts: Vec<Option<(f32, f32)>> = v
+                .iter()
+                .take_while(|x| !matches!(x, Value::Slash))
+                .map(|x| match x {
+                    Value::Percent(pc) => Some((0.0, pc / 100.0)),
+                    other => px(other, fs).map(|p| (p.max(0.0), 0.0)),
+                })
+                .collect();
+            if let Some(all) = parts.iter().copied().collect::<Option<Vec<_>>>() {
+                if let Some(e) = edges(&all) {
+                    // `edges` maps top/right/bottom/left; corners go tl, tr, br, bl the same way.
+                    s.border_radius = Corners { tl: e.top.0, tr: e.right.0, br: e.bottom.0, bl: e.left.0 };
+                    s.border_radius_pct = Corners { tl: e.top.1, tr: e.right.1, br: e.bottom.1, bl: e.left.1 };
+                }
+            }
+        }
+        "border-top-left-radius" | "border-top-right-radius" | "border-bottom-right-radius" | "border-bottom-left-radius" => {
+            let one = match first {
+                Some(Value::Percent(pc)) => Some((0.0, pc / 100.0)),
+                other => p(other).map(|x| (x.max(0.0), 0.0)),
+            };
+            if let Some((fixed, pct)) = one {
+                let (r, q) = (&mut s.border_radius, &mut s.border_radius_pct);
+                let (a, b) = match d.name.as_str() {
+                    "border-top-left-radius" => (&mut r.tl, &mut q.tl),
+                    "border-top-right-radius" => (&mut r.tr, &mut q.tr),
+                    "border-bottom-right-radius" => (&mut r.br, &mut q.br),
+                    _ => (&mut r.bl, &mut q.bl),
+                };
+                *a = fixed;
+                *b = pct;
+            }
+        }
         "background" | "background-color" | "background-image" => {
             if d.name != "background-image" {
                 if let Some(c) = v.iter().find_map(&color) {
@@ -1777,6 +1867,20 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.transform.clear();
             } else if !list.is_empty() && list.len() == v.len() {
                 s.transform = list;
+            }
+        }
+        "perspective" => match first {
+            Some(Value::Ident(i)) if i == "none" => s.perspective = None,
+            Some(x) => {
+                if let Some(d) = px(x, fs).filter(|d| *d > 0.0) {
+                    s.perspective = Some(d);
+                }
+            }
+            None => {}
+        },
+        "perspective-origin" => {
+            if let Some(o) = bg_position(&v[..v.len().min(2)], fs) {
+                s.perspective_origin = o;
             }
         }
         "transform-origin" => {
@@ -1984,6 +2088,21 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn border_radius_takes_one_to_four_corners_and_percent() {
+        let doc = Document::parse(
+            r#"<i id=a style="border-radius: 1px 2px 3px 4px"></i><i id=b style="border-radius: 5px 6px"></i>
+               <i id=c style="border-radius: 50%; border-bottom-left-radius: 9px"></i><i id=d style="border-radius: 3px / 8px"></i>"#,
+        );
+        let styles = compute_styles(&doc);
+        let r = |id: &str| styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        assert_eq!(r("a").border_radius, Corners { tl: 1.0, tr: 2.0, br: 3.0, bl: 4.0 });
+        assert_eq!(r("b").border_radius, Corners { tl: 5.0, tr: 6.0, br: 5.0, bl: 6.0 });
+        let c = r("c");
+        assert_eq!(c.corner_radii(100.0, 50.0), [(50.0, 25.0), (50.0, 25.0), (50.0, 25.0), (9.0, 9.0)]);
+        assert_eq!(r("d").border_radius, Corners::all(3.0));
+    }
 
     #[test]
     fn inline_vertical_align_parses() {

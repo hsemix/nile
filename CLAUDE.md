@@ -53,8 +53,16 @@ cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --typ
 cargo run -p nile-shell -- examples/scrolling.html --png out.png --wheel 100,100,-60
 cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --type "Ada{Home}{Shift+End}{Cmd+c}"
 cargo test --workspace
+NILE_STORAGE_DIR=off cargo test --release -p nile-engine bench_scroll -- --ignored --nocapture   # scroll/hover frame times on the Word page
 cargo clippy --workspace --all-targets -- -D warnings          # CI enforces this
 ```
+
+## Performance
+
+`[profile.dev]` in the root `Cargo.toml` optimises dependencies fully and our crates lightly: an
+unoptimised debug build made a wheel tick on the Word example cost ~16 ms (40 ms spikes); now it is
+~1-4 ms, in line with release. Keep it when touching profiles. Scrolling doesn't re-cascade `:hover` per wheel tick: `Page::hover_after_scroll` defers it 90 ms (settled by `tick`, a press or a pointer move). `NILE_TRACE=1` prints style, layout,
+paint and animation timings; `bench_scroll` (ignored test) replays wheel events with the pointer resting on the page.
 
 ## Working conventions
 
@@ -125,6 +133,14 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
 - `position: fixed`: layout hands such boxes to an anonymous viewport-sized absolute layer (`FIXED_BLOCKS`), marks `LayoutBox::fixed`, and `placements` cancels the page scroll for the subtree using `LayoutTree::page_scroll` (kept current by `View::layout()`); the renderer resets to the base matrix. `sticky` is in-flow (`Position::Sticky`) with `LayoutBox::sticky_shift(scroll, viewport_h)` used by both `placements` and the renderer.
 - Web platform JS (`nile-script/src/web.js`, spliced at `/*@WEB@*/` inside its own `{}` block so its helper names stay out of the prelude's scope): `URL`, `MutationObserver` (wraps the `N.append/remove/setAttr/...` natives), storage (`localStorage` saved by a 50ms-debounced `N.storageSave` to `ScriptHost::set_storage_file`, flushed on drop; `net::default_storage_file` picks the default), `matchMedia`, `location`/`history`/`navigator`, `ResizeObserver`/`IntersectionObserver` (the engine calls `__observeCheck` from `Page::sync` only while `ScriptHost::observing()`), `fetch`/XHR. Requests go through the `Fetcher` trait (`nile-script/src/net.rs`; `LocalFetcher` by default, `PageFetcher` in nile-engine adds http via `ureq` behind the `net` feature), one worker thread each; `ScriptHost::tick` hands finished ones to `__fetchDone` and asks to be ticked every 16ms while any are pending. `EventTarget.dispatchEvent` already calls `on<type>` properties, don't call them yourself.
 - `@nile` / `@env` modules (`@sciter` resolves to `@nile`, kept for Sciter apps): the resolver passes the names through and `FileLoader` declares tiny wrapper modules over `__sciterModule` / `__envModule` (defined at the end of `web.js`; OS access is the single `envCall` native in `envmod.rs`). Shapes follow docs.sciter.com/docs/JS.runtime (module-sciter, module-env).
+- `border-radius` is `Corners` (px, clockwise from top left) plus `border_radius_pct` (fractions of the box's width/height); the renderer resolves both through `ComputedStyle::corner_radii(w, h)` into Skia's per-corner radii (`round_rect`). Inline decorations (`InlineDeco`) keep one uniform radius.
+- Tables in the editor (`edit.js`): `insertTable`, `tabInTable`, `deleteAcrossCells`; `closestBlock` returns a `td`, so Enter (`splitBlock`) and Backspace/Delete (`backspace`) treat cells as walls. `Page::default_key` offers Tab to the host first.
+- Rich clipboard: `Clipboard::{html, set_html}` (arboard on the system clipboard); the editor's copy asks `__selectionHtml` (via `Range.cloneContents`), paste sends HTML through `__editPasteHtml` -> `pastedBlocks` (the sanitiser: `PASTE_TAGS`, `PASTE_STYLES`, `SAFE_URL`) -> `pasteBlocks`, which splits the current block for multi-paragraph pastes. `call()` returns JSON, so strings need `unjson_string`.
+- IME: `Page::{ime_wanted, ime_cursor_rect, ime_preedit, ime_commit, ime_cancel}`. In text inputs the composition is `View::preedit` (layout splices it into the displayed text in place of the selection via `LayoutOptions::preedit`, `Overlay::preedit` underlines it, the real value changes only on commit through `insert_text`); in contenteditable hosts it is an underlined `data-nile-ime` span managed by `__imePreedit`/`__imeCommit` in `edit.js` (not in undo history). Focus changes cancel it. winit's `Ime` events and `set_ime_allowed`/`set_ime_cursor_area` are in `App::sync_ime`.
+- 3D transforms: `Affine` is a projective 3x3 (`g`, `h`, `i` are the perspective row); `Affine::from_style_in` builds a 4x4 (`M4`) from the `TransformFn` list, folds in the container's `perspective` (`parent_perspective`, stored as `LayoutBox::persp` so `refresh_paint` can re-bake) and flattens it to z = 0. `perspective` changes are layout-affecting in `same_layout` on purpose.
+- Static positions: absolute boxes re-parented to a distant containing block are listed in `ABS_HANDED`; `compute_static_positions` (after layout, before `flatten`) turns the ones with `auto` insets into absolute page coordinates in `STATIC_AT`, which `flatten` uses instead of Taffy's (containing-block corner) position.
+- Stacking contexts (`flatten`): a context (the root, or `forms_context`: positioned + `z-index`, flex/grid item + `z-index`, `opacity < 1`, `transform`, `fixed`) calls `collect_hoisted` to find the positioned/z-indexed descendants that belong to its paint order, records them in the `HOISTED` thread-local so their ancestors skip them, and emits them around the in-flow children by layer (negative z first, positive last). Descendants beneath a `confines` box (clip, opacity, transform, sticky) are never hoisted, because the flat paint list scopes clips and layers by subtree range. `paint_layer(style, flex_item)` is the single ordering rule.
+- `table-layout: fixed`: `build_table` sets `grid_template_columns` (px / % / `minmax(0, 1fr)` per column from `<col>`s, else the first row) and clears the cells' own widths; only when the table's `width` isn't auto.
 - JSX is a source transform (`nile-script/src/jsx.rs`, a scanner, not a parser)
   applied to every script and module before QuickJS sees it; it returns `None`
   for non-JSX or malformed input so the engine reports the original error. Modules
@@ -157,8 +173,7 @@ cargo clippy --workspace --all-targets -- -D warnings          # CI enforces thi
 
 ## Next up
 
-Coverage first, language bindings last (user's call). Open: IME and spell-check for the editor, rich paste, `Range` extras, tables/images in the editor, proper stacking contexts,
-static positions for auto insets, text wrapping around floats line by line, `inset` shadows,
-3D transforms, `table-layout: fixed`, per-corner `border-radius`, 
-IME, restyling only affected subtrees (a hover on a page with `:hover` rules re-cascades everything), symbol fallback check on
+Coverage first, language bindings last (user's call). Open: pagination (`break-*`, `@page`, a paged Print-Layout view for the Word example, headers/footers/page numbers, PDF export via Skia; fragment the flat box list after layout, hit-testing and the editor caret across pages are the hard part), spell-check for the editor, image selection and resizing and table row/column commands in the editor, 
+text wrapping around floats line by line,
+restyling only affected subtrees (a hover on a page with `:hover` rules re-cascades everything), symbol fallback check on
 Windows/Linux. Then GPU surfaces and accessibility, and finally bindings (Python/C#/Go) over `nile-capi`.

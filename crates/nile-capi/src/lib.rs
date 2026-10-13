@@ -730,6 +730,72 @@ pub unsafe extern "C" fn nile_view_choose_files(view: *mut NileView, paths: *con
     })
 }
 
+/// Whether the focused element takes text, so the host should enable its input method (IME).
+/// Returns 1 or 0.
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_ime_wanted(view: *mut NileView) -> i32 {
+    let Some(v) = view_ref(view) else { return 0 };
+    guard(0, || i32::from(v.page.ime_wanted()))
+}
+
+/// Where the input method's candidate window should go: the caret, in logical pixels of the
+/// view. Returns 1 and fills the four outputs (any may be NULL), or 0 if there is no caret.
+///
+/// # Safety
+/// `view` must be a live view; the outputs NULL or writable.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_ime_cursor_area(view: *mut NileView, x: *mut f32, y: *mut f32, w: *mut f32, h: *mut f32) -> i32 {
+    let Some(v) = view_ref(view) else { return 0 };
+    guard(0, || match v.page.ime_cursor_rect() {
+        Some((rx, ry, rw, rh)) => {
+            for (out, val) in [(x, rx), (y, ry), (w, rw), (h, rh)] {
+                if !out.is_null() {
+                    unsafe { *out = val };
+                }
+            }
+            1
+        }
+        None => 0,
+    })
+}
+
+/// The input method is composing `utf8` text. `cursor_start`/`cursor_end` are the composition's
+/// own caret as byte offsets into the text, or both -1 for none. An empty string ends the
+/// composition. Returns 1 if the page changed.
+///
+/// # Safety
+/// `view` must be a live view and `utf8` a valid string.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_ime_preedit(view: *mut NileView, utf8: *const c_char, cursor_start: i32, cursor_end: i32) -> i32 {
+    let (Some(v), Some(text)) = (view_ref(view), text(utf8)) else { return 0 };
+    let cursor = (cursor_start >= 0 && cursor_end >= 0).then_some((cursor_start as usize, cursor_end as usize));
+    guard(0, || i32::from(v.page.ime_preedit(text, cursor)))
+}
+
+/// The input method finished composing: insert `utf8` text where the composition was.
+/// Returns 1 if the page changed.
+///
+/// # Safety
+/// `view` must be a live view and `utf8` a valid string.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_ime_commit(view: *mut NileView, utf8: *const c_char) -> i32 {
+    let (Some(v), Some(text)) = (view_ref(view), text(utf8)) else { return 0 };
+    guard(0, || i32::from(v.page.ime_commit(text)))
+}
+
+/// Abandon the composition (the input method was switched off or lost focus).
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_ime_cancel(view: *mut NileView) {
+    let Some(v) = view_ref(view) else { return };
+    guard((), || v.page.ime_cancel());
+}
+
 /// The `console.log`/`warn`/`error` lines written since the last call, separated by newlines
 /// (empty if none), as a new string to free with [`nile_string_free`].
 ///

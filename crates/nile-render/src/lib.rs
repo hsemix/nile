@@ -31,6 +31,8 @@ pub struct Overlay<'a> {
     pub page_selection: &'a [(usize, usize, usize)],
     /// The caret in `contenteditable` content (`None` while blinked off or without one).
     pub dom_caret: Option<DomCaret>,
+    /// An input method's composition in a text input: the input and the byte range of its text.
+    pub preedit: Option<(NodeId, usize, usize)>,
 }
 
 /// Where the caret of an editing host is drawn.
@@ -63,7 +65,7 @@ impl Renderer {
 
     /// Paint the whole tree.
     pub fn paint(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, overlay: &Overlay) {
-        let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection, dom_caret } = *overlay;
+        let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection, dom_caret, preedit } = *overlay;
         let base = canvas.local_to_device_as_3x3();
         canvas.save();
         canvas.translate((0.0, -scroll_y));
@@ -99,7 +101,7 @@ impl Renderer {
                     }
                     if let Some(t) = &b.transform {
                         canvas.save();
-                        canvas.concat(&skia_safe::Matrix::new_all(t.a, t.c, t.e, t.b, t.d, t.f, 0.0, 0.0, 1.0));
+                        canvas.concat(&skia_safe::Matrix::new_all(t.a, t.c, t.e, t.b, t.d, t.f, t.g, t.h, t.i));
                         open.push((b.subtree_end.max(i + 1), None));
                     }
                     self.paint_box(canvas, b, styles);
@@ -131,6 +133,9 @@ impl Renderer {
                         paint_selection(canvas, b.rect, content, from, to, highlight);
                     }
                     self.paint_text(canvas, b.rect, content, styles);
+                    if let Some((_, from, to)) = preedit.filter(|(n, ..)| content.control && content.owners.iter().any(|(_, o)| o == n)) {
+                        paint_underline(canvas, b.rect, content, from, to, styles.get(b.node).color);
+                    }
                     if let Some((_, at)) = caret.filter(|(n, _)| content.owners.iter().any(|(_, o)| o == n)) {
                         paint_caret(canvas, b.rect, content, at, styles.get(b.node).color);
                     }
@@ -262,10 +267,12 @@ impl Renderer {
 
     fn paint_box(&mut self, canvas: &Canvas, b: &LayoutBox, styles: &StyleMap) {
         let s = styles.get(b.node);
-        paint_shadows(canvas, skia_rect(b.rect), &s.box_shadow, s.border_radius);
+        let radii = s.corner_radii(b.rect.width, b.rect.height);
+        paint_shadows(canvas, skia_rect(b.rect), &s.box_shadow, radii);
         let photo = b.bg_image.as_ref().and_then(|data| self.background_shader(data, s, b.rect));
         let border = Border { width: s.border_width, color: s.border_color, style: s.border_style };
-        paint_decorated(canvas, skia_rect(b.rect), s.background, s.background_image.as_ref(), photo, &border, s.border_radius);
+        paint_decorated(canvas, skia_rect(b.rect), s.background, s.background_image.as_ref(), photo, &border, radii);
+        paint_inset_shadows(canvas, skia_rect(b.rect), s, radii);
         if let Some(data) = &b.image {
             self.paint_picture(canvas, data, s, b.rect);
         }
@@ -287,12 +294,15 @@ impl Renderer {
         if dest.width() <= 0.0 || dest.height() <= 0.0 {
             return;
         }
-        let radius = (s.border_radius - b.top.max(b.left) - p.top.max(p.left)).max(0.0);
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         canvas.save();
-        if s.border_radius > 0.0 {
-            canvas.clip_rrect(RRect::new_rect_xy(dest, radius, radius), skia_safe::ClipOp::Intersect, true);
+        if s.has_rounding() {
+            // The picture follows the padding edge: each corner's radius less the border and padding there.
+            let radii = s.corner_radii(r.width, r.height);
+            let inset = [(b.left + p.left, b.top + p.top), (b.right + p.right, b.top + p.top), (b.right + p.right, b.bottom + p.bottom), (b.left + p.left, b.bottom + p.bottom)];
+            let shrunk: Vec<skia_safe::Point> = radii.iter().zip(inset).map(|(&(rx, ry), (ix, iy))| skia_safe::Point::new((rx - ix).max(0.0), (ry - iy).max(0.0))).collect();
+            canvas.clip_rrect(RRect::new_rect_radii(dest, &[shrunk[0], shrunk[1], shrunk[2], shrunk[3]]), skia_safe::ClipOp::Intersect, true);
         }
         let sampling = skia_safe::SamplingOptions::new(skia_safe::FilterMode::Linear, skia_safe::MipmapMode::Linear);
         canvas.draw_image_rect_with_sampling_options(&img, None, dest, sampling, &paint);
@@ -598,8 +608,7 @@ enum Shape {
 }
 
 /// Outer `box-shadow`s: a blurred copy of the box outline, kept out from under the box.
-// TODO: `inset` shadows.
-fn paint_shadows(canvas: &Canvas, outer: Rect, shadows: &[nile_style::BoxShadow], radius: f32) {
+fn paint_shadows(canvas: &Canvas, outer: Rect, shadows: &[nile_style::BoxShadow], radii: [(f32, f32); 4]) {
     for sh in shadows.iter().rev().filter(|s| !s.inset && s.color.a > 0) {
         let shape = Rect::from_ltrb(
             outer.left - sh.spread + sh.dx,
@@ -607,14 +616,50 @@ fn paint_shadows(canvas: &Canvas, outer: Rect, shadows: &[nile_style::BoxShadow]
             outer.right + sh.spread + sh.dx,
             outer.bottom + sh.spread + sh.dy,
         );
-        let r = (radius + sh.spread).max(0.0);
+        let grown = radii.map(|(x, y)| skia_safe::Point::new((x + sh.spread).max(0.0), (y + sh.spread).max(0.0)));
         let mut paint = fill(sh.color);
         if sh.blur > 0.0 {
             paint.set_mask_filter(skia_safe::MaskFilter::blur(skia_safe::BlurStyle::Normal, sh.blur / 2.0, false));
         }
         canvas.save();
-        canvas.clip_rrect(RRect::new_rect_xy(outer, radius, radius), skia_safe::ClipOp::Difference, true);
-        canvas.draw_rrect(RRect::new_rect_xy(shape, r, r), &paint);
+        canvas.clip_rrect(round_rect(outer, radii), skia_safe::ClipOp::Difference, true);
+        canvas.draw_rrect(RRect::new_rect_radii(shape, &grown), &paint);
+        canvas.restore();
+    }
+}
+
+/// `inset` shadows: inside the padding box, a blurred frame around a hole that is the box
+/// moved by the offset and shrunk by the spread. The first shadow in the list is on top.
+fn paint_inset_shadows(canvas: &Canvas, outer: Rect, s: &nile_style::ComputedStyle, radii: [(f32, f32); 4]) {
+    if !s.box_shadow.iter().any(|sh| sh.inset && sh.color.a > 0) {
+        return;
+    }
+    let w = s.border_width;
+    let pad = Rect::from_ltrb(outer.left + w.left, outer.top + w.top, outer.right - w.right, outer.bottom - w.bottom);
+    if pad.width() <= 0.0 || pad.height() <= 0.0 {
+        return;
+    }
+    let cut = [(w.left, w.top), (w.right, w.top), (w.right, w.bottom), (w.left, w.bottom)];
+    let inner: Vec<(f32, f32)> = radii.iter().zip(cut).map(|(&(rx, ry), (cx, cy))| ((rx - cx).max(0.0), (ry - cy).max(0.0))).collect();
+    let inner = [inner[0], inner[1], inner[2], inner[3]];
+    for sh in s.box_shadow.iter().rev().filter(|sh| sh.inset && sh.color.a > 0) {
+        let hole = Rect::from_ltrb(pad.left + sh.spread + sh.dx, pad.top + sh.spread + sh.dy, pad.right - sh.spread + sh.dx, pad.bottom - sh.spread + sh.dy);
+        let hole_radii = inner.map(|(x, y)| skia_safe::Point::new((x - sh.spread).max(0.0), (y - sh.spread).max(0.0)));
+        // Everything but the hole, painted with an even-odd fill and clipped to the padding box.
+        let reach = sh.blur + sh.spread.abs() + sh.dx.abs().max(sh.dy.abs()) + 8.0;
+        let mut path = skia_safe::PathBuilder::new();
+        path.add_rect(Rect::from_ltrb(pad.left - reach, pad.top - reach, pad.right + reach, pad.bottom + reach), None, None);
+        if hole.width() > 0.0 && hole.height() > 0.0 {
+            path.add_rrect(RRect::new_rect_radii(hole, &hole_radii), None, None);
+        }
+        path.set_fill_type(skia_safe::PathFillType::EvenOdd);
+        let mut paint = fill(sh.color);
+        if sh.blur > 0.0 {
+            paint.set_mask_filter(skia_safe::MaskFilter::blur(skia_safe::BlurStyle::Normal, sh.blur / 2.0, false));
+        }
+        canvas.save();
+        canvas.clip_rrect(round_rect(pad, inner), skia_safe::ClipOp::Intersect, true);
+        canvas.draw_path(&path.detach(), &paint);
         canvas.restore();
     }
 }
@@ -626,6 +671,11 @@ struct Border {
     style: Edges<BorderStyle>,
 }
 
+/// A rounded rectangle with a radius per corner: top left, top right, bottom right, bottom left.
+fn round_rect(r: Rect, radii: [(f32, f32); 4]) -> RRect {
+    RRect::new_rect_radii(r, &radii.map(|(x, y)| skia_safe::Point::new(x, y)))
+}
+
 /// Draw `bg` and a (per-side) border inside `outer`, with rounded corners.
 fn paint_decorated(
     canvas: &Canvas,
@@ -634,10 +684,10 @@ fn paint_decorated(
     image: Option<&Gradient>,
     photo: Option<skia_safe::Shader>,
     border: &Border,
-    radius: f32,
+    radii: [(f32, f32); 4],
 ) {
     let (w, c, st) = (border.width, border.color, border.style);
-    let outer_r = RRect::new_rect_xy(outer, radius, radius);
+    let outer_r = round_rect(outer, radii);
     if let Some(bg) = bg.filter(|c| c.a > 0) {
         canvas.draw_rrect(outer_r, &fill(bg));
     }
@@ -663,8 +713,10 @@ fn paint_decorated(
             return;
         }
         let inner_rect = Rect::from_ltrb(outer.left + w.left, outer.top + w.top, outer.right - w.right, outer.bottom - w.bottom);
-        let inner_radius = (radius - w.top.max(w.left)).max(0.0);
-        let inner = RRect::new_rect_xy(inner_rect, inner_radius, inner_radius);
+        // Inside the border each corner shrinks by the widths of the two sides meeting there.
+        let cut = [(w.left, w.top), (w.right, w.top), (w.right, w.bottom), (w.left, w.bottom)];
+        let inner_radii = radii.iter().zip(cut).map(|(&(rx, ry), (cx, cy))| skia_safe::Point::new((rx - cx).max(0.0), (ry - cy).max(0.0))).collect::<Vec<_>>();
+        let inner = RRect::new_rect_radii(inner_rect, &[inner_radii[0], inner_radii[1], inner_radii[2], inner_radii[3]]);
         canvas.draw_drrect(outer_r, inner, &fill(c.top));
         return;
     }
@@ -855,6 +907,15 @@ fn paint_selection(canvas: &Canvas, origin: LRect, content: &TextContent, from: 
     }
 }
 
+/// A line under the bytes `from..to` of a text run (the text an input method is composing).
+fn paint_underline(canvas: &Canvas, origin: LRect, content: &TextContent, from: usize, to: usize, color: CssColor) {
+    let sel = Selection::new(Cursor::from_byte_index(&content.layout, from, Affinity::Downstream), Cursor::from_byte_index(&content.layout, to, Affinity::Upstream));
+    for (r, _) in sel.geometry(&content.layout) {
+        let y = origin.y + r.y1 as f32 - 1.0;
+        canvas.draw_rect(Rect::from_ltrb(origin.x + r.x0 as f32, y, origin.x + r.x1 as f32, y + 1.0), &fill(color));
+    }
+}
+
 /// A 1px caret at byte offset `at` of a text run.
 fn paint_caret(canvas: &Canvas, origin: LRect, content: &TextContent, at: usize, color: CssColor) {
     let g = Cursor::from_byte_index(&content.layout, at, Affinity::Downstream).geometry(&content.layout, 1.0);
@@ -933,7 +994,7 @@ fn paint_inline_fragments(
             origin.x + f.x1,
             origin.y + f.bottom + d.padding.bottom + d.border.bottom,
         );
-        paint_decorated(canvas, rect, d.background, None, None, &Border { width: d.border, color: d.border_color, style: d.border_style }, d.radius);
+        paint_decorated(canvas, rect, d.background, None, None, &Border { width: d.border, color: d.border_color, style: d.border_style }, [(d.radius, d.radius); 4]);
     }
 }
 
