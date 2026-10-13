@@ -139,7 +139,8 @@ pub enum UserSelect {
     All,
 }
 
-/// `position`. `Fixed` is laid out like `Absolute` (against the parent, scrolling with the page).
+/// `position`. `Fixed` is laid out against the viewport and stays put when the page scrolls;
+/// `Sticky` is in flow and slides within its parent while the page scrolls past its inset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Position {
     #[default]
@@ -147,6 +148,7 @@ pub enum Position {
     Relative,
     Absolute,
     Fixed,
+    Sticky,
 }
 
 impl Position {
@@ -1515,7 +1517,8 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         "position" => {
             s.position = match first.and_then(Value::ident) {
                 Some("static") => Position::Static,
-                Some("relative" | "sticky") => Position::Relative,
+                Some("relative") => Position::Relative,
+                Some("sticky") => Position::Sticky,
                 Some("absolute") => Position::Absolute,
                 Some("fixed") => Position::Fixed,
                 _ => return,

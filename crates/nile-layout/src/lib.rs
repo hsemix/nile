@@ -139,6 +139,35 @@ pub struct LayoutBox {
     /// `transform` of the element, as layout coordinates to layout coordinates (the
     /// origin is already folded in). Applies to the box and its subtree.
     pub transform: Option<Affine>,
+    /// `position: fixed`: the box and its subtree stay put while the page scrolls.
+    pub fixed: bool,
+    /// `position: sticky`: the box slides while the page scrolls (see `StickyBox::shift`).
+    pub sticky: Option<StickyBox>,
+}
+
+/// What a sticky box needs to compute its shift: its insets and its parent's vertical extent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StickyBox {
+    pub top: Option<f32>,
+    pub bottom: Option<f32>,
+    pub parent_top: f32,
+    pub parent_bottom: f32,
+}
+
+impl LayoutBox {
+    /// How far a sticky box is pushed down (negative: up) for a page scrolled by `scroll`
+    /// in a viewport `viewport_h` tall. Zero for other boxes.
+    // TODO: only the page's scroll counts, not an `overflow` ancestor's; horizontal insets are ignored.
+    pub fn sticky_shift(&self, scroll: f32, viewport_h: f32) -> f32 {
+        let Some(s) = self.sticky else { return 0.0 };
+        let (y, bottom) = (self.rect.y, self.rect.y + self.rect.height);
+        let dy = match (s.top, s.bottom) {
+            (Some(top), _) => (scroll + top - y).max(0.0),
+            (None, Some(b)) => (scroll + viewport_h - b - bottom).min(0.0),
+            _ => 0.0,
+        };
+        dy.min(s.parent_bottom - bottom).max(s.parent_top - y)
+    }
 }
 
 /// Clipping and scroll extent of an `overflow` box.
@@ -268,6 +297,10 @@ pub struct LayoutTree {
     elem_marks: std::collections::HashMap<NodeId, (usize, usize)>,
     /// Generated (`::before`/`::after`) box -> its element, so hits land on the element.
     origins: std::collections::HashMap<NodeId, NodeId>,
+    /// How far the page is scrolled; `position: fixed` boxes are shifted by it. Set by the
+    /// embedder (`set_page_scroll`) before anything asks for placements.
+    page_scroll: f32,
+    viewport_h: f32,
 }
 
 /// Ask for a `<select>`'s drop-down to be laid out under it.
@@ -502,6 +535,11 @@ impl LayoutTree {
         self.lists.get(&select)
     }
 
+    /// Tell the tree how far the page is scrolled (see `LayoutTree::page_scroll`).
+    pub fn set_page_scroll(&mut self, y: f32) {
+        self.page_scroll = y;
+    }
+
     pub fn placements(&self, offsets: &ScrollOffsets) -> Vec<Placement> {
         let mut out = Vec::with_capacity(self.boxes.len());
         let mut stack: Vec<(usize, Placement)> = Vec::new();
@@ -509,17 +547,26 @@ impl LayoutTree {
             while stack.last().is_some_and(|(end, _)| i >= *end) {
                 stack.pop();
             }
-            let cur = stack.last().map_or(Placement::default(), |(_, p)| *p);
+            let mut cur = stack.last().map_or(Placement::default(), |(_, p)| *p);
+            if b.fixed {
+                // Anchored to the viewport: ignore every ancestor's scroll, clip and transform.
+                cur = Placement { xf: Affine::translate(0.0, self.page_scroll), clip: None };
+                stack.push((b.subtree_end.max(i + 1), cur));
+            }
             // A transform applies to the box itself and everything inside it.
-            let own = Placement { xf: b.transform.map_or(cur.xf, |t| cur.xf.then_after(t)), clip: cur.clip };
+            let base = match b.sticky_shift(self.page_scroll, self.viewport_h) {
+                dy if dy != 0.0 => cur.xf.then_after(Affine::translate(0.0, dy)),
+                _ => cur.xf,
+            };
+            let own = Placement { xf: b.transform.map_or(base, |t| base.then_after(t)), clip: cur.clip };
             out.push(own);
             if let Some(sb) = &b.scroll {
                 let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
                 let clip = intersect(own.clip, own.xf.bounds(sb.clip));
                 let xf = own.xf.then_after(Affine::translate(-ox, -oy));
                 stack.push((b.subtree_end, Placement { xf, clip: Some(clip) }));
-            } else if b.transform.is_some() {
-                stack.push((b.subtree_end, own));
+            } else if b.transform.is_some() || b.sticky.is_some() {
+                stack.push((b.subtree_end.max(i + 1), own));
             }
         }
         out
@@ -958,6 +1005,7 @@ pub fn layout_with(
     let html = doc.find(|n| n.tag() == Some("html")).unwrap_or(Document::ROOT);
     // Absolute boxes with no positioned ancestor use the root as their containing block.
     CONTAINING_BLOCKS.with(|s| s.borrow_mut().push(Vec::new()));
+    FIXED_BLOCKS.with(|f| f.borrow_mut().clear());
     let was = PARENT_IS_CB.replace(false);
     let root = build(doc, styles, text, &mut tree, html).unwrap_or_else(|| {
         tree.new_leaf_with_context(Style::default(), NodeCtx::Element(html)).unwrap()
@@ -965,6 +1013,24 @@ pub fn layout_with(
     PARENT_IS_CB.set(was);
     for abs in CONTAINING_BLOCKS.with(|s| s.borrow_mut().pop()).unwrap_or_default() {
         tree.add_child(root, abs).unwrap();
+    }
+
+    // Fixed boxes share an invisible viewport-sized containing block.
+    let fixed = FIXED_BLOCKS.with(|f| std::mem::take(&mut *f.borrow_mut()));
+    if !fixed.is_empty() {
+        let layer = tree
+            .new_with_children(
+                Style {
+                    display: taffy::Display::Block,
+                    position: taffy::Position::Absolute,
+                    inset: taffy::Rect { left: LengthPercentageAuto::length(0.0), top: LengthPercentageAuto::length(0.0), right: LengthPercentageAuto::auto(), bottom: LengthPercentageAuto::auto() },
+                    size: Size { width: Dimension::length(viewport_width), height: Dimension::length(viewport_height) },
+                    ..Style::default()
+                },
+                &fixed,
+            )
+            .unwrap();
+        tree.add_child(root, layer).unwrap();
     }
 
     // The root fills the viewport, like a browser's initial containing block.
@@ -1003,7 +1069,7 @@ pub fn layout_with(
         .map(|(i, b)| (b.node, i))
         .collect();
     let origins = styles.origins().clone();
-    let mut tree = LayoutTree { boxes, content_height, menu: None, lists: Default::default(), markers: Default::default(), index, text_nodes: Default::default(), elem_marks: Default::default(), origins };
+    let mut tree = LayoutTree { page_scroll: options.scroll_y, viewport_h: viewport_height, boxes, content_height, menu: None, lists: Default::default(), markers: Default::default(), index, text_nodes: Default::default(), elem_marks: Default::default(), origins };
     tree.compute_scroll_boxes(styles);
     for (i, b) in tree.boxes.iter().enumerate() {
         let BoxContent::Text(c) = &b.content else { continue };
@@ -1133,6 +1199,8 @@ thread_local! {
     /// Absolutely positioned boxes waiting to be attached to their containing block: one
     /// list per positioned ancestor being built, the root's at the bottom.
     static CONTAINING_BLOCKS: std::cell::RefCell<Vec<Vec<taffy::NodeId>>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// `position: fixed` boxes, whose containing block is the viewport.
+    static FIXED_BLOCKS: std::cell::RefCell<Vec<taffy::NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The element whose children are being built is itself a containing block.
     static PARENT_IS_CB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -1160,6 +1228,10 @@ fn with_containing_block(
 // TODO: with `auto` insets such a box sits at its containing block's corner, not at its
 // static position in the flow.
 fn hand_off_absolute(style: &ComputedStyle, n: taffy::NodeId) -> Option<taffy::NodeId> {
+    if style.position == Position::Fixed {
+        FIXED_BLOCKS.with(|f| f.borrow_mut().push(n));
+        return None;
+    }
     if style.position.out_of_flow() && !PARENT_IS_CB.get() {
         let taken = CONTAINING_BLOCKS.with(|s| s.borrow_mut().last_mut().map(|list| list.push(n)).is_some());
         if taken {
@@ -2331,16 +2403,22 @@ fn flatten(
         height: l.size.height,
     };
 
+    let sticky = match tree.get_node_context(n) {
+        Some(NodeCtx::Element(id) | NodeCtx::Replaced { id, .. }) => sticky_box(tree, styles, n, *id, parent_y),
+        _ => None,
+    };
     match tree.get_node_context_mut(n) {
         Some(NodeCtx::Element(id)) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect);
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform })
+            let fixed = styles.get(*id).position == Position::Fixed;
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, fixed, sticky })
         }
         Some(NodeCtx::Replaced { id, image, .. }) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect);
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform })
+            let fixed = styles.get(*id).position == Position::Fixed;
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, fixed, sticky })
         }
         Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
@@ -2379,6 +2457,8 @@ fn flatten(
                 image: None,
                 bg_image: None,
                 transform: None,
+                fixed: false,
+                sticky: None,
             });
             for b in placed {
                 let kid = kids[b.id as usize];
@@ -2465,6 +2545,21 @@ fn text_style(s: &ComputedStyle) -> TextStyle {
         letter_spacing: s.letter_spacing,
         align: alignment(s.text_align),
     }
+}
+
+/// A `position: sticky` element's insets and the vertical extent of its parent.
+fn sticky_box(tree: &TaffyTree<NodeCtx>, styles: &StyleMap, n: taffy::NodeId, id: NodeId, parent_y: f32) -> Option<StickyBox> {
+    let st = styles.get(id);
+    if st.position != Position::Sticky {
+        return None;
+    }
+    let px = |l: Length| match l {
+        Length::Px(v) => Some(v),
+        _ => None,
+    };
+    let parent = tree.parent(n)?;
+    let height = tree.layout(parent).ok()?.size.height;
+    Some(StickyBox { top: px(st.inset.top), bottom: px(st.inset.bottom), parent_top: parent_y, parent_bottom: parent_y + height })
 }
 
 fn alignment(a: TextAlign) -> Alignment {
@@ -2592,10 +2687,10 @@ fn taffy_style(s: &ComputedStyle) -> Style {
         item_is_table: s.display == Display::Table,
         position: match s.position {
             Position::Static => taffy::Position::Relative,
-            Position::Relative => taffy::Position::Relative,
+            Position::Relative | Position::Sticky => taffy::Position::Relative,
             Position::Absolute | Position::Fixed => taffy::Position::Absolute,
         },
-        inset: if s.position == Position::Static {
+        inset: if matches!(s.position, Position::Static | Position::Sticky) {
             taffy::Rect::auto()
         } else {
             taffy::Rect { top: lpa(s.inset.top), right: lpa(s.inset.right), bottom: lpa(s.inset.bottom), left: lpa(s.inset.left) }

@@ -64,6 +64,7 @@ impl Renderer {
     /// Paint the whole tree.
     pub fn paint(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, overlay: &Overlay) {
         let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection, dom_caret } = *overlay;
+        let base = canvas.local_to_device_as_3x3();
         canvas.save();
         canvas.translate((0.0, -scroll_y));
         // Boxes that wrap their subtree (an `overflow` clip, or an `opacity` layer) end
@@ -79,6 +80,18 @@ impl Renderer {
             }
             match &b.content {
                 BoxContent::Element => {
+                    if b.fixed {
+                        // Pinned to the viewport: drop the page scroll and any ancestor transform.
+                        canvas.save();
+                        canvas.set_matrix(&skia_safe::M44::from(&base));
+                        open.push((b.subtree_end.max(i + 1), None));
+                    }
+                    let dy = b.sticky_shift(scroll_y, viewport.1);
+                    if dy != 0.0 {
+                        canvas.save();
+                        canvas.translate((0.0, dy));
+                        open.push((b.subtree_end.max(i + 1), None));
+                    }
                     let opacity = styles.get(b.node).opacity;
                     if opacity < 1.0 {
                         canvas.save_layer_alpha_f(None, opacity);

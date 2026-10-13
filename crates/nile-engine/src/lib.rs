@@ -337,7 +337,10 @@ impl View {
             let tree = traced("layout", || nile_layout::layout_with(&self.doc.borrow(), &self.styles, &mut self.text, width, height, &options));
             self.layout = Some((width, height, tree));
         }
-        &self.layout.as_ref().unwrap().2
+        let y = self.scroll_y;
+        let tree = &mut self.layout.as_mut().unwrap().2;
+        tree.set_page_scroll(y);
+        tree
     }
 }
 
@@ -3663,6 +3666,44 @@ cd</textarea>
         assert!(log.contains("animationend:nudge:a"), "{log}");
         assert!(log.contains("transitionend:width:t"), "{log}");
         assert_eq!(log.matches("end").count(), 2, "each fires once: {log}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn fixed_boxes_stay_put_and_stay_clickable_while_scrolled() {
+        let (mut p, path) = page(
+            r#"<style>
+                body { margin: 0 }
+                .row { height: 100px }
+                #f { position: fixed; right: 10px; bottom: 10px; width: 40px; height: 30px }
+                #s { position: sticky; top: 0; height: 20px }
+            </style>
+            <div class=row></div><div id=s></div>
+            <div class=row></div><div class=row></div><div class=row></div><div class=row></div><div class=row></div>
+            <div id=f onclick="window.hit = 1"></div>"#,
+            "fixed_click",
+        );
+        let at = |p: &mut Page, id: &str| {
+            let node = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+            let (sc, offs) = {
+                let v = p.view.borrow();
+                (v.scroll_y, v.scroll_offsets.clone())
+            };
+            let r = p.view.borrow_mut().layout().node_rect_scrolled(node, &offs).unwrap();
+            (r.x + r.width / 2.0, r.y - sc + r.height / 2.0)
+        };
+        let before = at(&mut p, "f");
+        p.wheel(0.0, -250.0);
+        assert!(p.view.borrow().scroll_y > 0.0);
+        // Same place on screen after scrolling; the sticky bar has caught up with the top.
+        assert_eq!(at(&mut p, "f"), before);
+        let (_, sticky_y) = at(&mut p, "s");
+        assert!((sticky_y - 10.0).abs() < 1.0, "{sticky_y}");
+        let (x, y) = before;
+        p.pointer_moved(x, y);
+        p.press();
+        p.release();
+        assert_eq!(js(&mut p, "String(window.hit)"), "1");
         let _ = std::fs::remove_file(path);
     }
 }
