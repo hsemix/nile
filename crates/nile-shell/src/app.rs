@@ -11,12 +11,23 @@ use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize},
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{CursorIcon, Window, WindowId, WindowLevel},
 };
 
-use crate::{dialogs, mods_of};
+use crate::{access, dialogs, mods_of};
+
+/// What other threads (the accessibility layer) send the event loop.
+pub enum UserEvent {
+    Access(accesskit_winit::Event),
+}
+
+impl From<accesskit_winit::Event> for UserEvent {
+    fn from(e: accesskit_winit::Event) -> Self {
+        UserEvent::Access(e)
+    }
+}
 
 /// What a window's own handling can't do alone.
 enum Action {
@@ -46,9 +57,14 @@ struct Win {
     /// The window that opened this one, and whether it is a dialog that blocks it.
     opener: Option<u32>,
     modal: bool,
+    /// The window's link to the platform's accessibility API, and a stamp of the page when the
+    /// tree was last sent.
+    access: accesskit_winit::Adapter,
+    access_stamp: u64,
 }
 
 pub struct App {
+    proxy: EventLoopProxy<UserEvent>,
     wins: Vec<Win>,
     portals: Vec<PortalWin>,
     /// The page that becomes the first window once the event loop is running.
@@ -57,8 +73,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(page: Page) -> App {
-        App { wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0 }
+    pub fn new(page: Page, proxy: EventLoopProxy<UserEvent>) -> App {
+        App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0 }
     }
 }
 
@@ -106,6 +122,30 @@ struct PortalWin {
 }
 
 impl Win {
+    /// Send the accessibility tree again if the page has changed (only built when assistive
+    /// technology is listening).
+    fn sync_access(&mut self) {
+        let stamp = {
+            let v = self.page.view.borrow();
+            let doc = self.page.doc.borrow();
+            let mut h = doc.version.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            h ^= (v.scroll_y.to_bits() as u64) << 7;
+            h ^= (v.interaction.focus.map_or(0, |f| f.0 as u64 + 1)) << 21;
+            h ^= (v.viewport.0.to_bits() as u64) << 3 ^ (v.viewport.1.to_bits() as u64) << 13;
+            for slot in self.page.frames.borrow().slots.values() {
+                h = h.wrapping_add(slot.page.doc.borrow().version.wrapping_mul(31));
+            }
+            h
+        };
+        if stamp == self.access_stamp {
+            return;
+        }
+        self.access_stamp = stamp;
+        let scale = self.window.scale_factor();
+        let page = &mut self.page;
+        self.access.update_if_active(|| access::update(&page.a11y_tree(), scale));
+    }
+
     /// Answer a click on `<input type=file>` with the system's file chooser.
     fn sync_files(&mut self) {
         if let Some(request) = self.page.take_file_request() {
@@ -469,7 +509,8 @@ impl App {
             .with_resizable(config.resizable != Resizable::No)
             .with_decorations(!config.frameless())
             .with_transparent(config.frame == Frame::Transparent)
-            .with_visible(config.state != InitialState::Hidden)
+            // Shown after the accessibility adapter exists (it must see the window first).
+            .with_visible(false)
             .with_maximized(config.state == InitialState::Maximized)
             .with_window_level(level)
             .with_enabled_buttons({
@@ -523,6 +564,8 @@ impl App {
             InitialState::Fullscreen => window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None))),
             _ => {}
         }
+        let access = accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
+        window.set_visible(config.state != InitialState::Hidden);
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
         let surface = softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
         let title = config.title.clone();
@@ -540,6 +583,8 @@ impl App {
             ime_area: None,
             opener: spec.map(|s| s.opener),
             modal: spec.is_some_and(|s| s.modal),
+            access,
+            access_stamp: 0,
         });
         let last = self.wins.len() - 1;
         let actions = self.wins[last].sync_window();
@@ -631,6 +676,9 @@ impl App {
             self.wins[i].sync_cursor();
             self.run(event_loop, id, actions);
             self.sync_portals(event_loop, id);
+            if let Some(i) = self.index(id) {
+                self.wins[i].sync_access();
+            }
         }
     }
 
@@ -714,7 +762,7 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let Some(page) = self.first.take() else { return };
         let id = page.view.borrow().window_info.id;
@@ -739,6 +787,30 @@ impl ApplicationHandler for App {
         });
     }
 
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        let UserEvent::Access(event) = event;
+        let Some(idx) = self.wins.iter().position(|w| w.window.id() == event.window_id) else { return };
+        let id = self.wins[idx].id;
+        match event.window_event {
+            accesskit_winit::WindowEvent::InitialTreeRequested => {
+                let win = &mut self.wins[idx];
+                win.access_stamp = 0;
+                let scale = win.window.scale_factor();
+                let page = &mut win.page;
+                win.access.update_if_active(|| access::update(&page.a11y_tree(), scale));
+            }
+            accesskit_winit::WindowEvent::ActionRequested(request) => {
+                if let Some((node, action)) = access::action(&request) {
+                    if self.wins[idx].page.a11y_action(node, action) {
+                        self.wins[idx].window.request_redraw();
+                    }
+                    self.after(event_loop, id);
+                }
+            }
+            accesskit_winit::WindowEvent::AccessibilityDeactivated => {}
+        }
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, wid: WindowId, event: WindowEvent) {
         if let Some(pi) = self.portals.iter().position(|p| p.window.id() == wid) {
             self.portal_event(event_loop, pi, event);
@@ -746,6 +818,10 @@ impl ApplicationHandler for App {
         }
         let Some(idx) = self.wins.iter().position(|w| w.window.id() == wid) else { return };
         let id = self.wins[idx].id;
+        {
+            let win = &mut self.wins[idx];
+            win.access.process_event(&win.window.clone(), &event);
+        }
         // A window with an open dialog ignores the pointer and keyboard until it closes.
         let input = matches!(
             event,

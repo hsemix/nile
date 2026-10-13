@@ -71,6 +71,21 @@ typedef enum NileCursor {
 } NileCursor;
 
 /**
+ * What an assistive-technology request asks an element to do (`nile_view_accessibility_action`).
+ */
+typedef enum NileA11yAction {
+  NILE_A11Y_ACTION_CLICK = 0,
+  NILE_A11Y_ACTION_FOCUS = 1,
+  /**
+   * Replace the text of an input with `text`.
+   */
+  NILE_A11Y_ACTION_SET_VALUE = 2,
+  NILE_A11Y_ACTION_INCREMENT = 3,
+  NILE_A11Y_ACTION_DECREMENT = 4,
+  NILE_A11Y_ACTION_SCROLL_INTO_VIEW = 5,
+} NileA11yAction;
+
+/**
  * What a window request asks for.
  */
 typedef enum NileWindowCommandKind {
@@ -373,6 +388,29 @@ char *nile_view_selected_text(struct NileView *view);
  * `view` must be a live view; the callbacks and `user` must stay valid for its lifetime.
  */
 void nile_view_set_clipboard(struct NileView *view, struct NileClipboard clipboard);
+
+/**
+ * The page's accessibility tree as JSON (`{"root", "focus", "nodes": [{"id", "role", "name",
+ * "bounds": [x, y, w, h], "children": [ids], ...}]}`, window coordinates in logical pixels), as a
+ * new string to free with [`nile_string_free`]. Build the platform's accessibility objects from it
+ * (UI Automation, NSAccessibility, AT-SPI) and call it again after the page changes.
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+char *nile_view_accessibility_tree(struct NileView *view);
+
+/**
+ * Carry out a request from assistive technology on node `id` of the tree last returned. `value` is
+ * used by `SetValue` (NULL otherwise). Returns true if the page did something (draw again).
+ *
+ * # Safety
+ * `view` must be a live view; `value` NULL or a NUL-terminated string.
+ */
+bool nile_view_accessibility_action(struct NileView *view,
+                                    uint64_t id,
+                                    enum NileA11yAction action,
+                                    const char *value);
 
 /**
  * The page's current title (`document.title`); valid until the next call on the view.

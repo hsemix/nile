@@ -493,6 +493,54 @@ pub unsafe extern "C" fn nile_view_set_clipboard(view: *mut NileView, clipboard:
     }
 }
 
+// ---- accessibility ----------------------------------------------------------------------------
+
+/// What an assistive-technology request asks an element to do (`nile_view_accessibility_action`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NileA11yAction {
+    Click = 0,
+    Focus = 1,
+    /// Replace the text of an input with `text`.
+    SetValue = 2,
+    Increment = 3,
+    Decrement = 4,
+    ScrollIntoView = 5,
+}
+
+/// The page's accessibility tree as JSON (`{"root", "focus", "nodes": [{"id", "role", "name",
+/// "bounds": [x, y, w, h], "children": [ids], ...}]}`, window coordinates in logical pixels), as a
+/// new string to free with [`nile_string_free`]. Build the platform's accessibility objects from it
+/// (UI Automation, NSAccessibility, AT-SPI) and call it again after the page changes.
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_accessibility_tree(view: *mut NileView) -> *mut c_char {
+    let Some(v) = view_ref(view) else { return ptr::null_mut() };
+    guard(ptr::null_mut(), || into_c(v.page.a11y_tree().to_json()))
+}
+
+/// Carry out a request from assistive technology on node `id` of the tree last returned. `value` is
+/// used by `SetValue` (NULL otherwise). Returns true if the page did something (draw again).
+///
+/// # Safety
+/// `view` must be a live view; `value` NULL or a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_accessibility_action(view: *mut NileView, id: u64, action: NileA11yAction, value: *const c_char) -> bool {
+    use nile_engine::a11y::A11yAction as A;
+    let Some(v) = view_ref(view) else { return false };
+    let action = match action {
+        NileA11yAction::Click => A::Click,
+        NileA11yAction::Focus => A::Focus,
+        NileA11yAction::SetValue => A::SetValue(text(value).unwrap_or_default().to_string()),
+        NileA11yAction::Increment => A::Increment,
+        NileA11yAction::Decrement => A::Decrement,
+        NileA11yAction::ScrollIntoView => A::ScrollIntoView,
+    };
+    guard(false, || v.page.a11y_action(id, action))
+}
+
 // ---- window ---------------------------------------------------------------------------------
 
 /// The page's current title (`document.title`); valid until the next call on the view.

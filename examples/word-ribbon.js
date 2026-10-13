@@ -4,7 +4,32 @@ const paper = document.getElementById('paper');
 const status = document.getElementById('status');
 const report = (text) => { status.textContent = text; console.log('ribbon:', text); };
 let zoom = 100, marks = false;
-const cmd = (name, value) => { const ok = document.execCommand(name, false, value); paper.focus(); refresh(); return ok; };
+let savedRange = null;
+function rememberSelection() {
+  const sel = document.getSelection();
+  if (sel.rangeCount && paper.contains(sel.anchorNode) && paper.contains(sel.focusNode)) savedRange = sel.getRangeAt(0).cloneRange();
+}
+function restoreSelection() {
+  rememberSelection();
+  const range = savedRange && paper.contains(savedRange.startContainer) && paper.contains(savedRange.endContainer)
+    ? savedRange.cloneRange() : document.createRange();
+  if (!savedRange || !paper.contains(savedRange.startContainer) || !paper.contains(savedRange.endContainer)) {
+    // A command before the first editor click inserts at the end of the document.
+    range.selectNodeContents(paper);
+    range.collapse(false);
+  }
+  paper.focus();
+  const sel = document.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+const cmd = (name, value) => {
+  restoreSelection();
+  const ok = document.execCommand(name, false, value);
+  rememberSelection();
+  refresh();
+  return ok;
+};
 
 // Which ribbon buttons look pressed follows the caret.
 const FORMAT_STATE = { bold: 'bold', italic: 'italic', underline: 'underline', strike: 'strikeThrough' };
@@ -34,9 +59,13 @@ const words = () => { const t = paper.textContent.trim(); return t ? t.split(/\s
 const countWords = () => { document.getElementById('word-count').textContent = words() + ' words'; };
 countWords();
 paper.addEventListener('input', countWords);
-document.addEventListener('selectionchange', refresh);
+document.addEventListener('selectionchange', () => { rememberSelection(); refresh(); });
 // Ribbon buttons act on the document without taking the caret from it.
-document.querySelectorAll('.ribbon-wrap button, .quick button, .statusbar button').forEach((b) => b.addEventListener('mousedown', (e) => e.preventDefault()));
+document.addEventListener('mousedown', (e) => {
+  if (!e.target.closest('.ribbon-wrap button, .quick button, .statusbar button, [data-tab]')) return;
+  rememberSelection();
+  e.preventDefault();
+}, true);
 
 
 document.querySelectorAll('[data-format]').forEach((button) => button.addEventListener('click', () => {
@@ -137,7 +166,7 @@ document.addEventListener('click', (e) => {
   } else if (action === 'ruler') {
     document.querySelector('.ruler').classList.toggle('hidden'); report('Ruler toggled');
   } else if (action === 'table') {
-    cmd('insertTable', '3x3'); report('Inserted a 3 x 3 table (Tab moves between cells)');
+    report(cmd('insertTable', '3x3') ? 'Inserted a 3 x 3 table (Tab moves between cells)' : 'Could not insert a table');
   } else if (/^table[A-Z]/.test(action)) {
     report(cmd(action) ? button.textContent.trim() : 'Put the cursor in a table first');
   } else if (action === 'picture') {

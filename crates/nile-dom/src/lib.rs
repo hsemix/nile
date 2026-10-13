@@ -109,6 +109,11 @@ impl Document {
         }
     }
 
+    /// How many nodes the arena holds (detached ones included).
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
     pub fn node(&self, id: NodeId) -> &Node {
         &self.nodes[id.0]
     }

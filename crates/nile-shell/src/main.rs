@@ -9,6 +9,7 @@
 //!        [--compose TEXT]              show TEXT as an input method's composition at the caret
 //!        [--wait MS]                   let timers run this long before the snapshot
 
+mod access;
 mod app;
 mod dialogs;
 
@@ -211,7 +212,7 @@ fn main() {
         return;
     }
 
-    let event_loop = EventLoop::new().expect("event loop");
-    let mut app = app::App::new(page);
+    let event_loop = EventLoop::<app::UserEvent>::with_user_event().build().expect("event loop");
+    let mut app = app::App::new(page, event_loop.create_proxy());
     event_loop.run_app(&mut app).expect("run app");
 }
