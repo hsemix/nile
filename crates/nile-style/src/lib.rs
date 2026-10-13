@@ -209,6 +209,8 @@ pub enum Appearance {
     Progress,
     Meter,
     Range,
+    /// `<input type=number>`: up/down spin arrows in the right padding.
+    Spinner,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -618,6 +620,7 @@ impl ComputedStyle {
                 Appearance::Progress => "progress",
                 Appearance::Meter => "meter",
                 Appearance::Range => "range",
+                Appearance::Spinner => "spinner",
             }
             .into(),
             "box-sizing" => if self.border_box { "border-box" } else { "content-box" }.into(),
@@ -797,6 +800,7 @@ input[type=radio] { border-radius: 7px; appearance: radio }
 progress { display: inline-block; width: 160px; height: 16px; margin: 2px; border: 0; padding: 0; background: transparent; appearance: progress }
 meter { display: inline-block; width: 80px; height: 16px; margin: 2px; border: 0; padding: 0; background: transparent; appearance: meter }
 input[type=range] { width: 129px; height: 16px; min-height: 0; margin: 2px; padding: 0; border: 0; background: transparent; appearance: range }
+input[type=number] { padding-right: 20px; appearance: spinner }
 input[type=checkbox]:checked, input[type=radio]:checked { background: #1d4ed8; border-color: #1d4ed8; color: #ffffff }
 input[type=button], input[type=submit], input[type=reset] { width: auto; background: #efefef }
 "#;
@@ -1487,6 +1491,7 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 Some("progress-bar" | "progress") => Appearance::Progress,
                 Some("meter") => Appearance::Meter,
                 Some("slider-horizontal" | "range") => Appearance::Range,
+                Some("spinner" | "number-input") => Appearance::Spinner,
                 Some("none") | Some("auto") => Appearance::None,
                 _ => return,
             }

@@ -1114,6 +1114,74 @@ impl Page {
         n.tag() == Some("input") && n.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("range"))
     }
 
+    pub fn is_number(&self, id: NodeId) -> bool {
+        let doc = self.doc.borrow();
+        let n = doc.node(id);
+        n.tag() == Some("input") && n.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("number"))
+    }
+
+    /// Step a number input up (`dir > 0`) or down by its `step`, clamped to `min`/`max`;
+    /// fires `input` and `change`.
+    fn number_step(&mut self, id: NodeId, dir: f64) -> bool {
+        if self.is_disabled(id) || self.doc.borrow().node(id).attr("readonly").is_some() {
+            return false;
+        }
+        let (num, current) = {
+            let doc = self.doc.borrow();
+            let n = doc.node(id);
+            let num = |name: &str| n.attr(name).and_then(|v| v.trim().parse::<f64>().ok());
+            let step = match n.attr("step").map(str::trim) {
+                Some("any") => 1.0,
+                _ => num("step").filter(|s| *s > 0.0).unwrap_or(1.0),
+            };
+            ((num("min"), num("max"), step), n.attr("value").and_then(|v| v.trim().parse::<f64>().ok()))
+        };
+        let (min, max, step) = num;
+        let mut v = match current {
+            Some(v) => {
+                // Land on the next multiple of `step` (from `min`) in that direction.
+                let base = min.unwrap_or(0.0);
+                let k = (v - base) / step;
+                let k = if dir > 0.0 { (k + 1e-9).floor() + 1.0 } else { (k - 1e-9).ceil() - 1.0 };
+                base + k * step
+            }
+            // Empty: the minimum, or one step from zero.
+            None => min.unwrap_or(dir * step),
+        };
+        if let Some(lo) = min {
+            v = v.max(lo);
+        }
+        if let Some(hi) = max {
+            v = v.min(hi);
+        }
+        let text = format!("{v:.10}");
+        let text = if text.contains('.') { text.trim_end_matches('0').trim_end_matches('.').to_string() } else { text };
+        if current.is_some_and(|c| format!("{c}") == text) {
+            return false;
+        }
+        self.doc.borrow_mut().set_attr(id, "value", &text);
+        let len = text.chars().count();
+        self.set_sel(len, len);
+        self.value_at_focus = Some(text);
+        self.sync();
+        self.emit(id, UiEvent::Plain("input"));
+        self.emit(id, UiEvent::Plain("change"));
+        true
+    }
+
+    /// Which spin arrow is under the pointer: `Some(1.0)` up, `Some(-1.0)` down.
+    fn number_arrow_at_pointer(&mut self, id: NodeId) -> Option<f64> {
+        let (x, y) = self.pointer?;
+        let (rect, scroll) = {
+            let mut v = self.view.borrow_mut();
+            let offsets = v.scroll_offsets.clone();
+            let scroll = v.scroll_y;
+            (v.layout().node_rect_scrolled(id, &offsets)?, scroll)
+        };
+        let y = y + scroll;
+        (x >= rect.x + rect.width - 18.0 && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height).then(|| if y < rect.y + rect.height / 2.0 { 1.0 } else { -1.0 })
+    }
+
     /// `(min, max, step)` of a range input; step 0 means "any".
     fn range_bounds(&self, id: NodeId) -> (f32, f32, f32) {
         let doc = self.doc.borrow();
@@ -1382,7 +1450,11 @@ impl Page {
         }
         // Clicking inside a text input places the caret; shift extends the selection,
         // a double-click selects a word and a triple-click everything.
-        if let Some(f) = self.interaction().focus.filter(|f| self.is_text_input(*f)) {
+        let spin = self.interaction().focus.filter(|f| self.is_number(*f)).and_then(|f| Some((f, self.number_arrow_at_pointer(f)?)));
+        if let Some((f, dir)) = spin {
+            self.number_step(f, dir);
+            changed = true;
+        } else if let Some(f) = self.interaction().focus.filter(|f| self.is_text_input(*f)) {
             let clicks = self.register_click();
             if let Some(c) = self.char_at_pointer(f) {
                 let len = self.value_of(f).chars().count();
@@ -2238,6 +2310,7 @@ impl Page {
             k if command && k.eq_ignore_ascii_case("v") => {
                 if let (false, Some(text)) = (readonly, self.clipboard.text()) {
                     let text = if multiline { text.replace("\r\n", "\n") } else { text.replace("\r\n", " ").replace(['\r', '\n'], " ") };
+                    let text = if self.is_number(focus) { text.chars().filter(|c| "0123456789+-.eE".contains(*c)).collect() } else { text };
                     edit = Some((lo, hi, text));
                 }
             }
@@ -2290,6 +2363,9 @@ impl Page {
                     None => len,
                 });
             }
+            "ArrowUp" | "ArrowDown" if !multiline && self.is_number(focus) => {
+                return self.number_step(focus, if key == "ArrowUp" { 1.0 } else { -1.0 });
+            }
             "Enter" if multiline && !readonly => edit = Some((lo, hi, "\n".into())),
             "Enter" => {
                 // Commit: fire `change` if the value moved since focus.
@@ -2301,7 +2377,7 @@ impl Page {
             }
             k if !readonly && !command && k.chars().count() == 1 => {
                 let c = k.chars().next().unwrap();
-                if !c.is_control() {
+                if !c.is_control() && (!self.is_number(focus) || "0123456789+-.eE".contains(c)) {
                     edit = Some((lo, hi, c.to_string()));
                 }
             }
@@ -3704,6 +3780,43 @@ cd</textarea>
         p.press();
         p.release();
         assert_eq!(js(&mut p, "String(window.hit)"), "1");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn number_inputs_step_clamp_filter_and_spin() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><input id="q" type="number" value="9" min="0" max="10" style="margin:0;width:100px">
+               <input id="d" type="number" value="0.1" step="0.1" style="margin:0;width:100px"></body>"#,
+            "number",
+        );
+        let none = ModifiersState::default();
+        let val = |p: &mut Page, id: &str| js(p, &format!("document.getElementById('{id}').value"));
+        click(&mut p, "q");
+        press_key(&mut p, "ArrowUp", none);
+        press_key(&mut p, "ArrowUp", none);
+        assert_eq!(val(&mut p, "q"), "10"); // clamped to max
+        press_key(&mut p, "ArrowDown", none);
+        assert_eq!(val(&mut p, "q"), "9");
+        // Letters are dropped, digits and signs kept.
+        press_key(&mut p, "End", none);
+        type_keys(&mut p, "x5");
+        assert_eq!(val(&mut p, "q"), "95");
+        click(&mut p, "d");
+        press_key(&mut p, "ArrowUp", none);
+        press_key(&mut p, "ArrowUp", none);
+        assert_eq!(val(&mut p, "d"), "0.3"); // no 0.30000000000000004
+        // The spin arrows at the right edge: upper half up, lower half down.
+        let node = p.doc.borrow().find(|n| n.attr("id") == Some("d")).unwrap();
+        let r = p.view.borrow_mut().layout().node_rect(node).unwrap();
+        p.pointer_moved(r.x + r.width - 8.0, r.y + 3.0);
+        p.press();
+        p.release();
+        assert_eq!(val(&mut p, "d"), "0.4");
+        p.pointer_moved(r.x + r.width - 8.0, r.y + r.height - 3.0);
+        p.press();
+        p.release();
+        assert_eq!(val(&mut p, "d"), "0.3");
         let _ = std::fs::remove_file(path);
     }
 }

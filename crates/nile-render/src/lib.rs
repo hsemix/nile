@@ -713,7 +713,7 @@ fn paint_decorated(
 /// The check or radio dot for `appearance: checkbox | radio` when checked.
 fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) {
     // Checkbox and radio marks show only when checked; a select's chevron always does.
-    if !s.checked && !matches!(s.appearance, Appearance::Select | Appearance::Progress | Appearance::Meter | Appearance::Range) {
+    if !s.checked && !matches!(s.appearance, Appearance::Select | Appearance::Progress | Appearance::Meter | Appearance::Range | Appearance::Spinner) {
         return;
     }
     let mut paint = fill(s.color);
@@ -765,6 +765,18 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
                 canvas.clip_rrect(RRect::new_rect_xy(bar, radius, radius), skia_safe::ClipOp::Intersect, true);
                 canvas.draw_rect(Rect::from_xywh(bar.left, bar.top, bar.width() * f.clamp(0.0, 1.0), bar.height()), &paint);
                 canvas.restore();
+            }
+        }
+        Appearance::Spinner => {
+            // Up and down arrows stacked in the right padding.
+            let cx = r.x + r.width - 11.0;
+            let mid = r.y + r.height / 2.0;
+            paint.set_anti_alias(true);
+            paint.set_color(Color::from_argb(255, 90, 90, 90));
+            for (dy, dir) in [(-4.0, -1.0), (4.0, 1.0)] {
+                let mut builder = skia_safe::PathBuilder::new();
+                builder.move_to((cx - 3.5, mid + dy - 1.5 * dir)).line_to((cx + 3.5, mid + dy - 1.5 * dir)).line_to((cx, mid + dy + 2.0 * dir)).close();
+                canvas.draw_path(&builder.detach(), &paint);
             }
         }
         Appearance::Range => {
