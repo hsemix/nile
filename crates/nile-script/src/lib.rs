@@ -99,6 +99,11 @@ pub trait Environment {
     fn clipboard_request(&self, _kind: &str) {}
     /// Close, move, resize, ... the host window. Embedders without a window ignore it.
     fn window_command(&self, _cmd: WindowCommand) {}
+    /// A native dialog (`open`, `save`, `folder`, `message`) with four text arguments; the
+    /// answer as text, "" when cancelled, `None` when the host has no dialogs.
+    fn dialog(&self, _kind: &str, _args: [&str; 4]) -> Option<String> {
+        None
+    }
     /// Window `[screenX, screenY, outerWidth, outerHeight, fullscreen (0/1)]`.
     fn window_rect(&self) -> [f32; 5] {
         let (w, h) = self.viewport();
@@ -454,6 +459,10 @@ fn install_natives(
             };
             env.window_command(cmd);
         }
+    });
+    native!("dialog", {
+        let env = env.clone();
+        move |kind: String, a: String, b: String, c: String, d: String| -> Option<String> { env.dialog(&kind, [&a, &b, &c, &d]) }
     });
     native!("windowRect", {
         let env = env.clone();

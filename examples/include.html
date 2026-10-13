@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head>
+  <title>include</title>
+  <include src="include/styles.htm"></include>
+  <style> body { margin: 0; font: 15px sans-serif; } main { padding: 12px 20px; } </style>
+</head>
+<body>
+  <include src="include/header.htm"></include>
+  <main>
+    <p>The header, its nav and this page's stylesheet are separate files assembled while loading.</p>
+    <include src="include/missing.htm"><div class="card">Fallback: missing.htm could not be loaded.</div></include>
+    <include src="include/nav.htm" media="platform == 'Nope'"><div class="card">Fallback: media was false.</div></include>
+    <include src="include/nav.htm" media="platform != 'Nope'"></include>
+  </main>
+</body>
+</html>

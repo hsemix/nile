@@ -1,0 +1,22 @@
+<!doctype html>
+<html><head><title>frameset</title>
+<style>
+  html, body { height: 100%; margin: 0; font: 15px sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { background: #2b4c7e; color: white; padding: 8px 14px; }
+  frameset { flex: 1; }
+  .notes { padding: 10px; background: #fff; }
+</style></head>
+<body>
+  <header>drag the splitters <button id="state">state</button> <span id="out"></span></header>
+  <frameset id="fs" cols="140px,*,160px">
+    <frame src="frames/help-index.html"></frame>
+    <splitter/>
+    <frame id="mid" src="frames/content.html" content-style="frames/theme.css"></frame>
+    <splitter/>
+    <div class="notes">A plain <b>div</b> is a pane too.</div>
+  </frameset>
+  <script>
+    document.$('#state').on('click', () => { document.$('#out').text = JSON.stringify(document.$('#fs').frameset.state); });
+  </script>
+</body></html>

@@ -47,10 +47,26 @@ Read its chosen options with `select.selectedOptions.map((o) => o.value)`.
 See [forms.html](../../examples/forms.html) and [listbox.html](../../examples/listbox.html).
 
 Validation and submission belong to your script or host: automatic `<form>`
-submission, browser validation, IME composition and drag-and-drop are not
-implemented. Input selection indices currently count characters rather than
+submission, browser validation and drag-and-drop are not implemented. IME
+composition works in text controls and editable documents through the shell or
+[host IME integration](embedding.md#input-methods-and-file-choosers).
+Input selection indices currently count characters rather than
 JavaScript UTF-16 code units. Values live in attributes rather than a separate
 default-value model.
+
+## Additional controls
+
+Nile also renders number/range/color inputs, typed date/time/month/datetime-local
+fields, file inputs, progress/meter, fieldsets, and details/summary disclosure.
+See [inputs.html](../../examples/inputs.html), [number.html](../../examples/number.html)
+and [controls2.html](../../examples/controls2.html).
+
+Number controls step with arrows and respect min/max; range controls drag and emit
+input/change. Date/time fields offer digit editing and field stepping, without a
+calendar/clock popup. Color inputs accept hex text, without a color-picker popup.
+File inputs request a native chooser in the shell; scripts read `.files` entries
+with name/size/type and `.text()`. Other hosts must implement the chooser request
+API. These controls do not add automatic form validation/submission.
 
 ## Enable page-text selection
 
@@ -80,58 +96,123 @@ window.getSelection().removeAllRanges();
 For editable input text, use `selectionStart`, `selectionEnd`,
 `setSelectionRange(start, end)` and `.select()` instead.
 
-Selecting and copying display text does not make it editable. Rich-text editing
-and complete browser `Range`/`Selection` APIs are not provided. Selection follows
-paint order, cannot begin inside a link/control, and does not support extending
-page selections with Shift+arrow keys. A `user-select: none` inline span inside a
-selectable text run is not fully respected.
+For editing, use `contenteditable` and the selection/command APIs documented in
+[rich-text editing](rich-text-editing.md). Read-only page selection follows paint
+order, cannot begin inside a link/control, and does not support Shift+arrow
+extension. A `user-select: none` inline span inside a selectable text run is not
+fully respected. Selection inside inputs/textareas remains separate from the
+document selection.
 
 ## Build an application-drawn menubar
 
-The runnable [menubar example](../../examples/menubar.html) draws File, View and
-Help menus inside the window:
+The redesigned [menubar example](../../examples/menubar.html) provides File,
+Edit, View and Help menus around an editable notes workspace:
 
 ```sh
 cargo run -p nile-shell -- examples/menubar.html
 ```
 
-Its [script](../../examples/menubar.js) implements clicking, hover switching while
-open, arrow-key navigation, Enter/Space activation, Escape, outside-click closing,
-and Ctrl/Cmd+N. Disabled commands are skipped during keyboard navigation. View
-toggles the details text and can rename the window. File creates a local draft
-counter; disk saving is explicitly disabled. Close requests that the host close
-the native window.
+Its [script](../../examples/menubar.js) uses `element.popup()` for anchored menus,
+viewport placement, animation and outside-click dismissal. Menu rows align their
+icons, labels and shortcut hints using CSS grid. File → From a
+template opens a second anchored popup; View reflects its options with checkmarks.
 
-The core layout is:
+A minimal popup looks like this:
 
 ```html
-<div class="menu">
-  <button>File</button>
-  <div class="popup"><button>New draft</button></div>
-</div>
+<button id="file">File</button>
+<script>
+  document.getElementById('file').addEventListener('click', function () {
+    const panel = document.createElement('popup');
+    panel.className = 'command-menu';
+    panel.innerHTML = '<div role="menuitem" tabindex="0">New draft</div>';
+    const handle = this.popup(panel, {
+      anchorAt: 1, popupAt: 7,
+      animationType: 'blend', animationDuration: 100
+    });
+    if (handle) handle.on('close', () => panel.remove());
+    else panel.remove();
+  });
+</script>
 ```
 
 ```css
-.menubar { position: relative; z-index: 10 }
-.menu { position: relative }
-.popup { display: none; position: absolute; top: 36px; left: 0; width: 220px }
-.menu.open .popup { display: block }
+.command-menu {
+  width: 260px;
+  padding: 8px;
+  background: white;
+  border: 1px solid #d4e0d7;
+  border-radius: 8px;
+  box-shadow: 0 8px 28px #263e3224;
+  popup-position: top-left bottom-left;
+}
 ```
 
-JavaScript toggles `.open` on a menu, moves focus among enabled commands, and
-calls the same command function for clicks and shortcuts. Keep visible shortcut
-labels synchronized with the actual handlers. The example sets `aria-expanded`
-and menu roles as markup, but a full platform accessibility bridge is still pending.
-Tab follows regular focus order; the example does not implement the full browser
-ARIA menu pattern, nested submenus or automatic repositioning at viewport edges.
+This snippet only opens a panel; add command handlers and keyboard behavior as
+shown in the complete example. The points use numeric-keypad positions: anchor
+1 is bottom-left, popup 7 is top-left. `popup-position` can supply these reference
+points through CSS; the example's top-level menus use that CSS property. A submenu
+uses anchor 9 (top-right) and popup 7. Keep a popup handle to close it explicitly.
+Supplied DOM elements are not automatically removed on close; clean up ephemeral
+panels in the handle's close callback.
 
-The menubar itself needs a higher sibling paint order than the main content, so
-its dropdowns paint above that content. Giving only a nested popup a high z-index
-does not provide full browser stacking-context behavior in Nile.
+The example supports hover switching, arrow keys, Home/End, Enter/Space, nested
+Escape dismissal, outside-click closing, and Tab returning to normal focus order.
+Disabled Export is skipped by keyboard navigation. Menu roles, aria-expanded and
+aria-checked describe the state; a platform accessibility bridge is still pending.
 
-Custom menus are regular DOM elements, so they can be styled, checked, disabled
-or given submenus using the same approach. Prefer popups outside overflow-clipped
-containers. Native macOS/global OS menus require integration in the embedding host.
+Edit commands operate on the document's saved selection. The toolbar prevents
+mousedown focus changes, and menu commands restore a cloned Range before calling
+execCommand. Save draft/Ctrl/Cmd+S persists its HTML in localStorage; New draft and
+templates replace the current document. Unsaved changes are lost on reload or
+switching templates; PDF export is explicitly disabled. The View menu toggles the
+sidebar, details panel and compact reading layout. Right-click the document for
+an Edit context menu. Close window requests a native host action.
+
+Popups remain inside the host window. Embedded frames have additional overlay
+limits described in [composition](composition.md#current-limits). Native global
+OS menus still require integration in the embedding host.
+
+## Native dialogs, message boxes and popups
+
+`Window.this` (shapes from docs.sciter.com/docs/DOM/Window) opens the system's own dialogs. They
+block until answered and return `null` when cancelled, or when the host gave the page no dialogs
+(headless renders, C hosts that haven't wired them):
+
+```js
+const url = Window.this.selectFile({ mode: "open", filter: "Text (*.txt)|*.txt;*.md|All (*.*)|*.*", caption: "Open" });
+const urls = Window.this.selectFile({ mode: "open-multiple" });          // array of file:// URLs
+const save = Window.this.selectFile({ mode: "save", extension: "txt" });
+const dir = Window.this.selectFolder({ caption: "Pick a folder", path: "/tmp" });
+Window.this.modal(<alert>Careful!</alert>);              // <info>, <alert>, <error>, <question>
+if (Window.this.modal(<question>Delete it?</question>) === "yes") { /* ... */ }
+```
+
+`<question>` returns `"yes"` or `"no"` (Sciter doesn't document its return value). The system box is the
+default and only shows the tag's plain text and a `caption`/`title`. To go further, opt in per box with an
+`inline` attribute, or for every box with `Window.this.messageBoxes = "inline"` (`native` on a tag wins
+over the setting). The box is then plain HTML in the window, `.nile-modal` > `.nile-messagebox.<kind>`
+with `-title`, `-body`, `-icon`, `-text` and `-buttons` parts, so CSS restyles it; the tag's content
+may be rich markup, and `<button value="save" default>` / `cancel` children replace the default OK or
+Yes/No buttons. Enter chooses the default button, Escape the `cancel` one. Because it can't block the
+script it returns a **Promise** of the clicked button's `value` (else its `id`, else its text):
+`const r = await Window.this.modal(<question inline>…</question>)`. `new Window(...)`
+and `modal({url})` for a second document aren't supported; use a `<frame>` or a popup.
+
+`element.popup(menuOrJSX, { anchorAt, popupAt, x, y })` shows an element next to `element` (placement
+points are numpad digits: 1 bottom-left … 9 top-right; the default is below the anchor), closes on a
+click outside, on Escape, and after a menu item is clicked, and fires `popup-request`, `popup-ready`,
+`popup-dismissing` and `popup-dismissed`. `element.takeOff({ x, y, width, height, relativeTo })` lifts
+an element out of the flow until `takeOff()` is called without arguments. Right-clicking fires
+`contextmenu`; set `evt.source = menuElement` (for example a `<menu.context>`) to show it at the
+pointer. Placement and animation can come from CSS instead of the call: `popup-position: <popup point> <anchor point>`
+(`top-left` … `bottom-right`, or `popup-reference-point` / `popup-anchor-reference-point`) and
+`popup-animation: popup-animation(type: slide, axis: vertical, heading: start-to-end, duration: 150ms)`
+(`blend`, `inflate`, `slide`, `roll`), read from the popup element and then its anchor; the call's
+parameters (`anchorAt`, `popupAt`, `animationType`…) win. Hovering an element for half a second shows
+its `title` (text) or `tooltip` (HTML) as a `popup[role=tooltip]`; a script can answer the bubbling
+`tooltiprequest` event with `evt.source = element` to supply its own. Popups are painted inside the window, not as separate OS windows. See
+[popups example](../../examples/popups.html) and [dialogs example](../../examples/dialogs.html).
 
 ## Dialogs and command state
 

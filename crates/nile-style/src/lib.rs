@@ -430,6 +430,11 @@ pub struct ComputedStyle {
     pub vertical_align: VerticalAlign,
     /// `cursor`; inherited.
     pub cursor: Cursor,
+    /// `popup-position`: which numpad point (1 bottom-left … 9 top-right) of the popup meets which
+    /// point of its anchor. Read by scripts (`Element.popup`), not by layout.
+    pub popup_position: Option<(u8, u8)>,
+    /// `popup-animation(type: slide, axis: vertical, duration: 100ms)`, as written.
+    pub popup_animation: Option<String>,
     pub align_self: Align,
     pub align_content: Align,
 
@@ -548,6 +553,8 @@ impl Default for ComputedStyle {
             table_fixed: false,
             vertical_align: VerticalAlign::Baseline,
             cursor: Cursor::Auto,
+            popup_position: None,
+            popup_animation: None,
             align_self: Align::Normal,
             align_content: Align::Normal,
             justify_items: Align::Normal,
@@ -694,6 +701,11 @@ impl ComputedStyle {
             "padding-right" => px(self.padding.right),
             "padding-bottom" => px(self.padding.bottom),
             "padding-left" => px(self.padding.left),
+            "popup-position" => {
+                let name = |p: u8| ["bottom-left", "bottom-center", "bottom-right", "middle-left", "middle-center", "middle-right", "top-left", "top-center", "top-right"][p as usize - 1];
+                self.popup_position.map(|(a, b)| format!("{} {}", name(a), name(b)))?
+            }
+            "popup-animation" => self.popup_animation.clone()?,
             "border-top-width" => px(self.border_width.top),
             "border-right-width" => px(self.border_width.right),
             "border-bottom-width" => px(self.border_width.bottom),
@@ -807,6 +819,33 @@ td, th { display: table-cell; padding: 1px; vertical-align: middle }
 th { font-weight: bold; text-align: center }
 caption { display: table-caption; text-align: center }
 col, colgroup { display: none }
+popup { display: none; background: #fff; color: #222; border: 1px solid #b4b8c0; box-shadow: 0 4px 14px rgba(0,0,0,0.25); padding: 4px }
+popup[role=tooltip] { background: #fffbe6; padding: 3px 7px; font-size: 13px }
+menu.popup, menu.context { display: none }
+menu.popup, menu.context, popup > menu { list-style: none; margin: 0; padding: 4px 0; background: #fff; border: 1px solid #b4b8c0; box-shadow: 0 4px 14px rgba(0,0,0,0.25); min-width: 140px }
+popup > menu, popup > menu.popup, popup > menu.context { display: block; border: 0; box-shadow: none }
+menu.popup > li, menu.context > li, popup > menu > li { display: block; list-style: none; padding: 4px 18px; cursor: default }
+menu.popup > li.nile-hover, menu.context > li.nile-hover, popup > menu > li.nile-hover { background: #3a7bd5; color: #fff }
+menu.popup > li[disabled], menu.context > li[disabled], popup > menu > li[disabled] { color: #999; background: transparent !important }
+frame { display: block; height: 150px; border: 0 }
+.nile-modal { position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 2147483600; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center }
+.nile-messagebox { min-width: 280px; max-width: 460px; background: #fff; color: #222; border: 1px solid #b4b8c0; border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,0.4); overflow: hidden }
+.nile-messagebox-title { padding: 8px 14px; font-weight: bold; background: #f1f3f6; border-bottom: 1px solid #dde0e6 }
+.nile-messagebox-body { display: flex; padding: 16px 14px }
+.nile-messagebox-icon { width: 30px; height: 30px; border-radius: 15px; margin-right: 12px; text-align: center; line-height: 30px; font-weight: bold; color: #fff; background: #3a7bd5; flex: none }
+.nile-messagebox.alert .nile-messagebox-icon { background: #e0a100 }
+.nile-messagebox.error .nile-messagebox-icon { background: #d33a3a }
+.nile-messagebox.question .nile-messagebox-icon { background: #3a7bd5 }
+.nile-messagebox-text { flex: 1; align-self: center }
+.nile-messagebox-buttons { display: flex; justify-content: flex-end; padding: 8px 14px 12px }
+.nile-messagebox-buttons > button { margin-left: 8px; padding: 4px 16px }
+.nile-messagebox-buttons > button.default { border-color: #3a7bd5; font-weight: bold }
+frameset { display: grid; height: 100%; min-height: 150px }
+frameset > * { min-width: 0; min-height: 0 }
+frameset > frame { height: auto }
+splitter { display: block; background: #c8c8c8; cursor: col-resize }
+frameset[rows] > splitter { cursor: row-resize }
+iframe { display: inline-block; width: 300px; height: 150px; border: 0 }
 article, aside, address, blockquote, figure, figcaption, details, summary, fieldset, legend, dl, dt, dd, ol, pre,
   h4, h5, h6, hgroup, menu { display: block }
 span, a, b, strong, em, i, u, s, del, br, label, code, kbd, samp, var, tt, small, big, sub, sup, mark, abbr, cite, q,
@@ -975,6 +1014,8 @@ impl ComputedStyle {
         a.animations = other.animations.clone();
         a.transform_origin = other.transform_origin;
         a.cursor = other.cursor;
+        a.popup_position = other.popup_position;
+        a.popup_animation = other.popup_animation.clone();
         // Whether a box is faded or transformed decides its paint order; how much doesn't.
         if (a.opacity < 1.0) == (other.opacity < 1.0) {
             a.opacity = other.opacity;
@@ -1189,7 +1230,9 @@ fn apply_declarations(
             }
             // A `var()` that can't be resolved makes the declaration invalid.
             let text = substitute(&d.raw, &vars, 0)?;
-            Some(Declaration { values: parse::parse_values(&text, pcx), raw: String::new(), ..(*d).clone() })
+            // `popup-*` values are kept as text for scripts; everything else is parsed now.
+            let raw = if d.name.starts_with("popup-") { text.clone() } else { String::new() };
+            Some(Declaration { values: parse::parse_values(&text, pcx), raw, ..(*d).clone() })
         })
         .collect();
     for d in resolved.iter().filter(|d| d.name == "font-size") {
@@ -1560,6 +1603,18 @@ pub(crate) fn align(v: &Value) -> Option<Align> {
     })
 }
 
+/// A reference point of `popup-position`: `top-left` … `bottom-right` or a numpad digit.
+fn point_of(v: &Value) -> Option<u8> {
+    match v {
+        Value::Ident(i) => ["bottom-left", "bottom-center", "bottom-right", "middle-left", "middle-center", "middle-right", "top-left", "top-center", "top-right"]
+            .iter()
+            .position(|n| n == i)
+            .map(|p| p as u8 + 1),
+        Value::Number(n) if (1.0..=9.0).contains(n) && n.fract() == 0.0 => Some(*n as u8),
+        _ => None,
+    }
+}
+
 fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
     let fs = if d.name == "font-size" { parent_font_size } else { s.font_size };
     let v = &d.values;
@@ -1878,6 +1933,24 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
             }
             None => {}
         },
+        "popup-position" => {
+            if let (Some(a), Some(b)) = (v.first().and_then(point_of), v.get(1).and_then(point_of)) {
+                s.popup_position = Some((a, b));
+            }
+        }
+        "popup-reference-point" => {
+            if let Some(a) = first.and_then(point_of) {
+                s.popup_position = Some((a, s.popup_position.map_or(1, |p| p.1)));
+            }
+        }
+        "popup-anchor-reference-point" => {
+            if let Some(b) = first.and_then(point_of) {
+                s.popup_position = Some((s.popup_position.map_or(7, |p| p.0), b));
+            }
+        }
+        "popup-animation" => {
+            s.popup_animation = (!d.raw.is_empty() && d.raw != "none").then(|| d.raw.clone());
+        }
         "perspective-origin" => {
             if let Some(o) = bg_position(&v[..v.len().min(2)], fs) {
                 s.perspective_origin = o;
@@ -2605,6 +2678,18 @@ mod tests {
         let mut fainter = faded.clone();
         fainter.opacity = 0.2;
         assert!(faded.same_layout(&fainter), "but fading further doesn't");
+    }
+
+    #[test]
+    fn popup_properties_are_kept_for_scripts() {
+        let doc = Document::parse(r#"<style>#a { popup-position: top-right bottom-center; popup-animation: popup-animation(type:slide, duration:100ms) } #b { popup-reference-point: 5 }</style><p id="a"></p><p id="b"></p>"#);
+        let s = compute_styles(&doc);
+        let a = s.get(doc.find(|n| n.attr("id") == Some("a")).unwrap()).clone();
+        assert_eq!(a.popup_position, Some((9, 2)));
+        assert_eq!(a.css_value("popup-position").as_deref(), Some("top-right bottom-center"));
+        assert!(a.popup_animation.as_deref().is_some_and(|t| t.contains("type:slide")), "{:?}", a.popup_animation);
+        let b = s.get(doc.find(|n| n.attr("id") == Some("b")).unwrap()).clone();
+        assert_eq!(b.popup_position, Some((5, 1)));
     }
 
     #[test]

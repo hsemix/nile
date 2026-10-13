@@ -29,6 +29,7 @@ Use F5 or Ctrl/Cmd+R to reload. The shell currently loads file paths, not HTTP U
 | `--wheel X,Y,DY` | Wheel at a coordinate; negative DY scrolls further down the document |
 | `--select X1,Y1,X2,Y2` | Drag a text selection between two coordinates |
 | `--type TEXT` | Send characters and braced key names to the focused control |
+| `--compose TEXT` | Render an uncommitted IME composition at the caret |
 | `--wait MS` | Allow scheduled work before simulated input |
 | `--settle MS` | Allow scheduled work after simulated input |
 
@@ -66,6 +67,16 @@ is interpreted as a key token, rather than literal braces.
 
 Snapshot runs use a private in-memory clipboard. They do not read or change the
 system clipboard. Headless window commands are queued without a native window.
+Storage still follows normal engine persistence rules; set `NILE_STORAGE_DIR=off`
+to disable automatic disk persistence for a test run. File/network requests and
+timers can need `--wait` or `--settle` before a useful screenshot is produced.
+
+```sh
+NILE_STORAGE_DIR=off cargo run -p nile-shell -- examples/ime.html --png /tmp/nile-ime.png --click 150,45 --compose '日本語'
+```
+
+This focuses the first text input and shows composition without committing it.
+Use an appropriate click coordinate when composing in a different control.
 
 ## Validate behavior and visuals
 

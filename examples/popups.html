@@ -1,0 +1,44 @@
+<!doctype html>
+<html><head><title>popups</title>
+<style>
+  body { font: 15px sans-serif; margin: 0; padding: 16px; }
+  button { padding: 4px 10px; margin-right: 6px; }
+  #area { margin-top: 16px; height: 110px; border: 2px dashed #99a; display: flex; align-items: center; justify-content: center; color: #667; }
+  #log { margin-top: 12px; font-family: monospace; background: #f3f5f9; padding: 8px; min-height: 40px; }
+  #panel { width: 190px; padding: 8px; background: #fff7d6; border: 1px solid #c9b45a; }
+  menu.popup { popup-position: top-left bottom-left; popup-animation: popup-animation(type:slide, axis:vertical, duration:150ms); }
+  popup[role=tooltip] b { color: #b34700; }
+</style></head>
+<body>
+  <h3>Popups</h3>
+  <button id="file">File ▼</button>
+  <button id="info">Popup with content</button>
+  <button id="float">takeOff</button>
+  <button id="tip1" title="A plain title tooltip">hover me (title)</button>
+  <button id="tip2" tooltip="<b>Rich</b> tooltip with <i>HTML</i>">hover me (tooltip)</button>
+  <div id="area">Right-click here for a context menu</div>
+  <div id="log">…</div>
+
+  <menu.context id="ctx"><li id="cut">Cut</li><li id="copy">Copy</li><li disabled>Paste</li><li id="del">Delete</li></menu>
+  <div id="panel" style="display:none">A floating panel, lifted out of the page with <b>takeOff()</b>.</div>
+
+  <script>
+    const log = document.$('#log');
+    const say = (t) => { log.text = t; };
+    document.$('#file').on('click', function () {
+      this.popup(<menu class="popup"><li id="new">New</li><li id="open">Open…</li><li>Save</li><li disabled>Export</li></menu>);
+    });
+    document.on('click', 'menu li', function () { say('picked: ' + this.text); });
+    document.$('#info').on('click', function () {
+      this.popup(<popup><b>Hello</b><br/>anchored at the bottom right of the button</popup>, { anchorAt: 3, popupAt: 9 });
+    });
+    document.$('#area').on('contextmenu', (evt) => { evt.source = document.$('#ctx'); });
+    let panel = null;
+    document.$('#float').on('click', function () {
+      const p = document.$('#panel');
+      if (panel) { p.takeOff(); panel = null; p.style.display = 'none'; return; }
+      p.style.display = 'block';
+      panel = p.takeOff({ x: 520, y: 40, relativeTo: 'window' });
+    });
+  </script>
+</body></html>

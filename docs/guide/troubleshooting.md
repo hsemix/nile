@@ -15,15 +15,17 @@ assuming every browser CSS property is available.
 Run from the repository root when using the guide's commands. Asset paths resolve
 from the page folder; module imports resolve from the importing file. An image
 referenced by injected CSS still resolves from the page folder. Use local files
-or supported data URLs for images. HTTP loading, bare npm imports and `this://`
-resource URLs are not implemented. Check the terminal for script load errors.
+or supported data URLs for images. `fetch`/XHR can load HTTP resources when `net`
+is enabled, but that does not add remote `<img>` loading or npm resolution.
+`this://` URLs are not implemented. Check the terminal for script load errors.
 
 ## Text cannot be selected
 
 Add `user-select: text` to the reading area, or a `selectable` attribute. Page-text
 selection is deliberately opt-in. A text input has its own editable selection.
-Page selection and copying are available; selecting a paragraph does not enable
-rich-text editing. See [selection](controls-and-menus.md#enable-page-text-selection).
+Add `contenteditable="true"` for rich-text editing instead. Preserve the editor's
+selection when toolbar buttons are clicked; see [rich-text editing](rich-text-editing.md).
+Read-only selection is described in [selection](controls-and-menus.md#enable-page-text-selection).
 
 ## A symbol appears as a box
 
@@ -35,9 +37,10 @@ with `@font-face` is not implemented.
 ## A popup is clipped or appears behind content
 
 Check ancestor `overflow` and positioning. Use a positioned parent for local
-dropdowns, and put viewport overlays outside scrolling containers. Current
-`z-index` support orders siblings and does not implement complete stacking
-contexts. `position: fixed` does not pin content during page scrolling.
+dropdowns, and put viewport overlays outside scrolling containers.
+Stacking contexts work, but a popup still obeys its ancestors' clipping and
+painting constraints. Fixed boxes are viewport-pinned, although clipping ancestors
+still clip them. Embedded frames currently paint above outer-page overlays.
 
 ## Typing loses focus
 
@@ -47,11 +50,12 @@ the input, explicitly preserve and restore its value, focus and selection.
 
 ## Saving, fetching or navigation does not work
 
-The development shell supplies the UI runtime, not application storage or network
-services. The showcase's saves are in-memory snapshots, and its mail composer
-does not send email. There is no built-in `fetch`, browser URL navigation or
-document persistence. Register host functions through [the embedding API](embedding.md)
-for application services; do not assume browser storage APIs.
+The showcase's saves are in-memory snapshots, and its mail composer does not
+send email. Use `localStorage` for persistent JSON/string data and `sessionStorage` for
+session data. Use fetch/XHR for file/data requests or HTTP with `net`. Check
+`NILE_STORAGE_DIR` and the host's selected storage file if persistence fails.
+Location hash changes work, but assigning a new URL does not navigate the page.
+See [data and services](data-and-services.md) for limits and examples.
 
 ## A snapshot exists, but the app did not behave as expected
 
@@ -79,5 +83,5 @@ services, embed `nile-engine` or `libnile` rather than treating the development
 shell as a complete application framework.
 
 This guide reflects the current checkout. Check the [known gaps](../../README.md#known-gaps-deliberate-for-now)
-before relying on browser/Sciter behavior, especially IME, accessibility, rich-text
+before relying on browser/Sciter behavior, especially accessibility, advanced
 editing, GPU rendering and full CSS compatibility.

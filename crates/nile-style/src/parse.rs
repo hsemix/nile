@@ -384,7 +384,7 @@ fn declarations_in(p: &mut Parser<'_>, cx: &Cx) -> Vec<Declaration> {
                         raw = rest.trim_end().to_string();
                     }
                 }
-            } else if !raw.contains("var(") {
+            } else if !raw.contains("var(") && !name.starts_with("popup-") {
                 raw.clear();
             }
             Ok::<_, ParseError<()>>(Declaration { name, values, important, raw })

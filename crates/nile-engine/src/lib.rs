@@ -5,7 +5,9 @@
 //! `Page` is the entry point. Its fields and methods are public for those two embedders; most of
 //! them are internal plumbing, so prefer the C API (`nile-capi`) for anything else.
 
+pub mod dialogs;
 pub mod editing;
+pub mod frames;
 mod inputs;
 mod net;
 pub mod window;
@@ -132,6 +134,8 @@ impl Clipboard for SystemClipboard {
     }
 }
 
+/// How long the pointer rests on an element before its tooltip shows.
+const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 /// Half the caret's blink period.
 pub const CARET_BLINK: Duration = Duration::from_millis(530);
 
@@ -189,6 +193,8 @@ pub struct View {
     /// A file chooser a click on `<input type=file>` asked for; the embedder answers with
     /// `Page::choose_files`.
     pub file_request: Option<FileRequest>,
+    /// The embedder's native dialogs, for `Window.this.selectFile` and friends.
+    pub dialogs: Option<Rc<dyn dialogs::Dialogs>>,
     /// The viewport changed since `resize` last fired.
     pub resized: bool,
     /// Where the window is: `[screenX, screenY, outerWidth, outerHeight, fullscreen]`, kept
@@ -498,6 +504,28 @@ impl Environment for Env {
         self.0.borrow_mut().window_requests.push(cmd);
     }
 
+    fn dialog(&self, kind: &str, args: [&str; 4]) -> Option<String> {
+        use dialogs::{parse_filter, MessageKind};
+        // The borrow must not be held while the dialog blocks: a click handler may be mid-flight.
+        let dialogs = self.0.borrow().dialogs.clone()?;
+        let [a, b, c, d] = args;
+        Some(match kind {
+            "open" => dialogs.open_files(a == "open-multiple", &parse_filter(b), c, d).join("\n"),
+            "save" => dialogs.save_file(&parse_filter(a), b, c, d).unwrap_or_default(),
+            "folder" => dialogs.pick_folder(c, d).unwrap_or_default(),
+            "message" => {
+                let kind = match a {
+                    "info" => MessageKind::Info,
+                    "error" => MessageKind::Error,
+                    "question" => MessageKind::Question,
+                    _ => MessageKind::Alert,
+                };
+                if dialogs.message(kind, c, b) { "yes" } else { "no" }.to_string()
+            }
+            _ => return None,
+        })
+    }
+
     fn window_rect(&self) -> [f32; 5] {
         let v = self.0.borrow();
         v.window_rect.unwrap_or([0.0, 0.0, v.viewport.0, v.viewport.1, 0.0])
@@ -585,6 +613,13 @@ pub struct Page {
     /// Blink phase of the caret and when it flips next.
     pub caret_visible: bool,
     pub blink_at: Instant,
+    /// Sub-documents of `<frame>`/`<iframe>` elements.
+    pub frames: Rc<RefCell<frames::Frames>>,
+    /// When the tooltip for the hovered element shows, and whether one is showing.
+    pub tooltip_due: Option<Instant>,
+    pub tooltip_shown: bool,
+    /// A frameset splitter being dragged.
+    pub splitter_drag: Option<frames::SplitDrag>,
 }
 
 /// A scrollbar thumb held by the pointer.
@@ -660,11 +695,29 @@ impl Page {
         }
     }
 
+    /// Let scripts open native file choosers and message boxes.
+    pub fn set_dialogs(&mut self, dialogs: Rc<dyn dialogs::Dialogs>) {
+        self.view.borrow_mut().dialogs = Some(dialogs);
+    }
+
     pub fn load(path: PathBuf, viewport: (f32, f32), scroll_y: f32) -> Page {
+        Page::load_in(path, viewport, scroll_y, None)
+    }
+
+    /// A page shown inside a `<frame>`: `outbox` collects what its scripts post to `window.parent`.
+    pub(crate) fn load_embedded(path: PathBuf, viewport: (f32, f32), embed: frames::Embed) -> Page {
+        Page::load_in(path, viewport, 0.0, Some(embed))
+    }
+
+    pub(crate) fn html_embedded(html: &str, base_dir: PathBuf, viewport: (f32, f32), embed: frames::Embed) -> Page {
+        Page::from_source_in(html.to_string(), base_dir.join("index.html"), Some(html.to_string()), viewport, 0.0, Some(embed))
+    }
+
+    fn load_in(path: PathBuf, viewport: (f32, f32), scroll_y: f32, embed: Option<frames::Embed>) -> Page {
         let html = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             format!("<body><h1>Could not open file</h1><p>{}: {e}</p></body>", path.display())
         });
-        Page::from_source(html, path, None, viewport, scroll_y)
+        Page::from_source_in(html, path, None, viewport, scroll_y, embed)
     }
 
     /// A page from HTML text. Relative `src`, `href` and `url()` paths resolve against `base_dir`.
@@ -674,6 +727,23 @@ impl Page {
 
     /// `memory`: the HTML to use again on reload, for pages that didn't come from a file.
     fn from_source(html: String, path: PathBuf, memory: Option<String>, viewport: (f32, f32), scroll_y: f32) -> Page {
+        Page::from_source_in(html, path, memory, viewport, scroll_y, None)
+    }
+
+    fn from_source_in(html: String, path: PathBuf, memory: Option<String>, viewport: (f32, f32), scroll_y: f32, embed: Option<frames::Embed>) -> Page {
+        // A frame's `content-style` goes on top of the document's own styles.
+        let html = match embed.as_ref().and_then(|e| e.css.as_deref()) {
+            Some(css) => format!("{html}<style>{css}</style>"),
+            None => html,
+        };
+        let outbox = embed.map(|e| e.outbox);
+        // `<include>` fragments are spliced in as text before parsing; paths are the page's folder's.
+        let folder = path.parent().map(PathBuf::from).unwrap_or_default();
+        let html = nile_dom::expand_includes(&html, &mut |src| {
+            let file = folder.join(src);
+            std::fs::read_to_string(&file).map_err(|e| eprintln!("[include] could not load {}: {e}", file.display())).ok()
+        });
+        let frames: Rc<RefCell<frames::Frames>> = Rc::default();
         let doc = Rc::new(RefCell::new(Document::parse(&html)));
         let interaction = InteractionState::default();
         let styles = compute_styles_in(&doc.borrow(), &interaction, viewport);
@@ -705,6 +775,7 @@ impl Page {
             focus_changes: Vec::new(),
             window_requests: Vec::new(),
             file_request: None,
+            dialogs: None,
             resized: false,
             window_rect: None,
         }));
@@ -715,6 +786,15 @@ impl Page {
                 let sources = doc.borrow().script_sources();
                 let dir = path.parent().unwrap_or(std::path::Path::new("."));
                 host.set_fetcher(std::sync::Arc::new(net::PageFetcher::new(dir)));
+                if let Some(outbox) = outbox.clone() {
+                    host.register_host_fn("__parentPost", move |args| {
+                        if let Some(json) = args.trim().strip_prefix('[').and_then(|a| a.strip_suffix(']')).and_then(editing::unjson_string) {
+                            outbox.borrow_mut().push(json);
+                        }
+                        String::new()
+                    });
+                }
+                frames::register_frame_functions(&host, &frames);
                 let url = std::fs::canonicalize(&path).ok().map(|p| format!("file://{}", p.to_string_lossy().replace('\\', "/")));
                 host.set_location(url.as_deref().unwrap_or("about:blank"));
                 if memory.is_none() {
@@ -799,6 +879,10 @@ impl Page {
             page_drag: false,
             caret_visible: true,
             blink_at: Instant::now() + CARET_BLINK,
+            frames,
+            splitter_drag: None,
+            tooltip_due: None,
+            tooltip_shown: false,
         }
     }
 
@@ -808,11 +892,13 @@ impl Page {
             (v.viewport, v.scroll_y)
         };
         let clipboard = std::mem::replace(&mut self.clipboard, Box::new(MemoryClipboard::default()));
+        let dialogs = self.view.borrow().dialogs.clone();
         *self = match self.memory.take() {
             Some(html) => Page::from_source(html.clone(), self.path.clone(), Some(html), viewport, scroll),
             None => Page::load(self.path.clone(), viewport, scroll),
         };
         self.clipboard = clipboard;
+        self.view.borrow_mut().dialogs = dialogs;
     }
 
     /// Evaluate script text in the page and return the value as text (strings as they are,
@@ -894,7 +980,8 @@ impl Page {
         for node in scrolled {
             self.emit(node, UiEvent::Plain("scroll"));
         }
-        changed | moved
+        let delivered = self.deliver_frame_messages();
+        changed | moved | delivered
     }
 
     /// Focus moved from `old` to `new`: end the old input's edit (firing
@@ -981,6 +1068,10 @@ impl Page {
     /// i.e. `dy > 0` is wheel-up): the innermost `overflow: auto | scroll` ancestor
     /// that can still move that way takes it, else the page does.
     pub fn wheel(&mut self, dx: f32, dy: f32) {
+        self.tooltip_hide();
+        if self.frames_wheel(dx, dy) {
+            return;
+        }
         if let Some((x, y)) = self.pointer {
             if self.menu_row_at(x, y).is_some() {
                 self.scroll_menu(-dy);
@@ -1270,6 +1361,16 @@ impl Page {
         let request = self.view.borrow_mut().file_request.take();
         if let Some(r) = &request {
             self.file_target = Some(r.node);
+            self.frames.borrow_mut().file_frame = None;
+        }
+        if request.is_none() {
+            let ids: Vec<NodeId> = self.frames.borrow().slots.keys().copied().collect();
+            for id in ids {
+                if let Some(r) = self.with_frame(id, |p| p.take_file_request()).flatten() {
+                    self.frames.borrow_mut().file_frame = Some(id);
+                    return Some(r);
+                }
+            }
         }
         request
     }
@@ -1288,6 +1389,11 @@ impl Page {
     /// Give a file input the files the user picked (an empty list clears it) and fire
     /// `input` and `change`.
     pub fn choose_files(&mut self, node: NodeId, paths: &[String]) {
+        let file_frame = self.frames.borrow_mut().file_frame.take();
+        if let Some(id) = file_frame {
+            self.with_frame(id, |p| p.choose_files(node, paths));
+            return;
+        }
         let joined = paths.join("\n");
         {
             let mut doc = self.doc.borrow_mut();
@@ -1475,6 +1581,10 @@ impl Page {
     /// The pointer shape for what's under the pointer: a pressed scrollbar thumb or an open
     /// drop-down use the arrow; otherwise the hovered element's `cursor`.
     pub fn cursor(&self) -> nile_style::Cursor {
+        let hovered = self.frames.borrow().hover;
+        if let Some(cursor) = hovered.and_then(|id| self.frames.borrow().slots.get(&id).map(|s| s.page.cursor())) {
+            return cursor;
+        }
         use nile_style::Cursor;
         if self.bar_drag.is_some() || self.view.borrow().menu.is_some() {
             return Cursor::Default;
@@ -1496,6 +1606,7 @@ impl Page {
             return false;
         }
         self.view.borrow_mut().interaction.hover = hover;
+        self.tooltip_hover_changed(hover.is_some());
         self.restyle();
         let (x, y) = self.pointer.unwrap_or_default();
         let mouse = |kind| UiEvent::Mouse { kind, x, y, button: 0 };
@@ -1510,6 +1621,14 @@ impl Page {
 
     pub fn pointer_moved(&mut self, x: f32, y: f32) -> bool {
         self.pointer = Some((x, y));
+        if self.splitter_drag.is_some() {
+            return self.splitter_drag_to(x, y);
+        }
+        let in_frames = self.frames_pointer_moved(x, y);
+        in_frames | self.pointer_moved_here(x, y)
+    }
+
+    fn pointer_moved_here(&mut self, x: f32, y: f32) -> bool {
         if self.bar_drag.is_some() {
             return self.bar_drag_to(x, y);
         }
@@ -1555,7 +1674,8 @@ impl Page {
 
     pub fn pointer_left(&mut self) -> bool {
         self.pointer = None;
-        self.refresh_hover()
+        let in_frames = self.frames_pointer_left();
+        in_frames | self.refresh_hover()
     }
 
     /// Count consecutive clicks close in time and place (1, 2, 3).
@@ -1608,7 +1728,72 @@ impl Page {
 
     /// Primary button down: the hovered element becomes active and focus moves
     /// to its nearest focusable ancestor (or is cleared).
+    /// The hovered element changed: drop the tooltip and wait for the pointer to rest on the new one.
+    fn tooltip_hover_changed(&mut self, over_something: bool) {
+        self.tooltip_hide();
+        self.tooltip_due = over_something.then(|| Instant::now() + TOOLTIP_DELAY);
+    }
+
+    /// Hide the tooltip and stop waiting to show one. True if one was showing.
+    fn tooltip_hide(&mut self) -> bool {
+        self.tooltip_due = None;
+        if std::mem::take(&mut self.tooltip_shown) {
+            let _ = self.call("__tooltipHide", "[]");
+            return true;
+        }
+        false
+    }
+
+    /// Show the tooltip once the pointer has rested long enough.
+    fn tooltip_tick(&mut self) -> (bool, Option<Duration>) {
+        let Some(due) = self.tooltip_due else { return (false, None) };
+        let now = Instant::now();
+        if now < due {
+            return (false, Some(due - now));
+        }
+        self.tooltip_due = None;
+        let (Some(target), Some((x, y))) = (self.interaction().hover, self.pointer) else { return (false, None) };
+        if self.view.borrow().menu.is_some() || self.pressed.is_some() {
+            return (false, None);
+        }
+        let (shown, changed) = self.call("__tooltipShow", &format!("[{},{x},{y}]", target.0));
+        self.tooltip_shown = shown.is_ok_and(|v| v == "true");
+        (changed || self.tooltip_shown, None)
+    }
+
+    /// A right click at the pointer: fires `contextmenu`, and shows the menu a script hands back.
+    pub fn context_menu(&mut self) -> bool {
+        if self.hover_due.is_some() {
+            self.refresh_hover();
+        }
+        if let Some((x, y)) = self.pointer {
+            if let Some(id) = self.frame_at(x, y) {
+                let (lx, ly) = self.local(id, x, y);
+                self.frames.borrow_mut().focus = Some(id);
+                return self.with_frame(id, |p| {
+                    p.pointer_moved(lx, ly);
+                    p.context_menu()
+                })
+                .unwrap_or(false);
+            }
+        }
+        let (Some(target), Some((x, y))) = (self.interaction().hover, self.pointer) else { return false };
+        let _ = self.call("__contextMenu", &format!("[{},{x},{y}]", target.0));
+        true
+    }
+
     pub fn press(&mut self) -> bool {
+        if self.hover_due.is_some() {
+            self.refresh_hover();
+        }
+        if self.splitter_press() {
+            return true;
+        }
+        let here = self.press_here();
+        self.frames_press() | here
+    }
+
+    fn press_here(&mut self) -> bool {
         if self.hover_due.is_some() {
             self.refresh_hover(); // a click lands on what is under the pointer now
         }
@@ -1623,11 +1808,13 @@ impl Page {
         }
         let target = self.interaction().hover;
         self.pressed = target;
-        let mut changed = false;
+        let mut changed = self.tooltip_hide();
         // A script that cancels `mousedown` keeps the focus and selection where they are (how
         // toolbar buttons avoid taking them from an editor).
         let mut keep_focus = false;
-        if let Some(t) = target {
+        // A press on empty canvas still reaches the document (popups close on it).
+        let event_target = target.or_else(|| self.doc.borrow().body());
+        if let Some(t) = event_target {
             let (proceed, c) = self.emit(t, self.mouse_event("mousedown"));
             changed |= c;
             keep_focus = !proceed;
@@ -1777,6 +1964,14 @@ impl Page {
     /// Primary button up: `mouseup`, then `click` on the common ancestor of the
     /// pressed and released elements.
     pub fn release(&mut self) -> bool {
+        if self.splitter_drag.take().is_some() {
+            return true;
+        }
+        let there = self.frames_release();
+        self.release_here() | there
+    }
+
+    fn release_here(&mut self) -> bool {
         if self.bar_drag.take().is_some() {
             return true;
         }
@@ -1857,7 +2052,9 @@ impl Page {
         let (c1, n1) = self.run_timers();
         let (c2, n2) = self.blink();
         let (c3, n3) = self.animate();
-        (c0 | c1 | c2 | c3, [n0, n1, n2, n3].into_iter().flatten().min())
+        let (c4, n4) = self.frames_tick();
+        let (c5, n5) = self.tooltip_tick();
+        (c0 | c1 | c2 | c3 | c4 | c5, [n0, n1, n2, n3, n4, n5].into_iter().flatten().min())
     }
 
     /// Step transitions and animations; wake again in a frame while any is running.
@@ -1932,6 +2129,9 @@ impl Page {
     /// Default action for a key the page didn't cancel: Tab moves focus,
     /// anything else edits the focused text input.
     pub fn default_key(&mut self, key: &str, mods: ModifiersState) -> bool {
+        if let Some(id) = self.focused_frame() {
+            return self.with_frame(id, |p| p.default_key(key, mods)).unwrap_or(false);
+        }
         if self.view.borrow().menu.is_none() && self.page_key(key, mods) {
             return true;
         }
@@ -1942,6 +2142,10 @@ impl Page {
             true
         } else if key == "Tab" {
             self.focus_next(!mods.shift_key())
+        } else if let Some(f) = self.interaction().focus.filter(|f| matches!(key, "Enter" | " ") && self.is_button(*f)) {
+            // Space or Enter presses a focused button like a click would.
+            let (proceed, c) = self.emit(f, self.mouse_event("click"));
+            c | (proceed && self.click_default(f))
         } else if self.interaction().focus.is_some_and(|f| self.is_select(f)) {
             self.select_key(key, mods)
         } else if let Some(f) = self.interaction().focus.filter(|f| self.is_range(*f)) {
@@ -1956,6 +2160,13 @@ impl Page {
             self.show_caret();
         }
         changed
+    }
+
+    /// `<button>` and the `button`/`submit`/`reset` inputs.
+    pub fn is_button(&self, id: NodeId) -> bool {
+        let doc = self.doc.borrow();
+        let n = doc.node(id);
+        n.tag() == Some("button") || (n.tag() == Some("input") && matches!(n.attr("type"), Some("button" | "submit" | "reset")))
     }
 
     pub fn is_select(&self, id: NodeId) -> bool {
@@ -2765,6 +2976,9 @@ impl Page {
 
     /// Whether the focused element takes text, so the window should enable its input method.
     pub fn ime_wanted(&self) -> bool {
+        if let Some(id) = self.focused_frame() {
+            return self.frames.borrow().slots[&id].page.ime_wanted();
+        }
         if self.focused_host().is_some() {
             return true;
         }
@@ -2776,6 +2990,10 @@ impl Page {
     /// Where the input method should put its candidate window: the caret, in window
     /// coordinates `(x, y, width, height)`.
     pub fn ime_cursor_rect(&mut self) -> Option<(f32, f32, f32, f32)> {
+        if let Some(id) = self.focused_frame() {
+            let (fx, fy, ..) = self.frames.borrow().slots[&id].rect;
+            return self.with_frame(id, |p| p.ime_cursor_rect()).flatten().map(|(x, y, w, h)| (x + fx, y + fy, w, h));
+        }
         if let Some(_host) = self.focused_host() {
             let (_, f) = self.edit_selection()?;
             let (x, y, h) = self.edit_caret_painted(f)?;
@@ -2800,6 +3018,9 @@ impl Page {
     /// The input method is composing `text` (`cursor` is its caret as a byte range of `text`).
     /// An empty `text` ends the composition without inserting anything.
     pub fn ime_preedit(&mut self, text: &str, cursor: Option<(usize, usize)>) -> bool {
+        if let Some(id) = self.focused_frame() {
+            return self.with_frame(id, |p| p.ime_preedit(text, cursor)).unwrap_or(false);
+        }
         if self.focused_host().is_some() {
             let ok = self.call("__imePreedit", &format!("[{}]", editing::json_string(text))).0.is_ok();
             self.ime_host = !text.is_empty();
@@ -2822,6 +3043,9 @@ impl Page {
 
     /// The input method finished: `text` goes in where the composition was.
     pub fn ime_commit(&mut self, text: &str) -> bool {
+        if let Some(id) = self.focused_frame() {
+            return self.with_frame(id, |p| p.ime_commit(text)).unwrap_or(false);
+        }
         self.ime_cursor = None;
         self.view.borrow_mut().set_preedit(None);
         if self.focused_host().is_some() {
@@ -2836,6 +3060,10 @@ impl Page {
 
     /// The composition was abandoned (focus moved, or the input method turned off).
     pub fn ime_cancel(&mut self) {
+        if let Some(id) = self.focused_frame() {
+            self.with_frame(id, |p| p.ime_cancel());
+            return;
+        }
         if std::mem::take(&mut self.ime_host) {
             // The composition lives in the page; the span goes wherever focus is now.
             let _ = self.call("__imePreedit", "[\"\"]");
@@ -2848,6 +3076,9 @@ impl Page {
     /// Replace the selection of the focused text input with `text` (filtered to what the input
     /// takes) as one edit; an empty `text` just deletes the selection.
     pub fn insert_text(&mut self, text: &str) -> bool {
+        if let Some(id) = self.focused_frame() {
+            return self.with_frame(id, |p| p.insert_text(text)).unwrap_or(false);
+        }
         let Some(focus) = self.interaction().focus.filter(|f| self.is_text_input(*f)) else { return false };
         if self.is_disabled(focus) || self.doc.borrow().node(focus).attr("readonly").is_some() {
             return false;
@@ -2916,6 +3147,10 @@ impl Page {
     /// A key event goes to the focused element, or `<body>`. Returns whether
     /// the page should keep its default handling (no `preventDefault`).
     pub fn key(&mut self, kind: &'static str, key: String, mods: ModifiersState) -> (bool, bool) {
+        self.tooltip_hide();
+        if let Some(r) = self.frames_key(kind, &key, mods) {
+            return r;
+        }
         let target = self.interaction().focus.or_else(|| self.doc.borrow().body());
         let Some(target) = target else { return (true, false) };
         self.emit(
@@ -2986,11 +3221,13 @@ impl Page {
 
         let (lw, lh) = (width as f32 / scale, height as f32 / scale);
         self.layout(lw, lh);
+        self.update_frames();
         let bg = self.canvas_background();
         let caret = self.caret_for_paint();
         let selection = self.selection_for_paint();
         let dom_caret = self.dom_caret_for_paint();
         let ime_underline = self.ime_underline();
+        {
         let mut view = self.view.borrow_mut();
         view.layout();
         let page_selection = view.page_ranges();
@@ -3013,6 +3250,8 @@ impl Page {
             )
         });
         canvas.restore();
+        }
+        self.paint_frames(surface.canvas(), scale);
     }
 }
 
@@ -4616,6 +4855,410 @@ cd</textarea>
         }
         eprintln!("wheel+sync+paint: {:.2} ms avg, {:.2} ms worst", total / 40.0, worst);
         eprintln!("frames: {}", all.iter().map(|m| format!("{m:.1}")).collect::<Vec<_>>().join(" "));
+    }
+
+    #[test]
+    fn frames_host_documents_route_input_and_talk_to_scripts() {
+        let dir = std::env::temp_dir().join(format!("nile-frames-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("child.html"),
+            r#"<body style="margin:0"><input id="t"><button id="b" style="display:block">Go</button><p id="o"></p>
+               <div style="height:600px"></div>
+               <script>
+                 let n = 0;
+                 document.$('#b').on('click', () => { n++; document.$('#o').text = n; });
+                 window.addEventListener('message', (e) => window.parent.postMessage({ echo: e.data.say, same: window.parent !== window }));
+               </script></body>"#,
+        )
+        .unwrap();
+        let main = dir.join("main.html");
+        std::fs::write(
+            &main,
+            r#"<body style="margin:0"><p style="margin:0;height:40px">top</p><frame id="f" src="child.html" style="height:200px"></frame>
+               <script>
+                 globalThis.seen = [];
+                 const f = document.$('#f');
+                 f.on('newdocument', () => seen.push('new'));
+                 f.on('complete', () => seen.push('complete'));
+                 window.addEventListener('message', (e) => seen.push('msg:' + e.data.echo + ':' + e.data.same + ':' + (e.source === f)));
+               </script></body>"#,
+        )
+        .unwrap();
+        let mut p = Page::load(main, (600.0, 300.0), 0.0);
+        p.layout(600.0, 300.0);
+        p.update_frames();
+        let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+        assert_eq!(ev(&mut p, "seen.join()"), "new,complete");
+        assert_eq!(ev(&mut p, "f.document.$('#b').text"), "Go");
+
+        // A click inside the frame reaches the frame's own script, and the frame takes keyboard focus.
+        let id = p.doc.borrow().find(|n| n.attr("id") == Some("f")).unwrap();
+        let (fx, fy, ..) = p.frames.borrow().slots[&id].rect;
+        assert_eq!((fx, fy), (0.0, 40.0));
+        let button = {
+            let fr = p.frames.borrow();
+            let child = &fr.slots[&id].page;
+            let node = child.doc.borrow().find(|n| n.attr("id") == Some("b")).unwrap();
+            let r = child.view.borrow_mut().layout().node_rect(node).unwrap();
+            (fx + r.x + r.width / 2.0, fy + r.y + r.height / 2.0)
+        };
+        p.pointer_moved(button.0, button.1);
+        p.press();
+        p.release();
+        assert_eq!(ev(&mut p, "f.document.$('#o').text"), "1");
+        assert_eq!(p.focused_frame(), Some(id));
+
+        // Typing goes to the focused frame's input.
+        let input = {
+            let fr = p.frames.borrow();
+            let child = &fr.slots[&id].page;
+            let node = child.doc.borrow().find(|n| n.attr("id") == Some("t")).unwrap();
+            let r = child.view.borrow_mut().layout().node_rect(node).unwrap();
+            (fx + r.x + 4.0, fy + r.y + 4.0)
+        };
+        p.pointer_moved(input.0, input.1);
+        p.press();
+        p.release();
+        for k in ["h", "i"] {
+            let (proceed, _) = p.key("keydown", k.to_string(), ModifiersState::default());
+            if proceed {
+                p.default_key(k, ModifiersState::default());
+            }
+        }
+        assert_eq!(ev(&mut p, "f.document.$('#t').value"), "hi");
+
+        // The wheel scrolls the frame, not the outer page.
+        p.wheel(0.0, -50.0);
+        assert_eq!(p.view.borrow().scroll_y, 0.0);
+        assert!(p.frames.borrow().slots[&id].page.view.borrow().scroll_y > 0.0);
+
+        // Messages go both ways.
+        ev(&mut p, "f.postMessage({ say: 'yo' })");
+        p.sync();
+        assert_eq!(ev(&mut p, "seen.slice(2).join()"), "msg:yo:true:true");
+
+        // loadHtml and loadFile replace the document and fire the events again.
+        ev(&mut p, "f.loadHtml('<p id=z>hello</p>')");
+        p.update_frames();
+        assert_eq!(ev(&mut p, "f.document.$('#z').text"), "hello");
+        assert_eq!(ev(&mut p, "seen.slice(3).join()"), "new,complete");
+        ev(&mut p, "f.loadFile('child.html')");
+        p.update_frames();
+        assert_eq!(ev(&mut p, "f.document.$('#b').text"), "Go");
+        assert_eq!(ev(&mut p, "f.document.$('#nope') === null"), "true");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn framesets_split_panes_and_splitters_resize_them() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><frameset id="fs" cols="100px,*,50px" style="height:200px">
+                 <div id="a">a</div><splitter id="s1"/><div id="b">b</div><splitter id="s2"></splitter><div id="c">c</div>
+               </frameset></body>"#,
+            "frameset",
+        );
+        let rect = |p: &mut Page, id: &str| {
+            let n = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+            let r = p.view.borrow_mut().layout().node_rect(n).unwrap();
+            (r.x, r.width)
+        };
+        assert_eq!(rect(&mut p, "a"), (0.0, 100.0));
+        assert_eq!(rect(&mut p, "s1"), (100.0, 6.0));
+        assert_eq!(rect(&mut p, "b").0, 106.0);
+        assert_eq!(rect(&mut p, "c"), (550.0, 50.0));
+        // Dragging the first splitter 40px right widens the first pane and leaves the flexible one to absorb it.
+        p.pointer_moved(103.0, 50.0);
+        p.press();
+        p.pointer_moved(143.0, 50.0);
+        p.release();
+        assert_eq!(rect(&mut p, "a"), (0.0, 140.0));
+        assert_eq!(p.eval("document.$('#fs').getAttribute('cols')").0.unwrap(), "140px,*,50px");
+        assert_eq!(p.eval("document.$('#fs').frameset.state.map(Math.round).join()").0.unwrap(), "140,398,50");
+        p.eval("document.$('#fs').frameset.state = [60, 300, 80]").0.unwrap();
+        assert_eq!(rect(&mut p, "a"), (0.0, 60.0));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scripts_open_native_dialogs() {
+        use dialogs::{Dialogs, FileFilter, MessageKind};
+        #[derive(Default)]
+        struct Fake(RefCell<Vec<String>>);
+        impl Dialogs for Fake {
+            fn open_files(&self, multiple: bool, filters: &[FileFilter], caption: &str, dir: &str) -> Vec<String> {
+                self.0.borrow_mut().push(format!("open {multiple} {:?} {caption} {dir}", filters.iter().map(|f| f.extensions.clone()).collect::<Vec<_>>()));
+                vec!["/tmp/a b.txt".into(), "/tmp/c.txt".into()]
+            }
+            fn save_file(&self, _: &[FileFilter], extension: &str, caption: &str, path: &str) -> Option<String> {
+                self.0.borrow_mut().push(format!("save {extension} {caption} {path}"));
+                None
+            }
+            fn pick_folder(&self, caption: &str, _: &str) -> Option<String> {
+                self.0.borrow_mut().push(format!("folder {caption}"));
+                Some("/tmp/dir".into())
+            }
+            fn message(&self, kind: MessageKind, caption: &str, text: &str) -> bool {
+                self.0.borrow_mut().push(format!("message {kind:?} {caption} {text}"));
+                kind != MessageKind::Question
+            }
+        }
+        let (mut p, path) = page(r#"<body><script>
+              globalThis.filter = 'Text (*.txt)|*.txt;*.text|All (*.*)|*.*';
+            </script></body>"#, "dialogs");
+        // Without an embedder dialog host everything is cancelled.
+        assert_eq!(p.eval("Window.this.selectFile({}) === null && Window.this.selectFolder() === null").0.unwrap(), "true");
+        let fake = Rc::new(Fake::default());
+        p.set_dialogs(fake.clone());
+        assert_eq!(p.eval("JSON.stringify(Window.this.selectFile({ mode: 'open-multiple', filter, caption: 'Pick', path: '/tmp' }))").0.unwrap(), r#"["file:///tmp/a%20b.txt","file:///tmp/c.txt"]"#);
+        assert_eq!(p.eval("Window.this.selectFile({ mode: 'save', extension: 'txt', caption: 'Save' })").0.unwrap(), "null");
+        assert_eq!(p.eval("Window.this.selectFolder({ caption: 'Dir' })").0.unwrap(), "file:///tmp/dir");
+        assert_eq!(p.eval("Window.this.modal(JSX('question', null, ['Sure?']))").0.unwrap(), "no");
+        assert_eq!(p.eval("Window.this.modal(JSX('alert', { caption: 'Hey' }, ['Careful ', 'now']))").0.unwrap(), "yes");
+        assert!(p.eval("new Window({})").0.is_err());
+        assert_eq!(
+            *fake.0.borrow(),
+            [
+                "open true [[\"txt\", \"text\"], []] Pick /tmp",
+                "save txt Save ",
+                "folder Dir",
+                "message Question  Sure?",
+                "message Alert Hey Careful now",
+            ]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn popups_open_beside_their_anchor_and_close_on_outside_clicks() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><button id="b" style="position:absolute;left:100px;top:50px;width:80px;height:20px">go</button>
+               <div id="elsewhere" style="position:absolute;left:400px;top:200px;width:50px;height:50px"></div>
+               <menu.context id="m"><li id="one">One</li><li id="two">Two</li></menu>
+               <script>
+                 globalThis.seen = [];
+                 const b = document.$('#b');
+                 b.on('popup-request', (e) => seen.push('request:' + e.source.id));
+                 b.on('popup-dismissed', () => seen.push('dismissed'));
+                 document.on('popup-ready', (e) => seen.push('ready'));
+                 document.on('popup-dismissing', (e) => seen.push('dismissing:' + e.target.id));
+                 document.on('click', 'li', (e, li) => { seen.push('picked:' + li.id); });
+                 globalThis.win = null;
+               </script></body>"#,
+            "popups",
+        );
+        let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+        // The menu is hidden until it is popped up (menu.context is the class shorthand).
+        assert_eq!(ev(&mut p, "document.$('#m').getBoundingClientRect().height"), "0");
+        ev(&mut p, "win = b.popup(document.$('#m'))");
+        // Below the anchor's bottom-left corner.
+        assert_eq!(ev(&mut p, "const ar = b.getBoundingClientRect(); JSON.stringify(['left','top'].map(k => Math.round(document.$('#m').getBoundingClientRect()[k]) - Math.round(k === 'top' ? ar.bottom : ar.left)))"), "[0,0]");
+        assert_eq!(ev(&mut p, "win.isValid"), "true");
+        // Clicking an item runs its handler and closes the menu.
+        click(&mut p, "two");
+        p.tick();
+        assert_eq!(ev(&mut p, "seen.slice(0, 3).join()"), "request:m,ready,picked:two");
+        assert_eq!(ev(&mut p, "win.isValid"), "false");
+        assert_eq!(ev(&mut p, "seen.slice(3).join()"), "dismissing:m,dismissed");
+        // Pressing outside closes it too.
+        ev(&mut p, "win = b.popup(document.$('#m'), { anchorAt: 3, popupAt: 9 })");
+        assert_eq!(ev(&mut p, "Math.round(document.$('#m').getBoundingClientRect().right - ar.right) + ',' + Math.round(document.$('#m').getBoundingClientRect().top - ar.bottom)"), "0,0");
+        click(&mut p, "elsewhere");
+        assert_eq!(ev(&mut p, "win.isValid"), "false");
+        // So does a press on bare canvas, where no element is under the pointer.
+        ev(&mut p, "win = b.popup(document.$('#m'))");
+        p.pointer_moved(590.0, 290.0);
+        p.press();
+        p.release();
+        assert_eq!(ev(&mut p, "win.isValid"), "false");
+        // Airborne elements sit at the given window position until taken back.
+        ev(&mut p, "const o = document.$('#elsewhere').takeOff({ x: 10, y: 20, width: 33, relativeTo: 'window' })");
+        assert_eq!(ev(&mut p, "JSON.stringify(['left','top','width'].map(k => Math.round(document.$('#elsewhere').getBoundingClientRect()[k])))"), "[10,20,33]");
+        ev(&mut p, "document.$('#elsewhere').takeOff()");
+        assert_eq!(ev(&mut p, "Math.round(document.$('#elsewhere').getBoundingClientRect().left)"), "400");
+        // A right click hands scripts `contextmenu`; `evt.source` is shown as a menu at the pointer.
+        ev(&mut p, "document.$('#elsewhere').on('contextmenu', (e) => { e.source = document.$('#m'); })");
+        let (x, y) = center(&p, "elsewhere");
+        p.pointer_moved(x, y);
+        p.context_menu();
+        assert_eq!(ev(&mut p, "JSON.stringify(['left','top'].map(k => Math.round(document.$('#m').getBoundingClientRect()[k])))"), format!("[{},{}]", x as i32, y as i32));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn example_popup_closes_on_outside_clicks() {
+        let mut p = Page::load(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/popups.html")), (900.0, 640.0), 0.0);
+        p.layout(900.0, 640.0);
+        let open = |p: &mut Page| p.eval("document.$$('menu.popup, popup').length").0.unwrap();
+        assert_eq!(open(&mut p), "0");
+        p.pointer_moved(40.0, 88.0);
+        p.press();
+        assert!(p.release(), "opening a popup asks for a repaint");
+        assert_eq!(open(&mut p), "1", "the File menu opened");
+        for (x, y) in [(500.0, 400.0), (300.0, 170.0), (850.0, 20.0)] {
+            p.pointer_moved(x, y);
+            p.press();
+            p.release();
+            assert_eq!(open(&mut p), "0", "closed by a press at {x},{y}");
+            p.pointer_moved(40.0, 88.0);
+            p.press();
+            p.release();
+            assert_eq!(open(&mut p), "1");
+        }
+        // The pixels agree: the menu is painted while open and gone after the press.
+        let pixel = |p: &mut Page| {
+            let mut buf = vec![0u8; 900 * 640 * 4];
+            p.paint(&mut buf, 900, 640, 1.0);
+            buf
+        };
+        p.pointer_moved(500.0, 400.0);
+        p.press();
+        p.release();
+        let closed = pixel(&mut p);
+        p.pointer_moved(40.0, 88.0);
+        p.press();
+        p.release();
+        let opened = pixel(&mut p);
+        assert_ne!(closed, opened, "the menu is painted");
+        p.pointer_moved(500.0, 400.0);
+        p.press();
+        p.release();
+        assert_eq!(pixel(&mut p), closed, "and gone again");
+        // Clicking the button that opened a menu closes it (and doesn't open it again).
+        p.pointer_moved(40.0, 88.0);
+        p.press();
+        p.release();
+        assert_eq!(open(&mut p), "1");
+        p.press();
+        p.release();
+        assert_eq!(open(&mut p), "0", "a second click on the button closes the menu");
+        p.press();
+        p.release();
+        assert_eq!(open(&mut p), "1");
+        p.pointer_moved(500.0, 400.0);
+        p.press();
+        p.release();
+        // The right-click menu closes the same way.
+        p.pointer_moved(500.0, 400.0);
+        p.press();
+        p.release();
+        assert_eq!(open(&mut p), "0");
+        p.pointer_moved(300.0, 170.0);
+        p.context_menu();
+        let shown = || p.eval("Math.round(document.$('#ctx').getBoundingClientRect().height) > 0").0.unwrap();
+        let _ = shown;
+        assert_eq!(p.eval("Math.round(document.$('#ctx').getBoundingClientRect().height) > 0").0.unwrap(), "true");
+        p.pointer_moved(500.0, 400.0);
+        let redraw = p.press() | p.release();
+        assert!(redraw, "closing a popup asks for a repaint");
+        assert_eq!(p.eval("Math.round(document.$('#ctx').getBoundingClientRect().height) > 0").0.unwrap(), "false");
+    }
+
+    #[test]
+    fn inline_message_boxes_are_html_and_resolve_a_promise() {
+        let (mut p, path) = page(r#"<body style="margin:0"><script>globalThis.answers = [];</script></body>"#, "inlinebox");
+        let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+        // The default stays the system's box (here no host, so the fallback answers).
+        assert_eq!(ev(&mut p, "Window.this.messageBoxes"), "native");
+        assert_eq!(ev(&mut p, "Window.this.modal(JSX('question', null, ['Sure?']))"), "no");
+        // An `inline` attribute opts one box in; buttons and rich content come from the markup.
+        ev(&mut p, "Window.this.modal(JSX('question', { inline: true, caption: 'Quit' }, [JSX('b', null, ['Save']), ' first?', JSX('button', { value: 'save', default: true }, ['Save']), JSX('button', { id: 'discard' }, [\"Don't save\"]), JSX('button', { value: 'cancel', cancel: true }, ['Cancel'])])).then((v) => answers.push(v))");
+        assert_eq!(ev(&mut p, "document.$$('.nile-messagebox button').map((b) => b.textContent).join('|')"), "Save|Don't save|Cancel");
+        assert_eq!(ev(&mut p, "document.$('.nile-messagebox-title').textContent + ':' + document.$('.nile-messagebox-text b').textContent"), "Quit:Save");
+        assert_eq!(ev(&mut p, "document.$('.nile-messagebox.question') !== null && document.activeElement.textContent"), "Save");
+        // The box covers the window and is gone once an answer is given.
+        assert_eq!(ev(&mut p, "JSON.stringify(document.$('.nile-modal').getBoundingClientRect().width)"), "600");
+        let (x, y) = {
+            let n = p.eval("document.$$('.nile-messagebox button')[1]._id").0.unwrap().parse::<usize>().unwrap();
+            let r = p.view.borrow_mut().layout().node_rect(NodeId(n)).unwrap();
+            (r.x + r.width / 2.0, r.y + r.height / 2.0)
+        };
+        p.pointer_moved(x, y);
+        p.press();
+        p.release();
+        assert_eq!(ev(&mut p, "answers.join()"), "discard");
+        assert_eq!(ev(&mut p, "document.$('.nile-modal')"), "null");
+        // The global setting, the default buttons and Escape.
+        ev(&mut p, "Window.this.messageBoxes = 'inline'; Window.this.modal(JSX('question', null, ['Delete?'])).then((v) => answers.push(v))");
+        assert_eq!(ev(&mut p, "document.$$('.nile-messagebox button').map((b) => b.textContent).join('|')"), "No|Yes");
+        p.key("keydown", "Escape".to_string(), ModifiersState::default());
+        assert_eq!(ev(&mut p, "answers.slice(1).join()"), "no");
+        ev(&mut p, "Window.this.modal(JSX('info', null, ['Done'])).then((v) => answers.push(v))");
+        // Enter on the focused default button clicks it, as for any button.
+        let (proceed, _) = p.key("keydown", "Enter".to_string(), ModifiersState::default());
+        if proceed {
+            p.default_key("Enter", ModifiersState::default());
+        }
+        assert_eq!(ev(&mut p, "answers.slice(2).join()"), "yes");
+        // `native` wins over the global setting.
+        assert_eq!(ev(&mut p, "Window.this.modal(JSX('question', { native: true }, ['x']))"), "no");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tooltips_follow_title_and_tooltip_attributes() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="a" title="Plain tip" style="width:100px;height:40px"></div>
+               <div id="b" tooltip="<b>Rich</b> tip" style="width:100px;height:40px"></div>
+               <div id="c" style="width:100px;height:40px"><span id="d" title="Inherited from a child"></span>x</div>
+               <div id="e" style="width:100px;height:40px"></div>
+               <div id="f" title="Never shown" style="width:100px;height:40px"></div>
+               <div id="custom" style="width:100px;height:40px"></div>
+               <script>
+                 document.$('#custom').on('tooltiprequest', (e) => { const t = document.createElement('div'); t.id = 'mine'; t.style.display = 'none'; t.textContent = 'dynamic'; document.body.appendChild(t); e.source = t; });
+               </script></body>"#,
+            "tooltips",
+        );
+        let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+        let tip = |p: &mut Page| ev(p, "document.$('popup[role=tooltip]') ? document.$('popup[role=tooltip]').innerHTML : ''");
+        let rest = |p: &mut Page, id: &str| {
+            let (x, y) = center(p, id);
+            p.pointer_moved(x, y);
+            assert_eq!(tip(p), "", "nothing shows before the pointer has rested");
+            std::thread::sleep(TOOLTIP_DELAY + Duration::from_millis(40));
+            p.tick();
+        };
+        rest(&mut p, "a");
+        assert_eq!(tip(&mut p), "Plain tip");
+        // Near the pointer, not covering it.
+        assert_eq!(ev(&mut p, "document.$('popup[role=tooltip]').getBoundingClientRect().top > 20"), "true");
+        // Moving to another element replaces it; `tooltip` is HTML.
+        rest(&mut p, "b");
+        assert_eq!(tip(&mut p), "<b>Rich</b> tip");
+        // A press or a key hides it.
+        p.press();
+        p.release();
+        assert_eq!(tip(&mut p), "");
+        // `title` on the pointer's own element or an ancestor; none: nothing.
+        rest(&mut p, "e");
+        assert_eq!(tip(&mut p), "");
+        // A script answers `tooltiprequest` with its own element.
+        rest(&mut p, "custom");
+        assert_eq!(ev(&mut p, "document.$('#mine').getBoundingClientRect().width > 0"), "true");
+        p.pointer_moved(500.0, 290.0);
+        assert_eq!(ev(&mut p, "document.$('#mine').getBoundingClientRect().width > 0"), "false", "restored to hidden");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn popup_position_and_animation_css() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><button id="b" style="position:absolute;left:100px;top:50px;width:80px;height:20px">go</button>
+               <popup id="pp" style="popup-position: top-right bottom-right; popup-animation: popup-animation(type:slide, axis:vertical, duration:100ms)">menu text</popup>
+               <popup id="q" style="width:60px">other</popup>
+               <style>popup#q { popup-reference-point: top-left; popup-anchor-reference-point: bottom-center }</style></body>"#,
+            "popupcss",
+        );
+        let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+        assert_eq!(ev(&mut p, "getComputedStyle(document.$('#pp')).getPropertyValue('popup-position')"), "top-right bottom-right");
+        assert!(ev(&mut p, "getComputedStyle(document.$('#pp')).getPropertyValue('popup-animation')").contains("slide"));
+        ev(&mut p, "globalThis.w = document.$('#b').popup(document.$('#pp'), { animationDuration: 0 })");
+        // The popup's right edge meets the anchor's right edge, its top the anchor's bottom.
+        assert_eq!(ev(&mut p, "(() => { const r = document.$('#pp').getBoundingClientRect(), a = document.$('#b').getBoundingClientRect(); return Math.round(r.right - a.right) + ',' + Math.round(r.top - a.bottom); })()"), "0,0");
+        ev(&mut p, "w.close()");
+        ev(&mut p, "document.$('#b').popup(document.$('#q'))");
+        assert_eq!(ev(&mut p, "(() => { const r = document.$('#q').getBoundingClientRect(), a = document.$('#b').getBoundingClientRect(); return Math.round(r.left - (a.left + a.width / 2)) + ',' + Math.round(r.top - a.bottom); })()"), "0,0");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

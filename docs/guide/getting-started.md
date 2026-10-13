@@ -77,6 +77,8 @@ Nile currently does not load styles from `<link rel="stylesheet">`. Start with
 `<style>` in the HTML. To share CSS across pages, export a CSS string from a JS
 module and append a `<style>` element; the [workbench styles](../../examples/workbench/styles.js)
 and [app](../../examples/workbench/app.js) demonstrate that approach.
+For reusable markup and style fragments, `<include>` is also supported. For
+separate document runtimes and resizable panes, see [composition](composition.md).
 
 ## Save a preview
 
