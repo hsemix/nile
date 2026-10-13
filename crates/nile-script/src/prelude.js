@@ -755,7 +755,7 @@
     pageYOffset: { get: () => N.scrollY() },
     scrollX: { value: 0 },
     pageXOffset: { value: 0 },
-    devicePixelRatio: { value: 1 },
+    devicePixelRatio: { get: () => N.scale() },
   });
   // The host window (desktop, so these really move and resize it).
   const wr = (i) => N.windowRect()[i];

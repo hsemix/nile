@@ -235,9 +235,10 @@
     get length() { return this._m.size; }
     key(i) { return [...this._m.keys()][i] ?? null; }
     getItem(k) { k = String(k); return this._m.has(k) ? this._m.get(k) : null; }
-    setItem(k, v) { this._m.set(String(k), String(v)); }
-    removeItem(k) { this._m.delete(String(k)); }
-    clear() { this._m.clear(); }
+    setItem(k, v) { this._m.set(String(k), String(v)); this._changed(); }
+    removeItem(k) { if (this._m.delete(String(k))) this._changed(); }
+    clear() { if (this._m.size) { this._m.clear(); this._changed(); } }
+    _changed() {}
   }
   const storageProxy = (s) => new Proxy(s, {
     get: (t, k) => (k in t || typeof k === "symbol" ? t[k] : t.getItem(k) ?? undefined),
@@ -248,7 +249,19 @@
     getOwnPropertyDescriptor: (t, k) => (t._m.has(k) ? { value: t._m.get(k), writable: true, enumerable: true, configurable: true } : undefined),
   });
   g.Storage = Storage;
-  g.localStorage = storageProxy(new Storage());
+  const localRaw = new Storage();
+  // `localStorage` is saved to the file the host chose (`ScriptHost::set_storage_file`), soon
+  // after a change; without one it lives and dies with the page.
+  let saveTimer = null;
+  const save = () => { saveTimer = null; N.storageSave(JSON.stringify(Object.fromEntries(localRaw._m))); };
+  localRaw._changed = () => { if (saveTimer === null) saveTimer = setTimeout(save, 50); };
+  Object.defineProperty(g, "__storageLoad", {
+    value(json) {
+      try { for (const [k, v] of Object.entries(JSON.parse(json))) localRaw._m.set(k, String(v)); } catch { /* a damaged file starts empty */ }
+    },
+  });
+  Object.defineProperty(g, "__storageFlush", { value() { if (saveTimer !== null) { clearTimeout(saveTimer); save(); } } });
+  g.localStorage = storageProxy(localRaw);
   g.sessionStorage = storageProxy(new Storage());
 
   // MutationObserver: every DOM change goes through a native in `N`, so wrap those.
@@ -526,4 +539,116 @@
     }
   };
   Object.assign(XMLHttpRequest, { UNSENT: 0, OPENED: 1, HEADERS_RECEIVED: 2, LOADING: 3, DONE: 4 });
+
+  // ---- location, history, navigator --------------------------------------------
+  let here = new URL("about:blank");
+  Object.defineProperty(g, "__setLocation", { value(url) { try { here = new URL(url); } catch { here = new URL("about:blank"); } } });
+  const hashChanged = (old) => {
+    if (old !== here.href) {
+      const ev = new Event("hashchange");
+      ev.oldURL = old; ev.newURL = here.href;
+      g.dispatchEvent(ev);
+    }
+  };
+  const loc = {
+    get href() { return here.href; },
+    set href(v) {
+      const old = here.href;
+      const next = new URL(v, here.href);
+      if (next.href.split("#")[0] === old.split("#")[0]) { here = next; hashChanged(old); } // other pages can't be opened from a script
+    },
+    get protocol() { return here.protocol; },
+    get host() { return here.host; },
+    get hostname() { return here.hostname; },
+    get port() { return here.port; },
+    get origin() { return here.origin; },
+    get pathname() { return here.pathname; },
+    get search() { return here.search; },
+    get hash() { return here.hash; },
+    set hash(v) {
+      const old = here.href;
+      here.hash = v ? (String(v).startsWith("#") ? String(v) : "#" + v) : "";
+      hashChanged(old);
+    },
+    assign(u) { loc.href = u; },
+    replace(u) { loc.href = u; },
+    reload() {},
+    toString() { return here.href; },
+  };
+  Object.defineProperty(g, "location", { get: () => loc, set: (v) => { loc.href = v; } });
+  Object.defineProperty(document, "location", { get: () => loc });
+  Object.defineProperty(document, "URL", { get: () => here.href });
+  const states = [null];
+  Object.defineProperty(g, "history", {
+    value: {
+      get length() { return states.length; },
+      get state() { return states[states.length - 1]; },
+      scrollRestoration: "auto",
+      pushState(state, title, url) { states.push(state ?? null); if (url != null) here = new URL(url, here.href); },
+      replaceState(state, title, url) { states[states.length - 1] = state ?? null; if (url != null) here = new URL(url, here.href); },
+      back() {}, forward() {}, go() {},
+    },
+  });
+  Object.defineProperty(g, "navigator", {
+    value: { userAgent: "Mozilla/5.0 Nile/0.1", appName: "Nile", language: "en-US", languages: ["en-US", "en"], onLine: true, platform: "", hardwareConcurrency: 4, cookieEnabled: false, maxTouchPoints: 0 },
+  });
+
+  // ---- ResizeObserver, IntersectionObserver ------------------------------------
+  // The host calls `__observeCheck` after layout changes and scrolls while any are active.
+  const watchers = new Set();
+  const refresh = () => N.observing(watchers.size > 0);
+  const box = (x, y, w, h) => ({ x, y, width: w, height: h, top: y, left: x, right: x + w, bottom: y + h });
+  g.ResizeObserver = class ResizeObserver {
+    constructor(cb) { this._cb = cb; this._seen = new Map(); }
+    observe(el) { if (!this._seen.has(el)) { this._seen.set(el, null); watchers.add(this); refresh(); } }
+    unobserve(el) { this._seen.delete(el); if (!this._seen.size) { watchers.delete(this); refresh(); } }
+    disconnect() { this._seen.clear(); watchers.delete(this); refresh(); }
+    _check() {
+      const entries = [];
+      for (const [el, last] of this._seen) {
+        const r = el.getBoundingClientRect();
+        if (!last || last[0] !== r.width || last[1] !== r.height) {
+          this._seen.set(el, [r.width, r.height]);
+          const size = [{ inlineSize: r.width, blockSize: r.height }];
+          entries.push({ target: el, contentRect: box(0, 0, r.width, r.height), borderBoxSize: size, contentBoxSize: size });
+        }
+      }
+      if (entries.length) try { this._cb(entries, this); } catch (e) { report(e); }
+    }
+  };
+  g.IntersectionObserver = class IntersectionObserver {
+    constructor(cb, options = {}) {
+      this._cb = cb; this.root = options.root || null; this._seen = new Map();
+      const t = options.threshold === undefined ? [0] : [].concat(options.threshold);
+      this.thresholds = t.slice().sort((a, b) => a - b);
+    }
+    observe(el) { if (!this._seen.has(el)) { this._seen.set(el, -2); watchers.add(this); refresh(); } }
+    unobserve(el) { this._seen.delete(el); if (!this._seen.size) { watchers.delete(this); refresh(); } }
+    disconnect() { this._seen.clear(); watchers.delete(this); refresh(); }
+    takeRecords() { return []; }
+    _check() {
+      const rb = this.root ? this.root.getBoundingClientRect() : box(0, 0, g.innerWidth, g.innerHeight);
+      const entries = [];
+      for (const [el, last] of this._seen) {
+        const r = el.getBoundingClientRect();
+        const x0 = Math.max(r.left, rb.left), y0 = Math.max(r.top, rb.top);
+        const x1 = Math.min(r.right, rb.right), y1 = Math.min(r.bottom, rb.bottom);
+        const inter = x1 >= x0 && y1 >= y0;
+        const area = r.width * r.height;
+        const ratio = !inter ? 0 : area > 0 ? ((x1 - x0) * (y1 - y0)) / area : 1;
+        // The index of the highest threshold reached (-1 below all of them, or not intersecting).
+        let idx = -1;
+        this.thresholds.forEach((t, i) => { if (inter && (ratio >= t && (t > 0 || inter))) idx = i; });
+        if (idx !== last) {
+          this._seen.set(el, idx);
+          entries.push({
+            target: el, isIntersecting: inter && idx >= 0, intersectionRatio: ratio, time: g.performance.now(),
+            boundingClientRect: r, intersectionRect: inter ? box(x0, y0, x1 - x0, y1 - y0) : box(0, 0, 0, 0), rootBounds: rb,
+          });
+        }
+      }
+      if (entries.length) try { this._cb(entries, this); } catch (e) { report(e); }
+    }
+  };
+  Object.defineProperty(g, "__observeCheck", { value() { for (const w of [...watchers]) w._check(); } });
   }

@@ -65,6 +65,10 @@ pub trait Environment {
     fn computed_style(&self, node: NodeId, property: &str) -> Option<String>;
     /// Viewport size in CSS px.
     fn viewport(&self) -> (f32, f32);
+    /// Device pixels per logical pixel (`devicePixelRatio`).
+    fn scale(&self) -> f32 {
+        1.0
+    }
     fn scroll_y(&self) -> f32;
     fn scroll_to(&self, y: f32);
     /// Hover/active/focus, for `:hover` etc. in selectors scripts evaluate.
@@ -180,6 +184,8 @@ pub struct ScriptHost {
     start: Instant,
     host_fns: HostFns,
     net: net::NetState,
+    observing: Rc<std::cell::Cell<bool>>,
+    storage: Rc<RefCell<Option<std::path::PathBuf>>>,
 }
 
 /// Functions the embedder exposes to scripts as `host.name(...)`: each takes the call's
@@ -220,15 +226,23 @@ fn id_out(id: Option<NodeId>) -> i32 {
     id.map_or(-1, |n| n.0 as i32)
 }
 
+/// State the natives share with the [`ScriptHost`].
+struct Shared {
+    host_fns: HostFns,
+    net: net::NetState,
+    observing: Rc<std::cell::Cell<bool>>,
+    storage: Rc<RefCell<Option<std::path::PathBuf>>>,
+}
+
 fn install_natives(
     ctx: &Ctx<'_>,
     doc: Rc<RefCell<Document>>,
     log: Arc<Mutex<Vec<String>>>,
     start: Instant,
     env: Rc<dyn Environment>,
-    host_fns: HostFns,
-    net: net::NetState,
+    shared: Shared,
 ) -> rquickjs::Result<()> {
+    let Shared { host_fns, net, observing, storage } = shared;
     let n = Object::new(ctx.clone())?;
 
     macro_rules! native {
@@ -492,6 +506,22 @@ fn install_natives(
     native!("hostHas", {
         move |name: String| host_fns.borrow().contains_key(&name)
     });
+    native!("storageSave", move |json: String| {
+        if let Some(path) = storage.borrow().as_ref() {
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, path)).is_err() {
+                eprintln!("[js] could not save localStorage to {}", path.display());
+            }
+        }
+    });
+    native!("scale", {
+        let env = env.clone();
+        move || env.scale()
+    });
+    native!("observing", {
+        let flag = observing.clone();
+        move |on: bool| flag.set(on)
+    });
     native!("fetchStart", move |id: u32, method: String, url: String, headers: Vec<String>, body: String| {
         let headers = headers.chunks(2).filter(|c| c.len() == 2).map(|c| (c[0].clone(), c[1].clone())).collect();
         net.start(id, FetchRequest { method, url, headers, body: net::unb64(&body) });
@@ -509,6 +539,13 @@ fn install_natives(
     Ok(())
 }
 
+impl Drop for ScriptHost {
+    fn drop(&mut self) {
+        // A change still waiting for its save timer.
+        self.call_global("__storageFlush", |_, f| f.call::<_, ()>(()));
+    }
+}
+
 impl ScriptHost {
     /// A runtime whose `document` is `doc`. Scripts mutate it in place; the
     /// owner compares `doc.version` after each call to see if anything changed.
@@ -520,21 +557,51 @@ impl ScriptHost {
         let start = Instant::now();
         let host_fns: HostFns = Rc::default();
         let net = net::NetState::new();
+        let observing: Rc<std::cell::Cell<bool>> = Rc::default();
+        let storage: Rc<RefCell<Option<std::path::PathBuf>>> = Rc::default();
 
         context.with(|ctx| -> rquickjs::Result<()> {
-            install_natives(&ctx, doc, log.clone(), start, env, host_fns.clone(), net.clone())?;
+            install_natives(&ctx, doc, log.clone(), start, env, Shared { host_fns: host_fns.clone(), net: net.clone(), observing: observing.clone(), storage: storage.clone() })?;
             ctx.eval::<(), _>(prelude()).catch(&ctx).map_err(|e| {
                 eprintln!("[js] prelude failed: {e}");
                 rquickjs::Error::Unknown
             })
         })?;
-        Ok(ScriptHost { runtime, context, log, start, host_fns, net })
+        Ok(ScriptHost { runtime, context, log, start, host_fns, net, observing, storage })
     }
 
     /// The loader behind `fetch` and `XMLHttpRequest` (by default: files next to the page and
     /// `data:` URLs). It runs on a worker thread per request.
     pub fn set_fetcher(&self, fetcher: Arc<dyn Fetcher>) {
         *self.net.fetcher.borrow_mut() = fetcher;
+    }
+
+    /// Keep `localStorage` in this file: read now, written shortly after each change and on drop.
+    pub fn set_storage_file(&self, path: impl Into<std::path::PathBuf>) {
+        let path = path.into();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let saved = std::fs::read_to_string(&path).ok();
+        *self.storage.borrow_mut() = Some(path);
+        if let Some(json) = saved {
+            self.call_global("__storageLoad", |_, f| f.call::<_, ()>((json.as_str(),)));
+        }
+    }
+
+    /// Tell `window.location` where the page lives.
+    pub fn set_location(&self, url: &str) {
+        self.call_global("__setLocation", |_, f| f.call::<_, ()>((url,)));
+    }
+
+    /// Some script watches sizes or visibility (`ResizeObserver`, `IntersectionObserver`).
+    pub fn observing(&self) -> bool {
+        self.observing.get()
+    }
+
+    /// Let those observers look at the current layout.
+    pub fn check_observers(&self) {
+        self.call_global("__observeCheck", |_, f| f.call::<_, ()>(()));
     }
 
     /// Requests still in flight; the embedder should keep ticking while there are any.

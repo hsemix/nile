@@ -123,6 +123,8 @@ pub struct View {
     pub animator: Animator,
     /// Time zero of transitions and animations.
     pub clock: Instant,
+    /// Device pixels per logical pixel of the last paint (`devicePixelRatio`).
+    pub scale: f32,
     pub text: TextEngine,
     pub layout: Option<(f32, f32, LayoutTree)>,
     /// Logical viewport size, so hit testing and scripts can lay out on demand.
@@ -369,6 +371,10 @@ impl Environment for Env {
         self.0.borrow().viewport
     }
 
+    fn scale(&self) -> f32 {
+        self.0.borrow().scale
+    }
+
     fn scroll_y(&self) -> f32 {
         self.0.borrow().scroll_y
     }
@@ -608,6 +614,7 @@ impl Page {
             base: None,
             animator: Animator::new(),
             clock: Instant::now(),
+            scale: 1.0,
             text: TextEngine::new(),
             layout: None,
             viewport,
@@ -636,6 +643,8 @@ impl Page {
                 let sources = doc.borrow().script_sources();
                 let dir = path.parent().unwrap_or(std::path::Path::new("."));
                 host.set_fetcher(std::sync::Arc::new(net::PageFetcher::new(dir)));
+                let url = std::fs::canonicalize(&path).ok().map(|p| format!("file://{}", p.to_string_lossy().replace('\\', "/")));
+                host.set_location(url.as_deref().unwrap_or("about:blank"));
                 let read = |rel: &str| -> Option<(String, String)> {
                     let file = dir.join(rel);
                     match std::fs::read_to_string(&file) {
@@ -779,6 +788,9 @@ impl Page {
     /// Pick up DOM changes and script-driven scrolling. True if the page
     /// needs repainting.
     pub fn sync(&mut self) -> bool {
+        if let Some(host) = self.scripts.as_ref().filter(|h| h.observing()) {
+            host.check_observers();
+        }
         let (changed, moves, scrolled) = {
             let mut v = self.view.borrow_mut();
             let changed = v.sync();
@@ -2555,6 +2567,7 @@ impl Page {
 
     /// Paint into a BGRA pixel buffer of `width`×`height` physical pixels.
     pub fn paint(&mut self, pixels: &mut [u8], width: u32, height: u32, scale: f32) {
+        self.view.borrow_mut().scale = scale;
         let info = ImageInfo::new(
             (width as i32, height as i32),
             ColorType::BGRA8888,
@@ -3855,6 +3868,37 @@ cd</textarea>
             }
         }
         assert_eq!(js(&mut p, "document.getElementById('o').textContent"), "POST");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn observers_location_and_history_follow_the_page() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="top" style="height:100px"></div><div style="height:600px"></div><div id="far" style="height:50px"></div>
+               <script>
+                 window.log = [];
+                 new ResizeObserver(es => es.forEach(e => log.push('ro ' + e.target.id + ' ' + e.contentRect.height))).observe(document.getElementById('top'));
+                 new IntersectionObserver(es => es.forEach(e => log.push('io ' + e.target.id + ' ' + e.isIntersecting))).observe(document.getElementById('far'));
+                 window.addEventListener('hashchange', e => log.push('hash ' + location.hash));
+               </script>"#,
+            "observers",
+        );
+        let log = |p: &mut Page| js(p, "log.join(',')");
+        p.sync();
+        assert_eq!(log(&mut p), "ro top 100,io far false");
+        // A size change reaches the resize observer; scrolling reveals the far box.
+        js(&mut p, "document.getElementById('top').style.height = '120px'; 0");
+        p.sync();
+        p.wheel(0.0, -700.0);
+        p.sync();
+        assert_eq!(log(&mut p), "ro top 100,io far false,ro top 120,io far true");
+        // location and history.
+        assert!(js(&mut p, "location.href").starts_with("file://"));
+        assert_eq!(js(&mut p, "location.pathname.endsWith('observers.html') + ',' + devicePixelRatio"), "true,1");
+        js(&mut p, "location.hash = 'two'; 0");
+        assert!(js(&mut p, "log.join(',')").ends_with("hash #two"));
+        js(&mut p, "history.pushState({ a: 1 }, '', '?q=1#three'); 0");
+        assert_eq!(js(&mut p, "location.search + location.hash + history.state.a + history.length"), "?q=1#three12");
         let _ = std::fs::remove_file(path);
     }
 }

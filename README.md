@@ -129,7 +129,7 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
   to the page and `data:` URLs, and http(s) when the `net` feature of `nile-engine` is on (the `nile` binary has it;
   `nile-capi` needs `--features net`); requests run on worker threads, so the page never blocks
   (`examples/fetch.html`). Also `MutationObserver`, `URL`/`URLSearchParams`, `localStorage`/`sessionStorage`
-  (in memory, not saved), `matchMedia`, `structuredClone`, `atob`/`btoa` and `TextEncoder`/`TextDecoder`.
+  (in memory, not saved), `matchMedia`, `ResizeObserver` and `IntersectionObserver` (checked after each layout change or scroll; `rootMargin` is ignored), `window.location` (the page's `file://` URL; only `hash` changes take effect), `history.pushState`/`replaceState` (no back/forward), `navigator`, `devicePixelRatio`, `structuredClone`, `atob`/`btoa` and `TextEncoder`/`TextDecoder`.
 - **Modules and JSX:** `<script type="module">` and `import` of relative files (`./x.js`, `../y.jsx`). JSX in any
   script compiles like Sciter's: `<h1 id="a">Hi</h1>` becomes `JSX("h1", {id: "a"}, ["Hi"])`, which returns a
   vnode array `[tag, attrs, children]`. `append`/`prepend`/`content` render vnodes (strings, nodes and arrays
@@ -207,8 +207,8 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
   in the `value` attribute (no separate default value). Sciter's `Element.value` for other behaviors isn't there.
 - Scrollbars are thin overlay bars (draggable; clicking the track jumps there), with no `scrollbar-*` styling, no
   hover/fade behavior and no arrow buttons; clipping ignores `border-radius`.
-- JS gaps: no `Blob`/`FormData`/streams/`WebSocket`, `ResizeObserver`/`IntersectionObserver`, no persistence for `localStorage`, no cookies or CORS, `fetch` follows redirects only for http(s), bare/`@sciter`/`@env`-style module specifiers (only relative and absolute paths),
-  `window.location`, `devicePixelRatio` (always 1), `offsetParent` (approximated by the parent).
+- JS gaps: no `Blob`/`FormData`/streams/`WebSocket`, no persistence for `localStorage`, no cookies or CORS, `fetch` follows redirects only for http(s), bare/`@sciter`/`@env`-style module specifiers (only relative and absolute paths),
+  `offsetParent` (approximated by the parent).
   From Sciter: class components, `componentUpdate`,
   `onGlobalEvent`, `Element.value` (no native behaviors yet), `this://` URLs, and JSX shortcuts like `.class`;
   `patch` is simplified (children match by key, id, then tag).
