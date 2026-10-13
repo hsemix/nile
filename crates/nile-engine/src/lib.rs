@@ -66,10 +66,19 @@ impl std::ops::BitOrAssign for ModifiersState {
 pub trait Clipboard {
     fn text(&mut self) -> Option<String>;
     fn set_text(&mut self, text: &str);
+    /// The clipboard's HTML flavour, if it has one (rich paste into editors).
+    fn html(&mut self) -> Option<String> {
+        None
+    }
+    /// Put `html` on the clipboard with `text` as its plain-text form. Clipboards without an
+    /// HTML flavour keep just the text.
+    fn set_html(&mut self, _html: &str, text: &str) {
+        self.set_text(text);
+    }
 }
 
 #[derive(Default)]
-pub struct MemoryClipboard(Option<String>);
+pub struct MemoryClipboard(Option<String>, Option<String>);
 
 impl Clipboard for MemoryClipboard {
     fn text(&mut self) -> Option<String> {
@@ -77,6 +86,14 @@ impl Clipboard for MemoryClipboard {
     }
     fn set_text(&mut self, text: &str) {
         self.0 = Some(text.to_string());
+        self.1 = None;
+    }
+    fn html(&mut self) -> Option<String> {
+        self.1.clone()
+    }
+    fn set_html(&mut self, html: &str, text: &str) {
+        self.0 = Some(text.to_string());
+        self.1 = Some(html.to_string());
     }
 }
 
@@ -103,6 +120,14 @@ impl Clipboard for SystemClipboard {
     fn set_text(&mut self, text: &str) {
         if let Some(c) = self.get() {
             let _ = c.set_text(text.to_string());
+        }
+    }
+    fn html(&mut self) -> Option<String> {
+        self.get()?.get().html().ok()
+    }
+    fn set_html(&mut self, html: &str, text: &str) {
+        if let Some(c) = self.get() {
+            let _ = c.set_html(html, Some(text));
         }
     }
 }
@@ -537,6 +562,8 @@ pub struct Page {
     pub ime_cursor: Option<(usize, usize)>,
     /// A composition is showing as a span inside a contenteditable host.
     pub ime_host: bool,
+    /// When the hover target is next recomputed after scrolling.
+    pub hover_due: Option<Instant>,
     /// List box row the shift-range started from, and the row keys moved to last.
     pub list_anchor: Option<(NodeId, usize)>,
     /// A list box being dragged over (the button went down on a row).
@@ -759,6 +786,7 @@ impl Page {
             file_target: None,
             ime_cursor: None,
             ime_host: false,
+            hover_due: None,
             list_anchor: None,
             list_drag: None,
             list_press: None,
@@ -990,7 +1018,7 @@ impl Page {
             };
             if moved {
                 self.sync();
-                self.refresh_hover();
+                self.hover_after_scroll();
                 return;
             }
             cur = self.doc.borrow().node(n).parent;
@@ -1000,7 +1028,14 @@ impl Page {
             let max = (v.layout().content_height - v.viewport.1).max(0.0);
             v.scroll_y = (v.scroll_y - dy).clamp(0.0, max);
         }
-        self.refresh_hover();
+        self.hover_after_scroll();
+    }
+
+    /// Content moved under a resting pointer. Re-cascading for `:hover` on every wheel tick is
+    /// wasted work while it flies past, so (like a browser) the hover waits for the scrolling
+    /// to pause; a click or a pointer move settles it at once.
+    fn hover_after_scroll(&mut self) {
+        self.hover_due = Some(Instant::now() + Duration::from_millis(90));
     }
 
     /// Keyboard scrolling when no text is being edited: arrows, Page Up/Down, Space
@@ -1454,6 +1489,7 @@ impl Page {
     /// `mouseout`/`mouseover` when the hovered element changes. True if the
     /// page needs repainting.
     pub fn refresh_hover(&mut self) -> bool {
+        self.hover_due = None;
         let hover = self.pointer.and_then(|(x, y)| self.hit_test(x, y));
         let old = self.interaction().hover;
         if hover == old {
@@ -1573,6 +1609,9 @@ impl Page {
     /// Primary button down: the hovered element becomes active and focus moves
     /// to its nearest focusable ancestor (or is cleared).
     pub fn press(&mut self) -> bool {
+        if self.hover_due.is_some() {
+            self.refresh_hover(); // a click lands on what is under the pointer now
+        }
         if let Some((x, y)) = self.pointer {
             if self.scrollbar_press(x, y) {
                 return true;
@@ -1805,10 +1844,20 @@ impl Page {
 
     /// Timers and caret blink together: whether to repaint, and when to wake next.
     pub fn tick(&mut self) -> (bool, Option<Duration>) {
+        let (mut c0, mut n0) = (false, None);
+        if let Some(due) = self.hover_due {
+            let now = Instant::now();
+            if now >= due {
+                self.hover_due = None;
+                c0 = self.refresh_hover();
+            } else {
+                n0 = Some(due - now);
+            }
+        }
         let (c1, n1) = self.run_timers();
         let (c2, n2) = self.blink();
         let (c3, n3) = self.animate();
-        (c1 | c2 | c3, [n1, n2, n3].into_iter().flatten().min())
+        (c0 | c1 | c2 | c3, [n0, n1, n2, n3].into_iter().flatten().min())
     }
 
     /// Step transitions and animations; wake again in a frame while any is running.
@@ -1888,6 +1937,9 @@ impl Page {
         }
         let changed = if self.view.borrow().menu.is_some() {
             self.menu_key(key)
+        } else if key == "Tab" && self.focused_host().is_some_and(|host| self.edit_dom_key(host, key, mods)) {
+            // Tab inside a table cell moved between cells.
+            true
         } else if key == "Tab" {
             self.focus_next(!mods.shift_key())
         } else if self.interaction().focus.is_some_and(|f| self.is_select(f)) {
@@ -4029,6 +4081,24 @@ cd</textarea>
         p.release();
         assert!(q(&mut p, "document.getElementById('sample').style.textAlign") == "center");
         assert!(q(&mut p, "document.getElementById('word-count').textContent").ends_with("words"));
+        // The ribbon tabs switch panels, and Insert > Table puts a table in the document.
+        let click_node = |p: &mut Page, n: NodeId| {
+            let r = p.view.borrow_mut().layout().node_rect(n).unwrap();
+            p.pointer_moved(r.x + r.width / 2.0, r.y + r.height / 2.0);
+            p.press();
+            p.release();
+        };
+        let tab = p.doc.borrow().find(|n| n.attr("data-tab") == Some("Insert")).unwrap();
+        click_node(&mut p, tab);
+        assert_eq!(q(&mut p, "document.getElementById('home-ribbon').classList.contains('hidden')"), "true");
+        assert_eq!(q(&mut p, "document.querySelectorAll('#other-ribbon [data-action]').length > 0"), "true");
+        q(&mut p, "var t = document.getElementById('sample').firstChild; document.getElementById('paper').focus(); getSelection().setBaseAndExtent(t, 3, t, 3)");
+        let table = p.doc.borrow().find(|n| n.attr("data-action") == Some("table")).unwrap();
+        click_node(&mut p, table);
+        assert_eq!(q(&mut p, "document.querySelectorAll('#paper td').length"), "9");
+        let home = p.doc.borrow().find(|n| n.attr("data-tab") == Some("Home")).unwrap();
+        click_node(&mut p, home);
+        assert_eq!(q(&mut p, "document.getElementById('home-ribbon').classList.contains('hidden')"), "false");
     }
 
     #[test]
@@ -4407,6 +4477,169 @@ cd</textarea>
         p.ime_preedit("zz", None);
         p.ime_cancel();
         assert_eq!(js(&mut p, "document.getElementById('para').textContent"), "xyか");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rich_copy_paste_and_range_extras() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="h" contenteditable><p id="a">one <b>two</b> three</p><p id="b">tail</p></div></body>"#,
+            "rich_paste",
+        );
+        let html = |p: &mut Page| js(p, "document.getElementById('h').innerHTML");
+        let ctrl = ModifiersState::CONTROL;
+        // Range extras on the unedited document.
+        assert_eq!(
+            js(&mut p, "(() => { const t = document.getElementById('a'); const r = document.createRange(); r.setStart(t.firstChild, 2); r.setEnd(t.querySelector('b').firstChild, 2); return r.cloneContents().innerHTML + '|' + t.innerHTML; })()"),
+            "e <b>tw</b>|one <b>two</b> three"
+        );
+        assert_eq!(
+            js(&mut p, "(() => { const t = document.getElementById('a'); const r = document.createRange(), s = document.createRange(); r.setStart(t.firstChild, 1); r.setEnd(t.firstChild, 3); s.setStart(t.firstChild, 2); s.setEnd(t.firstChild, 4); return [r.compareBoundaryPoints(Range.START_TO_START, s), r.compareBoundaryPoints(Range.END_TO_END, s), r.comparePoint(t.firstChild, 2), r.comparePoint(t.firstChild, 9), r.isPointInRange(t.firstChild, 0)].join(); })()"),
+            "-1,-1,0,1,false"
+        );
+        // Copy "two three" (spanning the bold run) and paste it at the start of the second paragraph.
+        click_end_of(&mut p, "a");
+        for _ in 0..9 {
+            press_key(&mut p, "ArrowLeft", ModifiersState::SHIFT);
+        }
+        press_key(&mut p, "c", ctrl);
+        let copied = p.clipboard.html().unwrap_or_default();
+        assert!(copied.contains("<b>two</b>"), "{copied}");
+        assert_eq!(p.clipboard.text().as_deref(), Some("two three"));
+        click_end_of(&mut p, "b");
+        press_key(&mut p, "v", ctrl);
+        assert_eq!(js(&mut p, "document.getElementById('b').innerHTML"), "tail<b>two</b> three");
+        // HTML from elsewhere: blocks stay blocks, scripts and unknown wrappers go, styles are filtered.
+        p.clipboard.set_html(
+            r#"<meta charset="utf-8"><div style="color: red; position: fixed"><strong>Hello</strong></div><script>evil()</script><div><section>World <em>wide</em> <a href="javascript:x()">link</a></section></div>"#,
+            "Hello World wide link",
+        );
+        click_end_of(&mut p, "a");
+        press_key(&mut p, "v", ctrl);
+        let out = html(&mut p);
+        assert!(out.contains(r#"<p style="color: red"><b>Hello</b></p>"#) || out.contains("<b>Hello</b>"), "{out}");
+        assert!(!out.contains("script") && !out.contains("evil") && !out.contains("javascript") && !out.contains("fixed"), "{out}");
+        assert!(out.contains("World <i>wide</i>"), "{out}");
+        // Undo takes the whole paste back.
+        press_key(&mut p, "z", ctrl);
+        assert_eq!(js(&mut p, "document.getElementById('a').textContent"), "one two three");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tables_in_the_editor_insert_navigate_and_keep_their_shape() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="h" contenteditable><p id="a">before</p></div><input id="after"></body>"#,
+            "editor_table",
+        );
+        let none = ModifiersState::default();
+        click_end_of(&mut p, "a");
+        js(&mut p, "document.execCommand('insertTable', false, '2x3'); 0");
+        assert_eq!(js(&mut p, "document.querySelectorAll('#h table tr').length + 'x' + document.querySelectorAll('#h td').length"), "2x6");
+        assert_eq!(js(&mut p, "document.getElementById('h').lastElementChild.tagName"), "P", "a paragraph follows the table");
+        type_keys(&mut p, "A");
+        press_key(&mut p, "Tab", none);
+        type_keys(&mut p, "B");
+        press_key(&mut p, "Tab", none);
+        press_key(&mut p, "Tab", none);
+        type_keys(&mut p, "D");
+        assert_eq!(js(&mut p, "Array.from(document.querySelectorAll('#h td')).map(c => c.textContent).join('|')"), "A|B||D||");
+        // Enter stays inside the cell; Backspace at a cell's start doesn't eat the previous cell.
+        press_key(&mut p, "Enter", none);
+        assert_eq!(js(&mut p, "document.querySelectorAll('#h td').length"), "6");
+        press_key(&mut p, "Backspace", none);
+        press_key(&mut p, "Backspace", none);
+        press_key(&mut p, "Backspace", none);
+        assert_eq!(js(&mut p, "document.querySelectorAll('#h td').length + ':' + document.querySelectorAll('#h td')[3].textContent"), "6:");
+        // Shift+Tab goes back; Tab from the last cell adds a row.
+        press_key(&mut p, "Tab", ModifiersState::SHIFT);
+        type_keys(&mut p, "C");
+        assert_eq!(js(&mut p, "document.querySelectorAll('#h td')[2].textContent"), "C");
+        for _ in 0..4 {
+            press_key(&mut p, "Tab", none);
+        }
+        assert_eq!(js(&mut p, "document.querySelectorAll('#h tr').length"), "3");
+        // Select across cells and delete: contents go, cells stay.
+        js(&mut p, "const tds = document.querySelectorAll('#h td'); const r = document.createRange(); r.setStart(tds[0], 0); r.setEnd(tds[4], 0); const s = getSelection(); s.removeAllRanges(); s.addRange(r); 0");
+        press_key(&mut p, "Backspace", none);
+        assert_eq!(js(&mut p, "document.querySelectorAll('#h td').length + ':' + Array.from(document.querySelectorAll('#h td')).map(c => c.textContent).join('')"), "9:");
+        // Selecting everything and deleting takes the whole table with it.
+        press_key(&mut p, "a", ModifiersState::CONTROL);
+        press_key(&mut p, "Backspace", none);
+        assert_eq!(js(&mut p, "document.querySelectorAll('#h table').length"), "0");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_scroll_paint() {
+        let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/word-ribbon.html");
+        let (w, h) = (1100u32, 760u32);
+        let mut p = Page::load(file, (w as f32, h as f32), 0.0);
+        p.layout(w as f32, h as f32);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for _ in 0..3 {
+            p.paint(&mut px, w, h, 1.0);
+        }
+        let n = 60;
+        let t = Instant::now();
+        for i in 0..n {
+            p.view.borrow_mut().scroll_y = (i * 7) as f32;
+            p.paint(&mut px, w, h, 1.0);
+        }
+        eprintln!("paint at 1x: {:.2} ms/frame", t.elapsed().as_secs_f64() * 1e3 / n as f64);
+        let (w2, h2) = (w * 2, h * 2);
+        let mut px2 = vec![0u8; (w2 * h2 * 4) as usize];
+        p.paint(&mut px2, w2, h2, 2.0);
+        let t = Instant::now();
+        for i in 0..n {
+            p.view.borrow_mut().scroll_y = (i * 7) as f32;
+            p.paint(&mut px2, w2, h2, 2.0);
+        }
+        eprintln!("paint at 2x: {:.2} ms/frame", t.elapsed().as_secs_f64() * 1e3 / n as f64);
+        // The real sequence: wheel events with the pointer resting on the page, then the frame.
+        p.view.borrow_mut().scroll_y = 0.0;
+        p.pointer_moved(500.0, 400.0);
+        let mut worst = 0.0f64;
+        let mut total = 0.0f64;
+        let mut all = Vec::new();
+        for _ in 0..40 {
+            let t = Instant::now();
+            p.wheel(0.0, -18.0);
+            p.sync();
+            let _ = p.animate();
+            p.paint(&mut px, w, h, 1.0);
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            worst = worst.max(ms);
+            total += ms;
+            all.push(ms);
+        }
+        eprintln!("wheel+sync+paint: {:.2} ms avg, {:.2} ms worst", total / 40.0, worst);
+        eprintln!("frames: {}", all.iter().map(|m| format!("{m:.1}")).collect::<Vec<_>>().join(" "));
+    }
+
+    #[test]
+    fn hover_waits_for_scrolling_to_pause() {
+        let (mut p, path) = page(
+            r#"<style>.r { height: 40px } .r:hover { background: red }</style><body style="margin:0"><div class=r id=a></div><div class=r id=b></div><div class=r id=c></div>
+               <div style="height:900px"></div></body>"#,
+            "hover_scroll",
+        );
+        p.pointer_moved(20.0, 20.0);
+        let hovered = |p: &Page| p.interaction().hover.map(|n| p.doc.borrow().node(n).attr("id").map(str::to_string));
+        assert_eq!(hovered(&p), Some(Some("a".into())));
+        p.wheel(0.0, -45.0); // row b is now under the pointer
+        assert_eq!(hovered(&p), Some(Some("a".into())), "unchanged while scrolling");
+        assert!(p.tick().1.is_some(), "a wake-up is scheduled");
+        std::thread::sleep(Duration::from_millis(110));
+        p.tick();
+        assert_eq!(hovered(&p), Some(Some("b".into())), "settled once scrolling paused");
+        // A press settles it at once.
+        p.wheel(0.0, -40.0);
+        assert_eq!(hovered(&p), Some(Some("b".into())));
+        p.press();
+        assert_eq!(hovered(&p), Some(Some("c".into())));
+        p.release();
         let _ = std::fs::remove_file(path);
     }
 }

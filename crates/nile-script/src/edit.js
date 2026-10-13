@@ -185,6 +185,87 @@ class Range {
   surroundContents(wrapper) { const t = textNodesBetween(pt(this.startContainer, this.startOffset), pt(this.endContainer, this.endOffset)); if (t.length) { t[0].parentNode.insertBefore(wrapper, t[0]); for (const x of t) wrapper.appendChild(x); } }
   getBoundingClientRect() { return documentObj.documentElement.getBoundingClientRect(); }
 }
+// A fragment is a detached <div> marked as one: nodeType 11, and inserting it moves its children.
+function makeFragment() {
+  const f = documentObj.createElement("div");
+  Object.defineProperty(f, "nodeType", { value: 11 });
+  Object.defineProperty(f, "__fragment", { value: true });
+  return f;
+}
+documentObj.createDocumentFragment = makeFragment;
+const origAppend = Node.prototype.appendChild, origInsert = Node.prototype.insertBefore;
+Node.prototype.appendChild = function (c) {
+  if (c && c.__fragment) { for (const k of kids(c)) origAppend.call(this, k); return c; }
+  return origAppend.call(this, c);
+};
+Node.prototype.insertBefore = function (c, ref) {
+  if (c && c.__fragment) { for (const k of kids(c)) origInsert.call(this, k, ref); return c; }
+  return origInsert.call(this, c, ref);
+};
+// Keep only what lies between `a` and `b` inside a deep copy of `root` (points are in the copy).
+function trimTo(root, a, b) {
+  const cut = (p, after) => {
+    let node = p.node, off = p.offset;
+    if (isTx(node)) {
+      node.data = after ? node.data.slice(0, off) : node.data.slice(off);
+      off = after ? idx(node) + 1 : idx(node);
+      node = node.parentNode;
+    }
+    for (;;) {
+      const ks = kids(node);
+      for (const k of after ? ks.slice(off) : ks.slice(0, off)) k.remove();
+      if (node === root) break;
+      off = after ? idx(node) + 1 : idx(node);
+      node = node.parentNode;
+    }
+  };
+  cut(b, true);
+  cut(a, false);
+}
+Range.prototype.cloneContents = function () {
+  const frag = makeFragment();
+  const a = pt(this.startContainer, this.startOffset), b = pt(this.endContainer, this.endOffset);
+  if (order(a, b) >= 0) return frag;
+  const common = commonAncestor(a.node, b.node);
+  if (isTx(common)) { frag.appendChild(documentObj.createTextNode(common.data.slice(a.offset, b.offset))); return frag; }
+  const copy = common.cloneNode(true);
+  const inCopy = (p) => {
+    let n = copy;
+    for (const i of pathOf(p.node, common)) n = kids(n)[i];
+    return pt(n, p.offset);
+  };
+  trimTo(copy, inCopy(a), inCopy(b));
+  for (const k of kids(copy)) frag.appendChild(k);
+  return frag;
+};
+Range.prototype.extractContents = function () {
+  const frag = this.cloneContents();
+  this.deleteContents();
+  return frag;
+};
+Range.prototype.createContextualFragment = function (html) {
+  const frag = makeFragment();
+  frag.innerHTML = String(html);
+  return frag;
+};
+Object.assign(Range, { START_TO_START: 0, START_TO_END: 1, END_TO_END: 2, END_TO_START: 3 });
+Range.prototype.compareBoundaryPoints = function (how, other) {
+  const mine = how === 0 || how === 3 ? pt(this.startContainer, this.startOffset) : pt(this.endContainer, this.endOffset);
+  const theirs = how === 0 || how === 1 ? pt(other.startContainer, other.startOffset) : pt(other.endContainer, other.endOffset);
+  return order(mine, theirs);
+};
+Range.prototype.comparePoint = function (node, offset) {
+  const p = pt(node, offset);
+  if (order(p, pt(this.startContainer, this.startOffset)) < 0) return -1;
+  if (order(p, pt(this.endContainer, this.endOffset)) > 0) return 1;
+  return 0;
+};
+Range.prototype.isPointInRange = function (node, offset) { return this.comparePoint(node, offset) === 0; };
+Range.prototype.intersectsNode = function (node) {
+  const at = node.parentNode ? idx(node) : 0, parent = node.parentNode || node;
+  return order(pt(parent, at), pt(this.endContainer, this.endOffset)) < 0 && order(pt(parent, node.parentNode ? at + 1 : nlen(node)), pt(this.startContainer, this.startOffset)) > 0;
+};
+Range.prototype.detach = function () {};
 documentObj.createRange = () => new Range();
 g.Range = Range;
 function textBetween(a, b) {
@@ -311,10 +392,92 @@ function truncate(p, stop, after) {
     n = par;
   }
 }
+// ---- tables --------------------------------------------------------------------------
+const isCell = (n) => lname(n) === "td" || lname(n) === "th";
+function cellOf(n, host) {
+  for (; n && n !== host; n = n.parentNode) if (isCell(n)) return n;
+  return null;
+}
+// Deleting across cells empties what the selection covers and keeps the table's shape.
+function deleteAcrossCells(a, b, host) {
+  const ca = cellOf(a.node, host), cb = cellOf(b.node, host);
+  const clear = (cell) => { for (const c of kids(cell)) c.remove(); cell.appendChild(documentObj.createElement("br")); };
+  if (ca) truncate(a, ca, true);
+  if (cb) truncate(b, cb, false);
+  for (const cell of host.querySelectorAll("td, th")) {
+    if (cell === ca || cell === cb) continue;
+    if (order(pt(cell, 0), a) >= 0 && order(pt(cell, nlen(cell)), b) <= 0) clear(cell);
+  }
+  for (const cell of [ca, cb]) if (cell) ensureContent(cell, host);
+  return ca ? leafToPoint(a.node.isConnected ? a : pt(ca, 0), host) : a;
+}
+// Tab and Shift+Tab move between cells; Tab in the last cell adds a row.
+function tabInTable(back, host) {
+  const sp = getPts();
+  const cell = sp && cellOf(sp.f.node, host);
+  if (!cell) return false;
+  let target;
+  const sibling = back ? cell.previousElementSibling : cell.nextElementSibling;
+  if (sibling && isCell(sibling)) target = sibling;
+  else {
+    const row = cell.parentNode;
+    let other = back ? row.previousElementSibling : row.nextElementSibling;
+    if (!other && row.parentNode && lname(row.parentNode) !== "table") {
+      const group = back ? row.parentNode.previousElementSibling : row.parentNode.nextElementSibling;
+      other = group && (back ? group.lastElementChild : group.firstElementChild);
+    }
+    if (!other && !back) {
+      checkpoint(host, "structure");
+      other = row.cloneNode(false);
+      for (const c of kids(row)) { const nc = c.cloneNode(false); nc.appendChild(documentObj.createElement("br")); other.appendChild(nc); }
+      row.parentNode.insertBefore(other, row.nextSibling);
+      fireInput(host, "insertTableRow");
+    }
+    if (!other) return true;
+    const cells = kids(other).filter(isCell);
+    target = back ? cells[cells.length - 1] : cells[0];
+  }
+  if (target) setPts(leafToPoint(pt(target, 0), host));
+  return true;
+}
+function insertTable(rows, cols, host) {
+  const caret = deleteSelectionIn(host) || getPts().f;
+  const table = documentObj.createElement("table");
+  table.setAttribute("style", "border-collapse: collapse; width: 100%");
+  const body = documentObj.createElement("tbody");
+  for (let r = 0; r < rows; r++) {
+    const tr = documentObj.createElement("tr");
+    for (let c = 0; c < cols; c++) {
+      const td = documentObj.createElement("td");
+      td.setAttribute("style", "border: 1px solid #9aa0a6; padding: 4px 6px; min-width: 24px");
+      td.appendChild(documentObj.createElement("br"));
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+  table.appendChild(body);
+  const block = closestBlock(caret.node, host);
+  const after = documentObj.createElement("p");
+  after.appendChild(documentObj.createElement("br"));
+  if (block === host) {
+    const end = insertNodesAt(caret, [table, after]);
+    void end;
+  } else {
+    const right = splitTreeAt(textPointForInsert(caret), block);
+    const leftEmpty = kids(block).every(isEmptyInline);
+    block.parentNode.insertBefore(table, right);
+    if (leftEmpty) block.remove();
+    if (kids(right).every(isEmptyInline)) { dropPlaceholder(right); right.appendChild(documentObj.createElement("br")); }
+  }
+  if (!table.nextSibling) table.parentNode.appendChild(after);
+  setPts(leafToPoint(pt(kids(kids(kids(table)[0])[0])[0], 0), host));
+}
+
 // Remove everything between two points, joining the blocks they were in. Returns the caret.
 function deleteRange(a, b, host) {
   if (order(a, b) > 0) [a, b] = [b, a];
   if (order(a, b) === 0) return a;
+  if (cellOf(a.node, host) !== cellOf(b.node, host)) return deleteAcrossCells(a, b, host);
   const startBlock = closestBlock(a.node, host), endBlock = closestBlock(b.node, host);
   let caret;
   if (isTx(a.node) && a.node === b.node) {
@@ -427,7 +590,7 @@ function insertLineBreak(p, host) {
 }
 function splitBlock(p, host) {
   const block = closestBlock(p.node, host);
-  if (block === host) return insertLineBreak(p, host);
+  if (block === host || isCell(block)) return insertLineBreak(p, host);
   const empty = kids(block).every(isEmptyInline) || (kids(block).length === 1 && lname(kids(block)[0]) === "br");
   if (lname(block) === "li" && empty) return outdentItem(block, host);
   const right = splitTreeAt(p, block);
@@ -797,6 +960,8 @@ function backspace(host, forward, word) {
     setPts(outdentItem(block, host));
     return;
   }
+  // Backspace and Delete don't merge one cell into the next.
+  if (cellOf(a.node, host) !== cellOf(b.node, host)) return;
   setPts(deleteRange(a, b, host));
 }
 function moveCaret(dir, shift, unit, host) {
@@ -858,7 +1023,7 @@ Object.defineProperty(g, "__editKey", {
       case "Backspace": return edit("delete", "deleteContentBackward", undefined, (h) => backspace(h, false, alt));
       case "Delete": return edit("delete", "deleteContentForward", undefined, (h) => backspace(h, true, alt));
       case "Enter": return shift ? execCommand("insertLineBreak") : execCommand("insertParagraph");
-      case "Tab": return false;
+      case "Tab": return tabInTable(shift, host);
     }
     if ([...String(key)].length === 1) return edit("typing", "insertText", key, (h) => typeText(key, h));
     return false;
@@ -917,6 +1082,131 @@ Object.defineProperty(g, "__imeActive", { value() { return !!imeSpan; } });
 
 Object.defineProperty(g, "__editPaste", {
   value(text) { return execCommand("insertText", false, String(text)); },
+});
+
+// ---- rich copy and paste ------------------------------------------------------------
+// The HTML of the selection, for the clipboard.
+Object.defineProperty(g, "__selectionHtml", {
+  value() {
+    const sp = selectedPoints();
+    if (!sp || order(sp.s, sp.e) === 0) return "";
+    const r = new Range();
+    r.startContainer = sp.s.node; r.startOffset = sp.s.offset; r.endContainer = sp.e.node; r.endOffset = sp.e.offset;
+    return r.cloneContents().innerHTML;
+  },
+});
+const PASTE_TAGS = new Set(["b", "i", "u", "s", "sub", "sup", "a", "br", "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "blockquote", "pre", "code", "span", "img"]);
+const PASTE_RENAME = { strong: "b", em: "i", strike: "s", del: "s", div: "p", font: "span", section: "p", article: "p", header: "p", footer: "p", main: "p" };
+const PASTE_DROP = new Set(["script", "style", "head", "title", "meta", "link", "template", "iframe", "object", "embed", "svg", "noscript", "form", "input", "button", "select", "textarea"]);
+const PASTE_STYLES = new Set(["color", "background-color", "font-weight", "font-style", "text-decoration", "text-decoration-line", "font-size", "font-family", "text-align"]);
+function cleanStyle(css) {
+  const keep = [];
+  for (const decl of String(css).split(";")) {
+    const i = decl.indexOf(":");
+    if (i < 0) continue;
+    const k = decl.slice(0, i).trim().toLowerCase(), v = decl.slice(i + 1).trim();
+    if (PASTE_STYLES.has(k) && v && !/url\(|expression|javascript/i.test(v)) keep.push(k + ": " + v);
+  }
+  return keep.join("; ");
+}
+const SAFE_URL = /^\s*(https?:|file:|data:image\/|mailto:|#|\/|\.|[a-z0-9_-]+(\/|\.|$))/i;
+// Copy `src`'s children into `dst`, keeping only formatting the editor understands.
+function cleanInto(src, dst) {
+  for (const n of kids(src)) {
+    if (isTx(n)) { dst.appendChild(documentObj.createTextNode(n.data)); continue; }
+    if (!isEl(n)) continue;
+    let tag = lname(n);
+    if (PASTE_DROP.has(tag)) continue;
+    tag = PASTE_RENAME[tag] || tag;
+    if (!PASTE_TAGS.has(tag)) { cleanInto(n, dst); continue; }
+    const el = documentObj.createElement(tag);
+    if (tag === "a") {
+      const href = n.getAttribute("href");
+      if (href && SAFE_URL.test(href) && !/^\s*(javascript|vbscript):/i.test(href)) el.setAttribute("href", href);
+    } else if (tag === "img") {
+      const s = n.getAttribute("src");
+      if (!s || !SAFE_URL.test(s)) continue;
+      el.setAttribute("src", s);
+      for (const a of ["width", "height", "alt"]) { const v = n.getAttribute(a); if (v !== null && /^[\w .%-]*$/.test(v)) el.setAttribute(a, v); }
+    }
+    const css = n.getAttribute("style") || (lname(n) === "font" && n.getAttribute("color") ? "color: " + n.getAttribute("color") : "");
+    if (css) { const c = cleanStyle(css); if (c) el.setAttribute("style", c); }
+    cleanInto(n, el);
+    dst.appendChild(el);
+  }
+}
+const PASTE_BLOCKS = new Set(["p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "blockquote", "pre", "li"]);
+const MERGEABLE = new Set(["p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "li"]);
+// Clean pasted HTML into a list of blocks (loose inline runs get a paragraph of their own).
+function pastedBlocks(html) {
+  const tmp = documentObj.createElement("div");
+  tmp.innerHTML = String(html);
+  const clean = documentObj.createElement("div");
+  cleanInto(tmp, clean);
+  const blocks = [];
+  let run = null;
+  for (const n of kids(clean)) {
+    if (isEl(n) && PASTE_BLOCKS.has(lname(n))) { run = null; blocks.push(n); continue; }
+    if (isTx(n) && !/\S/.test(n.data) && !run) continue; // whitespace between blocks
+    if (!run) { run = documentObj.createElement("p"); blocks.push(run); }
+    run.appendChild(n.nodeType === 3 ? documentObj.createTextNode(n.data.replace(/\s+/g, " ")) : n);
+  }
+  return blocks.filter((b) => kids(b).length > 0);
+}
+function insertNodesAt(at, nodes) {
+  at = textPointForInsert(at);
+  let last = null;
+  for (const n of nodes) {
+    if (isTx(at.node)) { const r = at.node.splitText(at.offset); at.node.parentNode.insertBefore(n, r); at = pt(at.node.parentNode, idx(n) + 1); } else { at.node.insertBefore(n, kids(at.node)[at.offset] || null); at = pt(at.node, at.offset + 1); }
+    last = n;
+  }
+  return last ? pt(last.parentNode, idx(last) + 1) : at;
+}
+function dropPlaceholder(block) {
+  for (const c of kids(block)) if ((isTx(c) && c.data === "") || lname(c) === "br") c.remove();
+}
+function pasteBlocks(blocks, host) {
+  let caret = deleteSelectionIn(host) || getPts().f;
+  if (blocks.length === 1) {
+    // One paragraph's worth goes into the text at the caret.
+    const end = insertNodesAt(caret, kids(blocks[0]).slice());
+    setPts(leafToPoint(end, host));
+    return;
+  }
+  const block = closestBlock(caret.node, host);
+  if (block === host) {
+    setPts(leafToPoint(insertNodesAt(caret, blocks), host));
+    return;
+  }
+  const right = splitTreeAt(textPointForInsert(caret), block);
+  if (kids(block).every(isEmptyInline)) dropPlaceholder(block);
+  if (kids(right).every(isEmptyInline)) dropPlaceholder(right);
+  let mids = blocks.slice();
+  if (MERGEABLE.has(lname(mids[0])) && lname(block) !== "li") {
+    const first = mids.shift();
+    for (const c of kids(first).slice()) block.appendChild(c);
+  }
+  let tail = null;
+  if (mids.length && MERGEABLE.has(lname(mids[mids.length - 1])) && lname(right) !== "li") tail = mids.pop();
+  for (const m of mids) block.parentNode.insertBefore(m, right);
+  let end = pt(right, 0);
+  if (tail) {
+    // The tail's text leads the right-hand block; the caret sits where it ends.
+    const moved = kids(tail).slice();
+    const before = kids(right)[0] || null;
+    for (const c of moved) right.insertBefore(c, before);
+    end = pt(right, moved.length);
+  }
+  ensureContent(block, host);
+  ensureContent(right, host);
+  setPts(leafToPoint(end, host));
+}
+Object.defineProperty(g, "__editPasteHtml", {
+  value(html, text) {
+    const blocks = pastedBlocks(html);
+    if (!blocks.length) return text ? execCommand("insertText", false, String(text)) : false;
+    return edit("structure", "insertFromPaste", undefined, (h) => pasteBlocks(blocks, h));
+  },
 });
 
 // A host that was focused by a script has no caret yet; put one at its start.
@@ -992,6 +1282,11 @@ function execCommand(cmd, ui, value) {
       if (isTx(c.node)) { const r = c.node.splitText(c.offset); c.node.parentNode.insertBefore(img, r); } else c.node.insertBefore(img, kids(c.node)[c.offset] || null);
       setPts(pt(img.parentNode, idx(img) + 1));
     });
+    case "inserttable": return edit("structure", cmd, undefined, (h) => {
+      const m = /^\s*(\d+)\s*[x,*]\s*(\d+)\s*$/i.exec(String(value));
+      const [r, c] = m ? [Math.min(+m[1], 50), Math.min(+m[2], 20)] : [2, 2];
+      insertTable(Math.max(r, 1), Math.max(c, 1), h);
+    });
     case "inserthtml": return edit("structure", cmd, undefined, (h) => {
       const c = deleteSelectionIn(h) || getPts().f;
       const tmp = documentObj.createElement("div");
@@ -1010,7 +1305,7 @@ function execCommand(cmd, ui, value) {
   return false;
 }
 documentObj.execCommand = execCommand;
-documentObj.queryCommandSupported = (cmd) => /^(bold|italic|underline|strikethrough|subscript|superscript|forecolor|backcolor|hilitecolor|fontname|fontsize|fontsizepx|removeformat|undo|redo|selectall|inserttext|insertparagraph|insertlinebreak|delete|forwarddelete|justify(left|center|right|full)|insertunorderedlist|insertorderedlist|indent|outdent|formatblock|blockstyle|inserthorizontalrule|createlink|unlink|insertimage|inserthtml)$/.test(String(cmd).toLowerCase());
+documentObj.queryCommandSupported = (cmd) => /^(bold|italic|underline|strikethrough|subscript|superscript|forecolor|backcolor|hilitecolor|fontname|fontsize|fontsizepx|removeformat|undo|redo|selectall|inserttext|insertparagraph|insertlinebreak|delete|forwarddelete|justify(left|center|right|full)|insertunorderedlist|insertorderedlist|indent|outdent|formatblock|blockstyle|inserthorizontalrule|createlink|unlink|insertimage|inserthtml|inserttable)$/.test(String(cmd).toLowerCase());
 documentObj.queryCommandEnabled = (cmd) => {
   const sp = getPts();
   const host = sp && hostOf(sp.f.node);

@@ -1265,7 +1265,7 @@ thread_local! {
     /// Absolute boxes moved to a containing block above their parent, and where `auto`-inset ones
     /// belong (absolute page coordinates of the border box) once layout has run.
     static ABS_HANDED: std::cell::RefCell<Vec<taffy::NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
-    static STATIC_AT: std::cell::RefCell<std::collections::HashMap<taffy::NodeId, (Option<f32>, Option<f32>)>> = std::cell::RefCell::default();
+    static STATIC_AT: std::cell::RefCell<std::collections::HashMap<taffy::NodeId, StaticAt>> = std::cell::RefCell::default();
     static HOISTED: std::cell::RefCell<std::collections::HashSet<taffy::NodeId>> = std::cell::RefCell::default();
     static FIXED_BLOCKS: std::cell::RefCell<Vec<taffy::NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The element whose children are being built is itself a containing block.
@@ -1308,6 +1308,9 @@ fn hand_off_absolute(style: &ComputedStyle, n: taffy::NodeId) -> Option<taffy::N
     }
     Some(n)
 }
+
+/// A box's static position on the axes where its insets are `auto` (absolute page coordinates).
+type StaticAt = (Option<f32>, Option<f32>);
 
 /// Where each absolute box with `auto` insets sits when its containing block isn't its parent:
 /// at the start of its parent's content box, below the previous element sibling that is in
@@ -3730,6 +3733,20 @@ second</textarea><textarea id="e"></textarea></body>"#,
         assert_ne!(t.hit_test_scrolled(2.0, 50.0, &none), Some(id));
         let r = t.node_rect_scrolled(id, &none).unwrap();
         assert!(r.width < 70.0 && r.width > 10.0, "{r:?}");
+    }
+
+    #[test]
+    fn absolute_boxes_without_insets_stay_at_their_static_position() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><div style="position:relative; padding:5px">
+                 <div id="wrap" style="padding:10px; margin-left:20px"><p id="p" style="margin:0; height:30px">one</p>
+                   <div id="a" style="position:absolute; width:10px; height:10px; margin-left:4px"></div>
+                   <div id="b" style="position:absolute; width:10px; height:10px; left:7px; top:9px"></div></div></div></body>"#,
+        );
+        let (p, a, b) = (rect_of(&doc, &t, "p"), rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"));
+        assert_eq!(a.y, p.y + p.height, "below the paragraph that precedes it: {a:?} vs {p:?}");
+        assert_eq!(a.x, p.x + 4.0, "at its parent's content edge plus its margin");
+        assert_eq!((b.x, b.y), (7.0, 9.0), "explicit insets still win, from the padding edge");
     }
 
     #[test]
