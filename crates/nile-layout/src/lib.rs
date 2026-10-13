@@ -1968,6 +1968,7 @@ impl InlineText {
                     self.text.push_str(piece);
                     let mut ts = text_style(styles.get(id));
                     ts.deco = deco;
+                    ts.shift = self.open.iter().map(|&o| baseline_shift(styles.get(o))).sum();
                     self.spans.push((start..self.text.len(), ts));
                     // Innermost owner first (hit testing takes the first match);
                     // enclosing inline elements follow, so their rects cover this text.
@@ -2071,6 +2072,7 @@ impl InlineText {
             self.text.push_str(piece);
             let mut ts = text_style(es);
             ts.deco = deco;
+            ts.shift = self.open.iter().map(|&o| baseline_shift(styles.get(o))).sum::<f32>() + baseline_shift(es);
             self.spans.push((start..self.text.len(), ts));
             let range = start..self.text.len();
             self.owners.push((range.clone(), origin));
@@ -2437,6 +2439,16 @@ fn transform_text(text: &str, t: TextTransform) -> String {
     }
 }
 
+/// How far an inline element's `vertical-align` lifts its text (px, up is positive).
+fn baseline_shift(s: &ComputedStyle) -> f32 {
+    match s.vertical_align {
+        VerticalAlign::Sub => -0.2 * s.font_size,
+        VerticalAlign::Super => 0.4 * s.font_size / 0.83,
+        VerticalAlign::Shift(px) => px,
+        _ => 0.0,
+    }
+}
+
 fn text_style(s: &ComputedStyle) -> TextStyle {
     TextStyle {
         font_family: s.font_family.clone(),
@@ -2446,6 +2458,7 @@ fn text_style(s: &ComputedStyle) -> TextStyle {
         color: [s.color.r, s.color.g, s.color.b, s.color.a],
         deco: 0,
         spacer: false,
+        shift: 0.0,
         italic: s.italic,
         underline: s.underline,
         line_through: s.line_through,

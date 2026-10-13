@@ -399,7 +399,7 @@ impl Renderer {
                         break;
                     }
                     glyph_ids.push(g.id as GlyphId);
-                    positions.push(Point::new(g.x, g.y));
+                    positions.push(Point::new(g.x, g.y - glyph_run.style().brush.shift));
                 }
                 if let Some((x, y)) = cut {
                     glyph_ids.push(dots);
@@ -422,7 +422,7 @@ impl Renderer {
                 paint.set_color(Color::from_argb(a, r, g, b));
 
                 let x = rect.x + glyph_run.offset();
-                let baseline = rect.y + glyph_run.baseline();
+                let baseline = rect.y + glyph_run.baseline() - style.brush.shift;
                 let fm = run.font_metrics();
                 canvas.draw_glyphs_at(&glyph_ids, positions.as_slice(), (rect.x, rect.y), &font, &paint);
 
