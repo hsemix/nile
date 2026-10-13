@@ -252,7 +252,13 @@ impl Page {
                 let Some((x, y, h)) = self.edit_caret_painted(sel.1) else { return false };
                 let hint = *self.edit_x.get_or_insert(x);
                 let ty = if key == "ArrowDown" { y + h * 1.5 } else { y - h * 0.5 };
-                self.edit_move_to(host, hint + 0.5, ty, shift);
+                if !self.edit_move_to(host, hint + 0.5, ty, shift) {
+                    // On the first or last line of a sheet the next line is past the margin and the gap.
+                    let zone = self.view.borrow_mut().layout().page_zone_of(host);
+                    if let Some(zone) = zone {
+                        self.edit_move_to(host, hint + 0.5, if key == "ArrowDown" { ty + zone } else { ty - zone }, shift);
+                    }
+                }
                 true
             }
             "Home" | "End" if !command => {
@@ -368,7 +374,8 @@ impl Page {
         v.sync();
         let (doc, styles) = (v.doc.clone(), v.styles.clone());
         let doc = doc.borrow();
-        let Some((c, _)) = v.layout().dom_caret_rect(&doc, &styles, f) else { return };
+        let Some((c, run)) = v.layout().dom_caret_rect(&doc, &styles, f) else { return };
+        let c = v.layout().to_layout_rect(run, c);
         // The nearest ancestor that scrolls vertically.
         let mut cur = Some(host);
         while let Some(n) = cur {

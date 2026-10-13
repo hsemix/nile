@@ -525,6 +525,9 @@ pub struct ComputedStyle {
     pub break_before: Break,
     pub break_after: Break,
     pub break_inside: Break,
+    /// `page-view: paged` (Nile): the element's content is shown as `@page`-sized sheets, with
+    /// the page breaks `paginate` finds. Not inherited.
+    pub page_view: bool,
     /// `text-selection-background-color` (Sciter); inherited.
     pub selection_bg: Option<Color>,
     pub text_transform: TextTransform,
@@ -625,6 +628,7 @@ impl Default for ComputedStyle {
             break_before: Break::Auto,
             break_after: Break::Auto,
             break_inside: Break::Auto,
+            page_view: false,
             selection_bg: None,
             text_transform: TextTransform::None,
             letter_spacing: 0.0,
@@ -1954,6 +1958,7 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.break_inside = kind;
             }
         }
+        "page-view" => s.page_view = first.and_then(Value::ident) == Some("paged"),
         // Sciter's way to make an element's text selectable.
         "behavior" => {
             if v.iter().any(|x| x.ident() == Some("htmlarea")) {

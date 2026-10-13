@@ -255,7 +255,7 @@ float, tables, transforms, transitions and animations, and opt-in page text sele
    (macOS), D3D (Windows), Vulkan/GL (Linux) instead of the CPU raster path.
 5. **Accessibility** — `accesskit`.
    (Window configuration, frameless windows and window chrome roles are done.)
-6. **CSS and control polish** — text wrapping around floats line by line; a paged print-layout view in a window, repeating table headers across pages (the page breaks, `@page` size/margins/margin boxes and PDF export are done: `--pdf`, `--page N`). The known gaps above list the rest.
+6. **CSS and control polish** — text wrapping around floats line by line; repeating table headers across pages (page breaks, `@page` size/margins/margin boxes, PDF export (`--pdf`, `--page N`) and the on-screen paged view `page-view: paged` with editing across sheets are done). The known gaps above list the rest.
 
 ## License
 

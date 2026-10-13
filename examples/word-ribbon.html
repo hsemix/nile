@@ -74,6 +74,8 @@
     .nav-sub { color: #7e8595; padding-left: 23px }
     .canvas { flex: 1; overflow: auto; padding: 0 30px 50px; background: #edf0f5 }
     .ruler { width: 720px; height: 29px; margin: 0 auto 17px; display: flex; align-items: center; justify-content: space-between; color: #8991a1; font-size: 9px; padding: 0 48px; border-bottom: 1px solid #cdd3df }
+    @page { size: 720px 930px; margin: 57px 70px; @bottom-center { content: "Page " counter(page) " of " counter(pages); font-size: 9px; color: #8992a1 } }
+    .paper.paged { page-view: paged; min-height: 0; padding: 0; border: 0; box-shadow: 0 2px 10px rgba(30, 40, 70, .22) }
     .paper { width: 720px; min-height: 790px; margin: 0 auto; padding: 57px 70px; background: white; box-shadow: 0 2px 12px #d1d6e0; border: 1px solid #dfe3eb }
     .document-meta { display: flex; justify-content: space-between; font-size: 9px; color: #8992a1; letter-spacing: 1.5px; padding-bottom: 22px; border-bottom: 1px solid #e4e8ef }
     .eyebrow { color: #315dc2; font-size: 10px; letter-spacing: 2px; margin-top: 35px; margin-bottom: 12px; font-weight: 700 }
@@ -126,7 +128,7 @@
       <div class="paper" id="paper" contenteditable="true"><div class="document-meta"><span>NORTHSTAR STUDIO</span><span>STRATEGY / 2026</span></div><div class="eyebrow">A NEW CHAPTER</div><h1 id="document-title">Good ideas deserve<br>a great beginning.</h1><div class="subtitle">Project proposal · Prepared by Alex Davis</div><h2 id="overview">Overview</h2><p id="sample">We believe the best work starts with a clear purpose. This proposal outlines a thoughtful path from an ambitious idea to a useful, beautifully crafted experience.</p><p>Our goal is simple: bring the right people, a shared direction, and the space to do meaningful work together.</p><div class="callout">“Make room for the work that matters.”</div><h2 id="approach">Our approach</h2><p>Start with listening. Build with intention. Refine the details. At every step, we will keep the people who use this experience at the heart of our decisions.</p><h2 id="timeline">The road ahead</h2><div class="milestones"><div class="milestone"><b>01 / DISCOVER</b><div>Ask better questions.<br>Find the opportunity.</div></div><div class="milestone"><b>02 / DESIGN</b><div>Explore possibilities.<br>Shape the experience.</div></div><div class="milestone"><b>03 / DELIVER</b><div>Bring it to life.<br>Make every detail count.</div></div></div></div>
     </div>
   </div>
-  <div class="statusbar"><span>Page 1 of 1</span><span id="word-count">151 words</span><span>English (United States)</span><span id="status">Ready</span><div class="zoom-tools"><button data-action="zoom-out" title="Zoom out">−</button><div class="zoom-track"><div class="zoom-thumb"></div></div><button data-action="zoom-in" title="Zoom in">+</button><span id="zoom-label">100%</span></div></div>
+  <div class="statusbar"><span id="page-count">Page 1 of 1</span><span id="word-count">151 words</span><span>English (United States)</span><span id="status">Ready</span><div class="zoom-tools"><button data-action="zoom-out" title="Zoom out">−</button><div class="zoom-track"><div class="zoom-thumb"></div></div><button data-action="zoom-in" title="Zoom in">+</button><span id="zoom-label">100%</span></div></div>
   <script src="word-ribbon.js"></script>
 </body>
 </html>

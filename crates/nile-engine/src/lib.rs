@@ -457,6 +457,24 @@ impl Environment for Env {
         self.0.borrow().interaction
     }
 
+    fn page_info(&self, node: NodeId) -> Option<[usize; 2]> {
+        let mut v = self.0.borrow_mut();
+        v.sync();
+        let pb = v.layout().pages.iter().find(|pb| pb.node == node)?.clone();
+        let (doc, styles) = (v.doc.clone(), v.styles.clone());
+        let caret = v.edit_sel.and_then(|(_, f)| v.layout().dom_caret_rect(&doc.borrow(), &styles, f)).filter(|(_, run)| *run > pb.index && *run < pb.end);
+        let current = match caret {
+            Some((r, _)) => pb.page_of_flow(r.y + 1.0),
+            None => {
+                let offsets = v.scroll_offsets.clone();
+                let painted = v.layout().node_rect_scrolled(node, &offsets)?;
+                let middle = v.scroll_y + v.viewport.1 / 2.0;
+                (((middle - painted.y) / (pb.page_h + nile_layout::SHEET_GAP)).floor().max(0.0) as usize).min(pb.count() - 1)
+            }
+        };
+        Some([pb.count(), current + 1])
+    }
+
     fn element_scroll(&self, node: NodeId) -> Option<[f32; 4]> {
         let mut v = self.0.borrow_mut();
         v.sync();
@@ -3398,6 +3416,51 @@ mod tests {
 
     fn log(p: &Page) -> Vec<String> {
         p.scripts.as_ref().unwrap().console_output()
+    }
+
+    #[test]
+    fn paged_elements_edit_across_sheets() {
+        let paras: String = (0..12).map(|i| format!("<p id=p{i} style=\"margin:0;font-size:16px;line-height:20px\">line {i}</p>")).collect();
+        let (mut p, path) = page(
+            &format!("<style>@page {{ size: 300px 140px; margin: 20px }} body{{margin:0}} #d{{page-view:paged;outline:none}}</style><div id=d contenteditable=true>{paras}</div>"),
+            "paged-edit",
+        );
+        // 100px of content per sheet: five lines each, so three sheets.
+        let painted = |p: &Page, id: &str| {
+            let node = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+            let mut v = p.view.borrow_mut();
+            let offsets = v.scroll_offsets.clone();
+            v.layout().node_rect_scrolled(node, &offsets).unwrap()
+        };
+        assert_eq!(painted(&p, "p4").y, 20.0 + 4.0 * 20.0);
+        let second = painted(&p, "p5");
+        assert_eq!(second.y, 140.0 + 20.0 + 20.0, "the sixth line is the first on sheet two (140px sheet, 20px gap)");
+        // Click in the middle of line 5 (viewport 300px: scroll so sheet two is on screen), then type.
+        p.layout(600.0, 300.0);
+        p.pointer_moved(second.x + 10.0, second.y + 10.0);
+        p.press();
+        p.release();
+        type_keys(&mut p, "X");
+        let doc = p.doc.clone();
+        let text = move |id: &str| {
+            let node = doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+            doc.borrow().text_content(node)
+        };
+        assert!(text("p5").contains('X'), "typed on line 5: {:?} / {:?}", text("p5"), text("p4"));
+        assert!(!text("p4").contains('X'));
+        // ArrowUp from the first line of sheet two goes to the last line of sheet one.
+        press_key(&mut p, "ArrowUp", ModifiersState::default());
+        type_keys(&mut p, "Y");
+        assert!(text("p4").contains('Y'), "up crossed the sheet gap: {:?} / {:?}", text("p4"), text("p5"));
+        // And ArrowDown comes back to the first line of sheet two.
+        press_key(&mut p, "ArrowDown", ModifiersState::default());
+        type_keys(&mut p, "Z");
+        assert!(text("p5").contains('Z'), "down crossed the sheet gap: {:?}", text("p5"));
+        // Scripts read the sheet count and the sheet with the caret; a page break adds one.
+        assert_eq!(js(&mut p, "const d = document.getElementById('d'); d.pageCount + ',' + d.pageNumber"), "3,2");
+        assert_eq!(js(&mut p, "document.execCommand('insertPageBreak'); document.getElementById('d').pageCount"), "4");
+        assert_eq!(js(&mut p, "document.getElementById('d').pageNumber"), "3", "the caret starts the new sheet");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

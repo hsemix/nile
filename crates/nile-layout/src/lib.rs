@@ -20,7 +20,9 @@ mod affine;
 pub use affine::Affine;
 mod images;
 mod pagination;
-pub use pagination::paginate;
+mod paged;
+pub use paged::{PagedBox, SHEET_GAP};
+pub use pagination::{paginate, paginate_boxes};
 pub use images::{FileImages, ImageData, ImageLoader};
 
 pub use nile_dom::NodeId;
@@ -288,6 +290,9 @@ pub struct Placement {
     pub xf: Affine,
     /// What containers clip it to, as a rectangle in painted coordinates.
     pub clip: Option<Rect>,
+    /// Inside the paged element `LayoutTree::pages[n]`: box coordinates are flow positions that
+    /// appear on that element's sheets.
+    pub paged: Option<usize>,
 }
 
 impl Placement {
@@ -325,6 +330,8 @@ pub struct LayoutTree {
     /// embedder (`set_page_scroll`) before anything asks for placements.
     page_scroll: f32,
     viewport_h: f32,
+    /// Elements shown as sheets of paper (`page-view: paged`).
+    pub pages: Vec<PagedBox>,
 }
 
 /// Ask for a `<select>`'s drop-down to be laid out under it.
@@ -605,6 +612,42 @@ impl LayoutTree {
         self.page_scroll = y;
     }
 
+    /// A painted point in box `p`'s own coordinates: layout coordinates, or inside a paged element
+    /// the flow position shown there. `strict` refuses margins and gaps between the sheets.
+    fn to_box(&self, p: &Placement, x: f32, y: f32, strict: bool) -> Option<(f32, f32)> {
+        let (lx, ly) = p.to_layout(x, y);
+        match p.paged {
+            Some(k) => self.pages[k].to_flow(ly, strict).map(|fy| (lx, fy)),
+            None => Some((lx, ly)),
+        }
+    }
+
+    /// A rectangle in the coordinates of box `i` as unscrolled layout coordinates: inside a paged
+    /// element, where the flow position appears on its sheets.
+    pub fn to_layout_rect(&self, i: usize, r: Rect) -> Rect {
+        match self.pages.iter().find(|pb| pb.index < i && i < pb.end) {
+            Some(pb) => pb.rect_to_screen(r),
+            None => r,
+        }
+    }
+
+    /// For an element in (or being) a paged element: the room between one sheet's text and the
+    /// next sheet's (bottom margin + gap + top margin).
+    pub fn page_zone_of(&self, node: NodeId) -> Option<f32> {
+        let i = *self.index.get(&node)?;
+        let pb = self.pages.iter().find(|pb| pb.index <= i && i < pb.end)?;
+        Some(pb.margin[0] + pb.margin[2] + SHEET_GAP)
+    }
+
+    /// Where a rectangle of box `p` paints.
+    fn painted(&self, p: &Placement, r: Rect) -> Rect {
+        let r = match p.paged {
+            Some(k) => self.pages[k].rect_to_screen(r),
+            None => r,
+        };
+        p.xf.bounds(r)
+    }
+
     pub fn placements(&self, offsets: &ScrollOffsets) -> Vec<Placement> {
         let mut out = Vec::with_capacity(self.boxes.len());
         let mut stack: Vec<(usize, Placement)> = Vec::new();
@@ -615,7 +658,7 @@ impl LayoutTree {
             let mut cur = stack.last().map_or(Placement::default(), |(_, p)| *p);
             if b.fixed {
                 // Anchored to the viewport: ignore every ancestor's scroll, clip and transform.
-                cur = Placement { xf: Affine::translate(0.0, self.page_scroll), clip: None };
+                cur = Placement { xf: Affine::translate(0.0, self.page_scroll), clip: None, paged: None };
                 stack.push((b.subtree_end.max(i + 1), cur));
             }
             // A transform applies to the box itself and everything inside it.
@@ -623,13 +666,18 @@ impl LayoutTree {
                 dy if dy != 0.0 => cur.xf.then_after(Affine::translate(0.0, dy)),
                 _ => cur.xf,
             };
-            let own = Placement { xf: b.transform.map_or(base, |t| base.then_after(t)), clip: cur.clip };
+            let own = Placement { xf: b.transform.map_or(base, |t| base.then_after(t)), clip: cur.clip, paged: cur.paged };
             out.push(own);
+            if let Some(k) = self.pages.iter().position(|pb| pb.index == i) {
+                // Everything inside is a flow position on this element's sheets.
+                stack.push((self.pages[k].end, Placement { paged: Some(k), ..own }));
+                continue;
+            }
             if let Some(sb) = &b.scroll {
                 let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
                 let clip = intersect(own.clip, own.xf.bounds(sb.clip));
                 let xf = own.xf.then_after(Affine::translate(-ox, -oy));
-                stack.push((b.subtree_end, Placement { xf, clip: Some(clip) }));
+                stack.push((b.subtree_end, Placement { xf, clip: Some(clip), paged: own.paged }));
             } else if b.transform.is_some() || b.sticky.is_some() {
                 stack.push((b.subtree_end.max(i + 1), own));
             }
@@ -647,7 +695,7 @@ impl LayoutTree {
             if !c.selectable() || c.text.trim().is_empty() {
                 continue;
             }
-            let (lx, ly) = p.to_layout(x, y);
+            let Some((lx, ly)) = self.to_box(p, x, y, false) else { continue };
             let r = b.rect;
             let dy = if ly < r.y { r.y - ly } else if ly > r.y + r.height { ly - r.y - r.height } else { 0.0 };
             let dx = if lx < r.x { r.x - lx } else if lx > r.x + r.width { lx - r.x - r.width } else { 0.0 };
@@ -786,8 +834,8 @@ impl LayoutTree {
     /// transforms), for moving the caret up and down.
     pub fn caret_painted(&self, doc: &Document, styles: &StyleMap, p: DomPoint, offsets: &ScrollOffsets) -> Option<(f32, f32, f32)> {
         let (r, i) = self.dom_caret_rect(doc, styles, p)?;
-        let (x, y) = self.placements(offsets)[i].xf.apply(r.x, r.y);
-        Some((x, y, r.height))
+        let at = self.painted(&self.placements(offsets)[i], r);
+        Some((at.x, at.y, r.height))
     }
 
     /// The DOM position nearest a point in painted coordinates, among selectable text.
@@ -857,7 +905,7 @@ impl LayoutTree {
         let (i, b) = self.text_box_of(node)?;
         let BoxContent::Text(c) = &b.content else { return None };
         let p = self.placements(offsets)[i];
-        let (lx, ly) = p.to_layout(x, y);
+        let (lx, ly) = self.to_box(&p, x, y, false)?;
         Some(Cursor::from_point(&c.layout, lx - b.rect.x, ly - b.rect.y).index())
     }
 
@@ -867,7 +915,7 @@ impl LayoutTree {
         let (i, b) = self.text_box_of(node)?;
         let BoxContent::Text(c) = &b.content else { return None };
         let p = self.placements(offsets)[i];
-        let (lx, ly) = p.to_layout(x, y);
+        let (lx, ly) = self.to_box(&p, x, y, false)?;
         Some(Selection::word_from_point(&c.layout, lx - b.rect.x, ly - b.rect.y).text_range())
     }
 
@@ -940,14 +988,13 @@ impl LayoutTree {
     }
 
     fn node_rect_with(&self, node: NodeId, places: Option<&[Placement]>) -> Option<Rect> {
-        let xf = |i: usize| places.map_or(Affine::IDENTITY, |p| p[i].xf);
+        let xf = |i: usize, r: Rect| places.map_or_else(|| self.to_layout_rect(i, r), |p| self.painted(&p[i], r));
         if let Some(&i) = self.index.get(&node) {
-            return Some(xf(i).bounds(self.boxes[i].rect));
+            return Some(xf(i, self.boxes[i].rect));
         }
         let (mut l, mut t, mut r, mut b) = (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
         for (ti, tb) in self.boxes.iter().enumerate() {
             let BoxContent::Text(c) = &tb.content else { continue };
-            let m = xf(ti);
             let ranges: Vec<_> = c.owners.iter().filter(|(_, n)| *n == node).map(|(r, _)| r.clone()).collect();
             if ranges.is_empty() {
                 continue;
@@ -969,7 +1016,7 @@ impl LayoutTree {
                         width: gr.advance(),
                         height: fm.ascent + fm.descent,
                     };
-                    let bounds = m.bounds(run);
+                    let bounds = xf(ti, run);
                     l = l.min(bounds.x);
                     r = r.max(bounds.x + bounds.width);
                     t = t.min(bounds.y);
@@ -996,7 +1043,7 @@ impl LayoutTree {
                     continue;
                 }
             }
-            let (lx, ly) = p.to_layout(x, y);
+            let Some((lx, ly)) = self.to_box(p, x, y, true) else { continue };
             let r = b.rect;
             if lx < r.x || ly < r.y || lx >= r.x + r.width || ly >= r.y + r.height {
                 continue;
@@ -1137,6 +1184,12 @@ pub fn layout_with(
         }
     }
 
+    // `page-view: paged` elements take the paper's width and the `@page` margins as padding.
+    let paged_nodes = paged::find(&tree, root, styles);
+    for (id, tn) in &paged_nodes {
+        paged::prepare(&mut tree, *tn, styles, *id);
+    }
+
     let compute = |tree: &mut TaffyTree<NodeCtx>| {
         tree.compute_layout_with_measure(
             root,
@@ -1158,6 +1211,27 @@ pub fn layout_with(
     }
 
     compute_static_positions(&tree, doc, styles, root);
+    // Paged elements: find where the sheets break, then make each element as tall as its sheets.
+    // Starts are kept relative to the element's top, which can move in the second pass.
+    let mut sheets: Vec<(NodeId, Vec<f32>, f32)> = Vec::new();
+    if !paged_nodes.is_empty() {
+        let page = styles.page_style(0);
+        let (mt, mb) = (page.margin[0], page.margin[2]);
+        let content_h = (page.size.1 - mt - mb).max(1.0);
+        let mut first = Vec::new();
+        flatten(&mut tree, styles, root, 0.0, 0.0, &mut first);
+        for (id, tn) in &paged_nodes {
+            let Some(i) = first.iter().position(|b| b.node == *id && matches!(b.content, BoxContent::Element)) else { continue };
+            let top = first[i].rect.y;
+            let end = first[i].subtree_end.max(i + 1);
+            let content_end = paged::content_end(&first, i);
+            let starts = pagination::paginate_boxes(&first[i + 1..end], styles, top + mt, content_end.max(top + mt + 1.0), content_h);
+            let height = starts.len() as f32 * page.size.1 + (starts.len() - 1) as f32 * SHEET_GAP;
+            paged::set_height(&mut tree, *tn, height, styles, *id);
+            sheets.push((*id, starts.iter().map(|s| s - top).collect(), content_end - top));
+        }
+        compute(&mut tree);
+    }
     let mut boxes = Vec::new();
     flatten(&mut tree, styles, root, 0.0, 0.0, &mut boxes);
     let mut content_height = tree.layout(root).map(|l| l.size.height).unwrap_or(0.0);
@@ -1182,8 +1256,24 @@ pub fn layout_with(
         .map(|(i, b)| (b.node, i))
         .collect();
     let origins = styles.origins().clone();
-    let mut tree = LayoutTree { page_scroll: options.scroll_y, viewport_h: viewport_height, boxes, content_height, menu: None, lists: Default::default(), markers: Default::default(), index, text_nodes: Default::default(), elem_marks: Default::default(), origins };
+    let mut tree = LayoutTree { pages: Vec::new(), page_scroll: options.scroll_y, viewport_h: viewport_height, boxes, content_height, menu: None, lists: Default::default(), markers: Default::default(), index, text_nodes: Default::default(), elem_marks: Default::default(), origins };
     tree.compute_scroll_boxes(styles);
+    for (id, rel, rel_end) in sheets {
+        let Some(&i) = tree.index.get(&id) else { continue };
+        let b = &tree.boxes[i];
+        let top = b.rect.y;
+        let page = styles.page_style(0);
+        tree.pages.push(PagedBox {
+            node: id,
+            index: i,
+            end: b.subtree_end.max(i + 1),
+            rect: b.rect,
+            page_h: page.size.1,
+            margin: page.margin,
+            starts: rel.iter().map(|s| s + top).collect(),
+            content_end: rel_end + top,
+        });
+    }
     for (i, b) in tree.boxes.iter().enumerate() {
         let BoxContent::Text(c) = &b.content else { continue };
         for (k, n) in c.nodes.iter().enumerate() {
@@ -3267,6 +3357,35 @@ mod tests {
         let tall = Document::parse(r#"<html style="height:100%"><body style="margin:0;height:100%"><div style="height:900px"></div></body></html>"#);
         let tree = layout(&tall, &compute_styles(&tall), &mut text, 200.0, 300.0);
         assert_eq!(tree.content_height, 900.0);
+    }
+
+    #[test]
+    fn paged_elements_stack_sheets_and_map_points_to_flow_positions() {
+        let rows: String = (0..10).map(|i| format!("<div class=r id=r{i}></div>")).collect();
+        let doc = Document::parse(&format!(
+            "<style>@page {{ size: 300px 200px; margin: 20px }} body{{margin:0}} .r{{height:30px;break-inside:avoid}} #d{{page-view:paged}}</style><div id=d>{rows}</div><p id=after style=\"margin:0\">after</p>"
+        ));
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 400.0, 100.0);
+        let id = |n: &str| doc.find(|e| e.attr("id") == Some(n)).unwrap();
+        // 160px of content per sheet: five rows, so two sheets of 200px and a 20px gap.
+        assert_eq!(tree.pages.len(), 1);
+        let pb = &tree.pages[0];
+        assert_eq!((pb.rect.width, pb.rect.height, pb.count()), (300.0, 420.0, 2));
+        assert_eq!(pb.starts, vec![20.0, 170.0]);
+        // The next element comes after both sheets.
+        assert_eq!(tree.node_rect(id("after")).unwrap().y, 420.0);
+        // Row 5 is the first on sheet two: flow y 170 appears at 220 + 20.
+        assert_eq!(pb.to_screen(170.0), 240.0);
+        let offsets = ScrollOffsets::new();
+        assert_eq!(tree.node_rect_scrolled(id("r5"), &offsets).unwrap().y, 240.0);
+        assert_eq!(tree.node_rect_scrolled(id("r4"), &offsets).unwrap().y, 20.0 + 4.0 * 30.0);
+        assert_eq!(tree.hit_test_scrolled(50.0, 245.0, &offsets), Some(id("r5")));
+        assert_eq!(tree.hit_test_scrolled(50.0, 30.0, &offsets), Some(id("r0")));
+        // A margin or the gap between sheets is the element itself, not a row.
+        assert_eq!(tree.hit_test_scrolled(50.0, 210.0, &offsets), Some(id("d")));
+        assert_eq!(tree.hit_test_scrolled(50.0, 225.0, &offsets), Some(id("d")));
     }
 
     fn text_boxes(tree: &LayoutTree) -> Vec<&LayoutBox> {

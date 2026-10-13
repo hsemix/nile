@@ -129,7 +129,7 @@ const menus = {
   Layout: [['Page setup', [['▤', 'Margins', 'margins'], ['▯', 'Orientation', 'orientation'], ['↔', 'Page width', 'page-width']]], ['Paragraph', [['≡›', 'Indent', 'indent'], ['↕', 'Spacing', 'spacing']]]],
   References: [['Table of contents', [['▤', 'Contents', 'contents']]], ['Footnotes', [['¹', 'Footnote', 'footnote']]], ['Citations', [['“ ”', 'Citation', 'citation']]]],
   Review: [['Proofing', [['Aa', 'Word count', 'word-count']]], ['Comments', [['▤', 'Comment', 'comments']]], ['Tracking', [['▧', 'Track changes', 'track']]]],
-  View: [['Show', [['▤', 'Navigation', 'navigation'], ['↔', 'Ruler', 'ruler']]], ['Zoom', [['−', 'Zoom out', 'zoom-out'], ['+', 'Zoom in', 'zoom-in'], ['▯', '100%', 'zoom-reset']]]]
+  View: [['Views', [['▯', 'Print layout', 'print-layout']]], ['Show', [['▤', 'Navigation', 'navigation'], ['↔', 'Ruler', 'ruler']]], ['Zoom', [['−', 'Zoom out', 'zoom-out'], ['+', 'Zoom in', 'zoom-in'], ['▯', '100%', 'zoom-reset']]]]
 };
 document.querySelectorAll('[data-tab]').forEach((button) => button.addEventListener('click', () => {
   const tab = button.dataset.tab;
@@ -153,6 +153,7 @@ document.addEventListener('click', (e) => {
   else if (action === 'spacing') { const wide = block && block.style.lineHeight === '2.2'; cmd('blockStyle', 'line-height: ' + (wide ? '1.7' : '2.2')); report('Line spacing ' + (wide ? '1.7' : '2.2')); }
   else if (action === 'borders') { const on = block && block.style.borderLeftWidth !== '' || block && /solid/.test(block.style.border || ''); cmd('blockStyle', on ? 'border: 0; padding: 0' : 'border: 1px solid #91a2c6; padding: 6px 10px'); report('Paragraph border ' + (on ? 'off' : 'on')); }
   else if (action === 'cut' || action === 'copy' || action === 'paste') { cmd(action); report(action[0].toUpperCase() + action.slice(1)); }
+  else if (action === 'print-layout') { paper.classList.toggle('paged'); updatePages(); report('Print layout ' + (paper.classList.contains('paged') ? 'on' : 'off')); }
   else if (action === 'select') { cmd('selectAll'); report('Selected all'); }
   else if (action === 'marks') { marks = !marks; paper.style.outline = marks ? '1px dashed #9aa7c7' : 'none'; report('Paragraph marks ' + (marks ? 'on' : 'off')); }
   else if (action.indexOf('zoom-') === 0) {
@@ -172,8 +173,16 @@ document.addEventListener('click', (e) => {
   } else if (action === 'picture') {
     cmd('insertImage', 'images/photo.png'); report('Picture inserted: click it to resize (drag a handle), Delete removes it');
   } else if (action === 'page-break') {
-    cmd('insertHorizontalRule'); report('Page break');
+    cmd('insertPageBreak'); report('Page break' + (paper.classList.contains('paged') ? '' : ' (shown in print layout)'));
   } else if (action === 'word-count') report(words() + ' words in document');
   else report(button.textContent.trim() + ' · not in this demo');
 });
+// "Page X of Y" in the status bar, in print layout.
+function updatePages() {
+  const el = document.getElementById('page-count');
+  el.textContent = paper.classList.contains('paged') && paper.pageCount ? 'Page ' + paper.pageNumber + ' of ' + paper.pageCount : 'Page 1 of 1';
+}
+document.addEventListener('selectionchange', updatePages);
+paper.addEventListener('input', updatePages);
+document.getElementById('canvas').addEventListener('scroll', updatePages);
 console.log('word processor ready: the page is editable');

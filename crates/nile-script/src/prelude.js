@@ -340,6 +340,10 @@
     // Elements with non-visible `overflow` scroll; the root and <body> scroll the page.
     get scrollTop() { return this._isRoot() ? N.scrollY() : (N.elScroll(this._id) || [0, 0])[1]; }
     set scrollTop(v) { if (this._isRoot()) N.scrollTo(+v || 0); else { const s = N.elScroll(this._id); if (s) N.elScrollTo(this._id, s[0], +v || 0); } }
+    // `page-view: paged` elements: how many sheets of paper they show and which one has the caret
+    // (else the one in the middle of the window); 0 for other elements.
+    get pageCount() { return (N.pageInfo(this._id) || [0, 0])[0]; }
+    get pageNumber() { return (N.pageInfo(this._id) || [0, 0])[1]; }
     get scrollLeft() { return this._isRoot() ? 0 : (N.elScroll(this._id) || [0])[0]; }
     set scrollLeft(v) { if (!this._isRoot()) { const s = N.elScroll(this._id); if (s) N.elScrollTo(this._id, +v || 0, s[1]); } }
     get scrollWidth() { const s = N.elScroll(this._id); return s ? Math.round(s[2]) : this.clientWidth; }
