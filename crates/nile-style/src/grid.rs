@@ -331,6 +331,8 @@ fn cursor_of(name: &str) -> Option<Cursor> {
         "grabbing" => Cursor::Grabbing,
         "col-resize" | "ew-resize" | "e-resize" | "w-resize" => Cursor::ResizeH,
         "row-resize" | "ns-resize" | "n-resize" | "s-resize" => Cursor::ResizeV,
+        "nwse-resize" | "nw-resize" | "se-resize" => Cursor::ResizeNwse,
+        "nesw-resize" | "ne-resize" | "sw-resize" => Cursor::ResizeNesw,
         "none" => Cursor::None,
         _ => return None,
     })

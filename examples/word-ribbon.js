@@ -96,7 +96,7 @@ function currentSize() {
 // The ribbon tabs: Home is built into the page, the others are filled in when chosen.
 const menus = {
   File: [['Document', [['▤', 'New copy', 'new'], ['▣', 'Save', 'save'], ['▧', 'Print preview', 'preview']]], ['About', [['W', 'Ribbon demo', 'about']]]],
-  Insert: [['Pages', [['▤', 'Cover page', 'cover'], ['+', 'Page break', 'page-break']]], ['Illustrations', [['▦', 'Table', 'table'], ['▧', 'Picture', 'picture'], ['○', 'Shapes', 'shapes']]], ['Text', [['Aa', 'Text box', 'text-box'], ['Ω', 'Symbol', 'symbol']]]],
+  Insert: [['Pages', [['▤', 'Cover page', 'cover'], ['+', 'Page break', 'page-break']]], ['Illustrations', [['▦', 'Table', 'table'], ['▧', 'Picture', 'picture'], ['○', 'Shapes', 'shapes']]], ['Table tools', [['↑+', 'Row above', 'tableInsertRowAbove'], ['↓+', 'Row below', 'tableInsertRowBelow'], ['←+', 'Column left', 'tableInsertColumnLeft'], ['→+', 'Column right', 'tableInsertColumnRight'], ['↕×', 'Delete row', 'tableDeleteRow'], ['↔×', 'Delete column', 'tableDeleteColumn'], ['▦', 'Merge cells', 'tableMergeCells'], ['▥', 'Split cell', 'tableSplitCell'], ['×', 'Delete table', 'tableDeleteTable']]], ['Text', [['Aa', 'Text box', 'text-box'], ['Ω', 'Symbol', 'symbol']]]],
   Layout: [['Page setup', [['▤', 'Margins', 'margins'], ['▯', 'Orientation', 'orientation'], ['↔', 'Page width', 'page-width']]], ['Paragraph', [['≡›', 'Indent', 'indent'], ['↕', 'Spacing', 'spacing']]]],
   References: [['Table of contents', [['▤', 'Contents', 'contents']]], ['Footnotes', [['¹', 'Footnote', 'footnote']]], ['Citations', [['“ ”', 'Citation', 'citation']]]],
   Review: [['Proofing', [['Aa', 'Word count', 'word-count']]], ['Comments', [['▤', 'Comment', 'comments']]], ['Tracking', [['▧', 'Track changes', 'track']]]],
@@ -138,6 +138,10 @@ document.addEventListener('click', (e) => {
     document.querySelector('.ruler').classList.toggle('hidden'); report('Ruler toggled');
   } else if (action === 'table') {
     cmd('insertTable', '3x3'); report('Inserted a 3 x 3 table (Tab moves between cells)');
+  } else if (/^table[A-Z]/.test(action)) {
+    report(cmd(action) ? button.textContent.trim() : 'Put the cursor in a table first');
+  } else if (action === 'picture') {
+    cmd('insertImage', 'images/photo.png'); report('Picture inserted: click it to resize (drag a handle), Delete removes it');
   } else if (action === 'page-break') {
     cmd('insertHorizontalRule'); report('Page break');
   } else if (action === 'word-count') report(words() + ' words in document');

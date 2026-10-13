@@ -210,7 +210,12 @@ pointer. Placement and animation can come from CSS instead of the call: `popup-p
 (`blend`, `inflate`, `slide`, `roll`), read from the popup element and then its anchor; the call's
 parameters (`anchorAt`, `popupAt`, `animationType`…) win. Hovering an element for half a second shows
 its `title` (text) or `tooltip` (HTML) as a `popup[role=tooltip]`; a script can answer the bubbling
-`tooltiprequest` event with `evt.source = element` to supply its own. Popups are painted inside the window, not as separate OS windows. See
+`tooltiprequest` event with `evt.source = element` to supply its own. By default popups are painted inside the window (so they can't hang outside it). Pass
+`window: "popup"` to `popup()` (or `"popup"`/`"detached"` to `takeOff()`), or set
+`Window.this.popupWindows = true` for all of them, and the popup gets an OS window of its own: it can
+extend past the window's edge, and it stays the same live element (handlers, `:hover`, scripts all run
+in the owning page, which paints it into that window and receives its pointer and keys). A popup
+window doesn't close when you click another application. See
 [popups example](../../examples/popups.html) and [dialogs example](../../examples/dialogs.html).
 
 ## Several windows
@@ -230,7 +235,7 @@ what it passed, `Window.this.close(value)` closes it, and `closerequest` / `acti
 Sciter's it can't block the script, so it returns a **Promise** of the value the dialog gave
 `close(value)`. Closing a window closes the windows it opened; closing the first window quits.
 
-Windows are not nested in the OS sense (a dialog doesn't stay above its owner), `new Window(...)` can't
+A dialog, tool or popup window (and anything with a `parent`) is owned by its opener where winit allows it: it stays above, and hides and closes with its owner (macOS, Windows; on Linux the windows are independent). `new Window(...)` can't
 be shown modally afterwards, `Window.all` lists the windows this one opened plus itself, and C hosts
 don't see the open/message commands yet. See the [windows example](../../examples/windows.html).
 

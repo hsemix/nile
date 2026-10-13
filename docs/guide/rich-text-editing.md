@@ -51,7 +51,7 @@ Call `document.execCommand(name, false, value)`. Check its return value, and use
 | Insertion | `insertText`, `insertHTML`, `insertParagraph`, `insertLineBreak`, `insertImage`, `insertHorizontalRule` |
 | Links / cleanup | `createLink`, `unlink`, `removeFormat` |
 | Editing | `delete`, `selectAll`, `undo`, `redo`, `copy`, `cut`, `paste` |
-| Tables (Nile extension) | `insertTable` with `'3x2'` |
+| Tables (Nile extension) | `insertTable` with `'3x2'`; with the caret in a cell: `tableInsertRowAbove`, `tableInsertRowBelow`, `tableInsertColumnLeft`, `tableInsertColumnRight`, `tableDeleteRow`, `tableDeleteColumn`, `tableDeleteTable`, `tableSplitCell`, and `tableMergeCells` (select from one cell to another; the covered rectangle becomes one cell with `colspan`/`rowspan`) |
 
 Use the supported command API for edits instead of rewriting the editor's whole
 `innerHTML` during typing. Undo snapshots cover the entire editing host, so script
@@ -63,7 +63,13 @@ empty list item can exit the list. Arrow keys, Home/End and modifier shortcuts
 move/extend the caret selection. Ctrl/Cmd+B/I/U toggle formatting; Ctrl/Cmd+A,
 C/X/V and undo/redo shortcuts are supported. IME composition works in the editor.
 Table Tab/Shift+Tab move between cells; Tab from the last cell adds a row.
-Enter stays inside a cell and deleting across cells empties their content.
+Enter stays inside a cell and deleting across cells empties their content. Row and column commands
+understand merged cells (spans grow or shrink where a line crosses them).
+
+Clicking an image selects it (outline and eight handles). Dragging a corner resizes it in proportion
+(Shift frees the ratio), an edge handle changes one side; the size is stored in the `width`/`height`
+attributes and is one undo step. Backspace/Delete removes the selected image, and the arrow keys
+deselect it.
 
 ## Read and change the selection
 
@@ -109,6 +115,5 @@ the editor's `innerHTML` with [storage](data-and-services.md#save-a-draft).
 Copy writes HTML and plain text in the shell. Paste retains a supported subset of
 HTML (emphasis, headings, lists, quotes, links, images and selected inline styles).
 C clipboard callbacks currently exchange text only. There is no spell-check,
-text drag-and-drop, image selection/resizing, or table commands to merge cells
-or add/remove arbitrary rows/columns. Indent uses margins rather than nested
+text drag-and-drop, image alignment/wrapping or captions, or resizing table columns by dragging. Indent uses margins rather than nested
 lists. This is an editable document foundation, not full Word compatibility.

@@ -333,6 +333,10 @@ pub enum Cursor {
     Grabbing,
     /// `col-resize`, `ew-resize`
     ResizeH,
+    /// `nwse-resize`: the diagonal from top left to bottom right.
+    ResizeNwse,
+    /// `nesw-resize`.
+    ResizeNesw,
     /// `row-resize`, `ns-resize`
     ResizeV,
     None,

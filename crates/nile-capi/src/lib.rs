@@ -64,6 +64,10 @@ pub enum NileCursor {
     ResizeV = 12,
     /// `cursor: none`: hide the pointer.
     Hidden = 13,
+    /// Diagonal resize, top left to bottom right.
+    ResizeNwse = 14,
+    /// Diagonal resize, top right to bottom left.
+    ResizeNesw = 15,
 }
 
 /// What [`nile_view_tick`] found.
@@ -461,6 +465,8 @@ pub unsafe extern "C" fn nile_view_cursor(view: *mut NileView) -> NileCursor {
         Cursor::Grabbing => NileCursor::Grabbing,
         Cursor::ResizeH => NileCursor::ResizeH,
         Cursor::ResizeV => NileCursor::ResizeV,
+        Cursor::ResizeNwse => NileCursor::ResizeNwse,
+        Cursor::ResizeNesw => NileCursor::ResizeNesw,
         Cursor::None => NileCursor::Hidden,
     })
 }

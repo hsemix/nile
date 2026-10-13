@@ -1,0 +1,38 @@
+<!doctype html>
+<html><head><title>Images and tables in the editor</title>
+<style>
+  body { font: 16px sans-serif; margin: 0; padding: 16px; }
+  #bar { margin-bottom: 8px; }
+  button { padding: 3px 8px; margin: 0 4px 4px 0; }
+  #doc { border: 1px solid #aab; padding: 14px; min-height: 360px; line-height: 1.5; }
+  table { border-collapse: collapse; }
+  td { border: 1px solid #9aa0a6; padding: 4px 8px; min-width: 40px; }
+</style></head>
+<body>
+  <div id="bar">
+    <button data-cmd="insertImage" data-value="images/photo.png">Insert picture</button>
+    <button data-cmd="insertTable" data-value="3x3">Insert table</button>
+    <button data-cmd="tableInsertRowBelow">Row below</button>
+    <button data-cmd="tableInsertColumnRight">Column right</button>
+    <button data-cmd="tableDeleteRow">Delete row</button>
+    <button data-cmd="tableDeleteColumn">Delete column</button>
+    <button data-cmd="tableMergeCells">Merge</button>
+    <button data-cmd="tableSplitCell">Split</button>
+    <button data-cmd="undo">Undo</button>
+  </div>
+  <div id="doc" contenteditable>
+    <p>Click the picture to select it, then drag one of its handles to resize (corners keep the proportions, Shift frees them). Backspace deletes it; Undo brings the old size back.</p>
+    <p>Here is a picture: <img src="images/photo.png" style="width:160px"> and some text after it.</p>
+    <table><tbody>
+      <tr><td>Name</td><td>Qty</td><td>Price</td></tr>
+      <tr><td>Apples</td><td>3</td><td>1.20</td></tr>
+      <tr><td>Pears</td><td>5</td><td>2.00</td></tr>
+    </tbody></table>
+    <p>Put the caret in a cell and use the table buttons; select across cells to merge them.</p>
+  </div>
+  <script>
+    // Toolbar buttons keep the editor's selection.
+    document.on('mousedown', '#bar button', (e) => e.preventDefault());
+    document.on('click', '#bar button', (e, b) => { document.execCommand(b.getAttribute('data-cmd'), false, b.getAttribute('data-value')); });
+  </script>
+</body></html>

@@ -19,3 +19,7 @@ nile-engine = { workspace = true, features = ["system-clipboard", "net"] }
 skia-safe.workspace = true
 winit.workspace = true
 softbuffer.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true

@@ -19,7 +19,114 @@ pub fn editing_host_of(doc: &Document, node: NodeId) -> Option<NodeId> {
     None
 }
 
+/// A resize handle being dragged on the selected image.
+#[derive(Debug, Clone, Copy)]
+pub struct ImageDrag {
+    pub node: NodeId,
+    /// Which edges move: `(-1, -1)` the top left corner, `(1, 0)` the right edge, ...
+    pub handle: (i8, i8),
+    /// The image's box and the pointer (page coordinates) when the drag began.
+    pub start: (f32, f32, f32, f32),
+    pub from: (f32, f32),
+}
+
 impl Page {
+    /// The image the editing selection covers exactly (clicked, or arrowed onto), if any.
+    pub fn selected_image(&self) -> Option<NodeId> {
+        let (a, f) = self.edit_selection()?;
+        if a.node != f.node || f.offset != a.offset + 1 {
+            return None;
+        }
+        let doc = self.doc.borrow();
+        doc.node(a.node).tag()?;
+        let kid = *doc.node(a.node).children.get(a.offset)?;
+        (doc.node(kid).tag() == Some("img")).then_some(kid)
+    }
+
+    /// An element's box where it paints, in page coordinates.
+    fn painted_rect(&self, node: NodeId) -> Option<nile_layout::Rect> {
+        let mut v = self.view.borrow_mut();
+        let offsets = v.scroll_offsets.clone();
+        v.layout().node_rect_scrolled(node, &offsets)
+    }
+
+    fn pointer_in_page(&self) -> Option<(f32, f32)> {
+        self.pointer.map(|(x, y)| (x, y + self.view.borrow().scroll_y))
+    }
+
+    /// The selected image and the resize handle under the pointer, if any.
+    fn image_handle_at_pointer(&self) -> Option<(NodeId, (i8, i8), nile_layout::Rect)> {
+        let img = self.selected_image()?;
+        let (px, py) = self.pointer_in_page()?;
+        let rect = self.painted_rect(img)?;
+        let slack = 2.0;
+        nile_layout::handles_of(rect)
+            .into_iter()
+            .find(|(_, h)| px >= h.x - slack && px <= h.x + h.width + slack && py >= h.y - slack && py <= h.y + h.height + slack)
+            .map(|(dir, _)| (img, dir, rect))
+    }
+
+    /// The cursor a selected image's handles ask for under the pointer.
+    pub fn image_handle_cursor(&self) -> Option<nile_style::Cursor> {
+        use nile_style::Cursor;
+        let dir = match self.image_drag {
+            Some(d) => d.handle,
+            None => self.image_handle_at_pointer()?.1,
+        };
+        Some(match dir {
+            (0, _) => Cursor::ResizeV,
+            (_, 0) => Cursor::ResizeH,
+            (-1, -1) | (1, 1) => Cursor::ResizeNwse,
+            _ => Cursor::ResizeNesw,
+        })
+    }
+
+    /// The selected image's box in page coordinates, to draw its outline and handles.
+    pub fn selected_image_rect(&self) -> Option<nile_layout::Rect> {
+        let img = self.selected_image()?;
+        self.painted_rect(img)
+    }
+
+    /// Drag a resize handle: corners keep the proportions (Shift frees them).
+    pub fn image_drag_to(&mut self, x: f32, y: f32) -> bool {
+        let Some(d) = self.image_drag else { return false };
+        let y = y + self.view.borrow().scroll_y;
+        let (_, _, w, h) = d.start;
+        let (mx, my) = (x - d.from.0, y - d.from.1);
+        let mut nw = if d.handle.0 != 0 { w + f32::from(d.handle.0) * mx } else { w };
+        let mut nh = if d.handle.1 != 0 { h + f32::from(d.handle.1) * my } else { h };
+        if d.handle.0 != 0 && d.handle.1 != 0 && !self.mods.shift_key() {
+            let scale = ((nw / w) + (nh / h)) / 2.0;
+            (nw, nh) = (w * scale, h * scale);
+        }
+        let (nw, nh) = (nw.max(8.0).round(), nh.max(8.0).round());
+        let (_, changed) = self.call("__imageSet", &format!("[{},{nw},{nh}]", d.node.0));
+        changed
+    }
+
+    /// The press began on a handle of the selected image, or on an image: select it.
+    fn begin_image_interaction(&mut self, host: NodeId) -> bool {
+        if let Some((img, handle, rect)) = self.image_handle_at_pointer() {
+            let from = self.pointer_in_page().unwrap_or_default();
+            self.image_drag = Some(ImageDrag { node: img, handle, start: (rect.x, rect.y, rect.width, rect.height), from });
+            let _ = self.call("__imageStart", &format!("[{}]", img.0));
+            return true;
+        }
+        let hit = self.interaction().hover.filter(|n| {
+            let doc = self.doc.borrow();
+            doc.node(*n).tag() == Some("img") && editing_host_of(&doc, *n) == Some(host)
+        });
+        let Some(img) = hit else { return false };
+        let (parent, index) = {
+            let doc = self.doc.borrow();
+            let parent = doc.node(img).parent.expect("an image in a host has a parent");
+            (parent, doc.node(parent).children.iter().position(|c| *c == img).unwrap_or(0))
+        };
+        self.edit_drag = None;
+        self.set_edit_selection(DomPoint { node: parent, offset: index }, DomPoint { node: parent, offset: index + 1 });
+        true
+    }
+
     /// The focused element, if it is an editing host.
     pub fn focused_host(&self) -> Option<NodeId> {
         let f = self.interaction().focus?;
@@ -60,6 +167,9 @@ impl Page {
     pub fn begin_edit_selection(&mut self, host: NodeId) -> bool {
         let clicks = self.register_click();
         self.edit_x = None;
+        if self.begin_image_interaction(host) {
+            return true;
+        }
         let Some(p) = self.pointer_dom_point(host) else { return false };
         let shift = self.mods.shift_key();
         let anchor = self.edit_selection().map(|s| s.0).filter(|_| shift);
