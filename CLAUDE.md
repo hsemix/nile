@@ -173,7 +173,7 @@ paint and animation timings; `bench_scroll` (ignored test) replays wheel events 
 
 ## Next up
 
-Coverage first, language bindings last (user's call). Open: spell-check for the editor, image selection and resizing and table row/column commands in the editor, 
+Coverage first, language bindings last (user's call). Open: pagination (`break-*`, `@page`, a paged Print-Layout view for the Word example, headers/footers/page numbers, PDF export via Skia; fragment the flat box list after layout, hit-testing and the editor caret across pages are the hard part), spell-check for the editor, image selection and resizing and table row/column commands in the editor, 
 text wrapping around floats line by line,
 restyling only affected subtrees (a hover on a page with `:hover` rules re-cascades everything), symbol fallback check on
 Windows/Linux. Then GPU surfaces and accessibility, and finally bindings (Python/C#/Go) over `nile-capi`.
