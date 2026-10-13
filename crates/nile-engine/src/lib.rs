@@ -6,6 +6,7 @@
 //! them are internal plumbing, so prefer the C API (`nile-capi`) for anything else.
 
 pub mod editing;
+mod net;
 pub mod window;
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc, time::{Duration, Instant}};
@@ -634,6 +635,7 @@ impl Page {
             Ok(host) => {
                 let sources = doc.borrow().script_sources();
                 let dir = path.parent().unwrap_or(std::path::Path::new("."));
+                host.set_fetcher(std::sync::Arc::new(net::PageFetcher::new(dir)));
                 let read = |rel: &str| -> Option<(String, String)> {
                     let file = dir.join(rel);
                     match std::fs::read_to_string(&file) {
@@ -3817,6 +3819,42 @@ cd</textarea>
         p.press();
         p.release();
         assert_eq!(val(&mut p, "d"), "0.3");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn fetch_reaches_a_local_http_server() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                // Read the whole request (headers, then the two body bytes) before answering.
+                let mut req = String::new();
+                let mut buf = [0u8; 2048];
+                while !req.contains("\r\n\r\nhi") {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => req.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    }
+                }
+                let body = format!("{{\"method\":\"{}\"}}", req.split(' ').next().unwrap_or(""));
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            }
+        });
+        let (mut p, path) = page(
+            &format!("<p id=o></p><script>fetch('http://127.0.0.1:{port}/x', {{ method: 'POST', body: 'hi' }}).then(r => r.json()).then(j => {{ document.getElementById('o').textContent = j.method; }})</script>"),
+            "fetch_http",
+        );
+        for _ in 0..1000 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            p.tick();
+            if js(&mut p, "document.getElementById('o').textContent") == "POST" {
+                break;
+            }
+        }
+        assert_eq!(js(&mut p, "document.getElementById('o').textContent"), "POST");
         let _ = std::fs::remove_file(path);
     }
 }

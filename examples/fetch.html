@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+  <head>
+    <style>
+      body {
+        margin: 20px;
+        font: 14px sans-serif;
+        background: #f4f1ea;
+      }
+      li {
+        margin: 4px 0;
+      }
+      pre {
+        background: #fff;
+        padding: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2 id="t">Loading…</h2>
+    <ul id="l"></ul>
+    <pre id="log"></pre>
+    <script>
+      const log = (m) =>
+        (document.getElementById("log").textContent += m + "\n");
+      fetch("fetch.json")
+        .then((r) => r.json())
+        .then((d) => {
+          document.getElementById("t").textContent = d.title;
+          document.getElementById("l").innerHTML = d.items
+            .map((i) => `<li>${i}</li>`)
+            .join("");
+          log("fetch ok");
+        });
+      const x = new XMLHttpRequest();
+      x.open("GET", "fetch.json");
+      x.onload = () =>
+        log(
+          "XMLHttpRequest " +
+            x.status +
+            ", " +
+            x.responseText.length +
+            " bytes",
+        );
+      x.send();
+      new MutationObserver((rs) => log("mutations: " + rs.length)).observe(
+        document.getElementById("l"),
+        { childList: true },
+      );
+      log(
+        btoa("Nile") +
+          " " +
+          new URL("a/b?x=1", "https://example.com/").href +
+          " " +
+          (localStorage.getItem("seen") ? "again" : "first run"),
+      );
+      localStorage.setItem("seen", "1");
+    </script>
+  </body>
+</html>

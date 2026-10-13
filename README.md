@@ -125,6 +125,11 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
   events, `DOMContentLoaded`/`load`, timers, `requestAnimationFrame`, promises, `<script src>` (see
   `examples/scripting.html`). Layout queries: `getBoundingClientRect`, `offset*`/`client*`, `getComputedStyle`
   (common properties), `innerWidth/Height`, `scrollTo`/`scrollY`/`scrollIntoView` (see `examples/measure.html`).
+- **Web platform:** `fetch` (`Headers`, `Request`, `Response`, `AbortController`) and `XMLHttpRequest` load files next
+  to the page and `data:` URLs, and http(s) when the `net` feature of `nile-engine` is on (the `nile` binary has it;
+  `nile-capi` needs `--features net`); requests run on worker threads, so the page never blocks
+  (`examples/fetch.html`). Also `MutationObserver`, `URL`/`URLSearchParams`, `localStorage`/`sessionStorage`
+  (in memory, not saved), `matchMedia`, `structuredClone`, `atob`/`btoa` and `TextEncoder`/`TextDecoder`.
 - **Modules and JSX:** `<script type="module">` and `import` of relative files (`./x.js`, `../y.jsx`). JSX in any
   script compiles like Sciter's: `<h1 id="a">Hi</h1>` becomes `JSX("h1", {id: "a"}, ["Hi"])`, which returns a
   vnode array `[tag, attrs, children]`. `append`/`prepend`/`content` render vnodes (strings, nodes and arrays
@@ -202,7 +207,7 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
   in the `value` attribute (no separate default value). Sciter's `Element.value` for other behaviors isn't there.
 - Scrollbars are thin overlay bars (draggable; clicking the track jumps there), with no `scrollbar-*` styling, no
   hover/fade behavior and no arrow buttons; clipping ignores `border-radius`.
-- JS gaps: `fetch`, bare/`@sciter`/`@env`-style module specifiers (only relative and absolute paths),
+- JS gaps: no `Blob`/`FormData`/streams/`WebSocket`, `ResizeObserver`/`IntersectionObserver`, no persistence for `localStorage`, no cookies or CORS, `fetch` follows redirects only for http(s), bare/`@sciter`/`@env`-style module specifiers (only relative and absolute paths),
   `window.location`, `devicePixelRatio` (always 1), `offsetParent` (approximated by the parent).
   From Sciter: class components, `componentUpdate`,
   `onGlobalEvent`, `Element.value` (no native behaviors yet), `this://` URLs, and JSX shortcuts like `.class`;

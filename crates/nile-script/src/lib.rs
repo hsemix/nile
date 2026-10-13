@@ -27,11 +27,15 @@ use rquickjs::{
 };
 
 mod jsx;
+mod net;
+
+pub use net::{FetchRequest, FetchResponse, Fetcher, LocalFetcher};
 
 const EDIT: &str = include_str!("edit.js");
+const WEB: &str = include_str!("web.js");
 
 fn prelude() -> String {
-    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT)
+    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", WEB)
 }
 
 /// Something a script asks the host window to do.
@@ -175,6 +179,7 @@ pub struct ScriptHost {
     log: Arc<Mutex<Vec<String>>>,
     start: Instant,
     host_fns: HostFns,
+    net: net::NetState,
 }
 
 /// Functions the embedder exposes to scripts as `host.name(...)`: each takes the call's
@@ -222,6 +227,7 @@ fn install_natives(
     start: Instant,
     env: Rc<dyn Environment>,
     host_fns: HostFns,
+    net: net::NetState,
 ) -> rquickjs::Result<()> {
     let n = Object::new(ctx.clone())?;
 
@@ -486,6 +492,10 @@ fn install_natives(
     native!("hostHas", {
         move |name: String| host_fns.borrow().contains_key(&name)
     });
+    native!("fetchStart", move |id: u32, method: String, url: String, headers: Vec<String>, body: String| {
+        let headers = headers.chunks(2).filter(|c| c.len() == 2).map(|c| (c[0].clone(), c[1].clone())).collect();
+        net.start(id, FetchRequest { method, url, headers, body: net::unb64(&body) });
+    });
     native!("now", move || start.elapsed().as_secs_f64() * 1000.0);
     native!("log", move |level: String, msg: String| {
         match level.as_str() {
@@ -509,15 +519,27 @@ impl ScriptHost {
         let log = Arc::new(Mutex::new(Vec::new()));
         let start = Instant::now();
         let host_fns: HostFns = Rc::default();
+        let net = net::NetState::new();
 
         context.with(|ctx| -> rquickjs::Result<()> {
-            install_natives(&ctx, doc, log.clone(), start, env, host_fns.clone())?;
+            install_natives(&ctx, doc, log.clone(), start, env, host_fns.clone(), net.clone())?;
             ctx.eval::<(), _>(prelude()).catch(&ctx).map_err(|e| {
                 eprintln!("[js] prelude failed: {e}");
                 rquickjs::Error::Unknown
             })
         })?;
-        Ok(ScriptHost { runtime, context, log, start, host_fns })
+        Ok(ScriptHost { runtime, context, log, start, host_fns, net })
+    }
+
+    /// The loader behind `fetch` and `XMLHttpRequest` (by default: files next to the page and
+    /// `data:` URLs). It runs on a worker thread per request.
+    pub fn set_fetcher(&self, fetcher: Arc<dyn Fetcher>) {
+        *self.net.fetcher.borrow_mut() = fetcher;
+    }
+
+    /// Requests still in flight; the embedder should keep ticking while there are any.
+    pub fn fetches_pending(&self) -> bool {
+        self.net.pending.get() > 0
     }
 
     /// Run promise jobs queued by the last call.
@@ -635,7 +657,25 @@ impl ScriptHost {
             next = f.call::<_, f64>((now,))?;
             Ok(())
         });
-        (next >= 0.0).then(|| Duration::from_secs_f64(next / 1000.0))
+        // Hand finished requests to their promises.
+        for (id, result) in self.net.take_done() {
+            self.call_global("__fetchDone", |_, f| {
+                match &result {
+                    Ok(r) => {
+                        let headers: Vec<String> = r.headers.iter().flat_map(|(k, v)| [k.clone(), v.clone()]).collect();
+                        f.call::<_, ()>((id, r.status, r.status_text.as_str(), r.url.as_str(), headers, net::b64(&r.body), ""))?;
+                    }
+                    Err(e) => f.call::<_, ()>((id, 0u16, "", "", Vec::<String>::new(), "", e.as_str()))?,
+                }
+                Ok(())
+            });
+        }
+        let poll = self.net.pending.get() > 0;
+        match ((next >= 0.0).then(|| Duration::from_secs_f64(next / 1000.0)), poll) {
+            (Some(d), true) => Some(d.min(Duration::from_millis(16))),
+            (None, true) => Some(Duration::from_millis(16)),
+            (d, false) => d,
+        }
     }
 
     /// Everything passed to `console.*` so far.
@@ -776,6 +816,90 @@ mod tests {
             r#"<li class="a">one</li><li>two</li><li class="x y" style="background-color: red" data-foo-bar="1">three</li>"#
         );
         assert!(doc.borrow().version > v0);
+    }
+
+    #[test]
+    fn web_platform_helpers_work() {
+        let (host, _) = host(r#"<ul id="l"><li>a</li></ul>"#);
+        host.run(
+            r#"
+            console.log(btoa('Hello, World!'), atob('SGVsbG8sIFdvcmxkIQ=='), btoa('ab'), atob('YWI'));
+            const bytes = new TextEncoder().encode('héllo €😀');
+            console.log(bytes.length, new TextDecoder().decode(bytes));
+            const u = new URL('../x/y.html?a=1&b=two%20words#top', 'https://user@Example.com:8080/p/q/r.html');
+            console.log(u.href, u.origin, u.pathname, u.searchParams.get('b'), u.hash, u.host);
+            u.searchParams.set('c', 'a b'); u.searchParams.append('a', '2');
+            console.log(u.search, u.searchParams.getAll('a').join('|'));
+            console.log(new URLSearchParams({ q: 'x y', n: 1 }).toString());
+            const o = { d: new Date(5), m: new Map([[1, { z: [1, 2] }]]), list: [1, { k: 2 }] };
+            o.self = o;
+            const c = structuredClone(o);
+            console.log(c !== o, c.self === c, c.d.getTime(), c.m.get(1).z.length, c.list[1].k);
+            localStorage.setItem('k', 'v'); localStorage.n = 5;
+            console.log(localStorage.getItem('k'), localStorage.n, localStorage.length, sessionStorage.length);
+            console.log(matchMedia('(min-width: 1px)').matches, matchMedia('(max-width: 1px)').matches, matchMedia('(prefers-color-scheme: light)').matches);
+            window.seen = [];
+            const ul = document.getElementById('l');
+            new MutationObserver((recs) => { for (const r of recs) seen.push(r.type + ':' + (r.attributeName || r.addedNodes.length + '/' + r.removedNodes.length)); })
+              .observe(ul, { childList: true, attributes: true, subtree: true });
+            const li = document.createElement('li');
+            ul.appendChild(li);
+            ul.setAttribute('data-x', '1');
+            li.setAttribute('class', 'new');
+            ul.removeChild(li);
+            "#,
+        )
+        .unwrap();
+        host.run("console.log(seen.join(','))").unwrap();
+        let out = host.console_output();
+        assert_eq!(out[0], "SGVsbG8sIFdvcmxkIQ== Hello, World! YWI= ab");
+        assert_eq!(out[1], "14 héllo €😀");
+        assert_eq!(out[2], "https://user@example.com:8080/p/x/y.html?a=1&b=two%20words#top https://example.com:8080 /p/x/y.html two words #top example.com:8080");
+        assert_eq!(out[3], "?a=1&b=two+words&c=a+b&a=2 1|2");
+        assert_eq!(out[4], "q=x+y&n=1");
+        assert_eq!(out[5], "true true 5 2 2");
+        assert_eq!(out[6], "v 5 2 0");
+        assert_eq!(out[7], "true false true");
+        assert_eq!(out[8], "childList:1/0,attributes:data-x,attributes:class,childList:0/1");
+    }
+
+    #[test]
+    fn fetch_and_xhr_load_local_files_and_data_urls() {
+        let dir = std::env::temp_dir().join(format!("nile-fetch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("d.json"), r#"{"n":7,"s":"héllo"}"#).unwrap();
+        let (host, _) = host("<p></p>");
+        host.set_fetcher(Arc::new(LocalFetcher::new(&dir)));
+        host.run(
+            r#"
+            window.out = [];
+            fetch('d.json').then(r => { out.push(r.status + ' ' + r.ok + ' ' + r.headers.get('content-type')); return r.json(); })
+              .then(j => out.push(j.n + j.s));
+            fetch('nope.txt').then(r => out.push(r.status + ' ' + r.ok));
+            fetch('data:text/plain;base64,SGk=').then(r => r.text()).then(t => out.push(t));
+            fetch('https://example.com/').catch(e => out.push('rejected'));
+            const x = new XMLHttpRequest();
+            x.open('GET', 'd.json'); x.responseType = 'json';
+            x.onload = () => out.push('xhr ' + x.status + ' ' + x.response.n);
+            x.send();
+            const ac = new AbortController();
+            fetch('d.json', { signal: ac.signal }).catch(e => out.push('aborted'));
+            ac.abort();
+            "#,
+        )
+        .unwrap();
+        for _ in 0..200 {
+            host.tick();
+            if !host.fetches_pending() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        host.tick();
+        host.run("console.log(out.slice().sort().join('|'))").unwrap();
+        let out = host.console_output();
+        assert_eq!(out[0], "200 true application/json|404 false|7héllo|Hi|aborted|rejected|xhr 200 7");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
