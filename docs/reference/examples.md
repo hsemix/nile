@@ -16,6 +16,7 @@ ownership require a GUI run; PNG success does not verify them.
 
 | Entry | Features/workflows | Persistence and limitations |
 |---|---|---|
+| [System theme](../../examples/system-theme/index.html) | Optional OS appearance, control states and components | External CSS package; [loading guide](../../themes/system/README.md) |
 | [POS](../../examples/pos/index.html) | Product search/categories, quantities, discount, customers, held carts, cash/change, simulated card/mobile, receipts and reports | In-memory sample data; no real payments, database, authentication or printing. [Instructions](../../examples/pos/README.md) |
 | [File explorer](../../examples/file-explorer/index.html) | Real directory tree, filtering, sorting, text preview, history, context menu and split panes | Read-only application; synchronous filesystem access, text previews ≤64 KB. [Instructions](../../examples/file-explorer/README.md) |
 | [Virtual grid](../../examples/virtual-grid/index.html) | Up to 1M×100 logical cells, two-axis virtualization, jumps, keyboard navigation and sparse edits | Generated data; in-memory edits, fixed tracks. [Implementation](../../examples/virtual-grid/README.md) |

@@ -39,6 +39,7 @@ for these examples.
 | POS sales, held orders, checkout and reports | [POS](../../examples/pos/README.md) |
 | Large datasets with two-axis virtualization | [Virtual grid](../../examples/virtual-grid/README.md) |
 | Real filesystem browsing | [File explorer](../../examples/file-explorer/README.md) |
+| Optional OS-specific controls and components | [System theme](../../themes/system/README.md), [demo](../../examples/system-theme/index.html) |
 | First app: input, events, theme, selectable text | [Getting started](../../examples/getting-started/index.html) |
 | An application-drawn menubar | [Menubar](../../examples/menubar.html), [its script](../../examples/menubar.js) |
 | Nine desktop interfaces with local state | [Workbench](../../examples/workbench/README.md) |

@@ -1,0 +1,10 @@
+/* Windows-inspired light appearance; not a query of the live Windows theme. */
+:root {
+  --ui-font:"Segoe UI",sans-serif; --ui-bg:#f3f3f3; --ui-surface:#ffffff; --ui-soft:#f7f7f7;
+  --ui-text:#202020; --ui-muted:#6b6b6b; --ui-border:#d1d1d1; --ui-hover:#f0f0f0; --ui-pressed:#e5e5e5;
+  --ui-accent:#0067c0; --ui-accent-hover:#005aab; --ui-accent-pressed:#004e94; --ui-selected:#e5f0fa;
+  --ui-focus:#0067c066; --ui-radius:4px; --ui-control-y:7px; --ui-control-x:13px;
+}
+input { border-bottom-color:#8a8a8a }
+input:focus,textarea:focus,select:focus { border-color:var(--ui-border); border-bottom-color:var(--ui-accent); box-shadow:0 1px 0 var(--ui-accent) }
+button { border-bottom-color:#b5b5b5 } button.primary { border-bottom-color:var(--ui-accent-pressed) }
