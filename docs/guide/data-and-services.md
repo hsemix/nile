@@ -86,6 +86,11 @@ navigate. `history.pushState`/`replaceState` exist without back/forward navigati
 
 ## Built-in modules
 
+For all module exports, signatures and placeholders, see the
+[built-in module reference](../reference/modules.md). For binary data, streams,
+WebSocket and request limitations, see the [web API reference](../reference/web-api.md).
+
+
 ```js
 import { uuid } from '@nile';
 import { OS, language } from '@env';
@@ -103,6 +108,6 @@ names and behavior rather than assuming complete Sciter compatibility.
 ## Use host functions for application-specific work
 
 Storage and fetch cover common data needs. Native integrations such as database
-access, privileged business operations or a custom save dialog still belong in
+access, privileged business operations or application-specific save workflows still belong in
 the host. `host.has(name)` and the JSON `host.name(...)` bridge let a page detect
 and call registered services. See [embedding](embedding.md#connect-scripts-and-services).

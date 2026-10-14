@@ -139,3 +139,5 @@ Frames have additional overlay limits covered in [composition](composition.md).
 
 Whenever you change layout or styling, [render a PNG](cli.md) and inspect it at
 the intended window sizes. Passing JavaScript checks does not verify visual layout.
+
+Related reference: [CSS property and compatibility reference](../reference/css.md).

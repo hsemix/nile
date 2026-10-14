@@ -6,6 +6,12 @@ window, or embed the engine in an application that owns its window and services.
 The authoring syntax is familiar, but the supported DOM and CSS are a subset;
 Nile is not a browser or a drop-in implementation of Sciter.
 
+## Feature reference
+
+The [complete feature reference](../reference/README.md) documents API arguments,
+return values, compatibility limits and runnable examples. It includes CSS/DOM,
+web APIs, built-in modules, windows, rich text and every exported C function.
+
 ## Start here
 
 1. [Build and run your first app](getting-started.md).
@@ -30,6 +36,9 @@ for these examples.
 
 | Learn about | Open this example |
 |---|---|
+| POS sales, held orders, checkout and reports | [POS](../../examples/pos/README.md) |
+| Large datasets with two-axis virtualization | [Virtual grid](../../examples/virtual-grid/README.md) |
+| Real filesystem browsing | [File explorer](../../examples/file-explorer/README.md) |
 | First app: input, events, theme, selectable text | [Getting started](../../examples/getting-started/index.html) |
 | An application-drawn menubar | [Menubar](../../examples/menubar.html), [its script](../../examples/menubar.js) |
 | Nine desktop interfaces with local state | [Workbench](../../examples/workbench/README.md) |

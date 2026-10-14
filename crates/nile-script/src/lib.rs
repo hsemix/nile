@@ -1,7 +1,7 @@
 //! JavaScript runtime (QuickJS via rquickjs) with a web-style DOM.
 //!
 //! Rust exposes a small set of native functions over the arena DOM
-//! (`__nile`, see [`install_natives`]); `prelude.js` builds the familiar
+//! (`__nile`, installed by `install_natives`); `prelude.js` builds the familiar
 //! classes on top (`document`, `Element`, `classList`, `style`, events with
 //! capture/bubble, timers). Nodes are identified by arena id, so JS wrappers
 //! are cheap and detached nodes simply stay in the arena.

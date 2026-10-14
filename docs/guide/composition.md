@@ -88,8 +88,9 @@ cargo run -p nile-shell -- examples/frameset.html
 ## Current limits
 
 Frames paint above outer-page content, so an outer dropdown or fixed overlay
-cannot cover a frame. Ancestor overflow clipping and transforms do not fully
-apply to frame painting. Tab does not enter a frame; click inside to direct input
+cannot cover a frame. Frame placement and input now follow ancestor overflow clips and transforms,
+as demonstrated by [transformed frames](../../examples/frames-transformed.html).
+Frames inside paged paper do not yet use the sheet mapping. Tab does not enter a frame; click inside to direct input
 there. Frame loading is synchronous with no `:busy` state. Use includes or normal
 DOM components instead when you need shared selection, integrated overlay layering
 or one script context.

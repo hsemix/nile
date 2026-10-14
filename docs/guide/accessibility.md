@@ -67,3 +67,5 @@ rebuilt on each change (fine for ordinary documents; a 1,500-row table costs a f
 update). Popups shown in their own OS windows and secondary windows each have their own tree. I could
 check the structure with AccessKit's consumer in tests but not with a real screen reader here, so treat
 reports from VoiceOver, NVDA and Orca as the source of truth.
+
+Related reference: [Native host function contracts](../reference/native-api.md).

@@ -68,3 +68,5 @@ the gap. Clicking in a margin puts the caret at the nearest line. `el.pageCount`
 - A repeated header for tables nested in tables, `position: fixed` headers per page; `@page` margin-box sizing beyond the six corners/edges.
 - `@media print` rules, and printing through the system's print dialog (export to PDF and print that).
 - Pages that have their own `size` or margins (`@page :first`) flow at the first page's content size.
+
+Related reference: [Editing commands](../reference/editing.md) and [native PDF APIs](../reference/native-api.md).

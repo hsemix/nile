@@ -48,7 +48,7 @@ Call `document.execCommand(name, false, value)`. Check its return value, and use
 | Paragraphs | `formatBlock` with `'h2'`, `'p'` or `'blockquote'`; `justifyLeft`, `justifyCenter`, `justifyRight`, `justifyFull` |
 | Lists | `insertUnorderedList`, `insertOrderedList`, `indent`, `outdent` |
 | Selected-block styles (Nile extension) | `blockStyle` with `'line-height: 1.8; margin-left: 16px'` |
-| Insertion | `insertText`, `insertHTML`, `insertParagraph`, `insertLineBreak`, `insertImage`, `insertHorizontalRule` |
+| Insertion | `insertText`, `insertHTML`, `insertParagraph`, `insertLineBreak`, `insertImage`, `insertHorizontalRule`, `insertPageBreak` |
 | Links / cleanup | `createLink`, `unlink`, `removeFormat` |
 | Editing | `delete`, `selectAll`, `undo`, `redo`, `copy`, `cut`, `paste` |
 | Tables (Nile extension) | `insertTable` with `'3x2'`; with the caret in a cell: `tableInsertRowAbove`, `tableInsertRowBelow`, `tableInsertColumnLeft`, `tableInsertColumnRight`, `tableDeleteRow`, `tableDeleteColumn`, `tableDeleteTable`, `tableSplitCell`, and `tableMergeCells` (select from one cell to another; the covered rectangle becomes one cell with `colspan`/`rowspan`) |
@@ -105,8 +105,8 @@ table. Search matches within text nodes and advances on Enter; a match spanning
 multiple styled nodes is not found as one string.
 
 Several ribbon items remain demonstrations: Save and AutoSave do not persist the
-document, sharing/printing are not implemented, and the command labelled Page
-break inserts a horizontal rule rather than paginating. Paragraph marks toggles
+document, sharing is not implemented, and Print preview is not connected to PDF export. Insert → Page break uses
+`insertPageBreak`; View → Print layout enables paged rendering. Paragraph marks toggles
 an outline, not visible nonprinting characters. For persistence, explicitly save
 the editor's `innerHTML` with [storage](data-and-services.md#save-a-draft).
 
@@ -117,3 +117,6 @@ HTML (emphasis, headings, lists, quotes, links, images and selected inline style
 C clipboard callbacks currently exchange text only. There is no spell-check,
 text drag-and-drop, image alignment/wrapping or captions, or resizing table columns by dragging. Indent uses margins rather than nested
 lists. This is an editable document foundation, not full Word compatibility.
+
+See the [editing reference](../reference/editing.md) for every command argument,
+Selection/Range member and geometry limitation.

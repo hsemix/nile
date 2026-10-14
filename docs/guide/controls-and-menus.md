@@ -237,7 +237,7 @@ Sciter's it can't block the script, so it returns a **Promise** of the value the
 
 A dialog, tool or popup window (and anything with a `parent`) is owned by its opener where winit allows it: it stays above, and hides and closes with its owner (macOS, Windows; on Linux the windows are independent). `new Window(...)` can't
 be shown modally afterwards, `Window.all` lists the windows this one opened plus itself, and C hosts
-don't see the open/message commands yet. See the [windows example](../../examples/windows.html).
+consume open/message commands through the window-request API. See the [windows example](../../examples/windows.html).
 
 ## Dialogs and command state
 
@@ -288,3 +288,6 @@ macOS, the window's menu bar on Windows. Elsewhere it does nothing, so draw your
   (JSON: `[{"id", "label", "accel"?, "enabled", "checked", "role"?, "items"?}, {"separator": true}]`; free it with
   `nile_string_free`), report a chosen item with `nile_view_menu_click(view, id)` (it returns NULL, or a window role
   such as `"quit"` to carry out) and, when their menu bar doesn't take shortcuts, `nile_view_menu_accelerator`.
+
+See [windows reference](../reference/windows.md) for complete handles, arguments,
+return values and current native limitations.
