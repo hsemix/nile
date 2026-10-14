@@ -66,9 +66,9 @@ mod win {
                 return false;
             }
             let cmd = msg.wParam & 0xFFFF;
-            let node = TABLES.lock().ok().and_then(|t| t.as_ref()?.get(&(msg.hwnd as isize))?.get(cmd.wrapping_sub(1)).copied());
+            let node = TABLES.lock().ok().and_then(|t| t.as_ref()?.get(&msg.hwnd)?.get(cmd.wrapping_sub(1)).copied());
             match (node, PROXY.get()) {
-                (Some(node), Some(proxy)) => proxy.send_event(UserEvent::MenuIn(msg.hwnd as isize, node)).is_ok(),
+                (Some(node), Some(proxy)) => proxy.send_event(UserEvent::MenuIn(msg.hwnd, node)).is_ok(),
                 _ => false,
             }
         });
