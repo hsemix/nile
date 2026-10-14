@@ -78,6 +78,15 @@ cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --typ
 cargo test --workspace
 ```
 
+## POS interface demo
+
+```sh
+cargo run -p nile-shell -- examples/pos/index.html
+```
+
+A retail counter with product search, categories, a cart, discounts, held sales,
+checkout and receipts. Uses sample data in memory; see [the example instructions](examples/pos/README.md).
+
 ## Virtual data grid demo
 
 ```sh
