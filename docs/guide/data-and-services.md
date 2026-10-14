@@ -96,8 +96,7 @@ console.log(uuid(), OS, language());
 encoding and hash utilities, JSON++ parsing, device-pixel conversion and global
 events. `@env` exposes platform/environment information and operations such as
 `launch` and `exec`. Those operations run programs; they are capabilities of the
-runtime, not simulated UI actions. Bare npm package names, `@sys`, and `this://`
-URLs are still unsupported. See [nile-modules.html](../../examples/nile-modules.html)
+runtime, not simulated UI actions. Bare npm package names are still unsupported. See [nile-modules.html](../../examples/nile-modules.html)
 and [the module implementation](../../crates/nile-script/src/envmod.rs) for export
 names and behavior rather than assuming complete Sciter compatibility.
 

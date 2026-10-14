@@ -116,7 +116,7 @@ fn platform() -> &'static str {
 }
 
 /// A path or URL (`this://app/...`, `file://...`) as a path.
-fn path_of(p: &str) -> PathBuf {
+pub(crate) fn path_of(p: &str) -> PathBuf {
     nile_dom::vfs::url_to_path(p).unwrap_or_else(|| PathBuf::from(crate::net::path_of_url(p)))
 }
 
@@ -188,7 +188,7 @@ pub fn fs(op: &str, args: &[String]) -> Result<String, String> {
     }
 }
 
-fn json_str(s: &str) -> String {
+pub(crate) fn json_str(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {
         match c {

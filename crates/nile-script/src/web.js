@@ -1484,8 +1484,7 @@
   Object.defineProperty(g, "__sciterModule", { value: sciterModule });
   Object.defineProperty(g, "__envModule", { value: envModule });
   // `@sys`: the file-system part of Sciter's NodeJS-style module (docs.sciter.com JS.runtime/module-sys),
-  // over the `fsCall` native. Sync functions throw; the promise forms wrap them. Not here: `open`/`File`,
-  // sockets, pipes, `spawn`, `watch`.
+  // over the `fsCall` native. Sync functions throw; the promise forms wrap them.
   const fsRun = (op, ...a) => {
     const r = N.fsCall(op, a);
     if (r.startsWith("E:")) { const e = new Error(r.slice(2)); e.code = r.slice(2, r.indexOf(":", 2)); throw e; }
@@ -1521,5 +1520,121 @@
     });
   }
   sysFs.readfile = sysFs.readFile; sysFs.readfileSync = sysFs.readFileSync; sync.readfile = sync.readFile;
-  Object.defineProperty(g, "__sysModule", { value: { fs: sysFs } });
+  // Files, sockets, processes and OS queries over the `sysCall`/`sysStart` natives (nile-script/src/sys.rs).
+  // Blocking calls return promises that `__sysDone` settles; not here: named pipes, TTYs, `fs.watch`.
+  const sysRun = (op, ...a) => {
+    const r = N.sysCall(op, a.map(String));
+    if (r.startsWith("E:")) { const m = r.slice(2); const e = new Error(m); e.code = m.slice(0, m.indexOf(":")); throw e; }
+    return r.slice(2);
+  };
+  const sysOps = new Map();
+  let sysNext = 1;
+  const sysAsync = (op, ...a) => new Promise((resolve, reject) => {
+    const id = sysNext++;
+    sysOps.set(id, { resolve, reject });
+    N.sysStart(id, op, a.map(String));
+  });
+  Object.defineProperty(g, "__sysDone", {
+    value(id, ok, text) {
+      const p = sysOps.get(id);
+      if (!p) return;
+      sysOps.delete(id);
+      if (ok) p.resolve(text); else p.reject(Object.assign(new Error(text), { code: text.slice(0, text.indexOf(":")) }));
+    },
+  });
+  const later = (fn) => new Promise((resolve, reject) => { try { resolve(fn()); } catch (e) { reject(e); } });
+  const readResult = (t) => (t === "E" ? undefined : b64ToBytes(t.slice(1)));
+  const addrOf = (o) => [o && o.ip != null ? o.ip : "", o && o.port != null ? o.port : 0];
+  class SysStream {
+    constructor(id) { Object.defineProperty(this, "_id", { value: id, writable: true }); }
+    read(len) { return sysAsync("read", this._id, len == null ? 65536 : len).then(readResult); }
+    write(data) { return sysAsync("write", this._id, bytesToB64(toBytes(data))).then(Number); }
+    close() { sysRun("close", this._id); }
+    fileno() { return this._id; }
+  }
+  class TCP extends SysStream {
+    constructor() { super(Number(sysRun("tcp_new"))); }
+    connect(addr) { return sysAsync("connect", this._id, ...addrOf(addr)).then(() => undefined); }
+    bind(addr) { sysRun("bind", this._id, ...addrOf(addr)); }
+    listen() { sysRun("listen", this._id); }
+    accept() { return sysAsync("accept", this._id).then((r) => { const s = Object.create(TCP.prototype); Object.defineProperty(s, "_id", { value: Number(r), writable: true }); return s; }); }
+    shutdown() { sysRun("shutdown", this._id); return Promise.resolve(); }
+    getsockname() { return JSON.parse(sysRun("sockname", this._id)); }
+    getpeername() { return JSON.parse(sysRun("peername", this._id)); }
+  }
+  class UDP {
+    constructor() { Object.defineProperty(this, "_id", { value: Number(sysRun("udp_new")), writable: true }); }
+    bind(addr) { sysRun("bind", this._id, ...addrOf(addr)); }
+    connect(addr) { return sysAsync("connect", this._id, ...addrOf(addr)).then(() => undefined); }
+    send(data, addr) { return sysAsync("send", this._id, bytesToB64(toBytes(data)), ...(addr ? addrOf(addr) : ["", 0])).then(Number); }
+    recv(len) { return sysAsync("recv", this._id, len == null ? 65536 : len).then((t) => { const o = JSON.parse(t); o.data = b64ToBytes(o.data); return o; }); }
+    close() { sysRun("close", this._id); }
+    fileno() { return this._id; }
+    getsockname() { return JSON.parse(sysRun("sockname", this._id)); }
+    getpeername() { return JSON.parse(sysRun("peername", this._id)); }
+  }
+  class Process {
+    constructor(info) {
+      this.pid = info.pid;
+      Object.defineProperty(this, "_id", { value: info.id });
+      for (const k of ["stdin", "stdout", "stderr"]) this[k] = info[k] == null ? null : new SysStream(info[k]);
+    }
+    wait() { return sysAsync("wait", this._id).then(JSON.parse); }
+    kill() { sysRun("kill", this._id); }
+  }
+  // `spawn(["ls", "-l"], { cwd, env, stdin, stdout, stderr })`: each stdio is "pipe" (default), "inherit" or "ignore".
+  // `env` adds to the program's environment.
+  const spawn = (args, opts = {}) => {
+    const list = typeof args === "string" ? args.trim().split(/\s+/) : Array.from(args, String);
+    const env = Object.entries(opts.env || {}).flat();
+    return new Process(JSON.parse(sysRun("spawn", opts.cwd || "", opts.stdin || "pipe", opts.stdout || "pipe", opts.stderr || "pipe", env.length / 2, ...env, ...list)));
+  };
+  class SysFile {
+    constructor(id, path) { Object.defineProperty(this, "_id", { value: id }); this.path = path; }
+    readSync(len, pos) { return b64ToBytes(sysRun("fread", this._id, len == null ? "" : len, pos == null ? "" : pos)); }
+    writeSync(data, pos) { return Number(sysRun("fwrite", this._id, bytesToB64(toBytes(data)), pos == null ? "" : pos)); }
+    statSync() { return JSON.parse(sysRun("fstat", this._id)); }
+    closeSync() { sysRun("close", this._id); }
+    read(len, pos) { return later(() => this.readSync(len, pos)); }
+    write(data, pos) { return later(() => this.writeSync(data, pos)); }
+    stat() { return later(() => this.statSync()); }
+    close() { return later(() => this.closeSync()); }
+    fileno() { return this._id; }
+  }
+  const openSync = (path, flags = "r") => new SysFile(Number(sysRun("fopen", pathOfAny(path), flags)), String(path));
+  sysFs.File = SysFile;
+  sysFs.openSync = openSync;
+  sysFs.open = (path, flags) => later(() => openSync(path, flags));
+  sysFs.Dir = class Dir {
+    constructor(path) { this.path = String(path); this._items = sync.readdir(path); if (this._items === null) throw Object.assign(new Error("ENOENT: no such directory: " + path), { code: "ENOENT" }); this._i = 0; }
+    next() { return Promise.resolve(this._i < this._items.length ? this._items[this._i++] : undefined); }
+    close() { this._i = this._items.length; }
+    [Symbol.asyncIterator]() { return { next: () => this.next().then((v) => (v === undefined ? { done: true, value: undefined } : { done: false, value: v })) }; }
+  };
+  sysFs.opendir = (path) => later(() => new sysFs.Dir(path));
+  sysFs.opendirSync = (path) => new sysFs.Dir(path);
+  const sysModule = {
+    fs: sysFs, TCP, UDP, Process, spawn,
+    hrtime: () => BigInt(Math.round(N.now() * 1e6)),
+    gettimeofday: () => JSON.parse(sysRun("gettimeofday")),
+    uname: () => JSON.parse(sysRun("uname")),
+    isatty: (fd) => sysRun("isatty", fd) === "true",
+    environ: () => JSON.parse(sysRun("environ")),
+    getenv: (name) => { const v = sysRun("getenv", name); return v === "" ? undefined : v.slice(1); },
+    setenv: (name, value) => { sysRun("setenv", name, value); },
+    unsetenv: (name) => { sysRun("unsetenv", name); },
+    cwd: () => sysRun("cwd"),
+    chdir: (dir) => { sysRun("chdir", dir); },
+    homedir: () => sysRun("homedir"),
+    tmpdir: () => sysRun("tmpdir"),
+    exepath: () => sysRun("exepath"),
+    // Random bytes: a length gives a new `Uint8Array`; a typed array is filled in place. Not cryptographic.
+    random: (target) => {
+      const buf = typeof target === "number" ? new Uint8Array(target) : target;
+      const bytes = b64ToBytes(sysRun("random", buf.byteLength));
+      new Uint8Array(buf.buffer || buf, buf.byteOffset || 0, buf.byteLength).set(bytes);
+      return buf;
+    },
+  };
+  Object.defineProperty(g, "__sysModule", { value: sysModule });
   }

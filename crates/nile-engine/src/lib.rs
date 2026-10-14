@@ -3483,6 +3483,64 @@ mod tests {
     }
 
     #[test]
+    fn the_sys_module_runs_processes_talks_over_sockets_and_opens_files() {
+        let dir = std::env::temp_dir().join(format!("nile-sys2-{}", std::process::id())).to_string_lossy().replace('\\', "/");
+        let command = if cfg!(windows) { r#"["cmd", "/c", "echo hi"]"# } else { r#"["echo", "hi"]"# };
+        let (mut p, path) = page(
+            &format!(r#"<body><script type="module">
+              import * as sys from "@sys";
+              const log = []; window.log = log; window.done = 0;
+              const dec = new TextDecoder();
+              const dir = "{dir}";
+              sys.fs.mkdirSync(dir);
+              // A file handle: write, then read back at a position.
+              const f = sys.fs.openSync(dir + "/f.txt", "w+");
+              f.writeSync("hello world");
+              log.push("file:" + dec.decode(f.readSync(5, 6)) + ":" + f.statSync().st_size);
+              f.closeSync();
+              // A process and its stdout.
+              const proc = sys.spawn({command});
+              (async () => {{
+                const out = await proc.stdout.read();
+                const status = await proc.wait();
+                log.push("proc:" + dec.decode(out).trim() + ":" + status.exit_status);
+                // A TCP echo over loopback.
+                const server = new sys.TCP();
+                server.bind({{ ip: "127.0.0.1", port: 0 }});
+                server.listen();
+                const port = server.getsockname().port;
+                const accepting = server.accept().then(async (conn) => {{ const data = await conn.read(); await conn.write(data); conn.close(); }});
+                const client = new sys.TCP();
+                await client.connect({{ ip: "127.0.0.1", port }});
+                await client.write("ping");
+                log.push("tcp:" + dec.decode(await client.read()));
+                await accepting;
+                client.close(); server.close();
+                // UDP.
+                const a = new sys.UDP(); a.bind({{ ip: "127.0.0.1", port: 0 }});
+                const b = new sys.UDP();
+                await b.send("dgram", {{ ip: "127.0.0.1", port: a.getsockname().port }});
+                log.push("udp:" + dec.decode((await a.recv()).data));
+                log.push("os:" + (typeof sys.uname().sysname) + ":" + (sys.getenv("NILE_SURELY_UNSET") === undefined) + ":" + sys.random(8).length + ":" + (typeof sys.hrtime()) + ":" + (sys.cwd().length > 0));
+                sys.setenv("NILE_SYS_TEST", "1"); log.push("env:" + sys.getenv("NILE_SYS_TEST"));
+                window.done = 1;
+              }})().catch((e) => {{ log.push("error:" + e.message); window.done = 1; }});
+            </script></body>"#),
+            "sys2",
+        );
+        for _ in 0..500 {
+            p.tick();
+            if js(&mut p, "window.done") == "1" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(js(&mut p, "window.log.join('|')"), "file:world:11|proc:hi:0|tcp:ping|udp:dgram|os:string:true:8:bigint:true|env:1");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn live_regions_are_marked_in_the_accessibility_tree() {
         let (mut p, path) = page(
             r#"<body style="margin:0"><div id="poll" aria-live="polite">Saved</div><div role="alert">Oops</div><div role="status" aria-atomic="false">Ready</div>

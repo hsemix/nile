@@ -27,8 +27,8 @@ import { createStore } from './store.js';
 ```
 
 Relative and absolute filesystem module paths work, together with `@nile`,
-`@sciter` (an alias) and `@env`. Bare npm package resolution, `@sys` and `this://`
-URLs are not implemented. An inline module resolves imports from the HTML file's
+`@sciter` (an alias) and `@env`. Bare npm package resolution is not implemented; `@sys` is
+documented in [packaging](packaging.md#bootstrap-scripts-runjs). An inline module resolves imports from the HTML file's
 folder. See [built-in modules](data-and-services.md#built-in-modules).
 
 ## Find and update elements
