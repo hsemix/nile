@@ -144,6 +144,16 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
 
 ![Nine Nile application interfaces](docs/workbench/overview.png)
 
+## Optional system appearance
+
+Load [the external system theme](themes/system/README.md) to apply platform-specific
+control and component styling, including hover/pressed/focus states. The package
+is optional and separate from the engine.
+
+```sh
+cargo run -p nile-shell -- examples/system-theme/index.html
+```
+
 ## Documentation
 
 Start with the [user guide](docs/guide/README.md). The

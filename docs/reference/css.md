@@ -2,6 +2,15 @@
 
 [Reference index](README.md) · [Layout tutorial](../guide/layout-and-style.md)
 
+## Optional platform theme
+
+The [system theme package](../../themes/system/README.md) is loaded explicitly
+with `<include src="themes/system/system.htm"></include>`. It selects Windows,
+macOS or Linux sheets and styles supported controls and components, including
+hover/pressed/focus states. It is not part of the engine and does not read live
+OS accent/dark-mode settings. Renderer-defined internal control parts have
+styling limits documented by the package.
+
 ## Style sources and values
 
 Use `<style>`, `style="..."` or `<link rel="stylesheet" href="app.css">`.

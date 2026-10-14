@@ -1,0 +1,9 @@
+/* Adwaita-inspired light appearance; Linux desktops do not have a single theme. */
+:root {
+  --ui-font:"Cantarell",sans-serif; --ui-bg:#fafafa; --ui-surface:#ffffff; --ui-soft:#f6f5f4;
+  --ui-text:#2e3436; --ui-muted:#77767b; --ui-border:#cdc7c2; --ui-hover:#eae8e6; --ui-pressed:#dedbd8;
+  --ui-accent:#3584e4; --ui-accent-hover:#2876d2; --ui-accent-pressed:#1c66bf; --ui-selected:#e4eefb;
+  --ui-focus:#3584e466; --ui-radius:6px; --ui-control-y:8px; --ui-control-x:14px;
+}
+button { background:#f6f5f4; border-bottom-color:#bfb8b1 } button.primary { background:var(--ui-accent); border-color:var(--ui-accent) }
+.ui-toolbar { background:#f6f5f4 }
