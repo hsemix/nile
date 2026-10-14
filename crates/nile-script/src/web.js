@@ -249,6 +249,7 @@
     getOwnPropertyDescriptor: (t, k) => (t._m.has(k) ? { value: t._m.get(k), writable: true, enumerable: true, configurable: true } : undefined),
   });
   g.Storage = Storage;
+  Storage.open = (...a) => g.__storageModule.open(...a);
   const localRaw = new Storage();
   // `localStorage` is saved to the file the host chose (`ScriptHost::set_storage_file`), soon
   // after a change; without one it lives and dies with the page.
@@ -1999,4 +2000,79 @@
   };
   for (const [k, v] of [["CONNECTING", 0], ["OPEN", 1], ["CLOSING", 2], ["CLOSED", 3]]) Object.defineProperty(g.WebSocket.prototype, k, { value: v });
   Object.defineProperty(g, "__sysModule", { value: sysModule });
+
+  // `@debug` (docs.sciter.com JS.runtime/module-debug): the handlers that make sense without an
+  // inspector; the breakpoint/inspection functions exist but do nothing.
+  const callFrame = (level) => {
+    const lines = String(new Error().stack || "").split("\n").filter((l) => /^\s*at /.test(l));
+    const l = lines[level + 1]; // 0 = this helper, 1 = callStackAt, so level 0 is its caller
+    if (!l) return null;
+    const m = /^\s*at (?:(.*?) \()?(.*?):(\d+)(?::\d+)?\)?$/.exec(l) || [];
+    return { isNative: /native/.test(l), functionName: m[1] || "", functionLineNo: 0, fileName: m[2] || "", lineNo: +m[3] || 0 };
+  };
+  const debugModule = {
+    setUnhandledExceptionHandler(f) { hooks.unhandled = typeof f === "function" ? f : null; },
+    setConsoleOutputHandler(f) { hooks.console = typeof f === "function" ? f : null; },
+    callStackAt(level) { return callFrame(level | 0); },
+    setResourceArrivalHandler() {}, setBreakpointHandler() {}, setBreakpoints() {},
+    getElementByUID(uid) { return wrap(uid); },
+    getUIDofElement(el) { return el._id; },
+    highlightElement() {}, getStyleRulesOfElement() { return []; }, containerId() { return 0; },
+    objectKind(o) { return o === null ? "null" : Array.isArray(o) ? "array" : typeof o; },
+    sublimatedValue(v) { return v; }, sublimatedValueElements() { return []; }, frameVariables() { return {}; },
+  };
+  Object.defineProperty(g, "__debugModule", { value: debugModule });
+
+  // `@storage` (docs.sciter.com Storage): `open(path)` gives a store whose `root` object persists
+  // on `commit()`/`close()`. The file is JSON (Dates and registered classes are tagged), not
+  // Sciter's own format; indexes (`createIndex`) aren't implemented.
+  const storageOpen = (path, allowWrite = true) => {
+    path = String(path);
+    const classes = new Map();
+    let root = {};
+    let text = null;
+    try { text = new TextDecoder().decode(fsRead(path)); } catch (e) { if (e.code !== "ENOENT" && !allowWrite) return null; }
+    const revive = (v) => {
+      if (Array.isArray(v)) return v.map(revive);
+      if (v && typeof v === "object") {
+        if ("$date" in v) return new Date(v.$date);
+        const o = {};
+        for (const k of Object.keys(v)) if (k !== "$class") o[k] = revive(v[k]);
+        if (v.$class && classes.has(v.$class)) Object.setPrototypeOf(o, classes.get(v.$class).prototype);
+        return o;
+      }
+      return v;
+    };
+    const tag = (v, seen) => {
+      if (v instanceof Date) return { $date: v.getTime() };
+      if (Array.isArray(v)) return v.map((x) => tag(x, seen));
+      if (v && typeof v === "object") {
+        if (seen.has(v)) throw new Error("storage: circular reference");
+        seen.add(v);
+        const o = {};
+        const cls = Object.getPrototypeOf(v) !== Object.prototype && Object.getPrototypeOf(v) !== null ? v.constructor && v.constructor.name : null;
+        if (cls && classes.has(cls)) o.$class = cls;
+        for (const k of Object.keys(v)) if (typeof v[k] !== "function") o[k] = tag(v[k], seen);
+        seen.delete(v);
+        return o;
+      }
+      return v;
+    };
+    let pending = text;
+    const db = {
+      get root() { if (pending !== null) { try { root = revive(JSON.parse(pending)); } catch (_) { root = {}; } pending = null; } return root; },
+      set root(v) { pending = null; root = v; },
+      registerClass(cls) { classes.set(cls.name, cls); },
+      commit() {
+        if (!allowWrite) return;
+        fsWrite(path, JSON.stringify(tag(db.root, new Set())));
+      },
+      close() { db.commit(); },
+      createIndex() { return null; },
+    };
+    return db;
+  };
+  const fsRead = (p) => b64ToBytes(fsRun("read", String(p)));
+  const fsWrite = (p, text) => { fsRun("write", String(p), bytesToB64(new TextEncoder().encode(text))); };
+  Object.defineProperty(g, "__storageModule", { value: { open: storageOpen } });
   }

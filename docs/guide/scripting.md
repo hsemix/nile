@@ -103,8 +103,46 @@ and modules without a separate compiler. The default `JSX` function creates
 virtual-node arrays, not DOM elements. `append`, `prepend`, `content` and `patch`
 materialize or reconcile those values. `content()` replaces children;
 `patch(vnode, true)` reconciles children. Function components receive props,
-children and a parent argument. Class components and `componentUpdate` are not
-implemented; reconciliation is simplified, matching children by key, id, then tag.
+children and a parent argument. Reconciliation is simplified, matching children by key, id, then tag.
+
+### Class components
+
+A class that extends `Element` is a component when used as a JSX tag. Its element is a
+`<div>`; the root of what `render()` returns lends its attributes and children to it.
+
+```js
+class Counter extends Element {
+  count = 0;
+  this(props, kids) { this.props = props; }     // after the constructor, and again on each parent render
+  render() { return <div class="counter">{this.props.label}: {this.count}</div>; }
+  componentDidMount() { this.on("click", () => this.componentUpdate({ count: this.count + 1 })); }
+  componentDidUpdate() {}
+  componentWillUnmount() {}
+}
+$("#app").content(<Counter label="Clicks"/>);
+```
+
+`componentUpdate({ count: 1 })` merges the fields and re-renders on the next turn (several calls
+batch into one render; nothing happens if no value changed; without an argument it always
+re-renders). When a parent re-renders with `patch`, matching component elements are reused (by
+`key`, else class) and get `this(props, kids)` + `render()` again. `Element.create(jsx)` builds an
+element from JSX, `el.post(fn)` runs `fn` after the current event. `examples/components.html`.
+
+### `Element.value` of a form
+
+`<form>` (or any element with `behavior="form"`) reports its named controls as an object:
+strings for text, numbers for `number`/`range`, booleans for checkboxes, the chosen value for a
+radio group. Assigning an object sets the controls it names.
+
+## `@debug` and `@storage`
+
+`import * as debug from "@debug"` offers `setUnhandledExceptionHandler(fn(err))`,
+`setConsoleOutputHandler(fn(subsystem, severity, msg))` (return `true` to swallow the line; severity
+0 info, 1 warning, 2 error) and `callStackAt(level)`; the breakpoint and inspector functions exist but
+do nothing. `import * as DB from "@storage"` (also the global `Storage.open`) gives
+`open(path, allowWrite = true)` -> `{ root, commit(), close(), registerClass(cls) }`: the `root`
+object graph is saved as JSON on `commit()`/`close()`, with `Date`s and registered class instances
+restored. Sciter's own file format, indexes (`createIndex`) and passwords are not supported.
 
 ## Timers and measurements
 

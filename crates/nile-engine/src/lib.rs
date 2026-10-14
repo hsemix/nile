@@ -3811,6 +3811,75 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[test]
+    fn class_components_forms_storage_and_debug_work() {
+        let db = std::env::temp_dir().join(format!("nile-store-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let src = r#"<body><form id="f"><input name="a" value="1"><input name="n" type="number" value="5"><input name="c" type="checkbox"><input name="r" type="radio" value="x"><input name="r" type="radio" value="y" checked></form><div id="host"></div><script type="module">
+              import * as debug from "@debug";
+              import * as DB from "@storage";
+              window.log = [];
+              const log = window.log;
+              class Clock extends Element {
+                time = 1;
+                this(props, kids) { this.props = props; this.kids = kids; log.push("this:" + props.label); }
+                render() { return <span class="c">{this.props.label}:{this.time}:{this.kids.length}</span>; }
+                componentDidMount() { log.push("mount:" + this.isConnected); }
+                componentDidUpdate() { log.push("update"); }
+                componentWillUnmount() { log.push("unmount"); }
+              }
+              const host = document.getElementById("host");
+              host.content(<div><Clock label="A"><i/></Clock></div>);
+              const clock = host.querySelector("div").firstElementChild;
+              log.push(clock instanceof Clock, clock.className, clock.textContent);
+              host.patch(<div><Clock label="B"><i/></Clock></div>, true);
+              log.push(host.querySelector("div").firstElementChild === clock ? "reused" : "new", clock.textContent);
+              clock.componentUpdate({ time: 2 });
+              clock.componentUpdate({ time: 3 });
+              await 0;
+              log.push(clock.textContent);
+              clock.componentUpdate({ time: 3 });
+              await 0;
+              host.content(<p/>);
+              log.push(JSON.stringify(document.getElementById("f").value));
+              document.getElementById("f").value = { a: "z", c: true, r: "x" };
+              log.push(JSON.stringify(document.getElementById("f").value));
+              const e = Element.create(<b>hi</b>);
+              log.push(e.localName);
+              const path = "DBPATH";
+              class Note { hello() { return "hi " + this.t; } }
+              const store = DB.open(path);
+              store.registerClass(Note);
+              store.root.n = Object.assign(new Note(), { t: "x" });
+              store.root.when = new Date(86400000);
+              store.close();
+              const again = DB.open(path);
+              again.registerClass(Note);
+              log.push(again.root.n.hello() + ":" + (again.root.when instanceof Date) + ":" + again.root.when.getTime());
+              let caught = "";
+              debug.setConsoleOutputHandler((sys, sev, msg) => { caught = sev + msg; return true; });
+              console.warn("careful");
+              log.push(caught);
+              const frame = debug.callStackAt(0);
+              log.push(typeof frame.lineNo);
+              window.done = 1;
+            </script></body>"#.replace("DBPATH", &db.to_string_lossy().replace('\\', "/"));
+        let (mut p, path) = page(&src, "components");
+        for _ in 0..200 {
+            p.tick();
+            if js(&mut p, "window.done") == "1" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            js(&mut p, "window.log.join('|')"),
+            "this:A|mount:true|true|c|A:1:1|this:B|reused|B:1:1|update|B:3:1|unmount|{\"a\":\"1\",\"n\":5,\"c\":false,\"r\":\"y\"}|{\"a\":\"z\",\"n\":5,\"c\":true,\"r\":\"x\"}|b|hi x:true:86400000|1careful|number"
+        );
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(db);
+    }
+
     /// A WebSocket server for one connection: accepts, echoes data frames and answers a close.
     fn echo_websocket_server() -> u16 {
         use std::io::{Read, Write};
