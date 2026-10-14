@@ -301,9 +301,21 @@ mod win {
         UI::{
             Controls::Dialogs::{GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW},
             Input::KeyboardAndMouse::GetActiveWindow,
-            WindowsAndMessaging::{MessageBoxW, SendMessageW, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
+            WindowsAndMessaging::{GetForegroundWindow, MessageBoxW, SendMessageW, SetForegroundWindow, MB_SETFOREGROUND, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
         },
     };
+
+    /// The window a dialog belongs to: the one active on this thread, else the foreground window
+    /// (a dialog with no owner can open behind the application).
+    fn owner() -> isize {
+        // SAFETY: plain queries.
+        unsafe {
+            match GetActiveWindow() {
+                0 => GetForegroundWindow(),
+                active => active,
+            }
+        }
+    }
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -343,7 +355,7 @@ mod win {
         // SAFETY: an all-zero OPENFILENAMEW is a valid empty one; the buffers outlive the call.
         let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
         ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-        ofn.hwndOwner = unsafe { GetActiveWindow() };
+        ofn.hwndOwner = owner();
         ofn.lpstrFilter = list.as_ptr();
         ofn.nFilterIndex = 1;
         ofn.lpstrFile = file.as_mut_ptr();
@@ -401,8 +413,14 @@ mod win {
 
     /// Opens the folder chooser on the folder `data` (a NUL-terminated wide path) points to.
     unsafe extern "system" fn start_at(hwnd: isize, msg: u32, _l: isize, data: isize) -> i32 {
-        if msg == BFFM_INITIALIZED && data != 0 {
-            unsafe { SendMessageW(hwnd, BFFM_SETSELECTIONW, 1, data) };
+        if msg == BFFM_INITIALIZED {
+            unsafe {
+                // Come to the front even when the chooser was opened by a timer or a background script.
+                SetForegroundWindow(hwnd);
+                if data != 0 {
+                    SendMessageW(hwnd, BFFM_SETSELECTIONW, 1, data);
+                }
+            }
         }
         0
     }
@@ -417,12 +435,12 @@ mod win {
             // The new-style dialog needs COM; it is fine if the thread already has it.
             CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32);
             let info = BrowseInfo {
-                owner: GetActiveWindow(),
+                owner: owner(),
                 root: null_mut(),
                 display_name: null_mut(),
                 title: if caption.is_empty() { null() } else { title.as_ptr() },
                 flags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
-                callback: start.is_some().then_some(start_at as unsafe extern "system" fn(isize, u32, isize, isize) -> i32),
+                callback: Some(start_at),
                 lparam: start.as_ref().map_or(0, |s| s.as_ptr() as isize),
                 image: 0,
             };
@@ -445,7 +463,7 @@ mod win {
             MessageKind::Question => MB_ICONQUESTION,
         };
         let (text, caption) = (wide(text), wide(caption));
-        let answer = unsafe { MessageBoxW(GetActiveWindow(), text.as_ptr(), caption.as_ptr(), icon | if question { MB_YESNO } else { MB_OK }) };
+        let answer = unsafe { MessageBoxW(owner(), text.as_ptr(), caption.as_ptr(), icon | MB_SETFOREGROUND | if question { MB_YESNO } else { MB_OK }) };
         answer == IDYES || (!question && answer == IDOK)
     }
 }
