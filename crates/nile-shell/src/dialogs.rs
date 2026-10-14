@@ -1,8 +1,10 @@
-//! Native dialogs through whatever the system ships (no extra dependencies): AppleScript on macOS,
-//! PowerShell and Windows Forms on Windows, `zenity` or `kdialog` elsewhere. Each call blocks
-//! until the user answers. This is the shell's [`Dialogs`] for scripts and for `<input type=file>`.
+//! Native dialogs without extra dependencies: the Win32 common dialogs on Windows (owned by the
+//! active window, so its parent is blocked while one is open), AppleScript on macOS, `zenity` or
+//! `kdialog` elsewhere. Each call blocks until the user answers. This is the shell's [`Dialogs`] for scripts and for `<input type=file>`.
 
-use std::{path::Path, process::Command};
+use std::path::Path;
+#[cfg(not(windows))]
+use std::process::Command;
 
 use nile_engine::dialogs::{Dialogs, FileFilter, MessageKind};
 
@@ -39,10 +41,12 @@ fn start_dir(path: &str) -> Option<String> {
     }
 }
 
+#[cfg(not(windows))]
 fn lines(out: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(out).lines().map(|l| l.trim_end_matches('\r').to_string()).filter(|l| !l.is_empty()).collect()
 }
 
+#[cfg(not(windows))]
 /// Runs `command`; its output lines on success, nothing when cancelled. Real failures are reported.
 fn run(mut command: Command) -> Vec<String> {
     match command.output() {
@@ -62,40 +66,19 @@ fn run(mut command: Command) -> Vec<String> {
     }
 }
 
+#[cfg(not(windows))]
 fn osa(script: &str) -> Vec<String> {
     let mut c = Command::new("osascript");
     c.args(["-e", script]);
     run(c)
 }
 
+#[cfg(not(windows))]
 fn osa_str(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn ps(script: &str) -> Vec<String> {
-    let mut c = Command::new("powershell");
-    c.args(["-NoProfile", "-Command", &format!("Add-Type -AssemblyName System.Windows.Forms; {script}")]);
-    run(c)
-}
-
-fn ps_str(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
-
-fn ps_filter(filters: &[FileFilter]) -> String {
-    if filters.is_empty() {
-        return ps_str("All files|*.*");
-    }
-    let parts: Vec<String> = filters
-        .iter()
-        .map(|f| {
-            let pats = if f.extensions.is_empty() { "*.*".to_string() } else { f.extensions.iter().map(|e| format!("*.{e}")).collect::<Vec<_>>().join(";") };
-            format!("{}|{pats}", f.label)
-        })
-        .collect();
-    ps_str(&parts.join("|"))
-}
-
+#[cfg(not(windows))]
 fn zenity_filters(c: &mut Command, filters: &[FileFilter]) {
     for f in filters {
         let pats = if f.extensions.is_empty() { "*".to_string() } else { f.extensions.iter().map(|e| format!("*.{e}")).collect::<Vec<_>>().join(" ") };
@@ -103,6 +86,7 @@ fn zenity_filters(c: &mut Command, filters: &[FileFilter]) {
     }
 }
 
+#[cfg(not(windows))]
 impl Dialogs for NativeDialogs {
     fn open_files(&self, multiple: bool, filters: &[FileFilter], caption: &str, dir: &str) -> Vec<String> {
         let start = start_dir(dir);
@@ -123,16 +107,6 @@ impl Dialogs for NativeDialogs {
             }
             script += "\nif class of fs is not list then set fs to {fs}\nset out to \"\"\nrepeat with f in fs\nset out to out & POSIX path of f & linefeed\nend repeat\nout";
             osa(&script)
-        } else if cfg!(windows) {
-            let mut script = format!("$d = New-Object System.Windows.Forms.OpenFileDialog; $d.Multiselect = ${multiple}; $d.Filter = {};", ps_filter(filters));
-            if !caption.is_empty() {
-                script += &format!(" $d.Title = {};", ps_str(caption));
-            }
-            if let Some(d) = &start {
-                script += &format!(" $d.InitialDirectory = {};", ps_str(d));
-            }
-            script += " if ($d.ShowDialog() -eq 'OK') { $d.FileNames -join \"`n\" }";
-            ps(&script)
         } else {
             let mut zenity = Command::new("zenity");
             zenity.arg("--file-selection").arg("--separator=\n");
@@ -184,16 +158,6 @@ impl Dialogs for NativeDialogs {
             }
             script += "\nPOSIX path of f";
             osa(&script)
-        } else if cfg!(windows) {
-            let mut script = format!("$d = New-Object System.Windows.Forms.SaveFileDialog; $d.Filter = {}; $d.DefaultExt = {}; $d.FileName = {};", ps_filter(filters), ps_str(extension.trim_start_matches('.')), ps_str(&name));
-            if !caption.is_empty() {
-                script += &format!(" $d.Title = {};", ps_str(caption));
-            }
-            if let Some(d) = &start {
-                script += &format!(" $d.InitialDirectory = {};", ps_str(d));
-            }
-            script += " if ($d.ShowDialog() -eq 'OK') { $d.FileName }";
-            ps(&script)
         } else {
             let mut zenity = Command::new("zenity");
             zenity.args(["--file-selection", "--save", "--confirm-overwrite"]);
@@ -227,16 +191,6 @@ impl Dialogs for NativeDialogs {
             }
             script += "\nPOSIX path of f";
             osa(&script)
-        } else if cfg!(windows) {
-            let mut script = String::from("$d = New-Object System.Windows.Forms.FolderBrowserDialog;");
-            if !caption.is_empty() {
-                script += &format!(" $d.Description = {};", ps_str(caption));
-            }
-            if let Some(d) = &start {
-                script += &format!(" $d.SelectedPath = {};", ps_str(d));
-            }
-            script += " if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }";
-            ps(&script)
         } else {
             let mut zenity = Command::new("zenity");
             zenity.args(["--file-selection", "--directory"]);
@@ -264,15 +218,6 @@ impl Dialogs for NativeDialogs {
             // Cancelling (Escape) is "no"; the button name comes back as `button returned:Yes`.
             let out = osa(&script).join(" ");
             !question || out.contains("button returned:Yes")
-        } else if cfg!(windows) {
-            let (buttons, icon) = (if question { "YesNo" } else { "OK" }, match kind {
-                MessageKind::Info => "Information",
-                MessageKind::Alert => "Warning",
-                MessageKind::Error => "Error",
-                MessageKind::Question => "Question",
-            });
-            let out = ps(&format!("[System.Windows.Forms.MessageBox]::Show({}, {}, '{buttons}', '{icon}')", ps_str(text), ps_str(caption)));
-            out.iter().any(|l| l == "Yes" || l == "OK")
         } else {
             let flag = match kind {
                 MessageKind::Info => "--info",
@@ -313,9 +258,194 @@ mod tests {
         assert!(accept_filters("image/*").is_empty());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn quoting_survives_awkward_text() {
         assert_eq!(osa_str("say \"hi\" \\ now"), "\"say \\\"hi\\\" \\\\ now\"");
-        assert_eq!(ps_str("it's"), "'it''s'");
+    }
+}
+
+#[cfg(windows)]
+impl Dialogs for NativeDialogs {
+    fn open_files(&self, multiple: bool, filters: &[FileFilter], caption: &str, dir: &str) -> Vec<String> {
+        win::open_files(multiple, filters, caption, start_dir(dir).as_deref())
+    }
+
+    fn save_file(&self, filters: &[FileFilter], extension: &str, caption: &str, path: &str) -> Option<String> {
+        let name = if Path::new(path).is_dir() || path.is_empty() { String::new() } else { Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() };
+        win::save_file(filters, extension.trim_start_matches('.'), caption, start_dir(path).as_deref(), &name)
+    }
+
+    fn pick_folder(&self, caption: &str, dir: &str) -> Option<String> {
+        win::pick_folder(caption, start_dir(dir).as_deref())
+    }
+
+    fn message(&self, kind: MessageKind, caption: &str, text: &str) -> bool {
+        win::message(kind, caption, text)
+    }
+}
+
+/// The Win32 common dialogs. They are owned by the window that is active on this thread, which
+/// disables it (its parent can't be used or moved around) until the dialog closes, and they open at
+/// once: no helper process is started.
+#[cfg(windows)]
+mod win {
+    use std::{
+        ffi::c_void,
+        ptr::{null, null_mut},
+    };
+
+    use nile_engine::dialogs::{FileFilter, MessageKind};
+    use windows_sys::Win32::{
+        System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED},
+        UI::{
+            Controls::Dialogs::{GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW},
+            Input::KeyboardAndMouse::GetActiveWindow,
+            WindowsAndMessaging::{MessageBoxW, SendMessageW, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
+        },
+    };
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn from_wide(buf: &[u16]) -> String {
+        String::from_utf16_lossy(&buf[..buf.iter().position(|c| *c == 0).unwrap_or(buf.len())])
+    }
+
+    /// `label\0*.a;*.b\0label\0*.*\0\0`, the list the common dialogs want.
+    fn filter_list(filters: &[FileFilter]) -> Vec<u16> {
+        let mut out = Vec::new();
+        let mut add = |text: &str| {
+            out.extend(text.encode_utf16());
+            out.push(0);
+        };
+        if filters.is_empty() {
+            add("All files");
+            add("*.*");
+        }
+        for f in filters {
+            add(&f.label);
+            add(&if f.extensions.is_empty() { "*.*".to_string() } else { f.extensions.iter().map(|e| format!("*.{e}")).collect::<Vec<_>>().join(";") });
+        }
+        out.push(0);
+        out
+    }
+
+    /// Runs a get-open/save-file dialog with `flags`; the buffer's contents when the user accepted.
+    fn file_dialog(save: bool, flags: u32, filters: &[FileFilter], caption: &str, dir: Option<&str>, name: &str, ext: &str) -> Option<Vec<u16>> {
+        let list = filter_list(filters);
+        let (title, initial, default_ext) = (wide(caption), dir.map(wide), wide(ext));
+        let mut file = vec![0u16; 64 * 1024];
+        for (slot, c) in file.iter_mut().zip(name.encode_utf16()) {
+            *slot = c;
+        }
+        // SAFETY: an all-zero OPENFILENAMEW is a valid empty one; the buffers outlive the call.
+        let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+        ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+        ofn.hwndOwner = unsafe { GetActiveWindow() };
+        ofn.lpstrFilter = list.as_ptr();
+        ofn.nFilterIndex = 1;
+        ofn.lpstrFile = file.as_mut_ptr();
+        ofn.nMaxFile = file.len() as u32;
+        ofn.lpstrInitialDir = initial.as_ref().map_or(null(), |d| d.as_ptr());
+        ofn.lpstrTitle = if caption.is_empty() { null() } else { title.as_ptr() };
+        ofn.lpstrDefExt = if ext.is_empty() { null() } else { default_ext.as_ptr() };
+        ofn.Flags = flags | OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
+        let ok = unsafe { if save { GetSaveFileNameW(&mut ofn) } else { GetOpenFileNameW(&mut ofn) } };
+        (ok != 0).then_some(file)
+    }
+
+    pub fn open_files(multiple: bool, filters: &[FileFilter], caption: &str, dir: Option<&str>) -> Vec<String> {
+        let flags = OFN_FILEMUSTEXIST | if multiple { OFN_ALLOWMULTISELECT } else { 0 };
+        let Some(buf) = file_dialog(false, flags, filters, caption, dir, "", "") else { return Vec::new() };
+        // One path, or `folder\0name\0name\0\0` when several were chosen.
+        let mut parts = buf.split(|c| *c == 0).take_while(|p| !p.is_empty()).map(String::from_utf16_lossy);
+        let first = parts.next().unwrap_or_default();
+        let rest: Vec<String> = parts.collect();
+        if rest.is_empty() {
+            vec![first]
+        } else {
+            rest.into_iter().map(|n| format!("{}\\{n}", first.trim_end_matches('\\'))).collect()
+        }
+    }
+
+    pub fn save_file(filters: &[FileFilter], extension: &str, caption: &str, dir: Option<&str>, name: &str) -> Option<String> {
+        file_dialog(true, OFN_OVERWRITEPROMPT, filters, caption, dir, name, extension).map(|b| from_wide(&b)).filter(|p| !p.is_empty())
+    }
+
+    /// `BROWSEINFOW` and the two shell functions, declared here because windows-sys 0.52 gates them
+    /// behind a feature it doesn't define.
+    #[repr(C)]
+    struct BrowseInfo {
+        owner: isize,
+        root: *mut c_void,
+        display_name: *mut u16,
+        title: *const u16,
+        flags: u32,
+        callback: Option<unsafe extern "system" fn(isize, u32, isize, isize) -> i32>,
+        lparam: isize,
+        image: i32,
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHBrowseForFolderW(info: *const BrowseInfo) -> *mut c_void;
+        fn SHGetPathFromIDListW(item: *const c_void, path: *mut u16) -> i32;
+    }
+
+    const BIF_RETURNONLYFSDIRS: u32 = 0x1;
+    const BIF_NEWDIALOGSTYLE: u32 = 0x40;
+    const BFFM_INITIALIZED: u32 = 1;
+    const BFFM_SETSELECTIONW: u32 = 0x400 + 103;
+
+    /// Opens the folder chooser on the folder `data` (a NUL-terminated wide path) points to.
+    unsafe extern "system" fn start_at(hwnd: isize, msg: u32, _l: isize, data: isize) -> i32 {
+        if msg == BFFM_INITIALIZED && data != 0 {
+            unsafe { SendMessageW(hwnd, BFFM_SETSELECTIONW, 1, data) };
+        }
+        0
+    }
+
+    pub fn pick_folder(caption: &str, dir: Option<&str>) -> Option<String> {
+        let title = wide(caption);
+        let start = dir.map(wide);
+        let mut path = [0u16; 1024];
+        // SAFETY: the structure is filled in before the call and the buffers outlive it; the returned
+        // item list is freed after use.
+        unsafe {
+            // The new-style dialog needs COM; it is fine if the thread already has it.
+            CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32);
+            let info = BrowseInfo {
+                owner: GetActiveWindow(),
+                root: null_mut(),
+                display_name: null_mut(),
+                title: if caption.is_empty() { null() } else { title.as_ptr() },
+                flags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+                callback: start.is_some().then_some(start_at as unsafe extern "system" fn(isize, u32, isize, isize) -> i32),
+                lparam: start.as_ref().map_or(0, |s| s.as_ptr() as isize),
+                image: 0,
+            };
+            let item = SHBrowseForFolderW(&info);
+            if item.is_null() {
+                return None;
+            }
+            let found = SHGetPathFromIDListW(item, path.as_mut_ptr()) != 0;
+            CoTaskMemFree(item);
+            found.then(|| from_wide(&path)).filter(|p| !p.is_empty())
+        }
+    }
+
+    pub fn message(kind: MessageKind, caption: &str, text: &str) -> bool {
+        let question = kind == MessageKind::Question;
+        let icon = match kind {
+            MessageKind::Info => MB_ICONINFORMATION,
+            MessageKind::Alert => MB_ICONWARNING,
+            MessageKind::Error => MB_ICONERROR,
+            MessageKind::Question => MB_ICONQUESTION,
+        };
+        let (text, caption) = (wide(text), wide(caption));
+        let answer = unsafe { MessageBoxW(GetActiveWindow(), text.as_ptr(), caption.as_ptr(), icon | if question { MB_YESNO } else { MB_OK }) };
+        answer == IDYES || (!question && answer == IDOK)
     }
 }

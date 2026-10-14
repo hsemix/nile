@@ -946,6 +946,70 @@ input[type=checkbox]:checked, input[type=radio]:checked { background: #1d4ed8; b
 input[type=button], input[type=submit], input[type=reset] { width: auto; background: #efefef }
 "#;
 
+/// The look of the platform's own controls, layered over the neutral base sheet (later rules win at
+/// equal specificity, so each repeats the base selectors it changes). There are no `:hover`/`:active`
+/// rules here on purpose: they would make every page restyle on pointer moves (see `StateDeps`).
+const THEME_WINDOWS: &str = r#"
+html { font-family: "Segoe UI", sans-serif }
+button, input, textarea, select { font-family: "Segoe UI", sans-serif }
+button, input { padding: 5px 12px; border: 1px solid #d1d1d1; border-bottom-color: #b8b8b8; border-radius: 4px; background: #fdfdfd }
+input { background: #fdfdfd; border-color: #e5e5e5; border-bottom-color: #8a8a8a; padding: 5px 10px; min-height: 18px }
+textarea { padding: 5px 10px; border: 1px solid #e5e5e5; border-bottom-color: #8a8a8a; border-radius: 4px; background: #fdfdfd }
+select { padding: 5px 28px 5px 10px; border: 1px solid #d1d1d1; border-bottom-color: #b8b8b8; border-radius: 4px; background: #fdfdfd }
+input:focus, textarea:focus, select:focus { border-color: #e5e5e5; border-bottom-color: #0067c0; box-shadow: 0 1px 0 #0067c0 }
+button:disabled, input:disabled, textarea:disabled, select:disabled { color: #a3a3a3; background: #f6f6f6; border-color: #e6e6e6 }
+input[type=checkbox], input[type=radio] { width: 18px; height: 18px; margin: 3px 4px; padding: 0; border: 1px solid #616161; border-radius: 4px; background: #fdfdfd }
+input[type=radio] { border-radius: 9px }
+input[type=checkbox]:checked, input[type=radio]:checked { background: #0067c0; border-color: #0067c0; color: #ffffff }
+input[type=file] { background: #fdfdfd }
+input[type=button], input[type=submit], input[type=reset] { background: #fdfdfd; border-color: #d1d1d1; border-bottom-color: #b8b8b8 }
+"#;
+
+const THEME_MACOS: &str = r#"
+button, input { padding: 3px 12px; border: 1px solid #d6d6d6; border-bottom-color: #c2c2c2; border-radius: 6px; background: #ffffff; box-shadow: 0 1px 1px rgba(0,0,0,0.08) }
+input { padding: 3px 7px; border-color: #cfcfcf; border-bottom-color: #bdbdbd; border-radius: 5px; box-shadow: none }
+textarea { padding: 3px 7px; border: 1px solid #cfcfcf; border-radius: 5px }
+select { border: 1px solid #d6d6d6; border-bottom-color: #c2c2c2; border-radius: 6px; box-shadow: 0 1px 1px rgba(0,0,0,0.08) }
+input:focus, textarea:focus, select:focus { border-color: #0a84ff; box-shadow: 0 0 0 3px rgba(10,132,255,0.35) }
+button:disabled, input:disabled, textarea:disabled, select:disabled { color: #a0a0a0; background: #f5f5f5; border-color: #e2e2e2; box-shadow: none }
+input[type=checkbox], input[type=radio] { width: 14px; height: 14px; margin: 3px 5px; padding: 0; border: 1px solid #b0b0b0; border-radius: 4px; background: #ffffff; box-shadow: none }
+input[type=radio] { border-radius: 7px }
+input[type=checkbox]:checked, input[type=radio]:checked { background: #0a84ff; border-color: #0a84ff; color: #ffffff }
+input[type=file] { background: #ffffff }
+input[type=button], input[type=submit], input[type=reset] { background: #ffffff }
+"#;
+
+const THEME_LINUX: &str = r#"
+button, input { padding: 5px 12px; border: 1px solid #cdc7c2; border-bottom-color: #bfb8b1; border-radius: 6px; background: #f6f5f4 }
+input { background: #ffffff; padding: 5px 8px; border-bottom-color: #cdc7c2 }
+textarea { padding: 5px 8px; border: 1px solid #cdc7c2; border-radius: 6px }
+select { padding: 5px 28px 5px 10px; border: 1px solid #cdc7c2; border-bottom-color: #bfb8b1; border-radius: 6px; background: #f6f5f4 }
+input:focus, textarea:focus, select:focus { border-color: #3584e4; box-shadow: 0 0 0 2px rgba(53,132,228,0.45) }
+button:disabled, input:disabled, textarea:disabled, select:disabled { color: #9a9996; background: #faf9f8; border-color: #e0dcd8 }
+input[type=checkbox], input[type=radio] { width: 16px; height: 16px; margin: 3px 4px; padding: 0; border: 1px solid #b5afa9; border-radius: 4px; background: #ffffff }
+input[type=radio] { border-radius: 8px }
+input[type=checkbox]:checked, input[type=radio]:checked { background: #3584e4; border-color: #3584e4; color: #ffffff }
+input[type=file] { background: #f6f5f4 }
+input[type=button], input[type=submit], input[type=reset] { background: #f6f5f4 }
+"#;
+
+/// The controls' theme: the running platform's, or `NILE_THEME=windows|macos|linux` (to look at
+/// another platform's rendering, e.g. in headless screenshots).
+fn theme_sheet() -> &'static str {
+    static THEME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    THEME.get_or_init(|| {
+        let name = std::env::var("NILE_THEME").ok().map(|t| t.to_ascii_lowercase());
+        match name.as_deref() {
+            Some("windows") => THEME_WINDOWS,
+            Some("macos") => THEME_MACOS,
+            Some("linux") => THEME_LINUX,
+            _ if cfg!(windows) => THEME_WINDOWS,
+            _ if cfg!(target_os = "macos") => THEME_MACOS,
+            _ => THEME_LINUX,
+        }
+    })
+}
+
 /// Computed styles for every node, indexed by `NodeId.0`.
 #[derive(Clone)]
 pub struct StyleMap {
@@ -1145,7 +1209,7 @@ pub fn compute_styles_with(doc: &Document, state: &InteractionState) -> StyleMap
 /// Like [`compute_styles_with`], with `@media` queries and `vw`/`vh` units resolved
 /// against a `viewport` of the given size in px.
 pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f32, f32)) -> StyleMap {
-    let ua = Stylesheet::parse(UA_STYLESHEET);
+    let ua = Stylesheet::parse(&format!("{UA_STYLESHEET}{}", theme_sheet()));
     let author: Vec<Stylesheet> = doc
         .nodes
         .iter()

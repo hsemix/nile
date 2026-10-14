@@ -3711,7 +3711,7 @@ mod tests {
     fn textareas_wrap_and_move_vertically() {
         let doc = Document::parse(
             r#"<body style="margin:0"><textarea id="t" style="width:80px; height:60px">one two three four five six
-second</textarea><textarea id="e"></textarea></body>"#,
+second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"></textarea></body>"#,
         );
         let styles = compute_styles(&doc);
         let mut text = TextEngine::new();
@@ -3731,7 +3731,7 @@ second</textarea><textarea id="e"></textarea></body>"#,
         assert_eq!(tree.move_caret_vertically(id("t"), down, -1), Some(0));
         assert_eq!(tree.move_caret_vertically(id("t"), 0, -1), None);
         let rect = tree.node_rect(id("e")).unwrap();
-        assert_eq!((rect.width, rect.height), (210.0, 68.0), "UA size plus padding and border");
+        assert_eq!((rect.width, rect.height), (210.0, 68.0), "the UA size plus padding and border");
     }
 
     #[test]
