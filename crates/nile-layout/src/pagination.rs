@@ -10,7 +10,8 @@ use nile_style::{Break, Display, StyleMap};
 
 use crate::{BoxContent, LayoutTree};
 
-/// A table's header rows, painted again at the top of each page the table continues onto.
+/// A table's header rows (painted again at the top of each page the table continues onto) or
+/// footer rows (painted at the bottom of each page it continues from).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Repeat {
     /// Boxes of the header rows and their cells, as `[from, to)` ranges of the paint list.
@@ -25,6 +26,8 @@ pub struct Repeat {
 pub struct Fragments {
     pub starts: Vec<f32>,
     pub repeats: Vec<Option<Repeat>>,
+    /// Per page: a table footer (`<tfoot>`) shown again at the bottom of a page its table goes on from.
+    pub feet: Vec<Option<Repeat>>,
 }
 
 /// Page start offsets (the first is 0) for `tree` cut into pages `page_h` tall.
@@ -49,8 +52,8 @@ struct Head {
     repeat: Repeat,
 }
 
-/// The tables in `boxes` (whose first box is paint-list index `base`) that have a `<thead>`.
-fn heads(boxes: &[crate::LayoutBox], base: usize, doc: &Document) -> Vec<Head> {
+/// The tables in `boxes` (whose first box is paint-list index `base`) that have a `<thead>` or `<tfoot>` (`group`).
+fn table_parts(boxes: &[crate::LayoutBox], base: usize, doc: &Document, group: &str) -> Vec<Head> {
     let mut out = Vec::new();
     for (k, t) in boxes.iter().enumerate() {
         if !matches!(t.content, BoxContent::Element) || doc.node(t.node).tag() != Some("table") {
@@ -62,7 +65,7 @@ fn heads(boxes: &[crate::LayoutBox], base: usize, doc: &Document) -> Vec<Head> {
         let mut header_rows = Vec::new();
         for (j, row) in boxes.iter().enumerate().take(end).skip(k + 1) {
             let n = doc.node(row.node);
-            if matches!(row.content, BoxContent::Element) && n.tag() == Some("tr") && n.parent.is_some_and(|p| doc.node(p).tag() == Some("thead")) {
+            if matches!(row.content, BoxContent::Element) && n.tag() == Some("tr") && n.parent.is_some_and(|p| doc.node(p).tag() == Some(group)) {
                 header_rows.push(row.node);
                 ranges.push((base + j, base + j + 1));
                 top = top.min(row.rect.y);
@@ -86,7 +89,8 @@ fn heads(boxes: &[crate::LayoutBox], base: usize, doc: &Document) -> Vec<Head> {
 pub fn paginate_with(boxes: &[crate::LayoutBox], base: usize, doc: Option<&Document>, styles: &StyleMap, origin: f32, end: f32, page_h: f32) -> Fragments {
     let page_h = page_h.max(1.0);
     let total = end;
-    let table_heads = doc.map(|d| heads(boxes, base, d)).unwrap_or_default();
+    let table_heads = doc.map(|d| table_parts(boxes, base, d, "thead")).unwrap_or_default();
+    let table_feet = doc.map(|d| table_parts(boxes, base, d, "tfoot")).unwrap_or_default();
     let mut forced: Vec<f32> = Vec::new();
     // Open intervals no cut may fall into, split by how important they are.
     let mut lines: Vec<(f32, f32)> = Vec::new();
@@ -148,7 +152,8 @@ pub fn paginate_with(boxes: &[crate::LayoutBox], base: usize, doc: Option<&Docum
     // A cut right after a table's header would leave it alone at the bottom of a page.
     for h in &table_heads {
         let after = h.repeat.y + h.repeat.height;
-        blocks.push((after - 0.01, after + 0.01));
+        // (A point-sized interval would never contain a cut: back up to the header's top instead.)
+        blocks.push((h.repeat.y, after + 0.5));
     }
     forced.sort_by(f32::total_cmp);
     tops.sort_by(f32::total_cmp);
@@ -160,12 +165,28 @@ pub fn paginate_with(boxes: &[crate::LayoutBox], base: usize, doc: Option<&Docum
     let repeat_at = |start: f32| table_heads.iter().find(|h| h.table_top < start - 0.5 && start >= h.repeat.y + h.repeat.height - 0.01 && start < h.table_bottom).map(|h| h.repeat.clone());
     let mut starts = vec![origin];
     let mut repeats: Vec<Option<Repeat>> = vec![None];
+    // The footer a page starting at `start` shows at its bottom: a table is on the page, and its
+    // footer doesn't fit on it where it naturally falls (it is on a later page).
+    let foot_at = |start: f32, limit: f32| table_feet.iter().find(|f| f.table_top < limit - 0.5 && f.table_bottom > start && f.repeat.y + f.repeat.height > limit + 0.01).map(|f| f.repeat.clone());
+    let mut feet: Vec<Option<Repeat>> = Vec::new();
+    // A page that ends before its table begins (the table moved whole to the next page) shows no footer.
+    let drop_foot = |feet: &mut Vec<Option<Repeat>>, cut: f32| {
+        if let Some(Some(r)) = feet.last() {
+            if table_feet.iter().any(|f| f.repeat.y == r.y && f.table_top >= cut - 0.5) {
+                *feet.last_mut().expect("just checked") = None;
+            }
+        }
+    };
     let mut start = origin;
     while starts.len() < 10_000 {
-        let room = page_h - repeat_at(start).map_or(0.0, |r| r.height).min(page_h / 2.0);
+        let after_head = page_h - repeat_at(start).map_or(0.0, |r| r.height).min(page_h / 2.0);
+        let foot = foot_at(start, start + after_head);
+        let room = after_head - foot.as_ref().map_or(0.0, |f| f.height).min(page_h / 2.0);
+        feet.push(foot);
         let limit = start + room;
         if let Some(&f) = forced.iter().find(|&&f| f > start + 0.5 && f <= limit + 0.01) {
             let f = snap(f);
+            drop_foot(&mut feet, f);
             starts.push(f);
             repeats.push(repeat_at(f));
             start = f;
@@ -188,11 +209,13 @@ pub fn paginate_with(boxes: &[crate::LayoutBox], base: usize, doc: Option<&Docum
         };
         let cut = find(&[&lines, &blocks]).or_else(|| find(&[&lines])).unwrap_or(limit);
         let cut = snap(cut);
+        drop_foot(&mut feet, cut);
         starts.push(cut);
         repeats.push(repeat_at(cut));
         start = cut;
     }
-    Fragments { starts, repeats }
+    feet.resize(starts.len(), None);
+    Fragments { starts, repeats, feet }
 }
 
 #[cfg(test)]
@@ -257,5 +280,23 @@ mod tests {
         let f = paginate_tree(&t, &plain, &ps, 100.0);
         assert_eq!(f.starts, vec![0.0, 100.0]);
         assert!(f.repeats.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn table_footers_repeat_at_the_bottom_of_pages_the_table_goes_on_from() {
+        let rows: String = (0..10).map(|i| format!("<tr><td>r{i}</td></tr>")).collect();
+        let doc = Document::parse(&format!(
+            "<style>body{{margin:0}} table{{border-spacing:0}} td,th{{padding:0;height:20px}}</style><table><thead><tr><th>h</th></tr></thead><tbody>{rows}</tbody><tfoot><tr><td>total</td></tr></tfoot></table>"
+        ));
+        let styles = compute_styles(&doc);
+        let mut text = nile_text::TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 400.0, 1.0);
+        let f = paginate_tree(&tree, &doc, &styles, 100.0);
+        // The footer (20px) is kept at the bottom of every page but the last, which shows the real one.
+        assert_eq!(f.feet.len(), f.starts.len());
+        let last = f.starts.len() - 1;
+        assert!(f.feet[..last].iter().all(Option::is_some), "{:?}", f.feet);
+        assert!(f.feet[last].is_none());
+        assert_eq!(f.starts[..3], [0.0, 80.0, 140.0], "{:?}", f.starts);
     }
 }

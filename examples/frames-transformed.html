@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><title>frames in scrolled, clipped and transformed boxes</title>
+<style>
+  body { margin: 0; padding: 16px; font: 14px sans-serif; }
+  h3 { margin: 0 0 6px; }
+  .row { display: flex; gap: 24px; align-items: flex-start; }
+  .box { width: 220px; height: 150px; overflow: auto; border: 2px solid #2b4c7e; background: #f4f6fb; }
+  .box .pad { height: 60px; padding: 8px; color: #567; }
+  iframe { display: block; width: 190px; height: 130px; border: 1px solid #aab; margin: 0 8px; }
+  .tilt { transform: rotate(-8deg) scale(.9); width: 190px; height: 120px; border: 2px solid #c84; }
+  .clipped { width: 200px; height: 70px; overflow: hidden; border: 2px solid #484; }
+  #msg { margin-top: 10px; color: #345; }
+</style></head>
+<body>
+  <div class="row">
+    <div><h3>Scrolled</h3><div class="box" id="scroller"><div class="pad">scroll down</div><iframe id="a" srcdoc="<body style='font:14px sans-serif;margin:0;padding:8px;background:#fff'><button id='b'>Click me</button><p>I live in a scroller.</p></body>"></iframe><div class="pad">more</div></div></div>
+    <div><h3>Clipped</h3><div class="clipped"><iframe id="c" srcdoc="<body style='font:14px sans-serif;margin:0;padding:8px;background:#ffe'><p>Only the top of this frame is visible.</p><button>Hidden button</button></body>"></iframe></div></div>
+    <div><h3>Transformed</h3><iframe class="tilt" id="t" srcdoc="<body style='font:14px sans-serif;margin:0;padding:8px;background:#fff'><button id='tb'>Tilted</button><p>Rotated and scaled.</p></body>"></iframe></div>
+  </div>
+  <div id="msg">…</div>
+  <script>
+    for (const id of ['a', 't']) {
+      const f = document.$('#' + id);
+      f.on('complete', () => { f.document.$('button').on('click', () => document.$('#msg').text = 'clicked in #' + id); });
+    }
+  </script>
+</body></html>

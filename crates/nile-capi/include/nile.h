@@ -487,6 +487,81 @@ bool nile_view_window_config(struct NileView *view,
 bool nile_view_take_window_command(struct NileView *view, struct NileWindowCommand *out);
 
 /**
+ * The id this view's window has (what other windows address it by, and `Window.this.id`).
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+uint32_t nile_view_window_id(struct NileView *view);
+
+/**
+ * The next thing this window's scripts asked of the host that involves other windows or the
+ * program, as JSON, or NULL when there is none. Free it with [`nile_string_free`]. Kinds:
+ *
+ * - `{"kind":"open","id":3,"opener":1,"modal":false,"fields":{"url":"a.html","width":"400",...}}`:
+ *   `new Window({...})` / `modal({...})`. Create a window and call [`nile_view_create_window`] with
+ *   the `id`, `opener`, `modal` and the `url`, `html`, `width`, `height` and `parameters` fields; the
+ *   other fields (`type`, `caption`, `x`, `y`, `alignment`, `state`, ...) say how to show it.
+ * - `{"kind":"post","from":1,"to":3,"json":{...}}`: deliver with [`nile_view_window_message`] to
+ *   the view whose [`nile_view_window_id`] is `to`.
+ * - `{"kind":"close","id":3,"value":null}`: close that window (ask [`nile_view_close_request`] first;
+ *   tell its opener with [`nile_view_window_closed`] afterwards).
+ * - `{"kind":"focus","id":3}`: bring it to the front.
+ * - `{"kind":"quit","code":0}`: `application.quit()`.
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+char *nile_view_take_window_request(struct NileView *view);
+
+/**
+ * Create the view for a window the page asked to open (an `"open"` request from
+ * [`nile_view_take_window_request`]). `url` is a file or `this://` URL resolved against `base_dir`
+ * (normally the opener's folder), or NULL when `html` has the markup; both NULL gives an empty page.
+ * `parameters_json` is the `parameters` field (NULL for none). Returns NULL on bad arguments.
+ *
+ * # Safety
+ * The string arguments must be NULL or valid NUL-terminated strings.
+ */
+struct NileView *nile_view_create_window(const char *url,
+                                         const char *html,
+                                         const char *base_dir,
+                                         float width,
+                                         float height,
+                                         uint32_t id,
+                                         uint32_t opener,
+                                         bool modal,
+                                         const char *parameters_json);
+
+/**
+ * A message another window posted (`Window.post`): fires `message` with `data` (`json_data`) and
+ * the sender's id as `source`. Returns whether the page changed.
+ *
+ * # Safety
+ * `view` must be a live view; `json_data` a valid string.
+ */
+bool nile_view_window_message(struct NileView *view, uint32_t from, const char *json_data);
+
+/**
+ * A window this one opened has closed; resolves its `Window.closed` / `modal()` promise with
+ * `value_json` (JSON text, `"null"` for none). Returns whether the page changed.
+ *
+ * # Safety
+ * `view` must be a live view; `value_json` a valid string.
+ */
+bool nile_view_window_closed(struct NileView *view, uint32_t id, const char *value_json);
+
+/**
+ * The user (or a script) wants this window closed: fires `closerequest`. Returns whether it may close
+ * (false if a listener called `preventDefault()`). `reason` is 0 for the title bar's button, 1 for a script.
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+bool nile_view_close_request(struct NileView *view,
+                             uint32_t reason);
+
+/**
  * Tell scripts where the window is (`window.screenX`, `outerWidth`, ...): top-left in screen
  * pixels, outer size, and whether it is full screen.
  *

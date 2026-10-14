@@ -57,8 +57,12 @@ Window coordinates are logical pixels.
 
 ## Limits
 
-The tree carries no text-selection or caret positions inside
-text (screen readers read inputs by value), there is no `aria-owns`/`aria-controls`, and the whole tree is
+**Text.** Text is exposed as text runs (one per text node, one per line of an input's value) with each
+character's length and where each word starts, and the focused input or `contenteditable` host carries the
+caret/selection as positions in those runs (`selection` in the JSON: `[anchorRun, anchorChar, focusRun,
+focusChar]`). A wrapped paragraph is one run, not one per visual line, and runs have no per-character
+screen positions, so line-by-line reading and a screen reader's own caret highlight are approximate; word
+starts stop after 255 characters in a run. Also, there is no `aria-owns`/`aria-controls`, and the whole tree is
 rebuilt on each change (fine for ordinary documents; a 1,500-row table costs a few milliseconds per
 update). Popups shown in their own OS windows and secondary windows each have their own tree. I could
 check the structure with AccessKit's consumer in tests but not with a real screen reader here, so treat

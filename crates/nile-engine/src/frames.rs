@@ -33,12 +33,36 @@ pub struct FrameSlot {
     pub page: Box<Page>,
     /// What the `src` attribute said when the page was loaded.
     pub src: String,
-    /// The content box in the outer viewport's logical pixels.
+    /// The box the content covers in the outer viewport's logical pixels (the bounding box when the
+    /// frame is transformed).
     pub rect: (f32, f32, f32, f32),
+    /// The content's own size, before any transform.
+    pub size: (f32, f32),
+    /// Layout coordinates (where the content box starts) to the viewport: scrolling and transforms
+    /// of the frame's containers and of the frame itself.
+    pub map: nile_layout::Affine,
+    /// The content box's top-left in layout coordinates.
+    pub origin: (f32, f32),
+    /// What scrolling or clipping containers leave visible, in viewport pixels.
+    pub clip: Option<(f32, f32, f32, f32)>,
     /// Messages the frame's scripts sent with `window.parent.postMessage`, not yet delivered.
     pub outbox: Rc<RefCell<Vec<String>>>,
     /// Reused pixel buffer for painting.
     buf: Vec<u8>,
+}
+
+impl FrameSlot {
+    /// A viewport point in the frame's own coordinates (through its container's scrolling and its
+    /// transform).
+    pub fn to_local(&self, x: f32, y: f32) -> (f32, f32) {
+        match self.map.inverse() {
+            Some(inv) => {
+                let (lx, ly) = inv.apply(x, y);
+                (lx - self.origin.0, ly - self.origin.1)
+            }
+            None => (x - self.rect.0, y - self.rect.1),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -156,14 +180,18 @@ impl Page {
                 };
                 (source, node.attr("content-style").map(str::to_string), s.border_width, s.padding)
             };
-            let rect = self.view.borrow_mut().layout().node_rect_scrolled(id, &offsets);
-            let Some(r) = rect else {
+            let geometry = self.view.borrow_mut().layout().placement_of(id, &offsets);
+            let Some((r, place)) = geometry else {
                 self.frames.borrow_mut().slots.remove(&id);
                 continue;
             };
-            let (x, y) = (r.x + border.left + pad.left, r.y - scroll + border.top + pad.top);
             let w = (r.width - border.left - border.right - pad.left - pad.right).max(0.0);
             let h = (r.height - border.top - border.bottom - pad.top - pad.bottom).max(0.0);
+            let origin = (r.x + border.left + pad.left, r.y + border.top + pad.top);
+            let map = nile_layout::Affine::translate(0.0, -scroll).then_after(place.xf);
+            let bounds = map.bounds(nile_layout::Rect { x: origin.0, y: origin.1, width: w, height: h });
+            let (x, y) = (bounds.x, bounds.y);
+            let clip = place.clip.map(|c| (c.x, c.y - scroll, c.width, c.height));
             let key = format!("{}|{}", source.key(), style_url.as_deref().unwrap_or(""));
             let existing = self.frames.borrow().slots.get(&id).map(|s| s.src.clone());
             if existing.as_deref() != Some(key.as_str()) {
@@ -175,10 +203,11 @@ impl Page {
                 let mut page = self.load_frame_document(&source, (w, h), Embed { outbox: outbox.clone(), css });
                 page.clipboard = Box::new(crate::MemoryClipboard::default());
                 page.view.borrow_mut().dialogs = self.view.borrow().dialogs.clone();
-                self.frames.borrow_mut().slots.insert(id, FrameSlot { page: Box::new(page), src: key, rect: (x, y, w, h), outbox, buf: Vec::new() });
+                self.frames.borrow_mut().slots.insert(id, FrameSlot { page: Box::new(page), src: key, rect: (x, y, bounds.width, bounds.height), size: (w, h), map, origin, clip, outbox, buf: Vec::new() });
                 created.push(id);
             } else if let Some(slot) = self.frames.borrow_mut().slots.get_mut(&id) {
-                slot.rect = (x, y, w, h);
+                slot.rect = (x, y, bounds.width, bounds.height);
+                (slot.size, slot.map, slot.origin, slot.clip) = ((w, h), map, origin, clip);
                 if slot.page.view.borrow().viewport != (w, h) {
                     slot.page.layout(w, h);
                 }
@@ -219,8 +248,13 @@ impl Page {
             return None;
         }
         self.frames.borrow().slots.iter().rev().find(|(_, s)| {
-            let (fx, fy, w, h) = s.rect;
-            x >= fx && y >= fy && x < fx + w && y < fy + h
+            if let Some((cx, cy, cw, ch)) = s.clip {
+                if x < cx || y < cy || x >= cx + cw || y >= cy + ch {
+                    return false;
+                }
+            }
+            let (lx, ly) = s.to_local(x, y);
+            lx >= 0.0 && ly >= 0.0 && lx < s.size.0 && ly < s.size.1
         }).map(|(&id, _)| id)
     }
 
@@ -237,8 +271,7 @@ impl Page {
     }
 
     pub(crate) fn local(&self, id: NodeId, x: f32, y: f32) -> (f32, f32) {
-        let (fx, fy, ..) = self.frames.borrow().slots[&id].rect;
-        (x - fx, y - fy)
+        self.frames.borrow().slots[&id].to_local(x, y)
     }
 
     fn outer_dragging(&self) -> bool {
@@ -361,7 +394,7 @@ impl Page {
     /// Paint every frame's page over its rectangle (after the outer page's own painting).
     pub(crate) fn paint_frames(&mut self, canvas: &skia_safe::Canvas, scale: f32) {
         for slot in self.frames.borrow_mut().slots.values_mut() {
-            let (x, y, w, h) = slot.rect;
+            let (w, h) = slot.size;
             let (pw, ph) = ((w * scale).round() as u32, (h * scale).round() as u32);
             if pw == 0 || ph == 0 {
                 continue;
@@ -372,9 +405,16 @@ impl Page {
             if let Some(image) = images::raster_from_data(&info, Data::new_copy(&slot.buf), pw as usize * 4) {
                 canvas.save();
                 canvas.reset_matrix();
-                let (px, py) = (x * scale, y * scale);
-                canvas.clip_rect(Rect::from_xywh(px, py, pw as f32, ph as f32), None, false);
-                canvas.draw_image(image, (px, py), None);
+                canvas.scale((scale, scale));
+                if let Some((cx, cy, cw, ch)) = slot.clip {
+                    canvas.clip_rect(Rect::from_xywh(cx, cy, cw, ch), None, false);
+                }
+                let m = slot.map;
+                canvas.concat(&skia_safe::Matrix::new_all(m.a, m.c, m.e, m.b, m.d, m.f, m.g, m.h, m.i));
+                canvas.translate(slot.origin);
+                canvas.clip_rect(Rect::from_xywh(0.0, 0.0, w, h), None, false);
+                canvas.scale((1.0 / scale, 1.0 / scale));
+                canvas.draw_image(image, (0.0, 0.0), None);
                 canvas.restore();
             }
         }

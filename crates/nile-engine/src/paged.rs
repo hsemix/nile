@@ -29,6 +29,7 @@ impl Page {
         };
         self.page_starts = frags.starts;
         self.page_repeats = frags.repeats;
+        self.page_feet = frags.feet;
         self.page_starts.len()
     }
 
@@ -59,7 +60,9 @@ impl Page {
             // next break, or at the content box.
             let head = self.page_repeats.get(index).cloned().flatten();
             let head_h = head.as_ref().map_or(0.0, |r| r.height);
-            let height = (end - start).min(ch - head_h);
+            let foot = self.page_feet.get(index).cloned().flatten();
+            let foot_h = foot.as_ref().map_or(0.0, |r| r.height);
+            let height = (end - start).min(ch - head_h - foot_h);
             if bg != Color::WHITE {
                 canvas.draw_rect(Rect::from_xywh(0.0, 0.0, cw, head_h + height), &Paint::default().set_color(bg).clone());
             }
@@ -89,6 +92,15 @@ impl Page {
             canvas.clip_rect(Rect::from_xywh(0.0, 0.0, cw, height), None, true);
             self.renderer.paint(canvas, tree, &view.styles, &overlay(start, (0, tree.boxes.len())));
             canvas.restore();
+            if let Some(foot) = &foot {
+                canvas.save();
+                canvas.translate((0.0, ch - foot_h));
+                canvas.clip_rect(Rect::from_xywh(0.0, 0.0, cw, foot_h), None, true);
+                for &range in &foot.ranges {
+                    self.renderer.paint(canvas, tree, &view.styles, &overlay(foot.y, range));
+                }
+                canvas.restore();
+            }
             canvas.restore();
         }
         let fonts = FontMgr::new();

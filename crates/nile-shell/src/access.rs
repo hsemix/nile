@@ -3,7 +3,7 @@
 //! Windows, NSAccessibility on macOS, AT-SPI on Linux); nothing here runs unless assistive
 //! technology is on.
 
-use accesskit::{Action, ActionData, Node, NodeId, Rect, Role, Toggled, TreeInfo, TreeUpdate};
+use accesskit::{Action, ActionData, Node, NodeId, Rect, Role, TextPosition, TextSelection, Toggled, TreeInfo, TreeUpdate};
 use nile_engine::a11y::{A11yAction, A11yNode, A11yRole, A11yTree};
 
 fn role(r: A11yRole) -> Role {
@@ -72,16 +72,41 @@ fn role(r: A11yRole) -> Role {
         R::Figure => Role::Figure,
         R::FigureCaption => Role::FigureCaption,
         R::Label => Role::Label,
-        R::StaticText => Role::Label,
+        R::StaticText => Role::TextRun,
         R::Iframe => Role::Iframe,
         R::Splitter => Role::Splitter,
     }
 }
 
+/// The text model AccessKit wants of a run: its text, each character's length in UTF-8 bytes and
+/// where each word starts (u8: a longer run's later words are left out).
+fn text_run(a: &mut Node, text: &str) {
+    a.set_value(text.to_string());
+    let lengths: Vec<u8> = text.chars().map(|c| c.len_utf8() as u8).collect();
+    a.set_character_lengths(lengths);
+    // A word starts at the first non-space after whitespace (trailing space stays with the word before).
+    let mut starts = Vec::new();
+    let mut prev_space = true;
+    for (i, c) in text.chars().enumerate() {
+        if prev_space && !c.is_whitespace() && i > 0 {
+            let Ok(i) = u8::try_from(i) else { break };
+            starts.push(i);
+        }
+        prev_space = c.is_whitespace();
+    }
+    a.set_word_starts(starts);
+}
+
 fn node(n: &A11yNode, scale: f64) -> Node {
     let mut a = Node::new(role(n.role));
-    if !n.name.is_empty() {
+    if n.role == A11yRole::StaticText {
+        text_run(&mut a, &n.name);
+    } else if !n.name.is_empty() {
         a.set_label(n.name.clone());
+    }
+    if let Some(s) = n.selection {
+        let point = |(node, character_index): (u64, usize)| TextPosition { node: NodeId(node), character_index };
+        a.set_text_selection(TextSelection { anchor: point(s.anchor), focus: point(s.focus) });
     }
     if !n.description.is_empty() {
         a.set_description(n.description.clone());
@@ -215,6 +240,34 @@ mod tests {
             1 + n.children().map(count).sum::<usize>()
         }
         assert_eq!(count(state.root()), tree.nodes.len());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Text inputs expose their value as text runs with the caret and selection, which is what a
+    /// screen reader walks by character and word.
+    #[test]
+    fn inputs_expose_text_and_selection() {
+        let dir = std::env::temp_dir().join(format!("nile-access-text-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let main = dir.join("main.html");
+        std::fs::write(&main, r#"<body style="margin:0"><input id="a" value="héllo big world"><p>Plain text</p></body>"#).unwrap();
+        let mut page = Page::load(main, (400.0, 200.0), 0.0);
+        page.layout(400.0, 200.0);
+        let input = page.a11y_tree().nodes.iter().find(|n| n.role == A11yRole::TextInput).map(|n| n.id).unwrap();
+        page.a11y_action(input, A11yAction::Focus);
+        page.set_sel(6, 9);
+        let tree = page.a11y_tree();
+        let consumer = accesskit_consumer::Tree::new(update(&tree, 1.0), true);
+        let state = consumer.state();
+        fn find<'a>(n: accesskit_consumer::NodeRef<'a>, role: Role) -> Option<accesskit_consumer::NodeRef<'a>> {
+            if n.role() == role { Some(n) } else { n.children().find_map(|c| find(c, role)) }
+        }
+        let field = find(state.root(), Role::TextInput).unwrap();
+        let sel = field.text_selection().expect("the focused input has a selection");
+        assert_eq!(sel.start().to_global_usv_index(), 6);
+        assert_eq!(sel.end().to_global_usv_index(), 9);
+        let text = field.document_range().text();
+        assert_eq!(text, "héllo big world");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

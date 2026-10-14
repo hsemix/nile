@@ -354,9 +354,13 @@ impl View {
         self.scroll_offsets.insert(node, new);
         self.scrolled.push(node);
         self.scroll_dirty = true;
-        // The drop-down is positioned for the old scroll position.
+        // Ordinary overflow scrolling only changes paint/hit-test offsets, not geometry.
+        // Native list boxes bake their scroll into ListBox; a drop-down also needs clearing.
+        let rebuild = self.menu.is_some() || self.layout.as_ref().is_some_and(|(_, _, tree)| tree.list_box(node).is_some());
         self.menu = None;
-        self.layout = None;
+        if rebuild {
+            self.layout = None;
+        }
         true
     }
 
@@ -688,6 +692,8 @@ pub struct Page {
     pub page_starts: Vec<f32>,
     /// The table header each page repeats at its top, if any.
     pub page_repeats: Vec<Option<nile_layout::Repeat>>,
+    /// The table footer each page repeats at its bottom, if any.
+    pub page_feet: Vec<Option<nile_layout::Repeat>>,
 }
 
 /// A scrollbar thumb held by the pointer.
@@ -989,6 +995,7 @@ impl Page {
             splitter_drag: None,
             page_starts: Vec::new(),
             page_repeats: Vec::new(),
+            page_feet: Vec::new(),
             tooltip_due: None,
             tooltip_shown: false,
         }
@@ -3497,6 +3504,55 @@ mod tests {
     }
 
     #[test]
+    fn frames_follow_scrolling_clipping_and_transforms_of_their_containers() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="box" style="width:200px;height:100px;overflow:auto"><div style="height:30px"></div>
+               <iframe id="f" srcdoc="<p>hi</p>" style="display:block;width:150px;height:150px;border:0"></iframe></div>
+               <iframe id="r" srcdoc="<p>tilt</p>" style="position:absolute;left:300px;top:20px;width:100px;height:40px;border:0;transform:rotate(90deg)"></iframe></body>"#,
+            "frames-clip",
+        );
+        p.layout(600.0, 300.0);
+        p.update_frames();
+        let f = p.doc.borrow().find(|n| n.attr("id") == Some("f")).unwrap();
+        let r = p.doc.borrow().find(|n| n.attr("id") == Some("r")).unwrap();
+        assert_eq!(p.frame_at(10.0, 40.0), Some(f));
+        // The container clips it: the part below the box's 100px is not the frame's.
+        assert_eq!(p.frame_at(10.0, 120.0), None);
+        // Scrolled by 20, the frame moves up with the content.
+        let _ = p.eval("document.$('#box').scrollTop = 20");
+        p.sync();
+        p.update_frames();
+        assert_eq!(p.frames.borrow().slots[&f].rect.1, 10.0);
+        assert_eq!(p.frame_at(10.0, 5.0), None, "above the box's top edge is clipped");
+        assert_eq!(p.frame_at(10.0, 15.0), Some(f));
+        // Rotated a quarter turn about its centre (350, 40): the 100x40 frame now covers 330..370 x -10..90.
+        assert_eq!(p.frame_at(350.0, 80.0), Some(r));
+        assert_eq!(p.frame_at(310.0, 40.0), None, "the unrotated rectangle's ends are empty now");
+        let (lx, ly) = p.frames.borrow().slots[&r].to_local(350.0, 80.0);
+        assert!((lx - 90.0).abs() < 0.5 && (ly - 20.0).abs() < 0.5, "{lx},{ly}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn selections_in_editable_text_reach_the_accessibility_tree() {
+        let (mut p, path) = page(r#"<body style="margin:0"><div id="ed" contenteditable="true"><p>Hello brave world</p></div></body>"#, "a11ysel");
+        let id = p.doc.borrow().find(|n| n.tag() == Some("p")).unwrap();
+        let text = p.doc.borrow().node(id).children[0];
+        let host = p.doc.borrow().find(|n| n.tag() == Some("div")).unwrap();
+        let mut next = p.interaction();
+        next.focus = Some(host);
+        p.set_interaction(next);
+        p.view.borrow_mut().edit_sel = Some((nile_layout::DomPoint { node: text, offset: 6 }, nile_layout::DomPoint { node: text, offset: 11 }));
+        let tree = p.a11y_tree();
+        let h = tree.nodes.iter().find(|n| n.selection.is_some()).expect("the host carries the selection");
+        let s = h.selection.unwrap();
+        assert_eq!((s.anchor.1, s.focus.1), (6, 11));
+        assert_eq!(s.anchor.0, s.focus.0);
+        assert!(tree.nodes.iter().any(|n| n.id == s.anchor.0 && n.name == "Hello brave world"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn a_menu_element_becomes_the_application_menu() {
         let (mut p, path) = page(
             r#"<body style="margin:0"><menu id="app"><li>File <menu>
@@ -3785,6 +3841,7 @@ cd</textarea>
         p.pointer_moved(x, y);
         p.wheel(0.0, -30.0); // wheel down: scroll content up by 30
         assert_eq!(offset(&p, "box"), (0.0, 30.0));
+        assert!(p.view.borrow().layout.is_some(), "overflow scrolling must preserve cached geometry");
         p.wheel(0.0, -100.0); // clamps at the end (120 - 50 = 70)
         assert_eq!(offset(&p, "box"), (0.0, 70.0));
         assert_eq!(p.view.borrow().scroll_y, 0.0);
