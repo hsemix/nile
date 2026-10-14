@@ -30,4 +30,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          set +e
+          cargo test --workspace --no-fail-fast 2>&1 | tee test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            # Failing test names and panics as one annotation (readable without the raw log).
+            summary=$(grep -E "^test .* FAILED|panicked at|^---- |left:|right:|error(\[|:)" test.log | head -60 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Failing tests on ${{ matrix.os }}::${summary}"
+          fi
+          exit $status
