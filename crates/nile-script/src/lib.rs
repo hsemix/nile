@@ -282,7 +282,7 @@ impl Loader for FileLoader {
         if let Some(source) = builtin {
             return Module::declare(ctx.clone(), name, source);
         }
-        let source = std::fs::read_to_string(name).map_err(|_| rquickjs::Error::new_loading(name))?;
+        let source = nile_dom::vfs::read_to_string(std::path::Path::new(name)).map_err(|_| rquickjs::Error::new_loading(name))?;
         let source = jsx::transform(&source).unwrap_or(source);
         Module::declare(ctx.clone(), name, source)
     }

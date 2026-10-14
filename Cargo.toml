@@ -18,6 +18,7 @@ nile-engine = { path = "crates/nile-engine" }
 nile-capi = { path = "crates/nile-capi" }
 
 html5ever = "0.39"
+miniz_oxide = "0.9.1"
 markup5ever_rcdom = "0.39"
 cssparser = "0.38"
 selectors = "0.41"

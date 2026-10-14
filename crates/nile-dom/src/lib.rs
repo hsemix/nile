@@ -60,6 +60,7 @@ pub struct Document {
 }
 
 mod include;
+pub mod vfs;
 pub use include::expand as expand_includes;
 use include::rewrite_frames;
 

@@ -814,7 +814,7 @@ impl Page {
     }
 
     fn load_in(path: PathBuf, viewport: (f32, f32), scroll_y: f32, embed: Option<frames::Embed>, info: WindowInfo) -> Page {
-        let html = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        let html = nile_dom::vfs::read_to_string(&path).unwrap_or_else(|e| {
             format!("<body><h1>Could not open file</h1><p>{}: {e}</p></body>", path.display())
         });
         Page::from_source_in(html, path, None, viewport, scroll_y, embed, info)
@@ -841,7 +841,7 @@ impl Page {
         let folder = path.parent().map(PathBuf::from).unwrap_or_default();
         let html = nile_dom::expand_includes(&html, &mut |src| {
             let file = folder.join(src);
-            std::fs::read_to_string(&file).map_err(|e| eprintln!("[include] could not load {}: {e}", file.display())).ok()
+            nile_dom::vfs::read_to_string(&file).map_err(|e| eprintln!("[include] could not load {}: {e}", file.display())).ok()
         });
         let frames: Rc<RefCell<frames::Frames>> = Rc::default();
         let doc = Rc::new(RefCell::new(Document::parse(&html)));
@@ -898,7 +898,7 @@ impl Page {
                     });
                 }
                 frames::register_frame_functions(&host, &frames);
-                let url = std::fs::canonicalize(&path).ok().map(|p| nile_script::file_url(&p));
+                let url = nile_dom::vfs::canonicalize(&path).ok().map(|p| nile_dom::vfs::app_url(&p).unwrap_or_else(|| nile_script::file_url(&p)));
                 host.set_location(url.as_deref().unwrap_or("about:blank"));
                 if memory.is_none() {
                     if let Some(file) = net::default_storage_file(&path) {
@@ -907,7 +907,7 @@ impl Page {
                 }
                 let read = |rel: &str| -> Option<(String, String)> {
                     let file = dir.join(rel);
-                    match std::fs::read_to_string(&file) {
+                    match nile_dom::vfs::read_to_string(&file) {
                         Ok(code) => Some((file.to_string_lossy().into_owned(), code)),
                         Err(e) => {
                             eprintln!("[js] could not load {}: {e}", file.display());
@@ -1405,7 +1405,7 @@ impl Page {
     /// The picture named by `window-icon` (a file next to the page) as unpremultiplied RGBA
     /// pixels with its width and height.
     pub fn window_icon(&self, src: &str) -> Option<(Vec<u8>, u32, u32)> {
-        let bytes = std::fs::read(self.path.parent()?.join(src)).ok()?;
+        let bytes = nile_dom::vfs::read(&self.path.parent()?.join(src)).ok()?;
         let img = skia_safe::Image::from_encoded(skia_safe::Data::new_copy(&bytes))?;
         let (w, h) = (img.width(), img.height());
         let info = ImageInfo::new((w, h), ColorType::RGBA8888, AlphaType::Unpremul, None);
@@ -3466,6 +3466,11 @@ mod tests {
         assert!(p.menu_accelerator("o", mods));
         assert!(!p.menu_accelerator("o", ModifiersState::default()));
         assert_eq!(js(&mut p, "log.join(',')"), "open,open");
+        // toggleAttribute flips `checked`, which the menu follows.
+        js(&mut p, "document.getElementById('auto').toggleAttribute('checked'); 0");
+        let MenuItem::Item { items, .. } = &p.app_menu().unwrap()[0] else { panic!() };
+        assert!(matches!(&items[3], MenuItem::Item { checked: false, .. }));
+        assert_eq!(js(&mut p, "const a = document.getElementById('auto'); String(a.toggleAttribute('checked', true)) + a.hasAttribute('checked') + a.toggleAttribute('checked', false) + a.hasAttribute('checked')"), "truetruefalsefalse");
         js(&mut p, "Window.this.menu = null; 0");
         assert!(p.app_menu().is_none());
         let _ = std::fs::remove_file(path);

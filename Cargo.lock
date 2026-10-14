@@ -1607,6 +1607,7 @@ version = "0.1.0"
 dependencies = [
  "html5ever",
  "markup5ever_rcdom",
+ "miniz_oxide",
 ]
 
 [[package]]

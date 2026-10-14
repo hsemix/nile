@@ -5,7 +5,8 @@
   const N = g.__nile;
   delete g.__nile;
 
-  const report = (e) => N.log("error", "Uncaught " + (e && e.stack ? e.stack : e));
+  // QuickJS stacks hold only the frames, so the message goes first.
+  const report = (e) => N.log("error", "Uncaught " + (e && e.stack ? (e.message !== undefined ? String(e.name || "Error") + ": " + e.message + "\n" : "") + e.stack : e));
   const kebab = (n) => String(n).replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
   const idOf = (n) => {
     if (n instanceof Node) return n._id;
@@ -277,6 +278,12 @@
     setAttribute(n, v) { N.setAttr(this._id, String(n), String(v)); }
     removeAttribute(n) { N.removeAttr(this._id, String(n)); }
     hasAttribute(n) { return this.getAttribute(n) !== null; }
+    // Adds or removes an attribute (`force` picks which); true if it is present afterwards.
+    toggleAttribute(n, force) {
+      const on = force === undefined ? !this.hasAttribute(n) : !!force;
+      if (on) { if (!this.hasAttribute(n)) this.setAttribute(n, ""); } else this.removeAttribute(n);
+      return on;
+    }
     getAttributeNames() { return N.attrNames(this._id); }
     get children() { return this.childNodes.filter((n) => n.nodeType === 1); }
     get childElementCount() { return this.children.length; }

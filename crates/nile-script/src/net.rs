@@ -113,17 +113,18 @@ impl Fetcher for LocalFetcher {
             let mime = meta.trim_end_matches(";base64");
             return Ok(ok(body, if mime.is_empty() { "text/plain;charset=US-ASCII" } else { mime }));
         }
-        if req.url.contains("://") && !req.url.starts_with("file://") {
+        if req.url.contains("://") && !req.url.starts_with("file://") && !req.url.starts_with("this://") {
             return Err(format!("network access is not available for {}", req.url));
         }
         if !req.method.eq_ignore_ascii_case("GET") && !req.method.eq_ignore_ascii_case("HEAD") {
             return Ok(FetchResponse { status: 405, status_text: "Method Not Allowed".into(), url: req.url, ..Default::default() });
         }
-        let raw = path_of_url(&req.url);
+        let mapped = nile_dom::vfs::url_to_path(&req.url).map(|p| p.to_string_lossy().into_owned());
+        let raw = mapped.as_deref().unwrap_or_else(|| path_of_url(&req.url));
         let raw = raw.split(['?', '#']).next().unwrap_or(raw);
         let rel = String::from_utf8_lossy(&percent_decode(raw)).into_owned();
         let path = if std::path::Path::new(&rel).is_absolute() { PathBuf::from(&rel) } else { self.base.join(&rel) };
-        match std::fs::read(&path) {
+        match nile_dom::vfs::read(&path) {
             Ok(body) => Ok(ok(if req.method.eq_ignore_ascii_case("HEAD") { Vec::new() } else { body }, mime_of(&rel))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Ok(FetchResponse { status: 404, status_text: "Not Found".into(), url: req.url, ..Default::default() })
