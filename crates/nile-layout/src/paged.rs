@@ -9,7 +9,7 @@ use nile_dom::NodeId;
 use nile_style::StyleMap;
 use taffy::prelude::*;
 
-use crate::{LayoutBox, NodeCtx, Rect};
+use crate::{pagination::Repeat, LayoutBox, NodeCtx, Rect};
 
 /// Space between two sheets, in px.
 pub const SHEET_GAP: f32 = 20.0;
@@ -30,6 +30,8 @@ pub struct PagedBox {
     pub starts: Vec<f32>,
     /// Flow y where the content ends.
     pub content_end: f32,
+    /// Per sheet: the table header repeated at its top (its flow `y` is absolute).
+    pub repeats: Vec<Option<Repeat>>,
 }
 
 impl PagedBox {
@@ -52,6 +54,17 @@ impl PagedBox {
         (self.page_h - self.margin[0] - self.margin[2]).max(1.0)
     }
 
+    /// How much of the top of sheet `i` a repeated table header takes.
+    pub fn head_h(&self, i: usize) -> f32 {
+        self.repeats.get(i).and_then(Option::as_ref).map_or(0.0, |r| r.height)
+    }
+
+    /// Height of what sheet `i` shows of the flow.
+    pub fn shown_h(&self, i: usize) -> f32 {
+        let (from, to) = self.band(i);
+        (to - from).min(self.content_h() - self.head_h(i))
+    }
+
     /// The sheet that shows flow position `y`.
     pub fn page_of_flow(&self, y: f32) -> usize {
         self.starts.partition_point(|s| *s <= y + 0.01).saturating_sub(1)
@@ -60,7 +73,7 @@ impl PagedBox {
     /// Where flow position `y` appears.
     pub fn to_screen(&self, y: f32) -> f32 {
         let i = self.page_of_flow(y);
-        self.top(i) + self.margin[0] + (y - self.starts[i])
+        self.top(i) + self.margin[0] + self.head_h(i) + (y - self.starts[i])
     }
 
     /// Where a flow rectangle appears (on the sheet its top is on).
@@ -76,11 +89,11 @@ impl PagedBox {
         let i = (((y - self.rect.y) / stride).floor().max(0.0) as usize).min(n - 1);
         let u = y - self.top(i);
         let (from, to) = self.band(i);
-        let local = u - self.margin[0];
+        let local = u - self.margin[0] - self.head_h(i);
         if strict {
             return (u >= 0.0 && local >= 0.0 && local < to - from).then_some(from + local);
         }
-        Some(if u < self.margin[0] {
+        Some(if local < 0.0 {
             from
         } else if local < to - from {
             from + local

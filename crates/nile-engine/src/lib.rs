@@ -686,6 +686,8 @@ pub struct Page {
     pub splitter_drag: Option<frames::SplitDrag>,
     /// Where each page of paged output starts (see `paginate`); empty until then.
     pub page_starts: Vec<f32>,
+    /// The table header each page repeats at its top, if any.
+    pub page_repeats: Vec<Option<nile_layout::Repeat>>,
 }
 
 /// A scrollbar thumb held by the pointer.
@@ -986,6 +988,7 @@ impl Page {
             frames,
             splitter_drag: None,
             page_starts: Vec::new(),
+            page_repeats: Vec::new(),
             tooltip_due: None,
             tooltip_shown: false,
         }
@@ -3433,6 +3436,67 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_scripts_get_application_and_their_own_folder() {
+        let dir = std::env::temp_dir().join(format!("nile-boot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("run.js"), "window.seen = [__DIR__.endsWith('/'), __FILE__.endsWith('/run.js'), application.run()].join(); application.start('gpu'); application.quit(3);").unwrap();
+        let mut p = Page::html_window(r#"<html window-state="hidden"><script type="module" src="run.js"></script></html>"#, dir.clone(), (400.0, 300.0), nile_script::WindowInfo::default());
+        assert_eq!(js(&mut p, "window.seen"), "true,true,0");
+        assert_eq!(p.view.borrow_mut().window_requests.last(), Some(&nile_script::WindowCommand::Quit(3)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_sys_module_reads_and_writes_files() {
+        let dir = std::env::temp_dir().join(format!("nile-sys-{}", std::process::id())).to_string_lossy().replace('\\', "/");
+        let (mut p, path) = page(
+            &format!(r#"<body><script type="module">
+              import * as sys from "@sys";
+              const dir = "{dir}";
+              const fs = sys.fs;
+              fs.mkdirSync(dir);
+              fs.writeFileSync(dir + "/a.txt", "héllo");
+              fs.writeFileSync(dir + "/b.bin", new Uint8Array([1, 2, 3]).buffer);
+              const text = new TextDecoder().decode(fs.readFileSync(dir + "/a.txt"));
+              const st = fs.statSync(dir + "/a.txt");
+              const names = fs.readdirSync(dir).map((e) => e.name + ":" + e.type).join(",");
+              const missing = [fs.statSync(dir + "/nope"), fs.readdirSync(dir + "/nope")];
+              fs.renameSync(dir + "/b.bin", dir + "/c.bin");
+              fs.unlinkSync(dir + "/a.txt");
+              window.out = [text, st.isFile, st.st_size, names, JSON.stringify(missing), fs.readdirSync(dir).map((e) => e.name).join(","), fs.splitpath("/x/y/z.txt").join("|")].join(";");
+              fs.readFile(dir + "/nope").catch((e) => {{ window.err = e.code; }});
+            </script></body>"#),
+            "sys",
+        );
+        p.run_timers();
+        assert_eq!(js(&mut p, "window.out"), "héllo;true;6;a.txt:1,b.bin:1;[null,null];c.bin;/x/y|z.txt");
+        assert_eq!(js(&mut p, "window.err"), "ENOENT");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn live_regions_are_marked_in_the_accessibility_tree() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="poll" aria-live="polite">Saved</div><div role="alert">Oops</div><div role="status" aria-atomic="false">Ready</div>
+               <div role="log">line</div><div aria-live="off">quiet</div><div aria-live="assertive" aria-atomic="true"></div></body>"#,
+            "live",
+        );
+        let tree = p.a11y_tree();
+        let live = |name: &str| tree.nodes.iter().find(|n| n.role != a11y::A11yRole::StaticText && tree.nodes.iter().any(|c| n.children.contains(&c.id) && c.name == name)).map(|n| (n.live, n.live_atomic));
+        use a11y::A11yLive::*;
+        assert_eq!(live("Saved"), Some((Polite, false)));
+        assert_eq!(live("Oops"), Some((Assertive, true)));
+        assert_eq!(live("Ready"), Some((Polite, false)));
+        assert_eq!(live("line"), Some((Polite, false)));
+        // `aria-live="off"` is a plain container; an empty live region stays in the tree so a change can be announced.
+        assert_eq!(live("quiet").map(|l| l.0), Some(Off));
+        assert!(tree.nodes.iter().any(|n| n.live == Assertive && n.children.is_empty() && n.live_atomic));
+        assert!(tree.to_json().contains("\"live\":\"assertive\""));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn a_menu_element_becomes_the_application_menu() {
         let (mut p, path) = page(
             r#"<body style="margin:0"><menu id="app"><li>File <menu>
@@ -3471,6 +3535,9 @@ mod tests {
         let MenuItem::Item { items, .. } = &p.app_menu().unwrap()[0] else { panic!() };
         assert!(matches!(&items[3], MenuItem::Item { checked: false, .. }));
         assert_eq!(js(&mut p, "const a = document.getElementById('auto'); String(a.toggleAttribute('checked', true)) + a.hasAttribute('checked') + a.toggleAttribute('checked', false) + a.hasAttribute('checked')"), "truetruefalsefalse");
+        // Hosts that build their own menus get it as JSON.
+        let json = crate::menus::menu_json(&p.app_menu().unwrap());
+        assert!(json.starts_with("[{\"id\":") && json.contains("\"label\":\"File\"") && json.contains("\"accel\":\"CmdOrCtrl+o\"") && json.contains("\"separator\":true") && json.contains("\"role\":\"quit\""), "{json}");
         js(&mut p, "Window.this.menu = null; 0");
         assert!(p.app_menu().is_none());
         let _ = std::fs::remove_file(path);

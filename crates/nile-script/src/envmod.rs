@@ -115,6 +115,94 @@ fn platform() -> &'static str {
     }
 }
 
+/// A path or URL (`this://app/...`, `file://...`) as a path.
+fn path_of(p: &str) -> PathBuf {
+    nile_dom::vfs::url_to_path(p).unwrap_or_else(|| PathBuf::from(crate::net::path_of_url(p)))
+}
+
+fn secs(t: std::io::Result<std::time::SystemTime>) -> f64 {
+    t.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// One `@sys.fs` operation. `Ok` carries the result as text (JSON, or base64 for file contents),
+/// `Err` an error message beginning with its code (`ENOENT: ...`).
+pub fn fs(op: &str, args: &[String]) -> Result<String, String> {
+    use base64::Engine as _;
+    let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
+    let path = path_of(arg(0));
+    let failed = |e: std::io::Error| {
+        let code = match e.kind() {
+            std::io::ErrorKind::NotFound => "ENOENT",
+            std::io::ErrorKind::PermissionDenied => "EACCES",
+            std::io::ErrorKind::AlreadyExists => "EEXIST",
+            _ => "EIO",
+        };
+        format!("{code}: {e}: {}", path.display())
+    };
+    let b64 = base64::engine::general_purpose::STANDARD;
+    match op {
+        "stat" => {
+            if nile_dom::vfs::is_virtual(&path) {
+                return match nile_dom::vfs::read(&path) {
+                    Ok(bytes) => Ok(format!("{{\"isFile\":true,\"isDirectory\":false,\"isSymbolicLink\":false,\"st_size\":{},\"st_mode\":33060}}", bytes.len())),
+                    Err(_) if nile_dom::vfs::exists(&path) => Ok("{\"isFile\":false,\"isDirectory\":true,\"isSymbolicLink\":false,\"st_size\":0,\"st_mode\":16749}".into()),
+                    Err(e) => Err(failed(e)),
+                };
+            }
+            let meta = if arg(1) == "link" { std::fs::symlink_metadata(&path) } else { std::fs::metadata(&path) }.map_err(failed)?;
+            #[cfg(unix)]
+            let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions());
+            #[cfg(not(unix))]
+            let mode = if meta.is_dir() { 0o40755 } else { 0o100644 };
+            Ok(format!(
+                "{{\"isFile\":{},\"isDirectory\":{},\"isSymbolicLink\":{},\"st_size\":{},\"st_mode\":{mode},\"st_mtime\":{},\"st_atime\":{},\"st_birthtime\":{}}}",
+                meta.is_file(),
+                meta.is_dir(),
+                meta.file_type().is_symlink(),
+                meta.len(),
+                secs(meta.modified()),
+                secs(meta.accessed()),
+                secs(meta.created())
+            ))
+        }
+        "readdir" => {
+            let entries: Vec<(String, bool)> = if nile_dom::vfs::is_virtual(&path) {
+                nile_dom::vfs::list_dir(&path).ok_or_else(|| format!("ENOTDIR: not a folder: {}", path.display()))?
+            } else {
+                let mut v: Vec<(String, bool)> = std::fs::read_dir(&path).map_err(failed)?.filter_map(Result::ok).map(|e| (e.file_name().to_string_lossy().into_owned(), e.path().is_dir())).collect();
+                v.sort();
+                v
+            };
+            // `fs.UV_DIRENT_FILE` is 1 and `UV_DIRENT_DIR` 2.
+            Ok(format!("[{}]", entries.iter().map(|(n, d)| format!("{{\"name\":{},\"type\":{}}}", json_str(n), if *d { 2 } else { 1 })).collect::<Vec<_>>().join(",")))
+        }
+        "read" => nile_dom::vfs::read(&path).map(|b| b64.encode(b)).map_err(failed),
+        "write" => std::fs::write(&path, b64.decode(arg(1)).map_err(|e| e.to_string())?).map(|_| String::new()).map_err(failed),
+        "unlink" => std::fs::remove_file(&path).map(|_| String::new()).map_err(failed),
+        "mkdir" => std::fs::create_dir_all(&path).map(|_| String::new()).map_err(failed),
+        "rmdir" => std::fs::remove_dir(&path).map(|_| String::new()).map_err(failed),
+        "rename" => std::fs::rename(&path, path_of(arg(1))).map(|_| String::new()).map_err(failed),
+        "copyfile" => std::fs::copy(&path, path_of(arg(1))).map(|_| String::new()).map_err(failed),
+        "realpath" => nile_dom::vfs::canonicalize(&path).map(|p| p.to_string_lossy().into_owned()).map_err(failed),
+        _ => Err(format!("ENOSYS: unknown operation {op}")),
+    }
+}
+
+fn json_str(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -129,6 +129,8 @@ pub enum WindowCommand {
     CloseId(u32),
     /// Bring another window to the front.
     FocusId(u32),
+    /// `application.quit(code)`: end the program with this exit code.
+    Quit(i32),
     Minimize,
     Maximize,
     /// Back from maximized, minimized or full screen.
@@ -224,7 +226,7 @@ impl Resolver for FileResolver {
         _attributes: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<String> {
         let path = std::path::Path::new(name);
-        if matches!(name, "@nile" | "@sciter" | "@env") {
+        if matches!(name, "@nile" | "@sciter" | "@env" | "@sys") {
             // `@sciter` is the same module under the name Sciter apps use.
             return Ok(if name == "@sciter" { "@nile".to_string() } else { name.to_string() });
         }
@@ -271,6 +273,7 @@ impl Loader for FileLoader {
     ) -> rquickjs::Result<Module<'js, Declared>> {
         // Built-in modules are thin wrappers over objects the prelude defines.
         let builtin = match name {
+            "@sys" => Some("const m = globalThis.__sysModule;\nexport const fs = m.fs;\nexport default m;"),
             "@nile" => Some(
                 "const m = globalThis.__sciterModule;\nexport const { VERSION, REVISION, QUICKJS_VERSION, setModuleUrlResolver, loadLibrary, parseValue, devicePixels, on, off, once, onGlobalEvent, offGlobalEvent, $, $$, uuid, encode, decode, compress, decompress, toBase64, fromBase64, md5, crc32 } = m;\nconst imp = m.import;\nexport { imp as import };\nexport default m;",
             ),
@@ -284,8 +287,22 @@ impl Loader for FileLoader {
         }
         let source = nile_dom::vfs::read_to_string(std::path::Path::new(name)).map_err(|_| rquickjs::Error::new_loading(name))?;
         let source = jsx::transform(&source).unwrap_or(source);
-        Module::declare(ctx.clone(), name, source)
+        Module::declare(ctx.clone(), name, with_location(name, source))
     }
+}
+
+/// `__DIR__` and `__FILE__` (Sciter): the module's folder (with a trailing slash) and file as URLs,
+/// declared on the module's first line so line numbers stay put. Inline modules (`page.html#module0`)
+/// keep the page-wide globals.
+fn with_location(name: &str, source: String) -> String {
+    if name.contains('#') || name.starts_with('@') {
+        return source;
+    }
+    let path = std::path::Path::new(name);
+    let absolute = std::fs::canonicalize(path).ok().filter(|_| !nile_dom::vfs::is_virtual(path)).unwrap_or_else(|| path.to_path_buf());
+    let url = |p: &std::path::Path| nile_dom::vfs::app_url(p).unwrap_or_else(|| file_url(p));
+    let dir = absolute.parent().map(|d| format!("{}/", url(d).trim_end_matches('/'))).unwrap_or_default();
+    format!("const __DIR__ = {dir:?}, __FILE__ = {:?}; {source}", url(&absolute))
 }
 
 /// An input event for [`ScriptHost::dispatch`].
@@ -552,6 +569,7 @@ fn install_natives(
                 "minimize" => WindowCommand::Minimize,
                 "maximize" => WindowCommand::Maximize,
                 "restore" => WindowCommand::Restore,
+                "quit" => WindowCommand::Quit(a as i32),
                 "toggleMaximize" => WindowCommand::ToggleMaximize,
                 "fullscreen" => WindowCommand::Fullscreen(a != 0.0),
                 "moveTo" => WindowCommand::MoveTo(a, b),
@@ -703,6 +721,11 @@ fn install_natives(
         }
     });
     native!("envCall", |op: String, args: Vec<String>| envmod::call(&op, &args));
+    // `@sys.fs`: "O:" + result, or "E:" + error.
+    native!("fsCall", |op: String, args: Vec<String>| match envmod::fs(&op, &args) {
+        Ok(v) => format!("O:{v}"),
+        Err(e) => format!("E:{e}"),
+    });
     native!("fileSize", |path: String| std::fs::metadata(path).map_or(-1.0, |m| m.len() as f64));
     native!("scale", {
         let env = env.clone();
@@ -847,7 +870,7 @@ impl ScriptHost {
     /// Run an ES module. `name` is its file path (or `page.html#module0` for an
     /// inline module); relative `import`s resolve from its folder.
     pub fn run_module(&self, name: &str, source: &str) -> Result<(), String> {
-        let source = jsx::transform(source).unwrap_or_else(|| source.to_string());
+        let source = with_location(name, jsx::transform(source).unwrap_or_else(|| source.to_string()));
         let result = self.context.with(|ctx| {
             let promise = Module::evaluate(ctx.clone(), name, source).catch(&ctx).map_err(|e| e.to_string())?;
             match promise.finish::<()>().catch(&ctx) {

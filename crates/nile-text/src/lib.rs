@@ -209,6 +209,25 @@ pub fn break_lines(layout: &mut TextLayout, max_width: Option<f32>, align: Align
     layout.align(align, AlignmentOptions::default());
 }
 
+/// Break lines where each line has its own start and width: `slot(y)` gives `(x, width)` for a line
+/// whose top is at `y` in the layout (text beside a float is narrower and starts further in).
+/// `container` is the widest any line can be. Alignment applies within each line's own width.
+pub fn break_lines_varying(layout: &mut TextLayout, container: f32, align: Alignment, mut slot: impl FnMut(f32) -> (f32, f32)) {
+    let mut lines = layout.break_lines();
+    lines.state_mut().set_layout_max_advance(container);
+    // A line takes at least one cluster, so the loop ends; the cap is only a guard.
+    for _ in 0..100_000 {
+        let (x, width) = slot(lines.committed_y() as f32);
+        lines.state_mut().set_line_x(x);
+        lines.state_mut().set_line_max_advance(width.clamp(1.0, container.max(1.0)));
+        if lines.break_next().is_none() {
+            break;
+        }
+    }
+    lines.finish();
+    layout.align(align, AlignmentOptions::default());
+}
+
 /// CSS `white-space: normal`: collapse runs of whitespace to one space.
 pub fn collapse_whitespace(text: &str) -> String {
     let mut out = String::with_capacity(text.len());

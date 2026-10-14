@@ -284,4 +284,7 @@ macOS, the window's menu bar on Windows. Elsewhere it does nothing, so draw your
 - On macOS Nile adds the standard application menu (About, Hide, Quit) and, if you did not write menus
   titled Edit and Window, those too. Windows gets only what you write.
 - `Window.this.menu = null` removes it. `examples/native-menu.html` is a small working page.
-- C hosts can read the description with `Page::app_menu` from Rust; the C API for it is still to do.
+- Hosts that build their own menus (C, or an embedder without `nile-shell`) read it with `nile_view_menu(view)`
+  (JSON: `[{"id", "label", "accel"?, "enabled", "checked", "role"?, "items"?}, {"separator": true}]`; free it with
+  `nile_string_free`), report a chosen item with `nile_view_menu_click(view, id)` (it returns NULL, or a window role
+  such as `"quit"` to carry out) and, when their menu bar doesn't take shortcuts, `nile_view_menu_accelerator`.

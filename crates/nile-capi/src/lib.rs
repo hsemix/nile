@@ -541,6 +541,48 @@ pub unsafe extern "C" fn nile_view_accessibility_action(view: *mut NileView, id:
     guard(false, || v.page.a11y_action(id, action))
 }
 
+// ---- application menu -------------------------------------------------------------------------
+
+/// The page's application menu (`Window.this.menu = element`) as JSON, or NULL when it has none:
+/// `[{"id", "label", "accel"?, "enabled", "checked", "role"?, "items"?}, {"separator": true}, ...]`.
+/// Build the platform's menu bar from it and call [`nile_view_menu_click`] with an item's `id` when it
+/// is chosen. Call again after the page changes (`checked` and `enabled` follow its attributes).
+/// Free the string with [`nile_string_free`].
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_menu(view: *mut NileView) -> *mut c_char {
+    let Some(v) = view_ref(view) else { return ptr::null_mut() };
+    guard(ptr::null_mut(), || match v.page.app_menu() {
+        Some(items) => into_c(nile_engine::menus::menu_json(&items)),
+        None => ptr::null_mut(),
+    })
+}
+
+/// A menu item was chosen: fires its `click` (or does a clipboard/editing role). Returns NULL, or for a
+/// window role the host must carry out (`quit`, `close`, `minimize`, `zoom`, `about`, ...) a string
+/// to free with [`nile_string_free`].
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_menu_click(view: *mut NileView, id: u64) -> *mut c_char {
+    let Some(v) = view_ref(view) else { return ptr::null_mut() };
+    guard(ptr::null_mut(), || v.page.menu_click(id).map_or(ptr::null_mut(), into_c))
+}
+
+/// Run the menu item whose shortcut is `key` (a DOM key such as `"s"` or `"F5"`) with the same modifier
+/// bits as `nile_view_key`, for hosts whose menu bar doesn't handle shortcuts. Returns whether one ran.
+///
+/// # Safety
+/// `view` must be a live view and `key` a valid string.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_menu_accelerator(view: *mut NileView, key: *const c_char, modifiers: u8) -> bool {
+    let (Some(v), Some(key)) = (view_ref(view), text(key)) else { return false };
+    guard(false, || v.page.menu_accelerator(key, mods(modifiers)))
+}
+
 // ---- paged output -----------------------------------------------------------------------------
 
 /// Cut the document into pages (`@page` size and margins, `break-*`) and write them to a PDF at
@@ -645,7 +687,7 @@ pub unsafe extern "C" fn nile_view_take_window_command(view: *mut NileView, out:
         let mut view = v.page.view.borrow_mut();
         while !view.window_requests.is_empty() {
             match view.window_requests.remove(0) {
-                WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) => {}
+                WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) | WindowCommand::Quit(_) => {}
                 WindowCommand::CloseWith(_) => return Some(WindowCommand::Close),
                 other => return Some(other),
             }
@@ -666,7 +708,7 @@ pub unsafe extern "C" fn nile_view_take_window_command(view: *mut NileView, out:
                 WindowCommand::MoveTo(x, y) => (K::MoveTo, x, y),
                 WindowCommand::ResizeTo(w, h) => (K::ResizeTo, w, h),
                 // Filtered out above.
-                WindowCommand::CloseWith(_) | WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) => (K::None, 0.0, 0.0),
+                WindowCommand::CloseWith(_) | WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) | WindowCommand::Quit(_) => (K::None, 0.0, 0.0),
             };
             (true, NileWindowCommand { kind, a, b })
         }

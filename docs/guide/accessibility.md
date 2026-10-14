@@ -29,6 +29,15 @@ The engine builds it from the DOM the way a browser does:
 So the way to make a custom control accessible is the way you would on the web: use the native element,
 or add `role`, `aria-label`, `aria-checked`, `aria-expanded` and `tabindex="0"` to your own.
 
+## Live regions
+
+`aria-live="polite"` or `"assertive"` marks a region whose changes are announced without moving focus;
+`role="alert"` (assertive), `role="status"` and `role="log"` (polite) are live by default, and
+`aria-atomic="true"` announces the whole region instead of just what changed (the default for `alert`
+and `status`). A live region stays in the tree even when empty so the first message is spoken. The
+tree carries the setting (`live`, `atomic` in the JSON) and AccessKit raises the platform's live-region
+event when text inside changes. `examples/live-regions.html` has three buttons to try with a screen reader.
+
 ## What assistive technology can do
 
 Click (buttons, links, checkboxes, options, summaries), focus, replace an input's text, step sliders and
@@ -48,7 +57,7 @@ Window coordinates are logical pixels.
 
 ## Limits
 
-Live regions (`aria-live`) are not announced, the tree carries no text-selection or caret positions inside
+The tree carries no text-selection or caret positions inside
 text (screen readers read inputs by value), there is no `aria-owns`/`aria-controls`, and the whole tree is
 rebuilt on each change (fine for ordinary documents; a 1,500-row table costs a few milliseconds per
 update). Popups shown in their own OS windows and secondary windows each have their own tree. I could

@@ -53,10 +53,16 @@ pub fn is_virtual(path: &Path) -> bool {
 
 /// Mount the archive appended to the running executable, if there is one. Returns whether there is.
 pub fn mount_self() -> bool {
-    match std::env::current_exe().and_then(|exe| open(&exe)) {
-        Ok(Some(pack)) => PACK.set(pack).is_ok(),
-        _ => mounted(),
+    let Ok(exe) = std::env::current_exe() else { return false };
+    // Behind the executable, or (a macOS `.app` bundle, whose signed executable can't be appended to)
+    // as `Contents/Resources/app.nilepack`.
+    let beside = exe.parent().and_then(Path::parent).map(|contents| contents.join("Resources/app.nilepack"));
+    for file in [Some(exe.clone()), beside].into_iter().flatten() {
+        if let Ok(Some(pack)) = open(&file) {
+            return PACK.set(pack).is_ok();
+        }
     }
+    mounted()
 }
 
 fn open(exe: &Path) -> io::Result<Option<Pack>> {
@@ -144,6 +150,28 @@ pub fn exists(path: &Path) -> bool {
     key.is_empty() || pack.entries.contains_key(&key) || pack.entries.keys().any(|k| k.starts_with(&format!("{key}/")))
 }
 
+/// The entries of a folder inside the mount: `(name, is_dir)`, sorted. `None` if it isn't one.
+pub fn list_dir(path: &Path) -> Option<Vec<(String, bool)>> {
+    let (pack, key) = (PACK.get()?, key_of(path)?);
+    let prefix = if key.is_empty() { String::new() } else { format!("{key}/") };
+    let mut out: Vec<(String, bool)> = Vec::new();
+    for k in pack.entries.keys().filter(|k| k.starts_with(&prefix)) {
+        let rest = &k[prefix.len()..];
+        let (name, is_dir) = match rest.split_once('/') {
+            Some((dir, _)) => (dir.to_string(), true),
+            None => (rest.to_string(), false),
+        };
+        if !out.iter().any(|(n, _)| *n == name) {
+            out.push((name, is_dir));
+        }
+    }
+    if out.is_empty() && !key.is_empty() {
+        return None;
+    }
+    out.sort();
+    Some(out)
+}
+
 /// A path as one stable name: the real canonical path, or for the mount the path itself.
 pub fn canonicalize(path: &Path) -> io::Result<PathBuf> {
     if is_virtual(path) {
@@ -166,10 +194,7 @@ pub fn app_url(path: &Path) -> Option<String> {
 
 /// Which file a packaged or unpacked app starts with, looking in `dir`: Sciter's order.
 pub fn start_file(dir: &Path) -> Option<PathBuf> {
-    ["run.js", "scapp.htm", "scapp.html", "main.htm", "main.html", "index.htm", "index.html"]
-        .iter()
-        .map(|n| dir.join(n))
-        .find(|p| exists(p) && p.extension().is_some_and(|e| e != "js"))
+    ["run.js", "scapp.htm", "scapp.html", "main.htm", "main.html", "index.htm", "index.html"].iter().map(|n| dir.join(n)).find(|p| exists(p))
 }
 
 /// Append the files of `folder` to `runtime` (the bytes of a `nile` binary without an archive) and
@@ -217,8 +242,10 @@ pub fn pack(folder: &Path, runtime: &[u8], out: &Path) -> io::Result<(usize, u64
 
 /// The running executable's bytes without any archive behind it (what `pack` appends to).
 pub fn runtime_bytes() -> io::Result<Vec<u8>> {
-    let mut bytes = std::fs::read(std::env::current_exe()?)?;
-    if let Some(pack) = PACK.get() {
+    let exe = std::env::current_exe()?;
+    let mut bytes = std::fs::read(&exe)?;
+    // Only an archive appended to this very file is behind it (a bundle's lives in its own file).
+    if let Some(pack) = PACK.get().filter(|p| p.base as usize <= bytes.len() && bytes.ends_with(MAGIC)) {
         bytes.truncate(pack.base as usize);
     }
     Ok(bytes)

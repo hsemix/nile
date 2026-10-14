@@ -951,6 +951,12 @@
   const dialog = (kind, a = "", b = "", c = "", d = "") => N.dialog(kind, String(a), String(b), String(c), String(d));
   const textOf = (n) => (Array.isArray(n) ? n.map(textOf).join("") : n == null || typeof n === "boolean" ? "" : typeof n === "object" ? "" : String(n));
   let appMenu = null;
+  // Sciter's `application` (bootstrap scripts, docs.sciter.com scapp): the program's own loop is the shell's,
+  // so `run()` returns at once and `quit(code)` ends the program with that exit code.
+  Object.defineProperty(g, "application", { value: { start() {}, run() { return 0; }, quit(code = 0) { N.windowCommand("quit", +code | 0, 0); } }, configurable: true });
+  // Classic scripts have no module scope: the page's folder.
+  Object.defineProperty(g, "__DIR__", { get() { return String(location.href).replace(/[^/]*$/, ""); }, configurable: true });
+  Object.defineProperty(g, "__FILE__", { get() { return String(location.href); }, configurable: true });
   class Window {
     constructor(params = {}) { openWindow(this, params, false); }
     static get this() { return thisWindow; }
@@ -1477,4 +1483,43 @@
   });
   Object.defineProperty(g, "__sciterModule", { value: sciterModule });
   Object.defineProperty(g, "__envModule", { value: envModule });
+  // `@sys`: the file-system part of Sciter's NodeJS-style module (docs.sciter.com JS.runtime/module-sys),
+  // over the `fsCall` native. Sync functions throw; the promise forms wrap them. Not here: `open`/`File`,
+  // sockets, pipes, `spawn`, `watch`.
+  const fsRun = (op, ...a) => {
+    const r = N.fsCall(op, a);
+    if (r.startsWith("E:")) { const e = new Error(r.slice(2)); e.code = r.slice(2, r.indexOf(":", 2)); throw e; }
+    return r.slice(2);
+  };
+  const statOf = (s) => { const o = JSON.parse(s); o.st_ctime = o.st_mtime; return o; };
+  const pathOfAny = (p) => String(p);
+  const sync = {
+    stat: (p) => { try { return statOf(fsRun("stat", pathOfAny(p))); } catch (e) { if (e.code === "ENOENT") return null; throw e; } },
+    lstat: (p) => { try { return statOf(fsRun("stat", pathOfAny(p), "link")); } catch (e) { if (e.code === "ENOENT") return null; throw e; } },
+    readdir: (p) => { try { return JSON.parse(fsRun("readdir", pathOfAny(p))); } catch (e) { if (e.code === "ENOENT" || e.code === "ENOTDIR") return null; throw e; } },
+    readFile: (p) => bufferOf(b64ToBytes(fsRun("read", pathOfAny(p)))),
+    writeFile: (p, data) => { fsRun("write", pathOfAny(p), bytesToB64(typeof data === "string" ? new TextEncoder().encode(data) : toBytes(data))); },
+    unlink: (p) => { fsRun("unlink", pathOfAny(p)); },
+    mkdir: (p) => { fsRun("mkdir", pathOfAny(p)); },
+    rmdir: (p) => { fsRun("rmdir", pathOfAny(p)); },
+    rename: (a, b) => { fsRun("rename", pathOfAny(a), pathOfAny(b)); },
+    copyfile: (a, b) => { fsRun("copyfile", pathOfAny(a), pathOfAny(b)); },
+    realpath: (p) => fsRun("realpath", pathOfAny(p)),
+  };
+  const sysFs = {
+    sync,
+    S_IFMT: 0o170000, S_IFDIR: 0o040000, S_IFCHR: 0o020000, S_IFBLK: 0o060000, S_IFREG: 0o100000, S_IFLNK: 0o120000, S_IFSOCK: 0o140000, S_IFIFO: 0o010000,
+    UV_DIRENT_UNKNOWN: 0, UV_DIRENT_FILE: 1, UV_DIRENT_DIR: 2, UV_DIRENT_LINK: 3, UV_DIRENT_FIFO: 4, UV_DIRENT_SOCKET: 5, UV_DIRENT_CHAR: 6, UV_DIRENT_BLOCK: 7,
+    splitpath(p) { const s = String(p).replace(/[\\/]+$/, ""); const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\")); return i < 0 ? ["", s] : [s.slice(0, i), s.slice(i + 1)]; },
+  };
+  for (const [name, fn] of Object.entries(sync)) {
+    // The promise form throws for a missing file (stat) where the sync form returns null.
+    const strict = name === "stat" || name === "lstat" || name === "readdir";
+    sysFs[name + "Sync"] = fn;
+    sysFs[name] = (...a) => new Promise((resolve, reject) => {
+      try { const v = fn(...a); if (strict && v === null) reject(Object.assign(new Error("ENOENT: no such file or directory: " + a[0]), { code: "ENOENT" })); else resolve(v); } catch (e) { reject(e); }
+    });
+  }
+  sysFs.readfile = sysFs.readFile; sysFs.readfileSync = sysFs.readFileSync; sync.readfile = sync.readFile;
+  Object.defineProperty(g, "__sysModule", { value: { fs: sysFs } });
   }

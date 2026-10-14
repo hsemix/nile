@@ -49,6 +49,7 @@ pub enum A11yRole {
     AlertDialog,
     Alert,
     Status,
+    Log,
     Menu,
     MenuBar,
     MenuItem,
@@ -118,6 +119,20 @@ pub struct A11yNode {
     pub required: bool,
     pub read_only: bool,
     pub link_target: String,
+    /// `aria-live`: how a change in this region is announced (`alert` is assertive, `status` and
+    /// `log` polite). Changes anywhere inside the region count.
+    pub live: A11yLive,
+    /// `aria-atomic`: announce the whole region, not just what changed.
+    pub live_atomic: bool,
+}
+
+/// How urgently a live region's changes are announced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum A11yLive {
+    #[default]
+    Off,
+    Polite,
+    Assertive,
 }
 
 impl A11yNode {
@@ -142,6 +157,8 @@ impl A11yNode {
             required: false,
             read_only: false,
             link_target: String::new(),
+            live: A11yLive::Off,
+            live_atomic: false,
         }
     }
 }
@@ -191,6 +208,12 @@ impl A11yTree {
             out += &opt(n.selected, "selected");
             out += &opt(n.required, "required");
             out += &opt(n.read_only, "readOnly");
+            match n.live {
+                A11yLive::Off => {}
+                A11yLive::Polite => out += ",\"live\":\"polite\"",
+                A11yLive::Assertive => out += ",\"live\":\"assertive\"",
+            }
+            out += &opt(n.live_atomic, "atomic");
             out.push('}');
         }
         out + "]}"
@@ -315,6 +338,7 @@ impl Ctx<'_> {
                 "alertdialog" => R::AlertDialog,
                 "alert" => R::Alert,
                 "status" => R::Status,
+                "log" => R::Log,
                 "navigation" => R::Navigation,
                 "main" => R::Main,
                 "banner" => R::Banner,
@@ -502,6 +526,15 @@ impl Ctx<'_> {
         }
     }
 
+    /// An element that announces its changes (`aria-live` other than off, or a live role).
+    fn is_live_region(&self, n: NodeId) -> bool {
+        match self.attr(n, "aria-live").map(str::trim) {
+            Some("polite" | "assertive") => true,
+            Some(_) => false,
+            None => matches!(self.attr(n, "role").and_then(|r| r.split_whitespace().next()), Some("alert" | "status" | "log")),
+        }
+    }
+
     fn has_interesting_descendant(&self, n: NodeId) -> bool {
         self.doc.descendants(n).into_iter().any(|d| {
             let node = self.doc.node(d);
@@ -540,6 +573,7 @@ impl Ctx<'_> {
             && self.attr(n, "aria-labelledby").is_none()
             && self.attr(n, "title").is_none()
             && self.attr(n, "tabindex").is_none()
+            && !self.is_live_region(n)
             && !self.attr(n, "contenteditable").is_some_and(|v| !v.eq_ignore_ascii_case("false"))
             || presentational;
         if wrapper {
@@ -567,6 +601,21 @@ impl Ctx<'_> {
             && matches!(role, R::Button | R::Link | R::CheckBox | R::RadioButton | R::Switch | R::ListBoxOption | R::MenuItem | R::Tab | R::Disclosure | R::ColorWell);
         if a.clickable && role == R::Link {
             a.link_target = self.attr(n, "href").unwrap_or("").to_string();
+        }
+        if role == R::Status || role == R::Alert || role == R::Log || self.attr(n, "aria-live").is_some() {
+            a.live = match (self.attr(n, "aria-live").map(str::trim), role) {
+                (Some("assertive"), _) => A11yLive::Assertive,
+                (Some("polite"), _) => A11yLive::Polite,
+                (Some("off"), _) => A11yLive::Off,
+                (_, R::Alert) => A11yLive::Assertive,
+                (_, R::Status | R::Log) => A11yLive::Polite,
+                _ => A11yLive::Off,
+            };
+            // `alert` and `status` announce the whole region unless told otherwise.
+            a.live_atomic = match self.attr(n, "aria-atomic") {
+                Some(v) => v == "true",
+                None => matches!(role, R::Alert | R::Status),
+            };
         }
         // States.
         match role {

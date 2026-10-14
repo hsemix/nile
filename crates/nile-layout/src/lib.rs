@@ -22,7 +22,7 @@ mod images;
 mod pagination;
 mod paged;
 pub use paged::{PagedBox, SHEET_GAP};
-pub use pagination::{paginate, paginate_boxes};
+pub use pagination::{paginate, paginate_boxes, paginate_tree, paginate_with, Fragments, Repeat};
 pub use images::{FileImages, ImageData, ImageLoader};
 
 pub use nile_dom::NodeId;
@@ -31,7 +31,7 @@ use nile_style::{area_lines, Breadth, BorderStyle, GridLine, GridPlace, Position
     Align, Color, ComputedStyle, Display, Edges, FlexDirection, Length, OverflowKind, StyleMap, TextAlign, VerticalAlign,
 };
 use nile_text::{
-    break_lines, collapse_whitespace, Affinity, Alignment, Cluster, Cursor, InlineBoxSpec, Selection, PositionedLayoutItem, TextEngine,
+    break_lines, break_lines_varying, collapse_whitespace, Affinity, Alignment, Cluster, Cursor, InlineBoxSpec, Selection, PositionedLayoutItem, TextEngine,
     TextLayout, TextStyle,
 };
 use taffy::prelude::*;
@@ -1065,6 +1065,139 @@ impl LayoutTree {
     }
 }
 
+/// What a paragraph's lines must avoid: the content box it sits in (an x range) and the margin boxes
+/// of the floats beside it (`[x0, y0, x1, y1]`, with whether it floats left). Everything is relative
+/// to the paragraph's own top-left corner, because a second layout pass can move the whole group.
+#[derive(Clone)]
+struct FlowSpec {
+    x0: f32,
+    x1: f32,
+    /// A line's height, to test it against the floats.
+    line_h: f32,
+    floats: Vec<([f32; 4], bool)>,
+}
+
+impl FlowSpec {
+    /// Where a line whose top is at `y` (from the paragraph's top) can sit: `(left edge, width)`.
+    fn slot(&self, y: f32) -> (f32, f32) {
+        let (mut left, mut right) = (self.x0, self.x1);
+        for (f, is_left) in &self.floats {
+            if f[1] < y + self.line_h && f[3] > y {
+                if *is_left {
+                    left = left.max(f[2]);
+                } else {
+                    right = right.min(f[0]);
+                }
+            }
+        }
+        (left, (right - left).max(1.0))
+    }
+}
+
+/// Lay out text so its lines stop for floats and run full width below them. Taffy gives a text run
+/// one slot (the width beside the floats at its top); this finds the paragraphs that sit next to a
+/// float, breaks their lines again with a width per line (`FLOW_SPECS`, used by `flatten`), and makes
+/// each leaf as tall as its new lines so what follows moves up. True if any height changed.
+fn plan_floats(tree: &mut TaffyTree<NodeCtx>, doc: &Document, styles: &StyleMap, root: taffy::NodeId) -> bool {
+    FLOW_SPECS.with(|s| s.borrow_mut().clear());
+    TEXT_LEAVES.with(|t| t.borrow_mut().clear());
+    TEXT_LEAVES.with(|t| t.borrow_mut().clear());
+    compute_static_positions(tree, doc, styles, root);
+    let mut tmp = Vec::new();
+    flatten(tree, styles, root, 0.0, 0.0, &mut tmp);
+    let leaves = TEXT_LEAVES.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    let px = |l: Length| if let Length::Px(v) = l { v } else { 0.0 };
+    // Floats: margin boxes, in paint order.
+    let floats: Vec<(usize, [f32; 4], bool)> = tmp
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| matches!(b.content, BoxContent::Element) && !styles.is_pseudo(b.node))
+        .filter_map(|(i, b)| {
+            let s = styles.get(b.node);
+            let left = match s.float {
+                nile_style::Float::Left => true,
+                nile_style::Float::Right => false,
+                nile_style::Float::None => return None,
+            };
+            let m = s.margin;
+            Some((i, [b.rect.x - px(m.left), b.rect.y - px(m.top), b.rect.x + b.rect.width + px(m.right), b.rect.y + b.rect.height + px(m.bottom)], left))
+        })
+        .collect();
+    if floats.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    for (idx, leaf) in leaves {
+        let (BoxContent::Text(c), Some(tb)) = (&tmp[idx].content, tmp.get(idx)) else { continue };
+        if c.control || c.layout.lines().count() == 0 {
+            continue;
+        }
+        // The block the text sits in: the nearest element ancestor that isn't inline.
+        let mut p = doc.node(tb.node).parent.filter(|_| matches!(doc.node(tb.node).kind, NodeKind::Text(_))).unwrap_or(tb.node);
+        while styles.get(p).display == Display::Inline && styles.get(p).float == nile_style::Float::None {
+            match doc.node(p).parent {
+                Some(up) => p = up,
+                None => break,
+            }
+        }
+        let Some(pb) = tmp.iter().find(|b| b.node == p && matches!(b.content, BoxContent::Element) && !styles.is_pseudo(b.node)) else { continue };
+        let ps = styles.get(p);
+        let (x0, x1) = (pb.rect.x + ps.border_width.left + ps.padding.left, pb.rect.x + pb.rect.width - ps.border_width.right - ps.padding.right);
+        let (top, bottom) = (tb.rect.y, tb.rect.y + tb.rect.height);
+        // A box that is a float, is positioned out of flow, clips, or is a flex/grid/table/inline
+        // container makes its own formatting context: outer floats don't narrow its text.
+        let own_context = |n: NodeId| {
+            let s = styles.get(n);
+            s.float != nile_style::Float::None
+                || s.position.out_of_flow()
+                || s.overflow_x != OverflowKind::Visible
+                || s.overflow_y != OverflowKind::Visible
+                || !matches!(s.display, Display::Block | Display::ListItem | Display::Inline)
+        };
+        // Floats of the block's own parent chain flow around it, unless something between forms a context.
+        let reaches = |fp: NodeId| {
+            let mut n = Some(p);
+            while let Some(cur) = n {
+                if cur == fp {
+                    return true;
+                }
+                if own_context(cur) {
+                    return false;
+                }
+                n = doc.node(cur).parent;
+            }
+            false
+        };
+        let beside: Vec<([f32; 4], bool)> = floats
+            .iter()
+            .filter(|(fi, f, _)| *fi < idx && f[3] > top && f[1] < bottom && f[2] > x0 && f[0] < x1)
+            .filter(|(fi, ..)| doc.node(tmp[*fi].node).parent.is_some_and(reaches))
+            .map(|(_, f, l)| (*f, *l))
+            .collect();
+        if beside.is_empty() {
+            continue;
+        }
+        let lines = c.layout.lines().count() as f32;
+        let (ox, oy) = (tb.rect.x, tb.rect.y);
+        let floats = beside.into_iter().map(|(f, l)| ([f[0] - ox, f[1] - oy, f[2] - ox, f[3] - oy], l)).collect();
+        let spec = FlowSpec { x0: x0 - ox, x1: x1 - ox, line_h: (c.layout.height() / lines).max(1.0), floats };
+        let mut probe = c.layout.clone();
+        break_lines_varying(&mut probe, spec.x1 - spec.x0, Alignment::Start, |y| {
+            let (x, w) = spec.slot(y);
+            (x - spec.x0, w)
+        });
+        let height = probe.height();
+        if (height - tb.rect.height).abs() > 0.5 {
+            let mut st = tree.style(leaf).unwrap().clone();
+            st.size.height = Dimension::length(height);
+            tree.set_style(leaf, st).unwrap();
+            changed = true;
+        }
+        FLOW_SPECS.with(|s| s.borrow_mut().insert(leaf, spec));
+    }
+    changed
+}
+
 enum NodeCtx {
     Element(NodeId),
     /// An `<img>`: a leaf of its picture's size (0 x 0 without one).
@@ -1138,6 +1271,7 @@ pub fn layout_with(
     HOISTED.with(|h| h.borrow_mut().clear());
     ABS_HANDED.with(|a| a.borrow_mut().clear());
     STATIC_AT.with(|a| a.borrow_mut().clear());
+    FLOW_SPECS.with(|s| s.borrow_mut().clear());
     PREEDIT.with(|p| *p.borrow_mut() = options.preedit.clone());
     let was = PARENT_IS_CB.replace(false);
     let root = build(doc, styles, text, &mut tree, html).unwrap_or_else(|| {
@@ -1210,10 +1344,14 @@ pub fn layout_with(
         }
     }
 
+    if styles.styles.iter().any(|s| s.float != nile_style::Float::None) && plan_floats(&mut tree, doc, styles, root) {
+        compute(&mut tree);
+    }
     compute_static_positions(&tree, doc, styles, root);
     // Paged elements: find where the sheets break, then make each element as tall as its sheets.
     // Starts are kept relative to the element's top, which can move in the second pass.
-    let mut sheets: Vec<(NodeId, Vec<f32>, f32)> = Vec::new();
+    type Sheet = (NodeId, Vec<f32>, f32, Vec<Option<Repeat>>);
+    let mut sheets: Vec<Sheet> = Vec::new();
     if !paged_nodes.is_empty() {
         let page = styles.page_style(0);
         let (mt, mb) = (page.margin[0], page.margin[2]);
@@ -1225,10 +1363,11 @@ pub fn layout_with(
             let top = first[i].rect.y;
             let end = first[i].subtree_end.max(i + 1);
             let content_end = paged::content_end(&first, i);
-            let starts = pagination::paginate_boxes(&first[i + 1..end], styles, top + mt, content_end.max(top + mt + 1.0), content_h);
-            let height = starts.len() as f32 * page.size.1 + (starts.len() - 1) as f32 * SHEET_GAP;
+            let frags = pagination::paginate_with(&first[i + 1..end], i + 1, Some(doc), styles, top + mt, content_end.max(top + mt + 1.0), content_h);
+            let height = frags.starts.len() as f32 * page.size.1 + (frags.starts.len() - 1) as f32 * SHEET_GAP;
             paged::set_height(&mut tree, *tn, height, styles, *id);
-            sheets.push((*id, starts.iter().map(|s| s - top).collect(), content_end - top));
+            let repeats = frags.repeats.into_iter().map(|r| r.map(|r| Repeat { y: r.y - top, ..r })).collect();
+            sheets.push((*id, frags.starts.iter().map(|s| s - top).collect(), content_end - top, repeats));
         }
         compute(&mut tree);
     }
@@ -1258,7 +1397,7 @@ pub fn layout_with(
     let origins = styles.origins().clone();
     let mut tree = LayoutTree { pages: Vec::new(), page_scroll: options.scroll_y, viewport_h: viewport_height, boxes, content_height, menu: None, lists: Default::default(), markers: Default::default(), index, text_nodes: Default::default(), elem_marks: Default::default(), origins };
     tree.compute_scroll_boxes(styles);
-    for (id, rel, rel_end) in sheets {
+    for (id, rel, rel_end, rel_repeats) in sheets {
         let Some(&i) = tree.index.get(&id) else { continue };
         let b = &tree.boxes[i];
         let top = b.rect.y;
@@ -1272,6 +1411,7 @@ pub fn layout_with(
             margin: page.margin,
             starts: rel.iter().map(|s| s + top).collect(),
             content_end: rel_end + top,
+            repeats: rel_repeats.into_iter().map(|r| r.map(|r| Repeat { y: r.y + top, ..r })).collect(),
         });
     }
     for (i, b) in tree.boxes.iter().enumerate() {
@@ -1412,6 +1552,10 @@ thread_local! {
     static STATIC_AT: std::cell::RefCell<std::collections::HashMap<taffy::NodeId, StaticAt>> = std::cell::RefCell::default();
     static HOISTED: std::cell::RefCell<std::collections::HashSet<taffy::NodeId>> = std::cell::RefCell::default();
     static FIXED_BLOCKS: std::cell::RefCell<Vec<taffy::NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Text beside floats: per text leaf, the floats its lines must avoid (see `plan_floats`).
+    static FLOW_SPECS: std::cell::RefCell<std::collections::HashMap<taffy::NodeId, FlowSpec>> = std::cell::RefCell::default();
+    /// While planning: the paint-list index of each text leaf `flatten` emitted.
+    static TEXT_LEAVES: std::cell::RefCell<Vec<(usize, taffy::NodeId)>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The element whose children are being built is itself a containing block.
     static PARENT_IS_CB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -2834,7 +2978,21 @@ fn flatten(
             } else {
                 rect.width
             };
-            break_lines(layout, Some(width + 1.0), *align);
+            let spec = FLOW_SPECS.with(|s| s.borrow().get(&n).cloned());
+            match &spec {
+                // Beside floats: the box spans the whole content box and each line has its own slot.
+                Some(spec) if !*nowrap => {
+                    rect.x += spec.x0;
+                    rect.width = spec.x1 - spec.x0;
+                    // `slot` is relative to where Taffy put the paragraph, `rect` now starts at spec.x0 from there.
+                    break_lines_varying(layout, rect.width + 1.0, *align, |y| {
+                        let (x, w) = spec.slot(y);
+                        (x - spec.x0, w)
+                    });
+                }
+                _ => break_lines(layout, Some(width + 1.0), *align),
+            }
+            TEXT_LEAVES.with(|t| t.borrow_mut().push((out.len(), n)));
             let layout = (**layout).clone();
             let kids = kids.clone();
             let decos = decos.clone();
@@ -3885,6 +4043,33 @@ second</textarea><textarea id="e"></textarea></body>"#,
         let (m, h) = (r("m"), r("h"));
         assert_eq!((h.x, h.y, h.width, h.height), (0.0, 50.0, 200.0, 30.0));
         assert_eq!((m.x, m.width, m.height), (50.0, 150.0, 70.0));
+    }
+
+    #[test]
+    fn text_beside_a_float_widens_below_it() {
+        let doc = Document::parse(
+            r#"<body style="margin:0;font-family:sans-serif;font-size:16px"><div id="c" style="width:300px"><div style="float:left;width:100px;height:40px;margin:0 10px 0 0"></div><span id="t">One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty.</span></div></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 400.0, 100.0);
+        let run = text_boxes(&tree)[0];
+        let BoxContent::Text(c) = &run.content else { panic!() };
+        // Lines that start above the float's bottom (40px) are pushed right of it (110px); later ones start at 0.
+        let lines: Vec<(f32, f32, f32)> = c.layout.lines().map(|l| (run.rect.y + l.metrics().block_min_coord, l.metrics().inline_min_coord, l.metrics().inline_max_coord)).collect();
+        assert!(lines.len() >= 4, "{lines:?}");
+        for (top, min, max) in &lines {
+            if *top < 40.0 {
+                assert_eq!((*min + run.rect.x, *max + run.rect.x), (110.0, 300.0), "beside the float: {lines:?}");
+            } else {
+                assert_eq!((*min + run.rect.x, *max + run.rect.x), (0.0, 300.0), "below it: {lines:?}");
+            }
+        }
+        assert!(lines.iter().any(|l| l.0 >= 40.0), "{lines:?}");
+        // The block is as tall as the re-broken lines, not the old narrow ones.
+        let c_id = doc.find(|n| n.attr("id") == Some("c")).unwrap();
+        let block = tree.node_rect(c_id).unwrap();
+        assert!((block.height - c.layout.height()).abs() < 1.0, "{} vs {}", block.height, c.layout.height());
     }
 
     #[test]
