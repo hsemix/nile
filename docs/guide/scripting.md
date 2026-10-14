@@ -27,7 +27,7 @@ import { createStore } from './store.js';
 ```
 
 Relative and absolute filesystem module paths work, together with `@nile`,
-`@sciter` (an alias) and `@env`. Bare npm package resolution is not implemented; `@sys` is
+`@sciter` (an alias), `@env`, `@sys`, `@debug` and `@storage`. Bare npm package resolution is not implemented; `@sys` is
 documented in [packaging](packaging.md#bootstrap-scripts-runjs). An inline module resolves imports from the HTML file's
 folder. See [built-in modules](data-and-services.md#built-in-modules).
 
@@ -160,7 +160,7 @@ scroller.scrollTo({ top: 100, left: 0 });
 Layout queries synchronize pending DOM changes before answering. Batch writes
 before reads instead of repeatedly changing a style and measuring it in a loop.
 `getComputedStyle()` exposes implemented properties, not the full browser set.
-`offsetParent` is approximated by the parent. `devicePixelRatio` reflects the
+`offsetLeft`/`offsetTop` use the parent as their reference; `offsetParent` is not exposed. `devicePixelRatio` reflects the
 host's render scale. Element scroll properties and scroll events work; page
 scrolling is vertical. `ResizeObserver` and `IntersectionObserver` are available;
 intersection `rootMargin` is currently ignored.
@@ -178,3 +178,6 @@ if (host.has('saveDocument')) {
 embedding application. It is not a built-in filesystem or networking API. The
 development shell does not register a `saveDocument` service.
 See [embedding](embedding.md) for registration and host-to-script calls.
+
+For the member-by-member API, see [DOM/events](../reference/dom.md) and
+[built-in modules](../reference/modules.md).

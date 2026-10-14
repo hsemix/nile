@@ -33,8 +33,10 @@ side.
   with your own identity (and notarize it) before distributing.
 - The archive is read-only; `Window.this.selectFile` and the `@sys` module still use the real disk.
 - Size: the packed app is the `nile` shell plus your files. The shell (with window, dialogs, accessibility and
-  menus) is about 9.5 MB in a release build.
-- Not here yet: version resources for the executable, Linux desktop entries, and a CLI option to unpack.
+  menus) is build-dependent; measure your release executable and packed assets rather than
+  treating an earlier measurement as a size guarantee.
+- Branding/version resources and Linux desktop entries are described below. A CLI
+  option to unpack is not provided.
 
 ## An icon and details for the program
 

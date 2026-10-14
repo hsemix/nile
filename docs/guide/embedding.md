@@ -59,8 +59,10 @@ on the host surface; the software shell does not expose a surface alpha mode.
 Scripts can set `document.title`, call `window.close()`, `moveTo`/`moveBy`,
 `resizeTo`/`resizeBy`, and request/exit fullscreen. These enqueue host commands.
 Headless runs have no native window, so they do not perform the native actions.
-Multiple windows and a general native dialog API are not provided. File-input
-chooser requests are supported through the shell or C-host callbacks.
+Multiple windows, native/inline dialogs and popup windows are supplied by the
+shell. Custom hosts consume window requests and provide dialog/file-chooser
+services; see [windows](../reference/windows.md) and the
+[complete native API reference](../reference/native-api.md).
 
 ## Embed from Rust
 
