@@ -851,6 +851,13 @@ impl Page {
             let file = folder.join(src);
             nile_dom::vfs::read_to_string(&file).map_err(|e| eprintln!("[include] could not load {}: {e}", file.display())).ok()
         });
+        // Stylesheet links and `@import`s the same way (paths are the page's folder's).
+        let html = nile_dom::inline_links(&html, &mut |href| {
+            let mapped = nile_dom::vfs::url_to_path(href).map(|p| p.to_string_lossy().into_owned());
+            let rel = mapped.as_deref().unwrap_or_else(|| nile_script::path_of_url(href));
+            let file = if std::path::Path::new(rel).is_absolute() { PathBuf::from(rel) } else { folder.join(rel) };
+            nile_dom::vfs::read_to_string(&file).map_err(|e| eprintln!("[css] could not load {}: {e}", file.display())).ok()
+        });
         let frames: Rc<RefCell<frames::Frames>> = Rc::default();
         let doc = Rc::new(RefCell::new(Document::parse(&html)));
         let interaction = InteractionState::default();
@@ -3538,6 +3545,21 @@ mod tests {
         assert_eq!(js(&mut p, "window.log.join('|')"), "file:world:11|proc:hi:0|tcp:ping|udp:dgram|os:string:true:8:bigint:true|env:1");
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn linked_style_sheets_and_imports_apply() {
+        let dir = std::env::temp_dir().join(format!("nile-css-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("main.css"), "@import \"sub/part.css\"; #a { color: rgb(255, 0, 0) }").unwrap();
+        std::fs::write(dir.join("sub/part.css"), "#b { color: rgb(0, 0, 255) }").unwrap();
+        let main = dir.join("index.html");
+        std::fs::write(&main, r#"<head><link rel="stylesheet" href="main.css"></head><body><p id="a">a</p><p id="b">b</p></body>"#).unwrap();
+        let mut p = Page::load(main, (400.0, 200.0), 0.0);
+        p.layout(400.0, 200.0);
+        assert_eq!(js(&mut p, "getComputedStyle(document.getElementById('a')).color"), "rgb(255, 0, 0)");
+        assert_eq!(js(&mut p, "getComputedStyle(document.getElementById('b')).color"), "rgb(0, 0, 255)");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -60,8 +60,10 @@ pub struct Document {
 }
 
 mod include;
+mod stylelink;
 pub mod vfs;
 pub use include::expand as expand_includes;
+pub use stylelink::{inline_imports, inline_links};
 use include::rewrite_frames;
 
 impl Document {

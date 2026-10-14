@@ -92,7 +92,7 @@ pub(crate) fn tag_end(html: &str, from: usize) -> Option<usize> {
     None
 }
 
-fn attributes(tag: &str) -> Vec<(String, String)> {
+pub(crate) fn attributes(tag: &str) -> Vec<(String, String)> {
     let mut found = Vec::new();
     let chars: Vec<char> = tag.chars().collect();
     let mut i = 0;

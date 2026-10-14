@@ -1,0 +1,3 @@
+@import "base.css";
+h1 { color: #2356ab; font-size: 26px }
+.note { background: #eef3fb; border-left: 4px solid #2356ab; padding: 10px 14px }
