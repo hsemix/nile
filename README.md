@@ -238,7 +238,7 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
   in the `value` attribute (no separate default value). Sciter's `Element.value` for other behaviors isn't there.
 - Scrollbars are thin overlay bars (draggable; clicking the track jumps there), with no `scrollbar-*` styling, no
   hover/fade behavior and no arrow buttons; clipping ignores `border-radius`.
-- JS gaps: no `Blob`/`FormData`/streams/`WebSocket`, no cookies or CORS, `fetch` follows redirects only for http(s), `@sys`/`@debug`/`@storage` modules and bare module specifiers (only relative and absolute paths plus `@nile`/`@sciter`/`@env`; `setModuleUrlResolver` is accepted but unused, `compress`/`decompress`/`loadLibrary`/the synchronous `import()` throw),
+- JS gaps: no `Blob`/`FormData`/streams/`WebSocket`, no cookies or CORS, `fetch` follows redirects only for http(s), `@debug`/`@storage` modules and bare module specifiers (only relative and absolute paths plus `@nile`/`@sciter`/`@env`; `setModuleUrlResolver` is accepted but unused, `compress`/`decompress`/`loadLibrary`/the synchronous `import()` throw),
   `offsetParent` (approximated by the parent).
   From Sciter: class components, `componentUpdate`,
   element-level `onGlobalEvent`, `Element.value` (no native behaviors yet), `this://` URLs, and JSX shortcuts like `.class`;

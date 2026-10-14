@@ -3662,7 +3662,7 @@ mod tests {
     #[test]
     fn node_rect_for_blocks_and_inline_elements() {
         let doc = Document::parse(
-            r#"<body style="margin:0"><div id="d" style="width:200px; padding:10px; height:50px"><span id="s">hi <b id="b">bold</b></span><i id="none" style="display:none">x</i></div></body>"#,
+            r#"<body style="margin:0"><div id="d" style="width:200px; padding:10px; height:50px; font-family:sans-serif"><span id="s">hi <b id="b">bold</b></span><i id="none" style="display:none">x</i></div></body>"#,
         );
         let styles = compute_styles(&doc);
         let mut text = TextEngine::new();

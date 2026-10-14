@@ -2,6 +2,15 @@
 
 [Guide index](README.md) · Next: [Scripting](scripting.md)
 
+## Style sheets in files
+
+Besides `<style>`, a page can link style sheets: `<link rel="stylesheet" href="app.css">` (with an optional
+`media="(min-width: 700px)"`), and a sheet can `@import "other.css";` or `@import url(other.css) screen;`
+(paths relative to the importing sheet; nested up to 8 deep). They are read when the page loads, from disk or
+from a packed app, and spliced in as `<style>` text, so a sheet added later by script isn't loaded and
+`url()` references inside a sheet resolve against the page's folder, not the sheet's. See
+[css-file](../../examples/css-file/index.html).
+
 ## Start with predictable sizing
 
 ```css

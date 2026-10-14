@@ -29,6 +29,7 @@ use rquickjs::{
 mod envmod;
 mod jsx;
 mod net;
+mod sys;
 
 pub use net::{file_url, path_of_url, FetchRequest, FetchResponse, Fetcher, LocalFetcher};
 
@@ -273,7 +274,7 @@ impl Loader for FileLoader {
     ) -> rquickjs::Result<Module<'js, Declared>> {
         // Built-in modules are thin wrappers over objects the prelude defines.
         let builtin = match name {
-            "@sys" => Some("const m = globalThis.__sysModule;\nexport const fs = m.fs;\nexport default m;"),
+            "@sys" => Some("const m = globalThis.__sysModule;\nexport const fs = m.fs;\nexport const TCP = m.TCP;\nexport const UDP = m.UDP;\nexport const Process = m.Process;\nexport const spawn = m.spawn;\nexport const hrtime = m.hrtime;\nexport const gettimeofday = m.gettimeofday;\nexport const uname = m.uname;\nexport const isatty = m.isatty;\nexport const environ = m.environ;\nexport const getenv = m.getenv;\nexport const setenv = m.setenv;\nexport const unsetenv = m.unsetenv;\nexport const cwd = m.cwd;\nexport const chdir = m.chdir;\nexport const homedir = m.homedir;\nexport const tmpdir = m.tmpdir;\nexport const exepath = m.exepath;\nexport const random = m.random;\nexport default m;"),
             "@nile" => Some(
                 "const m = globalThis.__sciterModule;\nexport const { VERSION, REVISION, QUICKJS_VERSION, setModuleUrlResolver, loadLibrary, parseValue, devicePixels, on, off, once, onGlobalEvent, offGlobalEvent, $, $$, uuid, encode, decode, compress, decompress, toBase64, fromBase64, md5, crc32 } = m;\nconst imp = m.import;\nexport { imp as import };\nexport default m;",
             ),
@@ -325,6 +326,7 @@ pub struct ScriptHost {
     start: Instant,
     host_fns: HostFns,
     net: net::NetState,
+    sys: sys::SysState,
     observing: Rc<std::cell::Cell<bool>>,
     storage: Rc<RefCell<Option<std::path::PathBuf>>>,
 }
@@ -371,6 +373,7 @@ fn id_out(id: Option<NodeId>) -> i32 {
 struct Shared {
     host_fns: HostFns,
     net: net::NetState,
+    sys: sys::SysState,
     observing: Rc<std::cell::Cell<bool>>,
     storage: Rc<RefCell<Option<std::path::PathBuf>>>,
 }
@@ -383,7 +386,7 @@ fn install_natives(
     env: Rc<dyn Environment>,
     shared: Shared,
 ) -> rquickjs::Result<()> {
-    let Shared { host_fns, net, observing, storage } = shared;
+    let Shared { host_fns, net, sys, observing, storage } = shared;
     let n = Object::new(ctx.clone())?;
 
     macro_rules! native {
@@ -726,6 +729,15 @@ fn install_natives(
         Ok(v) => format!("O:{v}"),
         Err(e) => format!("E:{e}"),
     });
+    // `@sys` resources: results are "O:" + text or "E:" + error; blocking operations answer later (`__sysDone`).
+    native!("sysCall", |op: String, args: Vec<String>| match sys::call(&op, &args) {
+        Ok(v) => format!("O:{v}"),
+        Err(e) => format!("E:{e}"),
+    });
+    native!("sysStart", {
+        let sys = sys.clone();
+        move |id: u32, op: String, args: Vec<String>| sys::start(&sys, id, op, args)
+    });
     native!("fileSize", |path: String| std::fs::metadata(path).map_or(-1.0, |m| m.len() as f64));
     native!("scale", {
         let env = env.clone();
@@ -770,17 +782,18 @@ impl ScriptHost {
         let start = Instant::now();
         let host_fns: HostFns = Rc::default();
         let net = net::NetState::new();
+        let sys = sys::SysState::default();
         let observing: Rc<std::cell::Cell<bool>> = Rc::default();
         let storage: Rc<RefCell<Option<std::path::PathBuf>>> = Rc::default();
 
         context.with(|ctx| -> rquickjs::Result<()> {
-            install_natives(&ctx, doc, log.clone(), start, env, Shared { host_fns: host_fns.clone(), net: net.clone(), observing: observing.clone(), storage: storage.clone() })?;
+            install_natives(&ctx, doc, log.clone(), start, env, Shared { host_fns: host_fns.clone(), net: net.clone(), sys: sys.clone(), observing: observing.clone(), storage: storage.clone() })?;
             ctx.eval::<(), _>(prelude()).catch(&ctx).map_err(|e| {
                 eprintln!("[js] prelude failed: {e}");
                 rquickjs::Error::Unknown
             })
         })?;
-        Ok(ScriptHost { runtime, context, log, start, host_fns, net, observing, storage })
+        Ok(ScriptHost { runtime, context, log, start, host_fns, net, sys, observing, storage })
     }
 
     /// The loader behind `fetch` and `XMLHttpRequest` (by default: files next to the page and
@@ -819,7 +832,7 @@ impl ScriptHost {
 
     /// Requests still in flight; the embedder should keep ticking while there are any.
     pub fn fetches_pending(&self) -> bool {
-        self.net.pending.get() > 0
+        self.net.pending.get() > 0 || self.sys.pending()
     }
 
     /// Run promise jobs queued by the last call.
@@ -950,7 +963,16 @@ impl ScriptHost {
                 Ok(())
             });
         }
-        let poll = self.net.pending.get() > 0;
+        for (id, result) in self.sys.take_done() {
+            self.call_global("__sysDone", |_, f| {
+                match &result {
+                    Ok(v) => f.call::<_, ()>((id, true, v.as_str()))?,
+                    Err(e) => f.call::<_, ()>((id, false, e.as_str()))?,
+                }
+                Ok(())
+            });
+        }
+        let poll = self.net.pending.get() > 0 || self.sys.pending();
         match ((next >= 0.0).then(|| Duration::from_secs_f64(next / 1000.0)), poll) {
             (Some(d), true) => Some(d.min(Duration::from_millis(16))),
             (None, true) => Some(Duration::from_millis(16)),

@@ -76,6 +76,11 @@ application.run();
 - `@sys` has the file-system part of Sciter's module: `fs.stat/statSync/lstat`, `readdir/readdirSync`,
   `readFile/readFileSync` (an ArrayBuffer), `unlink`, `rename`, `mkdir`, `rmdir`, `copyfile`, `realpath`,
   `splitpath` and the type constants, with paths or `file://` / `this://app/` URLs (a packed app's files can be
-  read, not written). `writeFile`/`writeFileSync` are a Nile addition. Not there: `fs.open`/`File`, sockets,
-  pipes, `spawn`, `watch`.
+  read, not written). `writeFile`/`writeFileSync` are a Nile addition. Also `fs.open/openSync` (a `File` with
+  `read/write/stat/close` and sync forms, flags `r r+ w w+ a a+`, `x`), `fs.opendir`, `sys.TCP` and `sys.UDP`
+  (`bind/listen/accept/connect/read/write/send/recv/getsockname/getpeername/shutdown/close`), `sys.spawn`
+  (a `Process` with `pid`, `stdin/stdout/stderr` pipes, `wait()`, `kill()`; the `env` option adds to the
+  environment), and `hrtime`, `gettimeofday`, `uname`, `isatty`, `environ`, `getenv/setenv/unsetenv`, `cwd`,
+  `chdir`, `homedir`, `tmpdir`, `exepath`, `random` (not cryptographic). Blocking calls return promises.
+  Not there: named `Pipe`s, `TTY`, `fs.watch`.
 - The bootstrap window is not stripped down the way Sciter's is: a bootstrap script can use the DOM and timers.

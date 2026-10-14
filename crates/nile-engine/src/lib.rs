@@ -851,6 +851,13 @@ impl Page {
             let file = folder.join(src);
             nile_dom::vfs::read_to_string(&file).map_err(|e| eprintln!("[include] could not load {}: {e}", file.display())).ok()
         });
+        // Stylesheet links and `@import`s the same way (paths are the page's folder's).
+        let html = nile_dom::inline_links(&html, &mut |href| {
+            let mapped = nile_dom::vfs::url_to_path(href).map(|p| p.to_string_lossy().into_owned());
+            let rel = mapped.as_deref().unwrap_or_else(|| nile_script::path_of_url(href));
+            let file = if std::path::Path::new(rel).is_absolute() { PathBuf::from(rel) } else { folder.join(rel) };
+            nile_dom::vfs::read_to_string(&file).map_err(|e| eprintln!("[css] could not load {}: {e}", file.display())).ok()
+        });
         let frames: Rc<RefCell<frames::Frames>> = Rc::default();
         let doc = Rc::new(RefCell::new(Document::parse(&html)));
         let interaction = InteractionState::default();
@@ -3480,6 +3487,79 @@ mod tests {
         assert_eq!(js(&mut p, "window.err"), "ENOENT");
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_sys_module_runs_processes_talks_over_sockets_and_opens_files() {
+        let dir = std::env::temp_dir().join(format!("nile-sys2-{}", std::process::id())).to_string_lossy().replace('\\', "/");
+        let command = if cfg!(windows) { r#"["cmd", "/c", "echo hi"]"# } else { r#"["echo", "hi"]"# };
+        let (mut p, path) = page(
+            &format!(r#"<body><script type="module">
+              import * as sys from "@sys";
+              const log = []; window.log = log; window.done = 0;
+              const dec = new TextDecoder();
+              const dir = "{dir}";
+              sys.fs.mkdirSync(dir);
+              // A file handle: write, then read back at a position.
+              const f = sys.fs.openSync(dir + "/f.txt", "w+");
+              f.writeSync("hello world");
+              log.push("file:" + dec.decode(f.readSync(5, 6)) + ":" + f.statSync().st_size);
+              f.closeSync();
+              // A process and its stdout.
+              const proc = sys.spawn({command});
+              (async () => {{
+                const out = await proc.stdout.read();
+                const status = await proc.wait();
+                log.push("proc:" + dec.decode(out).trim() + ":" + status.exit_status);
+                // A TCP echo over loopback.
+                const server = new sys.TCP();
+                server.bind({{ ip: "127.0.0.1", port: 0 }});
+                server.listen();
+                const port = server.getsockname().port;
+                const accepting = server.accept().then(async (conn) => {{ const data = await conn.read(); await conn.write(data); conn.close(); }});
+                const client = new sys.TCP();
+                await client.connect({{ ip: "127.0.0.1", port }});
+                await client.write("ping");
+                log.push("tcp:" + dec.decode(await client.read()));
+                await accepting;
+                client.close(); server.close();
+                // UDP.
+                const a = new sys.UDP(); a.bind({{ ip: "127.0.0.1", port: 0 }});
+                const b = new sys.UDP();
+                await b.send("dgram", {{ ip: "127.0.0.1", port: a.getsockname().port }});
+                log.push("udp:" + dec.decode((await a.recv()).data));
+                log.push("os:" + (typeof sys.uname().sysname) + ":" + (sys.getenv("NILE_SURELY_UNSET") === undefined) + ":" + sys.random(8).length + ":" + (typeof sys.hrtime()) + ":" + (sys.cwd().length > 0));
+                sys.setenv("NILE_SYS_TEST", "1"); log.push("env:" + sys.getenv("NILE_SYS_TEST"));
+                window.done = 1;
+              }})().catch((e) => {{ log.push("error:" + e.message); window.done = 1; }});
+            </script></body>"#),
+            "sys2",
+        );
+        for _ in 0..500 {
+            p.tick();
+            if js(&mut p, "window.done") == "1" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(js(&mut p, "window.log.join('|')"), "file:world:11|proc:hi:0|tcp:ping|udp:dgram|os:string:true:8:bigint:true|env:1");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn linked_style_sheets_and_imports_apply() {
+        let dir = std::env::temp_dir().join(format!("nile-css-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("main.css"), "@import \"sub/part.css\"; #a { color: rgb(255, 0, 0) }").unwrap();
+        std::fs::write(dir.join("sub/part.css"), "#b { color: rgb(0, 0, 255) }").unwrap();
+        let main = dir.join("index.html");
+        std::fs::write(&main, r#"<head><link rel="stylesheet" href="main.css"></head><body><p id="a">a</p><p id="b">b</p></body>"#).unwrap();
+        let mut p = Page::load(main, (400.0, 200.0), 0.0);
+        p.layout(400.0, 200.0);
+        assert_eq!(js(&mut p, "getComputedStyle(document.getElementById('a')).color"), "rgb(255, 0, 0)");
+        assert_eq!(js(&mut p, "getComputedStyle(document.getElementById('b')).color"), "rgb(0, 0, 255)");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
