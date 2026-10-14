@@ -6,7 +6,12 @@
   delete g.__nile;
 
   // QuickJS stacks hold only the frames, so the message goes first.
-  const report = (e) => N.log("error", "Uncaught " + (e && e.stack ? (e.message !== undefined ? String(e.name || "Error") + ": " + e.message + "\n" : "") + e.stack : e));
+  // `@debug.setUnhandledExceptionHandler` and `setConsoleOutputHandler` hang their functions here.
+  const hooks = { unhandled: null, console: null };
+  const report = (e) => {
+    if (hooks.unhandled) { const h = hooks.unhandled; hooks.unhandled = null; try { h(e); return; } catch (_) { /* fall through */ } finally { hooks.unhandled = h; } }
+    N.log("error", "Uncaught " + (e && e.stack ? (e.message !== undefined ? String(e.name || "Error") + ": " + e.message + "\n" : "") + e.stack : e));
+  };
   const kebab = (n) => String(n).replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
   const idOf = (n) => {
     if (n instanceof Node) return n._id;
@@ -155,6 +160,7 @@
 
   // ---- nodes -------------------------------------------------------------
   const cache = new Map();
+  let adopting = -1;
   function wrap(id) {
     if (id < 0) return null;
     let w = cache.get(id);
@@ -167,7 +173,15 @@
   }
 
   class Node extends EventTarget {
-    constructor(id) { super(); this._id = id; }
+    constructor(id) {
+      super();
+      // A class component (`class Clock extends Element`) is built by `new Clock(props, kids)`:
+      // `adopting` hands it the element the engine made for it, or a new `<div>` outside JSX.
+      if (typeof id !== "number") {
+        this._id = adopting >= 0 ? adopting : N.createElement("div");
+        cache.set(this._id, this);
+      } else this._id = id;
+    }
     get nodeType() { return N.nodeType(this._id); }
     get parentNode() { return wrap(N.parent(this._id)); }
     get parentElement() { const p = this.parentNode; return p && p.nodeType === 1 ? p : null; }
@@ -188,14 +202,15 @@
       for (let n = this; n; n = n.parentNode) if (n === documentObj) return true;
       return false;
     }
-    appendChild(c) { N.append(this._id, idOf(c)); return c; }
-    insertBefore(c, ref) { N.insertBefore(this._id, idOf(c), ref ? idOf(ref) : -1); return c; }
+    appendChild(c) { N.append(this._id, idOf(c)); mounted(); return c; }
+    insertBefore(c, ref) { N.insertBefore(this._id, idOf(c), ref ? idOf(ref) : -1); mounted(); return c; }
     removeChild(c) {
       if (c.parentNode !== this) throw new Error("NotFoundError: the node is not a child of this node");
+      unmounting(c);
       N.remove(c._id);
       return c;
     }
-    remove() { N.remove(this._id); }
+    remove() { unmounting(this); N.remove(this._id); }
     contains(o) { for (let n = o; n; n = n.parentNode) if (n === this) return true; return false; }
   }
 
@@ -302,6 +317,7 @@
     }
     content(...items) {
       const nodes = materialize(expand(items, this));
+      if (liveComps) for (const c of this.childNodes) unmounting(c);
       N.setText(this._id, "");
       for (const n of nodes) this.appendChild(n);
       return this;
@@ -317,6 +333,36 @@
         patchChildren(this, root.kids);
       }
       return this;
+    }
+    // Class components: overridden by subclasses (see "class components" below).
+    this() {}
+    render() { return null; }
+    post(fn, avoidDuplicates) {
+      if (avoidDuplicates && this._posted && this._posted.has(fn)) return;
+      (this._posted = this._posted || new Set()).add(fn);
+      queueMicrotask(() => { this._posted.delete(fn); fn.call(this, this); });
+    }
+    // Merge `obj` into the element and re-render later when something changed (always when
+    // called without one); batches several calls into one render.
+    componentUpdate(obj) {
+      let changed = obj === undefined || obj === null;
+      if (obj && typeof obj === "object") {
+        for (const [k, v] of Object.entries(obj)) if (this[k] !== v) { this[k] = v; changed = true; }
+      }
+      if (!changed || this._upd) return;
+      this._upd = true;
+      queueMicrotask(() => {
+        this._upd = false;
+        if (!this._comp) return;
+        draw(this, this.render());
+        if (typeof this.componentDidUpdate === "function") this.componentDidUpdate();
+      });
+    }
+    static create(v) {
+      if (typeof v === "string") return documentObj.createElement(v);
+      const el = materialize(expand(v, null)).find((n) => n.nodeType === 1);
+      mounted();
+      return el || null;
     }
     insertAfter(node, ref) { this.insertBefore(node, ref ? ref.nextSibling : this.firstChild); return node; }
     get elementIndex() { const p = this.parentElement; return p ? p.children.indexOf(this) : -1; }
@@ -384,7 +430,9 @@
     else if (isVNode(x)) {
       const [tag, attrs, kids] = x;
       if (tag === JSX.Fragment) expand(kids, parent, out);
-      else if (typeof tag === "function") expand(tag(attrs || {}, flat(kids), parent), parent, out);
+      else if (typeof tag === "function" && tag.prototype instanceof Element) {
+        out.push({ tag: "div", attrs: {}, kids: [], comp: tag, props: attrs || {}, children: flat(kids) });
+      } else if (typeof tag === "function") expand(tag(attrs || {}, flat(kids), parent), parent, out);
       else out.push({ tag: String(tag), attrs: attrs || {}, kids: expand(kids, null) });
     } else if (Array.isArray(x)) for (const y of x) expand(y, parent, out);
     else out.push(String(x));
@@ -401,12 +449,78 @@
     return items.map((it) => {
       if (typeof it === "string") return documentObj.createTextNode(it);
       if (it instanceof Node) return it;
+      if (it.comp) return instantiate(it);
       const el = documentObj.createElement(it.tag);
       applyAttrs(el, it.attrs, null);
       for (const k of materialize(it.kids)) el.appendChild(k);
       if (typeof it.attrs.ref === "function") it.attrs.ref(el);
       return el;
     });
+  }
+
+  // ---- class components ---------------------------------------------------
+  // `class Clock extends Element { render() { ... } }` used as `<Clock/>`: the element is a
+  // `<div>` whose prototype is the class. Mounting runs the constructor, `this(props, kids)`,
+  // `render(props, kids)`, then `componentDidMount` once the element is in the document;
+  // a parent's render runs `this(...)` + `render(...)` again; `componentUpdate` re-renders
+  // later (`componentDidUpdate` after); removal calls `componentWillUnmount`.
+  let liveComps = 0;
+  const mountQueue = [];
+  const plainProps = (props) => {
+    const a = {};
+    for (const [k, v] of Object.entries(props)) if (typeof v !== "object" && (typeof v !== "function" || /^on[A-Za-z]/.test(k))) a[k] = v;
+    return a;
+  };
+  function instantiate(it) {
+    const id = N.createElement("div");
+    adopting = id;
+    let el;
+    try { el = new it.comp(it.props, it.children); } finally { adopting = -1; }
+    el._comp = true;
+    liveComps++;
+    el._pa = plainProps(it.props);
+    applyAttrs(el, el._pa, null);
+    el.this(it.props, it.children);
+    draw(el, el.render(it.props, it.children));
+    mountQueue.push(el);
+    if (typeof it.props.ref === "function") it.props.ref(el);
+    return el;
+  }
+  function refresh(el, it) {
+    el._pa = plainProps(it.props);
+    el.this(it.props, it.children);
+    draw(el, el.render(it.props, it.children));
+  }
+  // Show what `render` returned: the root vnode's attributes (over the props') and children
+  // go onto the component's own element, as `patch` does; anything else becomes its content.
+  function draw(el, vnode) {
+    const items = expand(vnode, null);
+    const root = items.find((i) => i && i.tag);
+    if (root && items.length === 1) {
+      applyAttrs(el, Object.assign({}, el._pa, root.attrs), currentAttrs(el));
+      patchChildren(el, root.kids);
+    } else {
+      applyAttrs(el, el._pa, currentAttrs(el));
+      patchChildren(el, items);
+    }
+  }
+  function mounted() {
+    if (!mountQueue.length) return;
+    for (let i = 0; i < mountQueue.length;) {
+      const el = mountQueue[i];
+      if (!el.isConnected) { i++; continue; }
+      mountQueue.splice(i, 1);
+      if (typeof el.componentDidMount === "function") { try { el.componentDidMount(); } catch (e) { report(e); } }
+    }
+  }
+  function unmounting(node) {
+    if (!liveComps || node.nodeType !== 1) return;
+    for (const d of [node, ...node.querySelectorAll("*")]) {
+      if (!d._comp) continue;
+      d._comp = false;
+      liveComps--;
+      if (typeof d.componentWillUnmount === "function") { try { d.componentWillUnmount(); } catch (e) { report(e); } }
+    }
   }
 
   // What `patch` compares against: the element's real attributes plus JSX-set handlers.
@@ -449,7 +563,11 @@
         node = dom.find((n) => !used.has(n) && n.nodeType === 3);
         if (node) { if (node.data !== it) node.data = it; } else node = documentObj.createTextNode(it);
       } else if (it instanceof Node) node = it;
-      else {
+      else if (it.comp) {
+        const key = it.props.key;
+        node = dom.find((n) => !used.has(n) && n instanceof it.comp && (key === undefined ? n._key === undefined : n._key === key));
+        if (node) refresh(node, it); else node = instantiate(it);
+      } else {
         const key = it.attrs.key;
         node = dom.find((n) => !used.has(n) && n.nodeType === 1 && n.localName === it.tag.toLowerCase() &&
           (key === undefined ? n._key === undefined : n._key === key) && (!it.attrs.id || n.id === String(it.attrs.id)));
@@ -513,6 +631,33 @@
   // separate "default value"). Elements without a native behavior have no
   // `value` (undefined), as in Sciter, but can be given one as an ordinary property.
   const VALUE_TAGS = new Set(["input", "textarea", "button"]);
+  // `<form>` (or `behavior="form"`): `value` is an object of the named controls' values, as in
+  // Sciter: text as strings, checkboxes as booleans, a radio group as the chosen value,
+  // numbers/ranges as numbers; assigning an object sets the controls it names.
+  const isForm = (el) => el.localName === "form" || el.getAttribute("behavior") === "form";
+  const formControls = (el) => el.querySelectorAll("input, select, textarea").filter((c) => c.getAttribute("name"));
+  const typeOf = (c) => (c.localName === "input" ? (c.getAttribute("type") || "text").toLowerCase() : c.localName);
+  function formValue(form) {
+    const out = {};
+    for (const c of formControls(form)) {
+      const name = c.getAttribute("name"), t = typeOf(c);
+      if (t === "checkbox") out[name] = !!c.checked;
+      else if (t === "radio") { if (c.checked) out[name] = c.value; else if (!(name in out)) out[name] = undefined; }
+      else if (t === "number" || t === "range") out[name] = c.value === "" ? null : Number(c.value);
+      else out[name] = c.value;
+    }
+    return out;
+  }
+  function setFormValue(form, obj) {
+    for (const c of formControls(form)) {
+      const name = c.getAttribute("name");
+      if (!obj || !(name in obj)) continue;
+      const v = obj[name], t = typeOf(c);
+      if (t === "checkbox") c.checked = !!v;
+      else if (t === "radio") c.checked = String(c.value) === String(v);
+      else c.value = v == null ? "" : String(v);
+    }
+  }
   const optValue = (o) => o.getAttribute("value") ?? o.text;
   Object.defineProperty(Element.prototype, "value", {
     configurable: true,
@@ -520,7 +665,7 @@
       const t = this.localName;
       if (t === "select") { const o = this.options[this.selectedIndex]; return o ? optValue(o) : ""; }
       if (t === "option") return optValue(this);
-      if (!VALUE_TAGS.has(t)) return undefined;
+      if (!VALUE_TAGS.has(t)) return isForm(this) ? formValue(this) : undefined;
       const v = this.getAttribute("value");
       if (v === null && t === "textarea") return this.textContent;
       if (v === null && t === "input" && this.type === "color") return "#000000";
@@ -534,6 +679,7 @@
       const t = this.localName;
       if (t === "select") this.selectedIndex = this.options.findIndex((o) => optValue(o) === String(v));
       else if (t === "option" || VALUE_TAGS.has(t)) this.setAttribute("value", v);
+      else if (isForm(this)) setFormValue(this, v);
       else Object.defineProperty(this, "value", { value: v, writable: true, configurable: true, enumerable: true });
     },
   });
@@ -811,7 +957,14 @@
   // ---- console -----------------------------------------------------------
   const fmt = (a) => a.map((x) => (typeof x === "string" ? x : (() => { try { return typeof x === "object" && x !== null ? JSON.stringify(x) : String(x); } catch { return String(x); } })())).join(" ");
   g.console = {};
-  for (const level of ["log", "info", "debug", "warn", "error"]) g.console[level] = (...a) => N.log(level, fmt(a));
+  for (const level of ["log", "info", "debug", "warn", "error"]) g.console[level] = (...a) => {
+    const msg = fmt(a);
+    if (hooks.console) {
+      const h = hooks.console; hooks.console = null;
+      try { if (h("script", level === "error" ? 2 : level === "warn" ? 1 : 0, msg) === true) return; } catch (_) { /* log normally */ } finally { hooks.console = h; }
+    }
+    N.log(level, msg);
+  };
 
   // ---- timers ------------------------------------------------------------
   let timers = [];

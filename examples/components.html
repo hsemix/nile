@@ -1,0 +1,81 @@
+<html>
+  <head>
+    <title>Class components</title>
+    <style>
+      body {
+        font: 15px sans-serif;
+        margin: 24px;
+      }
+      .counter {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 10px;
+        margin: 8px 0;
+        border: 1px solid #ccd;
+        border-radius: 8px;
+        width: 260px;
+      }
+      .counter b {
+        min-width: 28px;
+        text-align: center;
+      }
+      form {
+        margin-top: 16px;
+        display: grid;
+        gap: 6px;
+        width: 260px;
+      }
+      pre {
+        background: #f4f4f8;
+        padding: 8px;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>Class components</h3>
+    <div id="app"></div>
+    <form id="f">
+      <input name="who" value="Ada" /><input
+        name="age"
+        type="number"
+        value="36"
+      /><label><input name="ok" type="checkbox" checked /> subscribed</label>
+    </form>
+    <pre id="out"></pre>
+    <script type="module">
+      class Counter extends Element {
+        count = 0;
+        this(props) {
+          this.props = props;
+        }
+        render() {
+          return (
+            <div class="counter">
+              <span>{this.props.label}</span>
+              <button class="dec">-</button>
+              <b>{this.count}</b>
+              <button class="inc">+</button>
+            </div>
+          );
+        }
+        componentDidMount() {
+          this.on("click", "button.inc", () =>
+            this.componentUpdate({ count: this.count + 1 }),
+          );
+          this.on("click", "button.dec", () =>
+            this.componentUpdate({ count: this.count - 1 }),
+          );
+        }
+      }
+      $("#app").content(
+        <div>
+          <Counter label="Apples" />
+          <Counter label="Pears" />
+        </div>,
+      );
+      $("#out").textContent = JSON.stringify($("#f").value);
+    </script>
+  </body>
+</html>

@@ -227,7 +227,7 @@ impl Resolver for FileResolver {
         _attributes: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<String> {
         let path = std::path::Path::new(name);
-        if matches!(name, "@nile" | "@sciter" | "@env" | "@sys") {
+        if matches!(name, "@nile" | "@sciter" | "@env" | "@sys" | "@debug" | "@storage") {
             // `@sciter` is the same module under the name Sciter apps use.
             return Ok(if name == "@sciter" { "@nile".to_string() } else { name.to_string() });
         }
@@ -278,6 +278,8 @@ impl Loader for FileLoader {
             "@nile" => Some(
                 "const m = globalThis.__sciterModule;\nexport const { VERSION, REVISION, QUICKJS_VERSION, setModuleUrlResolver, loadLibrary, parseValue, devicePixels, on, off, once, onGlobalEvent, offGlobalEvent, $, $$, uuid, encode, decode, compress, decompress, toBase64, fromBase64, md5, crc32 } = m;\nconst imp = m.import;\nexport { imp as import };\nexport default m;",
             ),
+            "@debug" => Some("const m = globalThis.__debugModule;\nexport const { setUnhandledExceptionHandler, setConsoleOutputHandler, callStackAt, setResourceArrivalHandler, setBreakpointHandler, setBreakpoints, getElementByUID, getUIDofElement, highlightElement, getStyleRulesOfElement, containerId, objectKind, sublimatedValue, sublimatedValueElements, frameVariables } = m;\nexport default m;"),
+            "@storage" => Some("const m = globalThis.__storageModule;\nexport const open = m.open;\nexport default m;"),
             "@env" => Some(
                 "const m = globalThis.__envModule;\nexport const { language, country, userName, machineName, domainName, arguments: args, launch, home, homeURL, path, pathURL, drives, variable, exec, DEVICE } = m;\nexport { args as arguments };\nexport const OS = m.OS, PLATFORM = m.PLATFORM;\nexport default m;",
             ),
