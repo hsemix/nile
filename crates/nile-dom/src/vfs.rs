@@ -36,6 +36,9 @@ struct Pack {
 
 static PACK: OnceLock<Pack> = OnceLock::new();
 
+/// The program's window icon inside a packed archive (`nile --pack ... --icon x.png` adds it).
+pub const ICON_FILE: &str = "__nile_icon.png";
+
 /// The mount point as a path.
 pub fn mount_path() -> PathBuf {
     PathBuf::from(MOUNT)
@@ -200,6 +203,11 @@ pub fn start_file(dir: &Path) -> Option<PathBuf> {
 /// Append the files of `folder` to `runtime` (the bytes of a `nile` binary without an archive) and
 /// write the result to `out`. Returns the number of files and the stored size of the archive.
 pub fn pack(folder: &Path, runtime: &[u8], out: &Path) -> io::Result<(usize, u64)> {
+    pack_with(folder, &[], runtime, out)
+}
+
+/// [`pack`] with extra files that aren't in the folder: `(name in the archive, bytes)`.
+pub fn pack_with(folder: &Path, extras: &[(&str, Vec<u8>)], runtime: &[u8], out: &Path) -> io::Result<(usize, u64)> {
     fn walk(dir: &Path, root: &Path, files: &mut Vec<(String, PathBuf)>) -> io::Result<()> {
         let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
         entries.sort_by_key(|e| e.file_name());
@@ -222,10 +230,14 @@ pub fn pack(folder: &Path, runtime: &[u8], out: &Path) -> io::Result<(usize, u64
     walk(folder, folder, &mut files)?;
     let mut data: Vec<u8> = Vec::new();
     let mut index = String::new();
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(files.len() + extras.len());
     for (rel, path) in &files {
-        let bytes = std::fs::read(path)?;
-        let packed = miniz_oxide::deflate::compress_to_vec(&bytes, 9);
-        let (stored, deflated) = if packed.len() < bytes.len() { (&packed, true) } else { (&bytes, false) };
+        entries.push((rel.clone(), std::fs::read(path)?));
+    }
+    entries.extend(extras.iter().map(|(n, b)| (n.to_string(), b.clone())));
+    for (rel, bytes) in entries.iter().map(|(r, b)| (r, b)) {
+        let packed = miniz_oxide::deflate::compress_to_vec(bytes, 9);
+        let (stored, deflated) = if packed.len() < bytes.len() { (&packed, true) } else { (bytes, false) };
         index.push_str(&format!("{rel}\t{}\t{}\t{}\t{}\n", u8::from(deflated), data.len(), stored.len(), bytes.len()));
         data.extend_from_slice(stored);
     }
@@ -237,7 +249,7 @@ pub fn pack(folder: &Path, runtime: &[u8], out: &Path) -> io::Result<(usize, u64
     blob.extend_from_slice(&(runtime.len() as u64).to_le_bytes());
     blob.extend_from_slice(MAGIC);
     std::fs::write(out, &blob)?;
-    Ok((files.len(), (data.len() + index.len()) as u64))
+    Ok((entries.len(), (data.len() + index.len()) as u64))
 }
 
 /// The running executable's bytes without any archive behind it (what `pack` appends to).

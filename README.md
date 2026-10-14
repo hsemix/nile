@@ -264,8 +264,9 @@ float, tables, transforms, transitions and animations, and opt-in page text sele
    and background colors, borders colors, shadows, radius, transform and opacity amounts) keeps the
    laid-out boxes instead of relaying out, so hover effects and animations of those properties skip
    layout. A pointer or focus change that no selector mentions (`:hover`, `:active`, `:focus`) skips
-   the restyle too. Still open: restyling only the affected elements (a hover on a page that does
-   have `:hover` rules re-cascades everything, ~7 ms for 4,500 nodes), and keeping the layout when
+   the restyle too, and one that does cascades again only the elements whose state changed (and what
+   their selectors can reach), not the page: a hover on a 1,500-row page costs ~0.2 ms, down from ~15 ms.
+   Script changes to the DOM still re-cascade everything. Still open: keeping the layout when
    an element gains or loses a transform or opacity, when text color changes on pages with
    `::before`/`::after`, or for inline elements' backgrounds. `NILE_TRACE=1` prints per-phase timings.
 2. **Embedding API** (C ABI done; see above) — still to do: a GPU surface path, multi-button and touch input. Language bindings (Go, C#, Python) come last, once the engine covers nearly everything.

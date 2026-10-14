@@ -1036,6 +1036,9 @@ pub struct StateDeps {
     pub hover: bool,
     pub active: bool,
     pub focus: bool,
+    /// A rule has a state selector followed by a sibling combinator (`:hover + b`): a change can reach
+    /// the element's later siblings.
+    pub sibling: bool,
 }
 
 impl StateDeps {
@@ -1049,6 +1052,7 @@ impl StateDeps {
                     d.hover |= css.contains(":hover");
                     d.active |= css.contains(":active");
                     d.focus |= css.contains(":focus");
+                    d.sibling |= (css.contains(":hover") || css.contains(":active") || css.contains(":focus")) && (css.contains(" + ") || css.contains(" ~ "));
                 }
             }
         }
@@ -1161,6 +1165,34 @@ impl StyleMap {
         self.styles.iter().any(|s| !s.transitions.is_empty() || !s.animations.is_empty())
     }
 
+    /// Cascade again only the subtrees under `roots`, in place, for a change of `state` that can't
+    /// reach anywhere else (a pointer or focus change: the parent of each element whose state changed
+    /// is a root, so siblings and descendants that selectors like `:hover + b` reach are included).
+    /// Returns the styles the subtrees had before, or `None` (nothing touched) when this isn't
+    /// possible: the document changed size or there are generated `::before`/`::after`/marker boxes
+    /// (the caller does the full cascade then).
+    pub fn recascade(&mut self, doc: &Document, state: &InteractionState, viewport: (f32, f32), roots: &[NodeId]) -> Option<Vec<(NodeId, ComputedStyle)>> {
+        if self.styles.len() != doc.nodes.len() || !self.pseudo.is_empty() || !self.markers.is_empty() {
+            return None;
+        }
+        let (ua, author) = sheets_of(doc, viewport);
+        let mut caches = SelectorCaches::default();
+        let mut ctx = MatchingContext::new(MatchingMode::Normal, None, &mut caches, QuirksMode::NoQuirks, NeedsSelectorFlags::No, MatchingForInvalidation::No);
+        let uses_viewport = Cell::new(self.uses_viewport);
+        let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo: false };
+        let mut before = Vec::new();
+        let mut generated = Generated::default();
+        for &root in roots {
+            before.extend(doc.descendants(root).into_iter().chain(std::iter::once(root)).map(|n| (n, self.styles[n.0].clone())));
+            let inherited = match doc.node(root).parent {
+                Some(p) => self.styles[p.0].clone(),
+                None => ComputedStyle::default(),
+            };
+            cascade(&cx, &mut ctx, root, &inherited, &mut self.styles, &mut generated);
+        }
+        Some(before)
+    }
+
     /// The generated `::before` / `::after` box of `element`, if it has one.
     /// The `::marker` rules of a list item, if any.
     pub fn marker(&self, item: NodeId) -> Option<&MarkerStyle> {
@@ -1209,23 +1241,7 @@ pub fn compute_styles_with(doc: &Document, state: &InteractionState) -> StyleMap
 /// Like [`compute_styles_with`], with `@media` queries and `vw`/`vh` units resolved
 /// against a `viewport` of the given size in px.
 pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f32, f32)) -> StyleMap {
-    let ua = Stylesheet::parse(&format!("{UA_STYLESHEET}{}", theme_sheet()));
-    let author: Vec<Stylesheet> = doc
-        .nodes
-        .iter()
-        .filter(|n| n.tag() == Some("style"))
-        .map(|n| {
-            let css: String = n
-                .children
-                .iter()
-                .filter_map(|c| match &doc.node(*c).kind {
-                    NodeKind::Text(t) => Some(t.as_str()),
-                    _ => None,
-                })
-                .collect();
-            Stylesheet::parse_with(&css, viewport)
-        })
-        .collect();
+    let (ua, author) = sheets_of(doc, viewport);
 
     let mut styles = vec![ComputedStyle::default(); doc.nodes.len()];
     let root_style = ComputedStyle::default();
@@ -1247,7 +1263,7 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
     }
     let pages: Vec<(String, String)> = author.iter().flat_map(|s| s.pages.iter().cloned()).collect();
     let has_pseudo = author.iter().any(|s| s.rules.iter().any(|r| r.selectors.slice().iter().any(|sel| sel.has_pseudo_element())));
-    let state_deps = StateDeps::of(author.iter().chain(std::iter::once(&ua)));
+    let state_deps = StateDeps::of(author.iter().map(|s| &**s).chain(std::iter::once(&*ua)));
     let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo };
     let mut generated = Generated::default();
     cascade(&cx, &mut ctx, Document::ROOT, &root_style, &mut styles, &mut generated);
@@ -1264,11 +1280,52 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
     }
 }
 
+thread_local! {
+    /// Parsed sheets by source text and viewport (`@media` is evaluated while parsing): a restyle
+    /// after a hover shouldn't parse the same CSS again.
+    static SHEETS: std::cell::RefCell<HashMap<(String, u32, u32), Rc<Stylesheet>>> = std::cell::RefCell::default();
+    static UA_SHEET: Rc<Stylesheet> = Rc::new(Stylesheet::parse(&format!("{UA_STYLESHEET}{}", theme_sheet())));
+}
+
+/// The user-agent sheet and the document's `<style>` sheets, parsed (or taken from the cache).
+fn sheets_of(doc: &Document, viewport: (f32, f32)) -> (Rc<Stylesheet>, Vec<Rc<Stylesheet>>) {
+    let ua = UA_SHEET.with(Rc::clone);
+    let author = doc
+        .nodes
+        .iter()
+        .filter(|n| n.tag() == Some("style"))
+        .map(|n| {
+            let css: String = n
+                .children
+                .iter()
+                .filter_map(|c| match &doc.node(*c).kind {
+                    NodeKind::Text(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let key = (css, viewport.0.to_bits(), viewport.1.to_bits());
+            SHEETS.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                if let Some(hit) = cache.get(&key) {
+                    return hit.clone();
+                }
+                if cache.len() >= 64 {
+                    cache.clear();
+                }
+                let sheet = Rc::new(Stylesheet::parse_with(&key.0, viewport));
+                cache.insert(key, sheet.clone());
+                sheet
+            })
+        })
+        .collect();
+    (ua, author)
+}
+
 struct CascadeInput<'a> {
     doc: &'a Document,
     state: &'a InteractionState,
     ua: &'a Stylesheet,
-    author: &'a [Stylesheet],
+    author: &'a [Rc<Stylesheet>],
     viewport: (f32, f32),
     uses_viewport: &'a Cell<bool>,
     /// Some stylesheet has a `::before`/`::after` rule.
@@ -1285,7 +1342,7 @@ fn matching_decls<'a>(
     pseudo: bool,
 ) -> Vec<&'a Declaration> {
     let mut decls = Vec::new();
-    for sheet in std::iter::once(cx.ua).chain(cx.author.iter()) {
+    for sheet in std::iter::once(cx.ua).chain(cx.author.iter().map(|s| &**s)) {
         let mut matched: Vec<(u32, usize, &Rule)> = sheet
             .rules
             .iter()
@@ -2829,11 +2886,11 @@ mod tests {
     fn state_deps_find_the_pseudo_classes_rules_mention() {
         let deps = |css: &str| compute_styles(&Document::parse(&format!("<style>{css}</style><p>x</p>"))).state_deps;
         // The UA sheet already mentions :focus (input borders).
-        assert_eq!(deps("p { color: red }"), StateDeps { hover: false, active: false, focus: true });
+        assert_eq!(deps("p { color: red }"), StateDeps { hover: false, active: false, focus: true, sibling: false });
         assert!(deps("a:hover { color: red }").hover);
         assert!(deps(".x:not(:hover) b { color: red }").hover);
         assert!(deps("button:active { color: red }").active);
-        let d = StateDeps { hover: false, active: false, focus: true };
+        let d = StateDeps { hover: false, active: false, focus: true, sibling: false };
         let (a, b) = (InteractionState::default(), InteractionState { hover: Some(NodeId(1)), ..Default::default() });
         assert!(!d.affected_by(&a, &b), "a hover change is invisible to a sheet with no :hover");
         assert!(d.affected_by(&a, &InteractionState { focus: Some(NodeId(1)), ..Default::default() }));
