@@ -78,6 +78,16 @@ cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --typ
 cargo test --workspace
 ```
 
+## File explorer demo
+
+```sh
+cargo run -p nile-shell -- examples/file-explorer/index.html
+```
+
+A real folder browser using `@sys`: expandable folder tree, sortable file list,
+text previews, filtering, navigation history, context menus and resizable panes.
+See [the example's instructions](examples/file-explorer/README.md).
+
 ## Word-style ribbon demo
 
 ```sh
