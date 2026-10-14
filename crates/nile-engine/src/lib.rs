@@ -888,7 +888,7 @@ impl Page {
                     });
                 }
                 frames::register_frame_functions(&host, &frames);
-                let url = std::fs::canonicalize(&path).ok().map(|p| format!("file://{}", p.to_string_lossy().replace('\\', "/")));
+                let url = std::fs::canonicalize(&path).ok().map(|p| nile_script::file_url(&p));
                 host.set_location(url.as_deref().unwrap_or("about:blank"));
                 if memory.is_none() {
                     if let Some(file) = net::default_storage_file(&path) {

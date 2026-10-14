@@ -30,7 +30,7 @@ mod envmod;
 mod jsx;
 mod net;
 
-pub use net::{FetchRequest, FetchResponse, Fetcher, LocalFetcher};
+pub use net::{file_url, path_of_url, FetchRequest, FetchResponse, Fetcher, LocalFetcher};
 
 const EDIT: &str = include_str!("edit.js");
 const WEB: &str = include_str!("web.js");

@@ -193,7 +193,7 @@ impl Page {
 
     /// A path from the document, relative to the page's folder.
     fn resolve_path(&self, src: &str) -> PathBuf {
-        let rel = src.strip_prefix("file://").unwrap_or(src);
+        let rel = nile_script::path_of_url(src);
         if std::path::Path::new(rel).is_absolute() {
             PathBuf::from(rel)
         } else {
