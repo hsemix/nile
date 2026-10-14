@@ -35,7 +35,7 @@ A4 with 0.75 inch margins.
 - A page never cuts through a text line, a table row or a picture, and keeps at least two lines of a
   paragraph on each side of a cut (as `orphans: 2; widows: 2` would).
 - Content taller than a page is cut at the page edge, between lines where it can.
-- A table with a `<thead>` repeats its header row(s) at the top of every page it continues onto (in the PDF and in `page-view: paged`); a page never ends right after the header.
+- A table with a `<thead>` repeats its header row(s) at the top of every page it continues onto (in the PDF and in `page-view: paged`); a page never ends right after the header. A `<tfoot>` is shown again at the bottom of every page its table goes on from (the last page shows the real one).
 
 ## A paged view on screen
 
@@ -65,6 +65,6 @@ the gap. Clicking in a margin puts the caret at the nearest line. `el.pageCount`
 ## Not yet
 
 - In the paged view: frames inside the paper, transforms on the paper itself, content taller than a sheet (it is cut at the sheet edge), and a paper that is also a scroll container.
-- `<tfoot>` repeating, a repeated header for tables nested in tables, `position: fixed` headers per page; `@page` margin-box sizing beyond the six corners/edges.
+- A repeated header for tables nested in tables, `position: fixed` headers per page; `@page` margin-box sizing beyond the six corners/edges.
 - `@media print` rules, and printing through the system's print dialog (export to PDF and print that).
 - Pages that have their own `size` or margins (`@page :first`) flow at the first page's content size.

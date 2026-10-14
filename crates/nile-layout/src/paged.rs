@@ -32,6 +32,8 @@ pub struct PagedBox {
     pub content_end: f32,
     /// Per sheet: the table header repeated at its top (its flow `y` is absolute).
     pub repeats: Vec<Option<Repeat>>,
+    /// Per sheet: the table footer repeated at the bottom of its content area.
+    pub feet: Vec<Option<Repeat>>,
 }
 
 impl PagedBox {
@@ -59,10 +61,15 @@ impl PagedBox {
         self.repeats.get(i).and_then(Option::as_ref).map_or(0.0, |r| r.height)
     }
 
+    /// How much of the bottom of sheet `i`'s content area a repeated table footer takes.
+    pub fn foot_h(&self, i: usize) -> f32 {
+        self.feet.get(i).and_then(Option::as_ref).map_or(0.0, |r| r.height)
+    }
+
     /// Height of what sheet `i` shows of the flow.
     pub fn shown_h(&self, i: usize) -> f32 {
         let (from, to) = self.band(i);
-        (to - from).min(self.content_h() - self.head_h(i))
+        (to - from).min(self.content_h() - self.head_h(i) - self.foot_h(i))
     }
 
     /// The sheet that shows flow position `y`.

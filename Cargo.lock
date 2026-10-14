@@ -1596,6 +1596,7 @@ name = "nile-capi"
 version = "0.1.0"
 dependencies = [
  "cbindgen",
+ "nile-dom",
  "nile-engine",
  "nile-script",
  "nile-style",

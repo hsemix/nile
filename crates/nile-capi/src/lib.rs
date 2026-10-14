@@ -200,6 +200,11 @@ fn guard<T>(fallback: T, f: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(fallback)
 }
 
+/// What a host's own first window knows about itself: an id of its own, no opener.
+fn first_window() -> nile_script::WindowInfo {
+    nile_script::WindowInfo { id: nile_script::next_window_id(), ..Default::default() }
+}
+
 fn new_view(page: Page) -> *mut NileView {
     Box::into_raw(Box::new(NileView { page, title: CString::default(), config_title: CString::default() }))
 }
@@ -223,7 +228,7 @@ pub unsafe extern "C" fn nile_view_create_html(html: *const c_char, base_dir: *c
     guard(ptr::null_mut(), || {
         let Some(html) = text(html) else { return ptr::null_mut() };
         let base = text(base_dir).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-        new_view(Page::load_html(html, base, (width.max(1.0), height.max(1.0))))
+        new_view(Page::html_window(html, base, (width.max(1.0), height.max(1.0)), first_window()))
     })
 }
 
@@ -236,7 +241,7 @@ pub unsafe extern "C" fn nile_view_create_html(html: *const c_char, base_dir: *c
 pub unsafe extern "C" fn nile_view_create_file(path: *const c_char, width: f32, height: f32) -> *mut NileView {
     guard(ptr::null_mut(), || {
         let Some(path) = text(path) else { return ptr::null_mut() };
-        new_view(Page::load(PathBuf::from(path), (width.max(1.0), height.max(1.0)), 0.0))
+        new_view(Page::load_window(PathBuf::from(path), (width.max(1.0), height.max(1.0)), first_window()))
     })
 }
 
@@ -680,19 +685,14 @@ pub unsafe extern "C" fn nile_view_window_config(view: *mut NileView, desktop_wi
 #[no_mangle]
 pub unsafe extern "C" fn nile_view_take_window_command(view: *mut NileView, out: *mut NileWindowCommand) -> bool {
     let none = NileWindowCommand { kind: NileWindowCommandKind::None, a: 0.0, b: 0.0 };
-    // TODO: `new Window()` and window messages (`Open`, `Post`, `CloseId`, `FocusId`) have no C
-    // equivalent yet; a C host that wants several windows needs calls to take and answer them.
-    // They are dropped here rather than stalling the queue.
+    // Requests about other windows stay queued for `nile_view_take_window_request`.
     let cmd = view_ref(view).and_then(|v| {
         let mut view = v.page.view.borrow_mut();
-        while !view.window_requests.is_empty() {
-            match view.window_requests.remove(0) {
-                WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) | WindowCommand::Quit(_) => {}
-                WindowCommand::CloseWith(_) => return Some(WindowCommand::Close),
-                other => return Some(other),
-            }
+        let at = view.window_requests.iter().position(|c| !is_request(c))?;
+        match view.window_requests.remove(at) {
+            WindowCommand::CloseWith(_) => Some(WindowCommand::Close),
+            other => Some(other),
         }
-        None
     });
     let (found, result) = match cmd {
         None => (false, none),
@@ -717,6 +717,123 @@ pub unsafe extern "C" fn nile_view_take_window_command(view: *mut NileView, out:
         *out = result;
     }
     found
+}
+
+/// Whether a command concerns the program or other windows (answered by `nile_view_take_window_request`)
+/// rather than this window itself.
+fn is_request(c: &WindowCommand) -> bool {
+    matches!(c, WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) | WindowCommand::Quit(_))
+}
+
+/// The id this view's window has (what other windows address it by, and `Window.this.id`).
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_window_id(view: *mut NileView) -> u32 {
+    view_ref(view).map_or(0, |v| v.page.view.borrow().window_info.id)
+}
+
+/// The next thing this window's scripts asked of the host that involves other windows or the
+/// program, as JSON, or NULL when there is none. Free it with [`nile_string_free`]. Kinds:
+///
+/// - `{"kind":"open","id":3,"opener":1,"modal":false,"fields":{"url":"a.html","width":"400",...}}`:
+///   `new Window({...})` / `modal({...})`. Create a window and call [`nile_view_create_window`] with
+///   the `id`, `opener`, `modal` and the `url`, `html`, `width`, `height` and `parameters` fields; the
+///   other fields (`type`, `caption`, `x`, `y`, `alignment`, `state`, ...) say how to show it.
+/// - `{"kind":"post","from":1,"to":3,"json":{...}}`: deliver with [`nile_view_window_message`] to
+///   the view whose [`nile_view_window_id`] is `to`.
+/// - `{"kind":"close","id":3,"value":null}`: close that window (ask [`nile_view_close_request`] first;
+///   tell its opener with [`nile_view_window_closed`] afterwards).
+/// - `{"kind":"focus","id":3}`: bring it to the front.
+/// - `{"kind":"quit","code":0}`: `application.quit()`.
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_take_window_request(view: *mut NileView) -> *mut c_char {
+    let Some(v) = view_ref(view) else { return ptr::null_mut() };
+    guard(ptr::null_mut(), || {
+        let id = v.page.view.borrow().window_info.id;
+        let q = nile_engine::editing::json_string;
+        let cmd = {
+            let mut view = v.page.view.borrow_mut();
+            let at = view.window_requests.iter().position(is_request);
+            at.map(|i| view.window_requests.remove(i))
+        };
+        match cmd {
+            Some(WindowCommand::Open(spec)) => {
+                let fields: Vec<String> = spec.fields.iter().map(|(k, v)| format!("{}:{}", q(k), q(v))).collect();
+                into_c(format!("{{\"kind\":\"open\",\"id\":{},\"opener\":{},\"modal\":{},\"fields\":{{{}}}}}", spec.id, spec.opener, spec.modal, fields.join(",")))
+            }
+            Some(WindowCommand::Post { to, json }) => into_c(format!("{{\"kind\":\"post\",\"from\":{id},\"to\":{},\"json\":{json}}}", if to == 0 { id } else { to })),
+            Some(WindowCommand::CloseId(to)) => into_c(format!("{{\"kind\":\"close\",\"id\":{},\"value\":null}}", if to == 0 { id } else { to })),
+            Some(WindowCommand::FocusId(to)) => into_c(format!("{{\"kind\":\"focus\",\"id\":{}}}", if to == 0 { id } else { to })),
+            Some(WindowCommand::Quit(code)) => into_c(format!("{{\"kind\":\"quit\",\"code\":{code}}}")),
+            _ => ptr::null_mut(),
+        }
+    })
+}
+
+/// Create the view for a window the page asked to open (an `"open"` request from
+/// [`nile_view_take_window_request`]). `url` is a file or `this://` URL resolved against `base_dir`
+/// (normally the opener's folder), or NULL when `html` has the markup; both NULL gives an empty page.
+/// `parameters_json` is the `parameters` field (NULL for none). Returns NULL on bad arguments.
+///
+/// # Safety
+/// The string arguments must be NULL or valid NUL-terminated strings.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_create_window(url: *const c_char, html: *const c_char, base_dir: *const c_char, width: f32, height: f32, id: u32, opener: u32, modal: bool, parameters_json: *const c_char) -> *mut NileView {
+    guard(ptr::null_mut(), || {
+        let dir = text(base_dir).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        let info = nile_script::WindowInfo { id, opener: (opener != 0).then_some(opener), modal, parameters: text(parameters_json).unwrap_or_default().to_string() };
+        let size = (width.max(1.0), height.max(1.0));
+        let page = match (text(html), text(url)) {
+            (Some(html), _) => Page::html_window(html, dir, size, info),
+            (None, Some(url)) => {
+                let mapped = nile_dom::vfs::url_to_path(url).map(|p| p.to_string_lossy().into_owned());
+                let rel = mapped.as_deref().unwrap_or_else(|| nile_script::path_of_url(url));
+                let file = if std::path::Path::new(rel).is_absolute() { PathBuf::from(rel) } else { dir.join(rel) };
+                Page::load_window(file, size, info)
+            }
+            (None, None) => Page::html_window("<body></body>", dir, size, info),
+        };
+        new_view(page)
+    })
+}
+
+/// A message another window posted (`Window.post`): fires `message` with `data` (`json_data`) and
+/// the sender's id as `source`. Returns whether the page changed.
+///
+/// # Safety
+/// `view` must be a live view; `json_data` a valid string.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_window_message(view: *mut NileView, from: u32, json_data: *const c_char) -> bool {
+    let (Some(v), Some(json)) = (view_ref(view), text(json_data)) else { return false };
+    guard(false, || v.page.window_message(from, json))
+}
+
+/// A window this one opened has closed; resolves its `Window.closed` / `modal()` promise with
+/// `value_json` (JSON text, `"null"` for none). Returns whether the page changed.
+///
+/// # Safety
+/// `view` must be a live view; `value_json` a valid string.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_window_closed(view: *mut NileView, id: u32, value_json: *const c_char) -> bool {
+    let Some(v) = view_ref(view) else { return false };
+    let value = text(value_json).unwrap_or("null");
+    guard(false, || v.page.window_closed(id, value))
+}
+
+/// The user (or a script) wants this window closed: fires `closerequest`. Returns whether it may close
+/// (false if a listener called `preventDefault()`). `reason` is 0 for the title bar's button, 1 for a script.
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_close_request(view: *mut NileView, reason: u32) -> bool {
+    let Some(v) = view_ref(view) else { return true };
+    guard(true, || v.page.close_request(reason))
 }
 
 /// Tell scripts where the window is (`window.screenX`, `outerWidth`, ...): top-left in screen
@@ -962,6 +1079,48 @@ mod tests {
         let calls = unsafe { &mut *(user as *mut Vec<String>) };
         calls.push(unsafe { CStr::from_ptr(args) }.to_string_lossy().into_owned());
         c"3".as_ptr()
+    }
+
+    #[test]
+    fn a_c_host_can_open_windows_and_pass_messages() {
+        unsafe {
+            let main = nile_view_create_html(
+                s(r#"<body><script>
+                     globalThis.got = [];
+                     globalThis.w = new Window({ html: "<body><p id=x>child</p><script>window.addEventListener('message', e => document.$('#x').text = 'got ' + e.data.hi);<\/script></body>", width: 300, height: 200, parameters: { n: 7 } });
+                     w.closed.then(v => got.push('closed:' + JSON.stringify(v)));
+                     Window.this.post(1, {}); </script></body>"#)
+                .as_ptr(),
+                ptr::null(),
+                400.0,
+                300.0,
+            );
+            let mut open = None;
+            while let p @ 1.. = nile_view_take_window_request(main) as usize {
+                let json = take(p as *mut c_char);
+                if json.contains("\"kind\":\"open\"") {
+                    open = Some(json);
+                }
+            }
+            let open = open.expect("new Window() is an open request");
+            assert!(open.contains("\"width\":\"300\"") && open.contains("\"opener\":"), "{open}");
+            let id: u32 = open.split("\"id\":").nth(1).unwrap().split(',').next().unwrap().parse().unwrap();
+            let me = nile_view_window_id(main);
+            assert_ne!(id, me);
+            let child = nile_view_create_window(ptr::null(), s("<body><p id=x>child</p><script>window.addEventListener('message', e => document.$('#x').text = 'got ' + e.data.hi);</script></body>").as_ptr(), ptr::null(), 300.0, 200.0, id, me, false, s("{\"n\":7}").as_ptr());
+            assert_eq!(nile_view_window_id(child), id);
+            assert!(nile_view_window_message(child, me, s("{\"hi\":\"there\"}").as_ptr()));
+            let mut out = ptr::null_mut();
+            nile_view_eval(child, s("document.$('#x').text + ':' + Window.this.parameters.n").as_ptr(), &mut out);
+            assert_eq!(take(out), "got there:7");
+            assert!(nile_view_close_request(child, 1));
+            nile_view_window_closed(main, id, s("\"ok\"").as_ptr());
+            let mut out = ptr::null_mut();
+            nile_view_eval(main, s("got.join()").as_ptr(), &mut out);
+            assert_eq!(take(out), "closed:\"ok\"");
+            nile_view_destroy(child);
+            nile_view_destroy(main);
+        }
     }
 
     #[test]

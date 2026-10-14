@@ -226,6 +226,17 @@ impl Renderer {
             canvas.translate((0.0, top + pb.margin[0] + head - from));
             self.paint_boxes(canvas, tree, styles, overlay, base, pb.index + 1, pb.end);
             canvas.restore();
+            // A table that goes on to the next sheet shows its footer again at the bottom.
+            if let Some(foot) = pb.feet.get(i).and_then(Option::as_ref) {
+                let at = top + pb.margin[0] + pb.content_h() - foot.height;
+                canvas.save();
+                canvas.clip_rect(Rect::from_xywh(paper.x, at, paper.width, foot.height), None, true);
+                canvas.translate((0.0, at - foot.y));
+                for &(a, b) in &foot.ranges {
+                    self.paint_boxes(canvas, tree, styles, overlay, base, a, b);
+                }
+                canvas.restore();
+            }
             self.paint_margin_boxes(canvas, &styles.page_style(i), paper, i, n);
         }
     }

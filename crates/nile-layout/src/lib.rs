@@ -983,6 +983,13 @@ impl LayoutTree {
 
     /// [`LayoutTree::node_rect`] where the element paints: shifted by the scroll
     /// offsets of the containers around it.
+    /// An element's own box (layout coordinates) and where it paints: the transform from layout to
+    /// painted page coordinates (scrolling, `transform`, sticky) and the clip its containers impose.
+    pub fn placement_of(&self, node: NodeId, offsets: &ScrollOffsets) -> Option<(Rect, Placement)> {
+        let &i = self.index.get(&node)?;
+        Some((self.boxes[i].rect, self.placements(offsets)[i]))
+    }
+
     pub fn node_rect_scrolled(&self, node: NodeId, offsets: &ScrollOffsets) -> Option<Rect> {
         self.node_rect_with(node, Some(&self.placements(offsets)))
     }
@@ -1074,19 +1081,40 @@ struct FlowSpec {
     x1: f32,
     /// A line's height, to test it against the floats.
     line_h: f32,
-    floats: Vec<([f32; 4], bool)>,
+    floats: Vec<FloatSpec>,
 }
+
+/// One float a paragraph wraps around: its margin box, which side, and its `shape-outside` outline
+/// (resolved, with the reference box's top-left corner) if it has one.
+#[derive(Clone)]
+struct FloatSpec {
+    rect: [f32; 4],
+    left: bool,
+    shape: Option<Outline>,
+}
+
+/// A `shape-outside` shape: its reference box's top-left corner, the shape, and `shape-margin`.
+type Outline = (f32, f32, nile_style::ResolvedShape, f32);
 
 impl FlowSpec {
     /// Where a line whose top is at `y` (from the paragraph's top) can sit: `(left edge, width)`.
     fn slot(&self, y: f32) -> (f32, f32) {
         let (mut left, mut right) = (self.x0, self.x1);
-        for (f, is_left) in &self.floats {
+        for fl in &self.floats {
+            let f = &fl.rect;
             if f[1] < y + self.line_h && f[3] > y {
-                if *is_left {
-                    left = left.max(f[2]);
+                let (mut near, mut far) = (f[0], f[2]);
+                if let Some((ox, oy, shape, margin)) = &fl.shape {
+                    // The outline's reach across this line (a line the shape misses isn't pushed aside).
+                    match shape.span(y - oy, y + self.line_h - oy, *margin) {
+                        Some((lo, hi)) => (near, far) = ((ox + lo).max(f[0]), (ox + hi).min(f[2])),
+                        None => continue,
+                    }
+                }
+                if fl.left {
+                    left = left.max(far);
                 } else {
-                    right = right.min(f[0]);
+                    right = right.min(near);
                 }
             }
         }
@@ -1108,7 +1136,7 @@ fn plan_floats(tree: &mut TaffyTree<NodeCtx>, doc: &Document, styles: &StyleMap,
     let leaves = TEXT_LEAVES.with(|t| std::mem::take(&mut *t.borrow_mut()));
     let px = |l: Length| if let Length::Px(v) = l { v } else { 0.0 };
     // Floats: margin boxes, in paint order.
-    let floats: Vec<(usize, [f32; 4], bool)> = tmp
+    let floats: Vec<(usize, FloatSpec)> = tmp
         .iter()
         .enumerate()
         .filter(|(_, b)| matches!(b.content, BoxContent::Element) && !styles.is_pseudo(b.node))
@@ -1120,7 +1148,24 @@ fn plan_floats(tree: &mut TaffyTree<NodeCtx>, doc: &Document, styles: &StyleMap,
                 nile_style::Float::None => return None,
             };
             let m = s.margin;
-            Some((i, [b.rect.x - px(m.left), b.rect.y - px(m.top), b.rect.x + b.rect.width + px(m.right), b.rect.y + b.rect.height + px(m.bottom)], left))
+            let shape = s.shape_outside.as_ref().map(|so| {
+                // The box the outline's coordinates refer to.
+                let (bw, pd) = (s.border_width, s.padding);
+                let (mut x0, mut y0, mut x1, mut y1) = (b.rect.x, b.rect.y, b.rect.x + b.rect.width, b.rect.y + b.rect.height);
+                let (mut l, mut t, mut r, mut bt) = (0.0, 0.0, 0.0, 0.0);
+                match so.reference {
+                    nile_style::ShapeBox::MarginBox => (l, t, r, bt) = (-px(m.left), -px(m.top), -px(m.right), -px(m.bottom)),
+                    nile_style::ShapeBox::BorderBox => {}
+                    nile_style::ShapeBox::PaddingBox => (l, t, r, bt) = (bw.left, bw.top, bw.right, bw.bottom),
+                    nile_style::ShapeBox::ContentBox => (l, t, r, bt) = (bw.left + pd.left, bw.top + pd.top, bw.right + pd.right, bw.bottom + pd.bottom),
+                }
+                x0 += l;
+                y0 += t;
+                x1 -= r;
+                y1 -= bt;
+                (x0, y0, so.shape.resolve((x1 - x0).max(0.0), (y1 - y0).max(0.0), s.shape_margin), s.shape_margin)
+            });
+            Some((i, FloatSpec { rect: [b.rect.x - px(m.left), b.rect.y - px(m.top), b.rect.x + b.rect.width + px(m.right), b.rect.y + b.rect.height + px(m.bottom)], left, shape }))
         })
         .collect();
     if floats.is_empty() {
@@ -1168,18 +1213,21 @@ fn plan_floats(tree: &mut TaffyTree<NodeCtx>, doc: &Document, styles: &StyleMap,
             }
             false
         };
-        let beside: Vec<([f32; 4], bool)> = floats
+        let beside: Vec<FloatSpec> = floats
             .iter()
-            .filter(|(fi, f, _)| *fi < idx && f[3] > top && f[1] < bottom && f[2] > x0 && f[0] < x1)
+            .filter(|(fi, f)| *fi < idx && f.rect[3] > top && f.rect[1] < bottom && f.rect[2] > x0 && f.rect[0] < x1)
             .filter(|(fi, ..)| doc.node(tmp[*fi].node).parent.is_some_and(reaches))
-            .map(|(_, f, l)| (*f, *l))
+            .map(|(_, f)| f.clone())
             .collect();
         if beside.is_empty() {
             continue;
         }
         let lines = c.layout.lines().count() as f32;
         let (ox, oy) = (tb.rect.x, tb.rect.y);
-        let floats = beside.into_iter().map(|(f, l)| ([f[0] - ox, f[1] - oy, f[2] - ox, f[3] - oy], l)).collect();
+        let floats = beside
+            .into_iter()
+            .map(|f| FloatSpec { rect: [f.rect[0] - ox, f.rect[1] - oy, f.rect[2] - ox, f.rect[3] - oy], left: f.left, shape: f.shape.map(|(x, y, s, m)| (x - ox, y - oy, s, m)) })
+            .collect();
         let spec = FlowSpec { x0: x0 - ox, x1: x1 - ox, line_h: (c.layout.height() / lines).max(1.0), floats };
         let mut probe = c.layout.clone();
         break_lines_varying(&mut probe, spec.x1 - spec.x0, Alignment::Start, |y| {
@@ -1350,7 +1398,7 @@ pub fn layout_with(
     compute_static_positions(&tree, doc, styles, root);
     // Paged elements: find where the sheets break, then make each element as tall as its sheets.
     // Starts are kept relative to the element's top, which can move in the second pass.
-    type Sheet = (NodeId, Vec<f32>, f32, Vec<Option<Repeat>>);
+    type Sheet = (NodeId, Vec<f32>, f32, Vec<Option<Repeat>>, Vec<Option<Repeat>>);
     let mut sheets: Vec<Sheet> = Vec::new();
     if !paged_nodes.is_empty() {
         let page = styles.page_style(0);
@@ -1367,7 +1415,8 @@ pub fn layout_with(
             let height = frags.starts.len() as f32 * page.size.1 + (frags.starts.len() - 1) as f32 * SHEET_GAP;
             paged::set_height(&mut tree, *tn, height, styles, *id);
             let repeats = frags.repeats.into_iter().map(|r| r.map(|r| Repeat { y: r.y - top, ..r })).collect();
-            sheets.push((*id, frags.starts.iter().map(|s| s - top).collect(), content_end - top, repeats));
+            let feet = frags.feet.into_iter().map(|r| r.map(|r| Repeat { y: r.y - top, ..r })).collect();
+            sheets.push((*id, frags.starts.iter().map(|s| s - top).collect(), content_end - top, repeats, feet));
         }
         compute(&mut tree);
     }
@@ -1397,7 +1446,7 @@ pub fn layout_with(
     let origins = styles.origins().clone();
     let mut tree = LayoutTree { pages: Vec::new(), page_scroll: options.scroll_y, viewport_h: viewport_height, boxes, content_height, menu: None, lists: Default::default(), markers: Default::default(), index, text_nodes: Default::default(), elem_marks: Default::default(), origins };
     tree.compute_scroll_boxes(styles);
-    for (id, rel, rel_end, rel_repeats) in sheets {
+    for (id, rel, rel_end, rel_repeats, rel_feet) in sheets {
         let Some(&i) = tree.index.get(&id) else { continue };
         let b = &tree.boxes[i];
         let top = b.rect.y;
@@ -1412,6 +1461,7 @@ pub fn layout_with(
             starts: rel.iter().map(|s| s + top).collect(),
             content_end: rel_end + top,
             repeats: rel_repeats.into_iter().map(|r| r.map(|r| Repeat { y: r.y + top, ..r })).collect(),
+            feet: rel_feet.into_iter().map(|r| r.map(|r| Repeat { y: r.y + top, ..r })).collect(),
         });
     }
     for (i, b) in tree.boxes.iter().enumerate() {
@@ -4070,6 +4120,26 @@ second</textarea><textarea id="e"></textarea></body>"#,
         let c_id = doc.find(|n| n.attr("id") == Some("c")).unwrap();
         let block = tree.node_rect(c_id).unwrap();
         assert!((block.height - c.layout.height()).abs() < 1.0, "{} vs {}", block.height, c.layout.height());
+    }
+
+    #[test]
+    fn text_follows_a_floats_shape_outside_outline() {
+        let doc = Document::parse(
+            r#"<body style="margin:0;font-family:sans-serif;font-size:16px"><div style="width:300px"><div style="float:left;width:100px;height:100px;shape-outside:circle(50%)"></div><span>One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty.</span></div></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 400.0, 100.0);
+        let run = text_boxes(&tree)[0];
+        let BoxContent::Text(c) = &run.content else { panic!() };
+        let lines: Vec<(f32, f32)> = c.layout.lines().map(|l| (run.rect.y + l.metrics().block_min_coord, l.metrics().inline_min_coord + run.rect.x)).collect();
+        // The first line sits beside the circle's narrow top, further left than the line through its middle.
+        let first = lines[0].1;
+        let middle = lines.iter().filter(|l| l.0 + 8.0 > 40.0 && l.0 < 60.0).map(|l| l.1).fold(0.0, f32::max);
+        assert!(first > 0.0 && first < middle - 10.0, "{lines:?}");
+        assert!(middle <= 100.5, "never past the float's own box: {lines:?}");
+        // Below the float's 100px the text runs from the left edge again.
+        assert!(lines.iter().any(|l| l.0 >= 100.0 && l.1 == 0.0), "{lines:?}");
     }
 
     #[test]

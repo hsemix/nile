@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><title>shape-outside</title>
+<style>
+  body { margin: 0; padding: 16px; font: 13px/1.35 sans-serif; background: #fff; color: #223 }
+  .row { display: flex; gap: 20px; }
+  .box { width: 280px; border: 1px solid #ccd; padding: 8px; }
+  h4 { margin: 0 0 6px; font-size: 12px; color: #567 }
+  .f { float: left; width: 110px; height: 110px; margin: 0 10px 0 0; background: #2a7; }
+  .circle { shape-outside: circle(50%); border-radius: 50%; }
+  .tri { width: 110px; height: 110px; shape-outside: polygon(0 0, 100% 0, 0 100%); background-color: transparent; background-image: linear-gradient(to bottom right, #37e 50%, transparent 50%); }
+  .ell { width: 120px; height: 90px; shape-outside: ellipse(50% 50%); border-radius: 50%; background: #e74; shape-margin: 8px; }
+  .right { float: right; margin: 0 0 0 10px; width: 110px; height: 110px; background: #a4c; border-radius: 50%; shape-outside: circle(50%); }
+</style></head>
+<body>
+  <div class="row">
+    <div class="box"><h4>circle(50%)</h4><div class="f circle"></div>Text wraps around the circle instead of the rectangle that contains it, so each line starts just past the curve and the lines near the top and bottom of the shape run closer to its edge than the line through its middle. Below it, the text uses the full width again, as usual.</div>
+    <div class="box"><h4>polygon (a triangle)</h4><div class="f tri"></div>The lines beside a triangle are short at the top where it is wide and grow longer as the shape narrows, until they run all the way to the edge of the box. Below it, the text uses the full width again, as usual.</div>
+  </div>
+  <div class="row" style="margin-top:14px">
+    <div class="box"><h4>ellipse + shape-margin: 8px</h4><div class="f ell"></div>An ellipse with a margin keeps the text a little further from its outline, with the same curve-following lines as before. Below it, the text uses the full width again, as usual and the paragraph carries on.</div>
+    <div class="box"><h4>float: right</h4><div class="right"></div>The same works for floats on the right: the lines end before the curve instead of before the rectangle, so the text hugs the circle's outline while it passes the shape and then fills the box again.</div>
+  </div>
+</body></html>

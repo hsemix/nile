@@ -124,6 +124,19 @@ pub struct A11yNode {
     pub live: A11yLive,
     /// `aria-atomic`: announce the whole region, not just what changed.
     pub live_atomic: bool,
+    /// The text selection (or caret, when both ends are equal) inside this node, as positions in
+    /// its text runs. Set on the focused text input and on the editable host holding the selection.
+    pub selection: Option<A11ySelection>,
+}
+
+/// A position in text: a `StaticText` node and a character index into its text.
+pub type A11yPoint = (u64, usize);
+
+/// A selection between two text positions (`anchor` is the fixed end, `focus` the moving one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct A11ySelection {
+    pub anchor: A11yPoint,
+    pub focus: A11yPoint,
 }
 
 /// How urgently a live region's changes are announced.
@@ -159,6 +172,7 @@ impl A11yNode {
             link_target: String::new(),
             live: A11yLive::Off,
             live_atomic: false,
+            selection: None,
         }
     }
 }
@@ -192,6 +206,9 @@ impl A11yTree {
             }
             if let Some((v, min, max, step)) = n.numeric {
                 out += &format!(",\"numeric\":[{v},{min},{max},{step}]");
+            }
+            if let Some(sel) = n.selection {
+                out += &format!(",\"selection\":[{},{},{},{}]", sel.anchor.0, sel.anchor.1, sel.focus.0, sel.focus.1);
             }
             if n.level > 0 {
                 out += &format!(",\"level\":{}", n.level);
@@ -237,6 +254,23 @@ struct Ctx<'a> {
     scroll: f32,
     base: u64,
     out: Vec<A11yNode>,
+    /// The focused element and its selection in characters of its value.
+    focus: Option<NodeId>,
+    input_sel: (usize, usize),
+    edit_sel: Option<(DomPoint, DomPoint)>,
+}
+
+/// Ids of the text runs an input's value is split into (one per line); the high bit marks them.
+const RUN_BIT: u64 = 1 << 63;
+const RUN_SHIFT: u32 = 44;
+
+fn run_id(owner: u64, line: usize) -> u64 {
+    RUN_BIT | ((line as u64 & 0xFFFF) << RUN_SHIFT) | owner
+}
+
+/// The id of the node a text run belongs to (itself for a plain id).
+fn owner_of(id: u64) -> u64 {
+    if id & RUN_BIT != 0 { id & ((1 << RUN_SHIFT) - 1) } else { id }
 }
 
 fn collapse(s: &str) -> String {
@@ -544,6 +578,57 @@ impl Ctx<'_> {
         })
     }
 
+    /// Where `p` (a DOM point) is in the collapsed text of its text node.
+    fn text_point(&self, p: DomPoint) -> Option<A11yPoint> {
+        let nile_dom::NodeKind::Text(t) = &self.doc.node(p.node).kind else { return None };
+        let prefix: String = t.chars().take(p.offset).collect();
+        let mut at = collapse(&prefix).chars().count();
+        if at > 0 && prefix.ends_with(char::is_whitespace) && p.offset < t.chars().count() {
+            at += 1;
+        }
+        let len = collapse(t).chars().count();
+        Some((id_of(self.base, p.node), at.min(len)))
+    }
+
+    fn inside(&self, mut n: NodeId, host: NodeId) -> bool {
+        loop {
+            if n == host {
+                return true;
+            }
+            match self.doc.node(n).parent {
+                Some(p) => n = p,
+                None => return false,
+            }
+        }
+    }
+
+    /// An input's value as one text-run node per line, plus the selection when it has focus.
+    fn input_runs(&mut self, n: NodeId, owner: u64, value: &str) -> (Vec<u64>, Option<A11ySelection>) {
+        let mut ids = Vec::new();
+        let (mut start, mut anchor, mut focus) = (0usize, None, None);
+        let (a, f) = self.input_sel;
+        let focused = self.focus == Some(n);
+        let bounds = self.bounds(n);
+        for (line, text) in value.split('\n').enumerate() {
+            let id = run_id(owner, line);
+            let len = text.chars().count();
+            let mut run = A11yNode::new(id, A11yRole::StaticText);
+            run.name = text.to_string();
+            run.bounds = bounds;
+            self.out.push(run);
+            ids.push(id);
+            let at = |p: usize| (p >= start && p <= start + len).then_some((id, p - start));
+            anchor = anchor.or(at(a));
+            focus = focus.or(at(f));
+            start += len + 1;
+        }
+        let selection = match (focused, anchor, focus) {
+            (true, Some(anchor), Some(focus)) => Some(A11ySelection { anchor, focus }),
+            _ => None,
+        };
+        (ids, selection)
+    }
+
     /// Build the node for `n` (and its subtree). Returns the ids this element contributes to its
     /// parent: itself, or its children when it is only a wrapper.
     fn visit(&mut self, n: NodeId) -> Vec<u64> {
@@ -655,7 +740,13 @@ impl Ctx<'_> {
         // Children: text-only controls fold their text into the name.
         let collapse_children = Self::names_from_content(role) && !self.has_interesting_descendant(n);
         let mut kids = Vec::new();
-        if matches!(tag, "select" | "textarea" | "input") {
+        if matches!(role, R::TextInput | R::SearchInput | R::NumberInput | R::PasswordInput | R::MultilineInput) && matches!(tag, "input" | "textarea") {
+            // The value as text runs, so assistive technology can read and navigate it by character.
+            let value = a.value.clone().unwrap_or_default();
+            let (runs, selection) = self.input_runs(n, id, &value);
+            kids = runs;
+            a.selection = selection;
+        } else if matches!(tag, "select" | "textarea" | "input") {
             // Their content is part of the control.
         } else if tag == "frame" || tag == "iframe" {
             // Filled in by the caller with the frame's own tree.
@@ -679,6 +770,13 @@ impl Ctx<'_> {
                     oa.bounds = a.bounds;
                     self.out.push(oa);
                     kids.push(oid);
+                }
+            }
+        }
+        if let (true, Some((x, y)), true) = (editable, self.edit_sel, self.focus == Some(n)) {
+            if let (Some(anchor), Some(focus)) = (self.text_point(x), self.text_point(y)) {
+                if self.inside(x.node, n) && self.inside(y.node, n) {
+                    a.selection = Some(A11ySelection { anchor, focus });
                 }
             }
         }
@@ -744,7 +842,7 @@ impl Page {
         let v = &*v;
         let doc = self.doc.borrow();
         let tree = &v.layout.as_ref().expect("laid out above").2;
-        let mut cx = Ctx { doc: &doc, styles: &v.styles, tree, offsets, scroll, base, out: Vec::new() };
+        let mut cx = Ctx { doc: &doc, styles: &v.styles, tree, offsets, scroll, base, out: Vec::new(), focus, input_sel: (v.anchor, v.caret), edit_sel: v.edit_sel };
         let root_id = base | ROOT;
         let body = doc.body().unwrap_or(Document::ROOT);
         let top = cx.visit_body(body);
@@ -760,6 +858,8 @@ impl Page {
 
     /// Carry out a request from assistive technology on the node `id`. True if it did something.
     pub fn a11y_action(&mut self, id: u64, action: A11yAction) -> bool {
+        // A text run stands for the input it belongs to.
+        let id = owner_of(id);
         // A frame's nodes carry the frame element in their high bits.
         let high = id >> SHIFT;
         if high != 0 {

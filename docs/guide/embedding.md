@@ -119,7 +119,14 @@ the Unix `-rpath` command above does not apply.
 5. Drain `nile_view_take_window_command` after input, script calls and ticks; apply
    close, minimize, maximize, movement, resizing and fullscreen in your host.
    Follow title/cursor changes too.
-6. Destroy the view with `nile_view_destroy` when finished.
+6. For several windows, also drain `nile_view_take_window_request` (JSON, free it with
+   `nile_string_free`): `open` (`new Window()`/`modal()`: make a host window and a view with
+   `nile_view_create_window`, passing the request's `id`, `opener`, `modal` and its `url`/`html`/
+   `width`/`height`/`parameters` fields; `type`, `caption`, `alignment`... say how to show it),
+   `post` (`nile_view_window_message` on the view whose `nile_view_window_id` is `to`), `close`
+   (ask `nile_view_close_request` first, then tell the opener with `nile_view_window_closed`),
+   `focus` and `quit`. Answer a window the user closed the same way (`close_request` with reason 0).
+7. Destroy the view with `nile_view_destroy` when finished.
 
 `nile_key` performs uncanceled default keyboard actions. `nile_text_input` inserts
 committed text; avoid inserting the same character through both paths. Only the

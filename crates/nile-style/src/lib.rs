@@ -14,6 +14,8 @@ mod grid;
 mod page;
 mod parse;
 mod selector;
+mod shape;
+pub use shape::{Dim as ShapeDim, RefBox as ShapeBox, Resolved as ResolvedShape, Shape, ShapeOutside};
 
 use nile_dom::{Document, NodeId, NodeKind};
 use std::cell::Cell;
@@ -405,6 +407,10 @@ pub struct ComputedStyle {
     pub margin: Edges<Length>,
     pub position: Position,
     pub float: Float,
+    /// `shape-outside`: the outline text wraps around instead of the float's rectangle.
+    pub shape_outside: Option<ShapeOutside>,
+    /// `shape-margin`.
+    pub shape_margin: f32,
     pub clear: Clear,
     /// `z-index`; `None` is `auto`.
     pub z_index: Option<i32>,
@@ -550,6 +556,8 @@ impl Default for ComputedStyle {
             margin: Edges::all(Length::Px(0.0)),
             position: Position::Static,
             float: Float::None,
+            shape_outside: None,
+            shape_margin: 0.0,
             clear: Clear::None,
             z_index: None,
             inset: Edges::all(Length::Auto),
@@ -1271,7 +1279,7 @@ fn apply_declarations(
             // A `var()` that can't be resolved makes the declaration invalid.
             let text = substitute(&d.raw, &vars, 0)?;
             // `popup-*` values are kept as text for scripts; everything else is parsed now.
-            let raw = if d.name.starts_with("popup-") { text.clone() } else { String::new() };
+            let raw = if d.name.starts_with("popup-") || d.name == "shape-outside" { text.clone() } else { String::new() };
             Some(Declaration { values: parse::parse_values(&text, pcx), raw, ..(*d).clone() })
         })
         .collect();
@@ -1754,6 +1762,12 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 Some("absolute") => Position::Absolute,
                 Some("fixed") => Position::Fixed,
                 _ => return,
+            }
+        }
+        "shape-outside" => s.shape_outside = ShapeOutside::parse(&d.raw),
+        "shape-margin" => {
+            if let Some(m) = first.and_then(|x| px(x, fs)).filter(|m| *m >= 0.0) {
+                s.shape_margin = m;
             }
         }
         "float" => {

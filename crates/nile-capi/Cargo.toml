@@ -16,6 +16,7 @@ net = ["nile-engine/net"]
 [dependencies]
 nile-engine.workspace = true
 nile-script.workspace = true
+nile-dom.workspace = true
 nile-style.workspace = true
 
 [build-dependencies]
