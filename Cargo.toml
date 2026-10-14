@@ -30,7 +30,7 @@ rquickjs = { version = "0.14", features = ["loader"] }
 winit = "0.30"
 softbuffer = "0.4"
 accesskit = "0.25"
-windows-sys = { version = "0.52", default-features = false, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.52", default-features = false, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }
 accesskit_winit = "0.34"
 accesskit_consumer = "0.39"
 objc2 = "0.6.5"

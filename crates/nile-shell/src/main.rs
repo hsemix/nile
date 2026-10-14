@@ -11,11 +11,13 @@
 //!   nile                                open main.html / index.html next to the program (or in the pack)
 //!   nile folder                         open the folder's main.html / index.html
 //!   nile --pack folder [-o app]         write `app`: a copy of this program with the folder's files appended
+//!        [--icon icon.png|ico]          the executable's icon (macOS: makes `app.app`; Windows: in the .exe)
 //!   nile page.html --pdf out.pdf        write every page as a PDF ([--wait MS] first)
 //!        [--wait MS]                   let timers run this long before the snapshot
 
 mod access;
 mod app;
+mod bundle;
 mod dialogs;
 mod menu;
 
@@ -190,10 +192,12 @@ fn paged_output(page: &mut Page, pdf: Option<String>, png: Option<String>, page_
 fn pack_command(args: &[String]) -> ! {
     let mut folder = None;
     let mut out = None;
+    let mut icon: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-o" | "--out" => out = it.next().cloned(),
+            "--icon" => icon = it.next().map(PathBuf::from),
             _ => folder = Some(PathBuf::from(a)),
         }
     }
@@ -206,7 +210,23 @@ fn pack_command(args: &[String]) -> ! {
     }
     let name = std::fs::canonicalize(&folder).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "app".into());
     let out = PathBuf::from(out.unwrap_or_else(|| if cfg!(windows) { format!("{name}.exe") } else { name }));
-    let result = nile_dom::vfs::runtime_bytes().and_then(|runtime| nile_dom::vfs::pack(&folder, &runtime, &out));
+    // macOS: an `.app` bundle (what Finder and the Dock show an icon for) when asked for with an icon or an
+    // output name ending in `.app`. The archive then goes in its own file inside it.
+    let bundle_mode = cfg!(target_os = "macos") && (icon.is_some() || out.extension().is_some_and(|e| e == "app"));
+    let archive = out.with_extension("nilepack.tmp");
+    let result = nile_dom::vfs::runtime_bytes().and_then(|runtime| {
+        if bundle_mode {
+            std::fs::write(&out, &runtime)?;
+            return nile_dom::vfs::pack(&folder, &[], &archive);
+        }
+        // On Windows the icon goes into the executable before the archive is appended.
+        #[cfg(target_os = "windows")]
+        let runtime = match &icon {
+            Some(icon) => bundle::with_icon(runtime, icon)?,
+            None => runtime,
+        };
+        nile_dom::vfs::pack(&folder, &runtime, &out)
+    });
     match result {
         Ok((files, stored)) => {
             #[cfg(unix)]
@@ -217,6 +237,23 @@ fn pack_command(args: &[String]) -> ! {
             // A modified Mach-O has to be signed again to start on Apple silicon.
             #[cfg(target_os = "macos")]
             let _ = std::process::Command::new("codesign").args(["--force", "--sign", "-"]).arg(&out).output();
+            #[cfg(target_os = "macos")]
+            let out = if bundle_mode {
+                let name = out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "App".into());
+                match bundle::app_bundle(&out, &archive, &name, icon.as_deref()) {
+                    Ok(app) => app,
+                    Err(e) => {
+                        eprintln!("could not make the app bundle: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                out
+            };
+            #[cfg(not(target_os = "macos"))]
+            if icon.is_some() && !cfg!(target_os = "windows") {
+                eprintln!("note: --icon only changes the executable's icon on macOS and Windows");
+            }
             println!("wrote {} ({files} files, {} KB packed)", out.display(), stored / 1024);
             std::process::exit(0);
         }
@@ -297,7 +334,13 @@ fn main() {
     // A window knows its id before its scripts run, so `new Window()` at startup can name its opener.
     let info = nile_script::WindowInfo { id: nile_script::next_window_id(), ..Default::default() };
     let headless = png.is_some() || pdf.is_some();
-    let mut page = if !headless { Page::load_window(file, (width as f32, height as f32), info) } else { Page::load(file, (width as f32, height as f32), 0.0) };
+    // A `.js` start file is a bootstrap script (Sciter's `run.js`): it runs in a hidden window and opens the real ones.
+    let bootstrap = !headless && file.extension().is_some_and(|e| e == "js");
+    let mut page = if bootstrap {
+        let dir = file.parent().map(PathBuf::from).unwrap_or_default();
+        let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        Page::html_window(&format!("<html window-state=\"hidden\"><body><script type=\"module\" src=\"{name}\"></script></body></html>"), dir, (width as f32, height as f32), info)
+    } else if !headless { Page::load_window(file, (width as f32, height as f32), info) } else { Page::load(file, (width as f32, height as f32), 0.0) };
     if !headless {
         page.clipboard = Box::new(SystemClipboard::default());
         page.set_dialogs(Rc::new(dialogs::NativeDialogs));
@@ -316,5 +359,9 @@ fn main() {
     menu::install_hook(&mut builder);
     let event_loop = builder.build().expect("event loop");
     let mut app = app::App::new(page, event_loop.create_proxy());
+    app.bootstrap = bootstrap;
     event_loop.run_app(&mut app).expect("run app");
+    if app.exit_code != 0 {
+        std::process::exit(app.exit_code);
+    }
 }

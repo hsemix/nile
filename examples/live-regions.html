@@ -1,0 +1,27 @@
+<!doctype html>
+<html window-title="Live regions" window-width="520" window-height="360">
+<head><meta charset="utf-8"><title>Live regions</title>
+<style>
+  body { margin: 0; padding: 24px; font: 14px sans-serif; color: #24323b; background: #f5f7f9 }
+  button { font: 14px sans-serif; padding: 8px 14px; margin: 0 8px 8px 0 }
+  #status, #alert { margin-top: 10px; padding: 10px 12px; border-radius: 6px; min-height: 18px }
+  #status { background: #e4f1ea; color: #1d6b45 }
+  #alert { background: #fbe9e7; color: #a02a1c }
+  #log { margin-top: 10px; padding: 8px 12px; background: #fff; border: 1px solid #d7dde2; border-radius: 6px; min-height: 60px; font: 12px monospace }
+</style></head>
+<body>
+  <h1 style="font-size:18px;margin:0 0 12px">Live regions</h1>
+  <p style="margin:0 0 14px;color:#566872">With a screen reader on (VoiceOver, Narrator, Orca), these buttons change text inside live regions and the change is spoken without moving focus.</p>
+  <button id="save">Save (polite status)</button>
+  <button id="fail">Fail (assertive alert)</button>
+  <button id="line">Add log line</button>
+  <div id="status" role="status">Ready</div>
+  <div id="alert" role="alert"></div>
+  <div id="log" role="log" aria-live="polite"></div>
+<script>
+let n = 0;
+document.getElementById("save").addEventListener("click", () => { document.getElementById("status").textContent = "Saved at " + new Date().toLocaleTimeString(); });
+document.getElementById("fail").addEventListener("click", () => { document.getElementById("alert").textContent = "Could not save: the disk is full (" + (++n) + ")"; });
+document.getElementById("line").addEventListener("click", () => { const d = document.createElement("div"); d.textContent = "event " + (++n); document.getElementById("log").append(d); });
+</script>
+</body></html>

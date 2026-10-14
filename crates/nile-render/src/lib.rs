@@ -209,10 +209,21 @@ impl Renderer {
             paint_shadows(canvas, skia_rect(paper), &s.box_shadow, radii);
             let border = Border { width: s.border_width, color: s.border_color, style: s.border_style };
             paint_decorated(canvas, skia_rect(paper), Some(s.background.unwrap_or(CssColor::rgb(255, 255, 255))), s.background_image.as_ref(), None, &border, radii);
-            let (from, to) = pb.band(i);
+            let (from, _) = pb.band(i);
+            // A table that continues from the sheet before shows its header row(s) again at the top.
+            let head = pb.head_h(i);
+            if let Some(repeat) = pb.repeats.get(i).and_then(Option::as_ref) {
+                canvas.save();
+                canvas.clip_rect(Rect::from_xywh(paper.x, top + pb.margin[0], paper.width, head), None, true);
+                canvas.translate((0.0, top + pb.margin[0] - repeat.y));
+                for &(a, b) in &repeat.ranges {
+                    self.paint_boxes(canvas, tree, styles, overlay, base, a, b);
+                }
+                canvas.restore();
+            }
             canvas.save();
-            canvas.clip_rect(Rect::from_xywh(paper.x, top + pb.margin[0], paper.width, (to - from).min(pb.content_h())), None, true);
-            canvas.translate((0.0, top + pb.margin[0] - from));
+            canvas.clip_rect(Rect::from_xywh(paper.x, top + pb.margin[0] + head, paper.width, pb.shown_h(i)), None, true);
+            canvas.translate((0.0, top + pb.margin[0] + head - from));
             self.paint_boxes(canvas, tree, styles, overlay, base, pb.index + 1, pb.end);
             canvas.restore();
             self.paint_margin_boxes(canvas, &styles.page_style(i), paper, i, n);

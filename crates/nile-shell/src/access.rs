@@ -46,6 +46,7 @@ fn role(r: A11yRole) -> Role {
         R::AlertDialog => Role::AlertDialog,
         R::Alert => Role::Alert,
         R::Status => Role::Status,
+        R::Log => Role::Log,
         R::Menu => Role::Menu,
         R::MenuBar => Role::MenuBar,
         R::MenuItem => Role::MenuItem,
@@ -124,6 +125,14 @@ fn node(n: &A11yNode, scale: f64) -> Node {
             Some(false) => Toggled::False,
             None => Toggled::Mixed,
         });
+    }
+    match n.live {
+        nile_engine::a11y::A11yLive::Off => {}
+        nile_engine::a11y::A11yLive::Polite => a.set_live(accesskit::Live::Polite),
+        nile_engine::a11y::A11yLive::Assertive => a.set_live(accesskit::Live::Assertive),
+    }
+    if n.live_atomic {
+        a.set_live_atomic();
     }
     if !n.link_target.is_empty() {
         a.set_url(n.link_target.clone());

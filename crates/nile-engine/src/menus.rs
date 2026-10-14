@@ -62,6 +62,25 @@ impl Accel {
         Some(a)
     }
 
+    /// The shortcut as text (`CmdOrCtrl+Shift+S`): what `Accel::parse` reads back.
+    pub fn to_text(&self) -> String {
+        let mut parts = Vec::new();
+        if self.primary {
+            parts.push("CmdOrCtrl".to_string());
+        }
+        if self.meta {
+            parts.push("Meta".to_string());
+        }
+        if self.alt {
+            parts.push("Alt".to_string());
+        }
+        if self.shift {
+            parts.push("Shift".to_string());
+        }
+        parts.push(self.key.clone());
+        parts.join("+")
+    }
+
     /// Whether a DOM `key` with `mods` is this shortcut (on macOS `primary` is Cmd, elsewhere Ctrl).
     pub fn matches(&self, key: &str, mods: ModifiersState) -> bool {
         let want = self.key.as_str();
@@ -97,6 +116,32 @@ pub enum MenuItem {
         /// Items of the submenu; empty for a plain item.
         items: Vec<MenuItem>,
     },
+}
+
+/// A menu as JSON, for C hosts: `[{"id", "label", "accel"?, "enabled", "checked", "role"?, "items"?},
+/// {"separator": true}, ...]` where `items` holds a submenu.
+pub fn menu_json(items: &[MenuItem]) -> String {
+    use crate::editing::json_string as q;
+    let body: Vec<String> = items
+        .iter()
+        .map(|i| match i {
+            MenuItem::Separator => "{\"separator\":true}".to_string(),
+            MenuItem::Item { id, label, accel, enabled, checked, role, items } => {
+                let mut o = format!("{{\"id\":{id},\"label\":{},\"enabled\":{enabled},\"checked\":{checked}", q(label));
+                if let Some(a) = accel {
+                    o += &format!(",\"accel\":{}", q(&a.to_text()));
+                }
+                if let Some(r) = role {
+                    o += &format!(",\"role\":{}", q(r));
+                }
+                if !items.is_empty() {
+                    o += &format!(",\"items\":{}", menu_json(items));
+                }
+                o + "}"
+            }
+        })
+        .collect();
+    format!("[{}]", body.join(","))
 }
 
 impl Page {

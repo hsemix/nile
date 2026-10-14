@@ -22,6 +22,7 @@ use crate::{access, dialogs, menu, mods_of};
 pub enum UserEvent {
     Access(accesskit_winit::Event),
     /// A menu bar item was chosen: a page item's node id, or a negative tag for a standard action.
+    #[allow(dead_code)]
     Menu(isize),
     /// Windows: a command of window `hwnd`'s menu bar, as the page item's node id.
     #[allow(dead_code)]
@@ -41,6 +42,8 @@ enum Action {
     /// Close window `id` (0: the window that asked) with a result.
     Close { id: u32, value: String },
     Focus(u32),
+    /// `application.quit(code)`.
+    Quit(i32),
 }
 
 struct Win {
@@ -78,11 +81,16 @@ pub struct App {
     /// The system menu bar (macOS), and the window whose page supplies it.
     menu: Option<menu::NativeMenu>,
     active: u32,
+    /// Started from a `run.js`: the first window is a hidden host for the script, and the program ends
+    /// when the windows it opened are all closed.
+    pub bootstrap: bool,
+    /// The exit code `application.quit(code)` asked for.
+    pub exit_code: i32,
 }
 
 impl App {
     pub fn new(page: Page, proxy: EventLoopProxy<UserEvent>) -> App {
-        App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0, menu: None, active: 0 }
+        App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0, menu: None, active: 0, bootstrap: false, exit_code: 0 }
     }
 }
 
@@ -198,6 +206,7 @@ impl Win {
                 WindowCommand::Open(spec) => actions.push(Action::Open(spec)),
                 WindowCommand::Post { to, json } => actions.push(Action::Post { from: self.id, to: if to == 0 { self.id } else { to }, json }),
                 WindowCommand::FocusId(id) => actions.push(Action::Focus(if id == 0 { self.id } else { id })),
+                WindowCommand::Quit(code) => actions.push(Action::Quit(code)),
                 WindowCommand::Minimize => window.set_minimized(true),
                 WindowCommand::Maximize => window.set_maximized(true),
                 WindowCommand::Restore => {
@@ -608,7 +617,8 @@ impl App {
         let mut page = match (spec.get("html"), spec.get("url")) {
             (Some(html), _) => Page::html_window(html, dir, size, info),
             (None, Some(url)) => {
-                let rel = url.strip_prefix("file://").unwrap_or(url);
+                let mapped = nile_dom::vfs::url_to_path(url).map(|p| p.to_string_lossy().into_owned());
+                let rel = mapped.as_deref().unwrap_or_else(|| nile_script::path_of_url(url));
                 let file = if std::path::Path::new(rel).is_absolute() { PathBuf::from(rel) } else { dir.join(rel) };
                 Page::load_window(file, size, info)
             }
@@ -634,6 +644,10 @@ impl App {
                     }
                 }
                 Action::Close { id, value } => self.close(event_loop, if id == 0 { from } else { id }, 1, &value),
+                Action::Quit(code) => {
+                    self.exit_code = code;
+                    event_loop.exit();
+                }
                 Action::Focus(id) => {
                     if let Some(i) = self.index(id) {
                         self.wins[i].window.focus_window();
@@ -658,6 +672,10 @@ impl App {
             event_loop.exit();
         }
         self.close_now(id, value);
+        // A bootstrap script's own window is hidden: the program ends with the last window it opened.
+        if self.bootstrap && self.wins.iter().all(|w| w.id == self.main_id) {
+            event_loop.exit();
+        }
     }
 
     fn close_now(&mut self, id: u32, value: &str) {

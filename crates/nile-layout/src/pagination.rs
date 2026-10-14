@@ -5,20 +5,88 @@
 //! `break-inside: avoid` (when it fits on a page), nor leave fewer than two lines of a paragraph
 //! on either side (`orphans`/`widows`); `break-before/after: page` force one.
 
+use nile_dom::Document;
 use nile_style::{Break, Display, StyleMap};
 
 use crate::{BoxContent, LayoutTree};
+
+/// A table's header rows, painted again at the top of each page the table continues onto.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Repeat {
+    /// Boxes of the header rows and their cells, as `[from, to)` ranges of the paint list.
+    pub ranges: Vec<(usize, usize)>,
+    /// Where the header sits in the flow, and how tall it is.
+    pub y: f32,
+    pub height: f32,
+}
+
+/// Where pages start, and which pages repeat a table header at their top (parallel lists).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fragments {
+    pub starts: Vec<f32>,
+    pub repeats: Vec<Option<Repeat>>,
+}
 
 /// Page start offsets (the first is 0) for `tree` cut into pages `page_h` tall.
 pub fn paginate(tree: &LayoutTree, styles: &StyleMap, page_h: f32) -> Vec<f32> {
     paginate_boxes(&tree.boxes, styles, 0.0, tree.content_height, page_h)
 }
 
+/// [`paginate`], with table headers repeated on the pages their table continues onto.
+pub fn paginate_tree(tree: &LayoutTree, doc: &Document, styles: &StyleMap, page_h: f32) -> Fragments {
+    paginate_with(&tree.boxes, 0, Some(doc), styles, 0.0, tree.content_height, page_h)
+}
+
 /// Page starts for `boxes` (a subtree of the paint list) whose content runs from `origin` to
 /// `end` in the boxes' own y coordinates; the first start is `origin`.
 pub fn paginate_boxes(boxes: &[crate::LayoutBox], styles: &StyleMap, origin: f32, end: f32, page_h: f32) -> Vec<f32> {
+    paginate_with(boxes, 0, None, styles, origin, end, page_h).starts
+}
+
+struct Head {
+    table_top: f32,
+    table_bottom: f32,
+    repeat: Repeat,
+}
+
+/// The tables in `boxes` (whose first box is paint-list index `base`) that have a `<thead>`.
+fn heads(boxes: &[crate::LayoutBox], base: usize, doc: &Document) -> Vec<Head> {
+    let mut out = Vec::new();
+    for (k, t) in boxes.iter().enumerate() {
+        if !matches!(t.content, BoxContent::Element) || doc.node(t.node).tag() != Some("table") {
+            continue;
+        }
+        let end = t.subtree_end.saturating_sub(base).clamp(k + 1, boxes.len());
+        let mut ranges = Vec::new();
+        let (mut top, mut bottom) = (f32::INFINITY, f32::NEG_INFINITY);
+        let mut header_rows = Vec::new();
+        for (j, row) in boxes.iter().enumerate().take(end).skip(k + 1) {
+            let n = doc.node(row.node);
+            if matches!(row.content, BoxContent::Element) && n.tag() == Some("tr") && n.parent.is_some_and(|p| doc.node(p).tag() == Some("thead")) {
+                header_rows.push(row.node);
+                ranges.push((base + j, base + j + 1));
+                top = top.min(row.rect.y);
+                bottom = bottom.max(row.rect.y + row.rect.height);
+            }
+        }
+        if header_rows.is_empty() {
+            continue;
+        }
+        for (j, cell) in boxes.iter().enumerate().take(end).skip(k + 1) {
+            if matches!(cell.content, BoxContent::Element) && doc.node(cell.node).parent.is_some_and(|p| header_rows.contains(&p)) && doc.node(cell.node).tag() != Some("tr") {
+                ranges.push((base + j, cell.subtree_end.max(base + j + 1)));
+            }
+        }
+        out.push(Head { table_top: t.rect.y, table_bottom: t.rect.y + t.rect.height, repeat: Repeat { ranges, y: top, height: bottom - top } });
+    }
+    out
+}
+
+/// [`paginate_boxes`] with table headers (when the document is given): `base` is the paint-list index of `boxes[0]`.
+pub fn paginate_with(boxes: &[crate::LayoutBox], base: usize, doc: Option<&Document>, styles: &StyleMap, origin: f32, end: f32, page_h: f32) -> Fragments {
     let page_h = page_h.max(1.0);
     let total = end;
+    let table_heads = doc.map(|d| heads(boxes, base, d)).unwrap_or_default();
     let mut forced: Vec<f32> = Vec::new();
     // Open intervals no cut may fall into, split by how important they are.
     let mut lines: Vec<(f32, f32)> = Vec::new();
@@ -77,23 +145,33 @@ pub fn paginate_boxes(boxes: &[crate::LayoutBox], styles: &StyleMap, origin: f32
             }
         }
     }
+    // A cut right after a table's header would leave it alone at the bottom of a page.
+    for h in &table_heads {
+        let after = h.repeat.y + h.repeat.height;
+        blocks.push((after - 0.01, after + 0.01));
+    }
     forced.sort_by(f32::total_cmp);
     tops.sort_by(f32::total_cmp);
     // A page starts at its first line, not in the margin that preceded it.
     let snap = |cut: f32| tops.iter().find(|&&t| t >= cut - 0.01).filter(|&&t| t - cut < page_h).copied().unwrap_or(cut);
     let inside = |set: &[(f32, f32)], y: f32| set.iter().find(|&&(a, b)| y > a + 0.01 && y < b - 0.01).copied();
 
+    // The header a page starting at `start` repeats: its table began earlier and goes on past it.
+    let repeat_at = |start: f32| table_heads.iter().find(|h| h.table_top < start - 0.5 && start >= h.repeat.y + h.repeat.height - 0.01 && start < h.table_bottom).map(|h| h.repeat.clone());
     let mut starts = vec![origin];
+    let mut repeats: Vec<Option<Repeat>> = vec![None];
     let mut start = origin;
     while starts.len() < 10_000 {
-        let limit = start + page_h;
+        let room = page_h - repeat_at(start).map_or(0.0, |r| r.height).min(page_h / 2.0);
+        let limit = start + room;
         if let Some(&f) = forced.iter().find(|&&f| f > start + 0.5 && f <= limit + 0.01) {
             let f = snap(f);
             starts.push(f);
+            repeats.push(repeat_at(f));
             start = f;
             continue;
         }
-        if total - start <= page_h + 0.5 {
+        if total - start <= room + 0.5 {
             break;
         }
         // Back up from the limit past everything a cut may not split; without a way out, only
@@ -111,9 +189,10 @@ pub fn paginate_boxes(boxes: &[crate::LayoutBox], styles: &StyleMap, origin: f32
         let cut = find(&[&lines, &blocks]).or_else(|| find(&[&lines])).unwrap_or(limit);
         let cut = snap(cut);
         starts.push(cut);
+        repeats.push(repeat_at(cut));
         start = cut;
     }
-    starts
+    Fragments { starts, repeats }
 }
 
 #[cfg(test)]
@@ -153,5 +232,30 @@ mod tests {
 
         let avoid = pages(&format!("{css}<div class=row></div><div style=\"break-inside:avoid;height:80px\"></div><div class=row></div>"), 100.0);
         assert_eq!(avoid, vec![0.0, 30.0, 110.0], "{avoid:?}");
+    }
+
+    #[test]
+    fn table_headers_repeat_on_the_pages_a_table_continues_onto() {
+        let rows: String = (0..10).map(|i| format!("<tr><td>r{i}</td></tr>")).collect();
+        let doc = Document::parse(&format!(
+            "<style>body{{margin:0}} table{{border-spacing:0}} td,th{{padding:0;height:20px}}</style><table><thead><tr><th>h</th></tr></thead><tbody>{rows}</tbody></table>"
+        ));
+        let styles = compute_styles(&doc);
+        let mut text = nile_text::TextEngine::new();
+        let tree = layout(&doc, &styles, &mut text, 400.0, 1.0);
+        let f = paginate_tree(&tree, &doc, &styles, 100.0);
+        // Page one: the header and four rows. Page two repeats the header (20px), so four more rows.
+        assert_eq!(f.starts, vec![0.0, 100.0, 180.0], "{:?}", f.starts);
+        assert!(f.repeats[0].is_none());
+        let r = f.repeats[1].as_ref().expect("page two repeats the header");
+        assert_eq!((r.y, r.height), (0.0, 20.0));
+        assert!(f.repeats[2].is_some());
+        // Without a header nothing repeats and the pages are as tall as the paper.
+        let plain = Document::parse(&format!("<style>body{{margin:0}} table{{border-spacing:0}} td{{padding:0;height:20px}}</style><table><tbody>{rows}</tbody></table>"));
+        let ps = compute_styles(&plain);
+        let t = layout(&plain, &ps, &mut text, 400.0, 1.0);
+        let f = paginate_tree(&t, &plain, &ps, 100.0);
+        assert_eq!(f.starts, vec![0.0, 100.0]);
+        assert!(f.repeats.iter().all(Option::is_none));
     }
 }

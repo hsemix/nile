@@ -413,6 +413,40 @@ bool nile_view_accessibility_action(struct NileView *view,
                                     const char *value);
 
 /**
+ * The page's application menu (`Window.this.menu = element`) as JSON, or NULL when it has none:
+ * `[{"id", "label", "accel"?, "enabled", "checked", "role"?, "items"?}, {"separator": true}, ...]`.
+ * Build the platform's menu bar from it and call [`nile_view_menu_click`] with an item's `id` when it
+ * is chosen. Call again after the page changes (`checked` and `enabled` follow its attributes).
+ * Free the string with [`nile_string_free`].
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+char *nile_view_menu(struct NileView *view);
+
+/**
+ * A menu item was chosen: fires its `click` (or does a clipboard/editing role). Returns NULL, or for a
+ * window role the host must carry out (`quit`, `close`, `minimize`, `zoom`, `about`, ...) a string
+ * to free with [`nile_string_free`].
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+char *nile_view_menu_click(struct NileView *view,
+                           uint64_t id);
+
+/**
+ * Run the menu item whose shortcut is `key` (a DOM key such as `"s"` or `"F5"`) with the same modifier
+ * bits as `nile_view_key`, for hosts whose menu bar doesn't handle shortcuts. Returns whether one ran.
+ *
+ * # Safety
+ * `view` must be a live view and `key` a valid string.
+ */
+bool nile_view_menu_accelerator(struct NileView *view,
+                                const char *key,
+                                uint8_t modifiers);
+
+/**
  * Cut the document into pages (`@page` size and margins, `break-*`) and write them to a PDF at
  * `path`. Returns the page count, or -1 on failure. The view's own layout is redone on the next draw.
  *

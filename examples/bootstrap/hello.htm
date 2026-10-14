@@ -1,0 +1,15 @@
+<!doctype html>
+<html window-title="Bootstrap demo">
+<head><meta charset="utf-8"><style>
+  body { margin: 0; padding: 28px; font: 15px sans-serif; color: #24323b; background: #eef3f6 }
+  button { font: 14px sans-serif; padding: 8px 14px }
+</style></head>
+<body>
+  <h2 id="msg" style="margin:0 0 10px"></h2>
+  <p style="margin:0 0 16px;color:#566872">This window was opened by <code>run.js</code>. Closing it ends the program (<code>application.quit(0)</code>).</p>
+  <button id="close">Close</button>
+<script>
+document.getElementById("msg").textContent = Window.this.parameters.greeting;
+document.getElementById("close").addEventListener("click", () => Window.this.close());
+</script>
+</body></html>

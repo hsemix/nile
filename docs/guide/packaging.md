@@ -34,5 +34,48 @@ side.
 - The archive is read-only; `Window.this.selectFile` and the `@sys` module still use the real disk.
 - Size: the packed app is the `nile` shell plus your files. The shell (with window, dialogs, accessibility and
   menus) is about 9.5 MB in a release build.
-- Not here yet: the Sciter `run.js` bootstrap mode (`application.start`/`run`), icons and version resources for
-  the executable, and a CLI option to unpack.
+- Not here yet: version resources for the executable, Linux desktop entries, and a CLI option to unpack.
+
+## An icon for the program
+
+```sh
+nile --pack my-app -o MyApp --icon icon.png
+```
+
+- **macOS:** makes `MyApp.app` (Finder and the Dock show the icon): `Contents/MacOS/MyApp` is the plain program,
+  `Contents/Resources/app.nilepack` holds your files (a signed executable can't have an archive appended
+  without failing strict validation) and the `.png` becomes `AppIcon.icns` through `sips` and `iconutil`
+  (or give an `.icns`). The bundle is signed ad hoc; use `codesign` with your identity and notarize it to
+  distribute. A `-o Name.app` output gets a bundle even without an icon.
+- **Windows:** the `.ico` (or a `.png`) is written into the `.exe` as its application icon, through the
+  resource-update API, before the archive is appended. (Written without a Windows machine to hand: CI
+  compiles it, but it hasn't run.)
+- **Linux:** executables have no embedded icon; ship a `.desktop` file and the picture beside the program.
+- The icon of the window itself (title bar, taskbar) is `<html window-icon="icon.png">`, on every platform.
+
+## Bootstrap scripts (`run.js`)
+
+Like `scapp`, a start file named `run.js` (or `nile run.js`) is a bootstrap script: it runs first, in a hidden
+window of its own, and opens the real windows. `examples/bootstrap/` is a working one.
+
+```js
+import * as env from "@env";
+import * as sys from "@sys";
+
+const main = new Window({ url: __DIR__ + "hello.htm", parameters: { who: "me" }, width: 460, height: 240 });
+main.on("close", () => application.quit(0));
+application.run();
+```
+
+- `__DIR__` and `__FILE__` are the module's folder (with a trailing slash) and file as URLs, `this://app/...` when
+  packed. In classic scripts they are the page's.
+- `application.quit(code)` ends the program with that exit code. `application.start(gfx)` is accepted and
+  ignored (the shell chooses its graphics), and `application.run()` returns 0 at once: the program's own loop is
+  already running, so code after it runs immediately, not after the last window closes. Without a `quit`, the
+  program ends when the last window the script opened closes.
+- `@sys` has the file-system part of Sciter's module: `fs.stat/statSync/lstat`, `readdir/readdirSync`,
+  `readFile/readFileSync` (an ArrayBuffer), `unlink`, `rename`, `mkdir`, `rmdir`, `copyfile`, `realpath`,
+  `splitpath` and the type constants, with paths or `file://` / `this://app/` URLs (a packed app's files can be
+  read, not written). `writeFile`/`writeFileSync` are a Nile addition. Not there: `fs.open`/`File`, sockets,
+  pipes, `spawn`, `watch`.
+- The bootstrap window is not stripped down the way Sciter's is: a bootstrap script can use the DOM and timers.

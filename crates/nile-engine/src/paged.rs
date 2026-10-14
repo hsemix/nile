@@ -20,14 +20,15 @@ impl Page {
         let style = self.view.borrow().styles.page_style(0);
         let (w, h) = style.content_size();
         self.layout(w, h);
-        let starts = {
+        let frags = {
             let mut view = self.view.borrow_mut();
             view.scale = 1.0;
             view.layout();
             let tree = &view.layout.as_ref().expect("laid out above").2;
-            nile_layout::paginate(tree, &view.styles, h)
+            nile_layout::paginate_tree(tree, &self.doc.borrow(), &view.styles, h)
         };
-        self.page_starts = starts;
+        self.page_starts = frags.starts;
+        self.page_repeats = frags.repeats;
         self.page_starts.len()
     }
 
@@ -54,30 +55,40 @@ impl Page {
             let tree = &view.layout.as_ref().expect("laid out above").2;
             canvas.save();
             canvas.translate((style.margin[3], style.margin[0]));
-            // The page's content ends at the next break, or at the content box.
-            let height = (end - start).min(ch);
-            canvas.clip_rect(Rect::from_xywh(0.0, 0.0, cw, height), None, true);
+            // A table continuing from the page before repeats its header; the content ends at the
+            // next break, or at the content box.
+            let head = self.page_repeats.get(index).cloned().flatten();
+            let head_h = head.as_ref().map_or(0.0, |r| r.height);
+            let height = (end - start).min(ch - head_h);
             if bg != Color::WHITE {
-                canvas.draw_rect(Rect::from_xywh(0.0, 0.0, cw, height), &Paint::default().set_color(bg).clone());
+                canvas.draw_rect(Rect::from_xywh(0.0, 0.0, cw, head_h + height), &Paint::default().set_color(bg).clone());
             }
-            self.renderer.paint(
-                canvas,
-                tree,
-                &view.styles,
-                &Overlay {
-                    scroll_y: start,
-                    offsets: &view.scroll_offsets,
-                    caret: None,
-                    selection: None,
-                    viewport: (cw, ch),
-                    page_selection: &page_selection,
-                    dom_caret: None,
-                    preedit: None,
-                    only: Some((0, tree.boxes.len())),
-                    skip: &[],
-                    selected_image: None,
-                },
-            );
+            let overlay = |scroll_y: f32, only: (usize, usize)| Overlay {
+                scroll_y,
+                offsets: &view.scroll_offsets,
+                caret: None,
+                selection: None,
+                viewport: (cw, ch),
+                page_selection: &page_selection,
+                dom_caret: None,
+                preedit: None,
+                only: Some(only),
+                skip: &[],
+                selected_image: None,
+            };
+            if let Some(repeat) = &head {
+                canvas.save();
+                canvas.clip_rect(Rect::from_xywh(0.0, 0.0, cw, head_h), None, true);
+                for &range in &repeat.ranges {
+                    self.renderer.paint(canvas, tree, &view.styles, &overlay(repeat.y, range));
+                }
+                canvas.restore();
+            }
+            canvas.save();
+            canvas.translate((0.0, head_h));
+            canvas.clip_rect(Rect::from_xywh(0.0, 0.0, cw, height), None, true);
+            self.renderer.paint(canvas, tree, &view.styles, &overlay(start, (0, tree.boxes.len())));
+            canvas.restore();
             canvas.restore();
         }
         let fonts = FontMgr::new();
