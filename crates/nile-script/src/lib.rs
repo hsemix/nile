@@ -972,11 +972,19 @@ impl ScriptHost {
                 Ok(())
             });
         }
-        let poll = self.net.pending.get() > 0 || self.sys.pending();
-        match ((next >= 0.0).then(|| Duration::from_secs_f64(next / 1000.0)), poll) {
-            (Some(d), true) => Some(d.min(Duration::from_millis(16))),
-            (None, true) => Some(Duration::from_millis(16)),
-            (d, false) => d,
+        // Fetches are quick: look again at frame rate. A socket or process can wait for a long time (an idle
+        // WebSocket always has a read pending), so those are looked at less often.
+        let poll = if self.net.pending.get() > 0 {
+            Some(Duration::from_millis(16))
+        } else if self.sys.pending() {
+            Some(Duration::from_millis(30))
+        } else {
+            None
+        };
+        let timer = (next >= 0.0).then(|| Duration::from_secs_f64(next / 1000.0));
+        match (timer, poll) {
+            (Some(t), Some(p)) => Some(t.min(p)),
+            (t, p) => t.or(p),
         }
     }
 

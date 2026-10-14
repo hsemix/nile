@@ -24,6 +24,10 @@ pub struct ImageData {
 /// Finds the image a page refers to as `src`.
 pub trait ImageLoader {
     fn load(&self, src: &str) -> Option<Rc<ImageData>>;
+    /// The raw bytes behind `src` (what `@font-face` loads its fonts through).
+    fn bytes(&self, _src: &str) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// Loads images from disk (relative to the page's folder) and from `data:` URLs, and
@@ -74,6 +78,10 @@ fn percent_decode(s: &str) -> Vec<u8> {
 }
 
 impl ImageLoader for FileImages {
+    fn bytes(&self, src: &str) -> Option<Vec<u8>> {
+        self.read(src)
+    }
+
     fn load(&self, src: &str) -> Option<Rc<ImageData>> {
         if let Some(hit) = self.cache.borrow().get(src) {
             return hit.clone();

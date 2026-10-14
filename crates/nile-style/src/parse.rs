@@ -114,8 +114,22 @@ pub struct Stylesheet {
     pub keyframes: Vec<Keyframes>,
     /// `@page` rules: the selector (`:first`, `:left`, ..., or empty) and the body text.
     pub pages: Vec<(String, String)>,
+    /// `@font-face` rules.
+    pub font_faces: Vec<FontFace>,
     /// Some rule or value depended on the viewport size (`@media`, `vw`, ...).
     pub uses_viewport: bool,
+}
+
+/// One `@font-face`: a family name and where its font can be loaded from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontFace {
+    pub family: String,
+    /// `url(...)` sources in order (`local(...)` ones are skipped).
+    pub urls: Vec<String>,
+    /// `font-weight`: `None` for a range (a variable font) or when unspecified.
+    pub weight: Option<f32>,
+    /// `font-style`: `None` when unspecified.
+    pub italic: Option<bool>,
 }
 
 const DEFAULT_VIEWPORT: (f32, f32) = (800.0, 600.0);
@@ -189,6 +203,18 @@ fn at_rule(p: &mut Parser<'_>, cx: &Cx, name: &str, sheet: &mut Stylesheet) {
                 })
                 .unwrap_or_default();
             sheet.pages.push((raw_prelude.clone(), body));
+        } else if name == "font-face" {
+            let face = p.parse_nested_block(|p| Ok::<_, ParseError<()>>(font_face_in(p))).unwrap_or_default();
+            if let Some(face) = face {
+                sheet.font_faces.push(face);
+            }
+        } else if name == "supports" {
+            if supports_matches(&prelude, cx.viewport) {
+                let _ = p.parse_nested_block(|p| {
+                    rules_in(p, cx, sheet);
+                    Ok::<_, ParseError<()>>(())
+                });
+            }
         } else if name == "media" {
             cx.uses_viewport.set(true);
             if media_matches(&prelude, cx.viewport) {
@@ -198,6 +224,107 @@ fn at_rule(p: &mut Parser<'_>, cx: &Cx, name: &str, sheet: &mut Stylesheet) {
                 });
             }
         }
+    }
+}
+
+/// The descriptors of an `@font-face` block.
+fn font_face_in(p: &mut Parser<'_>) -> Option<FontFace> {
+    let (mut family, mut src, mut weight, mut style) = (None, String::new(), None, None);
+    while !p.is_exhausted() {
+        let entry = p.parse_until_after(Delimiter::Semicolon, |p| {
+            let name = p.expect_ident()?.to_ascii_lowercase();
+            p.expect_colon()?;
+            let start = p.position();
+            while p.next().is_ok() {}
+            Ok::<_, ParseError<()>>((name, p.slice_from(start).trim().to_string()))
+        });
+        let Ok((name, value)) = entry else { continue };
+        match name.as_str() {
+            "font-family" => family = Some(value.trim_matches(|c| c == '"' || c == '\'').to_string()),
+            "src" => src = value,
+            "font-weight" => weight = Some(value),
+            "font-style" => style = Some(value),
+            _ => {}
+        }
+    }
+    let family = family.filter(|f| !f.is_empty())?;
+    let urls = font_urls(&src);
+    if urls.is_empty() {
+        return None;
+    }
+    let weight = weight.and_then(|w| match w.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some(400.0),
+        "bold" => Some(700.0),
+        w => w.parse::<f32>().ok(),
+    });
+    let italic = style.map(|s| s.trim().to_ascii_lowercase()).map(|s| s.starts_with("italic") || s.starts_with("oblique"));
+    Some(FontFace { family, urls, weight, italic })
+}
+
+/// The `url(...)` entries of a `src` descriptor, in order.
+fn font_urls(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let lower = src.to_ascii_lowercase();
+    let mut at = 0;
+    while let Some(i) = lower[at..].find("url(") {
+        let start = at + i + 4;
+        let rest = &src[start..];
+        let rest_trim = rest.trim_start();
+        let lead = rest.len() - rest_trim.len();
+        let (url, used) = match rest_trim.chars().next() {
+            Some(q @ ('"' | '\'')) => match rest_trim[1..].find(q) {
+                Some(e) => (rest_trim[1..1 + e].to_string(), lead + e + 2),
+                None => break,
+            },
+            _ => match rest_trim.find(')') {
+                Some(e) => (rest_trim[..e].trim().to_string(), lead + e),
+                None => break,
+            },
+        };
+        if !url.is_empty() {
+            out.push(url);
+        }
+        at = start + used;
+    }
+    out
+}
+
+/// `@supports` conditions: `(prop: value)`, `not`, `and`, `or`, parentheses, `selector(...)` (true).
+fn supports_matches(cond: &str, viewport: (f32, f32)) -> bool {
+    fn split_top<'a>(s: &'a str, word: &str) -> Option<(&'a str, &'a str)> {
+        let mut depth = 0;
+        let pat = format!(" {word} ");
+        for (i, c) in s.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ if depth == 0 && s[i..].starts_with(&pat) => return Some((&s[..i], &s[i + pat.len()..])),
+                _ => {}
+            }
+        }
+        None
+    }
+    let s = cond.trim();
+    if let Some(rest) = s.strip_prefix("not ") {
+        return !supports_matches(rest, viewport);
+    }
+    if let Some((a, b)) = split_top(s, "or") {
+        return supports_matches(a, viewport) || supports_matches(b, viewport);
+    }
+    if let Some((a, b)) = split_top(s, "and") {
+        return supports_matches(a, viewport) && supports_matches(b, viewport);
+    }
+    if s.starts_with("selector(") {
+        return true;
+    }
+    let Some(inner) = s.strip_prefix('(').and_then(|r| r.strip_suffix(')')) else { return false };
+    let inner = inner.trim();
+    if inner.starts_with('(') || inner.starts_with("not ") {
+        return supports_matches(inner, viewport);
+    }
+    match inner.split_once(':') {
+        Some((name, value)) => crate::supports_declaration(name.trim(), value.trim(), viewport),
+        None => false,
     }
 }
 

@@ -156,7 +156,21 @@ impl Renderer {
                     if let Some(sb) = &b.scroll {
                         let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
                         canvas.save();
-                        canvas.clip_rect(skia_rect(sb.clip), None, true);
+                        let st = styles.get(b.node);
+                        if st.has_rounding() {
+                            // Content follows the rounded padding box: the border radii less the border widths.
+                            let [tl, tr, br, bl] = st.corner_radii(b.rect.width, b.rect.height);
+                            let bw = st.border_width;
+                            let inner = [
+                                ((tl.0 - bw.left).max(0.0), (tl.1 - bw.top).max(0.0)),
+                                ((tr.0 - bw.right).max(0.0), (tr.1 - bw.top).max(0.0)),
+                                ((br.0 - bw.right).max(0.0), (br.1 - bw.bottom).max(0.0)),
+                                ((bl.0 - bw.left).max(0.0), (bl.1 - bw.bottom).max(0.0)),
+                            ];
+                            canvas.clip_rrect(round_rect(skia_rect(sb.clip), inner), skia_safe::ClipOp::Intersect, true);
+                        } else {
+                            canvas.clip_rect(skia_rect(sb.clip), None, true);
+                        }
                         canvas.translate((-ox, -oy));
                         open.push((b.subtree_end, Some(b)));
                     }

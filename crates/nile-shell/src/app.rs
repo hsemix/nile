@@ -553,13 +553,27 @@ impl App {
             use winit::platform::macos::WindowAttributesExtMacOS;
             attrs = attrs.with_titlebar_transparent(true).with_title_hidden(true).with_fullsize_content_view(true);
         }
+        // The page's `window-icon`, else the icon a packed program carries.
+        let packed_icon = nile_dom::vfs::mounted().then(|| nile_dom::vfs::mount_path().join(nile_dom::vfs::ICON_FILE).to_string_lossy().into_owned());
+        // ... and failing both, Nile's own icon.
         if let Some(icon) = config
             .icon
             .as_deref()
+            .or(packed_icon.as_deref())
             .and_then(|i| page.window_icon(i))
+            .or_else(|| Page::icon_from_bytes(crate::bundle::DEFAULT_ICON))
             .and_then(|(rgba, w, h)| winit::window::Icon::from_rgba(rgba, w, h).ok())
         {
             attrs = attrs.with_window_icon(Some(icon));
+        }
+        // Linux: the application id is the program's name, which the `.desktop` entry's name matches.
+        #[cfg(target_os = "linux")]
+        if nile_dom::vfs::mounted() {
+            if let Some(id) = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())) {
+                use winit::platform::{wayland::WindowAttributesExtWayland, x11::WindowAttributesExtX11};
+                attrs = WindowAttributesExtWayland::with_name(attrs, id.clone(), id.clone());
+                attrs = WindowAttributesExtX11::with_name(attrs, id.clone(), id);
+            }
         }
         #[cfg(windows)]
         if let Some(hwnd) = owner.and_then(|o| self.index(o)).and_then(|i| owner_hwnd(&self.wins[i].window)) {

@@ -65,6 +65,17 @@ jobs:
             Linux)   cp "$dir/nile" "$dir/libnile.so" "$dir/libnile.a" "$out/" ;;
           esac
           cp crates/nile-capi/include/nile.h LICENSE* README.md "$out/" 2>/dev/null || cp crates/nile-capi/include/nile.h README.md "$out/"
+          cp assets/icon.png "$out/nile.png"
+          ver=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "${{ runner.os }}" = Windows ]; then
+            # Nile's icon and version details inside the executable (Explorer's Properties > Details).
+            "$dir/nile.exe" --brand "$dir/nile.exe" -o "$out/nile-branded.exe" --icon assets/icon.png --name Nile --version "$ver" \
+              --description "Nile UI engine" --company "Nile contributors" --copyright "Nile contributors" \
+              && mv -f "$out/nile-branded.exe" "$out/nile.exe" || echo "::warning::could not add the icon to nile.exe"
+          fi
+          if [ "${{ runner.os }}" = Linux ]; then
+            printf '[Desktop Entry]\nType=Application\nName=Nile\nComment=Nile UI engine\nExec=nile\nIcon=nile\nTerminal=false\nCategories=Development;\n' > "$out/nile.desktop"
+          fi
           if [ "${{ runner.os }}" = Windows ]; then 7z a "$out.zip" "$out"; else tar czf "$out.tar.gz" "$out"; fi
       - uses: actions/upload-artifact@v4
         with:

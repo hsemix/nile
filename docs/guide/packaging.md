@@ -36,11 +36,14 @@ side.
   menus) is about 9.5 MB in a release build.
 - Not here yet: version resources for the executable, Linux desktop entries, and a CLI option to unpack.
 
-## An icon for the program
+## An icon and details for the program
 
 ```sh
-nile --pack my-app -o MyApp --icon icon.png
+nile --pack my-app -o MyApp --icon icon.png --version 1.2.0 --company "Acme" \
+     --description "Does the thing" --copyright "(c) Acme"
 ```
+
+`--name` sets the display name (default: the output's name). The details go where each system shows them:
 
 - **macOS:** makes `MyApp.app` (Finder and the Dock show the icon): `Contents/MacOS/MyApp` is the plain program,
   `Contents/Resources/app.nilepack` holds your files (a signed executable can't have an archive appended
@@ -48,10 +51,19 @@ nile --pack my-app -o MyApp --icon icon.png
   (or give an `.icns`). The bundle is signed ad hoc; use `codesign` with your identity and notarize it to
   distribute. A `-o Name.app` output gets a bundle even without an icon.
 - **Windows:** the `.ico` (or a `.png`) is written into the `.exe` as its application icon, through the
-  resource-update API, before the archive is appended. (Written without a Windows machine to hand: CI
-  compiles it, but it hasn't run.)
-- **Linux:** executables have no embedded icon; ship a `.desktop` file and the picture beside the program.
-- The icon of the window itself (title bar, taskbar) is `<html window-icon="icon.png">`, on every platform.
+  resource-update API, before the archive is appended, together with a version resource (file description,
+  file and product version, company, copyright: Explorer's Properties > Details). Even without `--icon`,
+  `--version`/`--company`/... write the version resource. (Written without a Windows machine to hand: CI
+  compiles it, but it hasn't run. The version block's layout is checked by a unit test.)
+- Without `--icon`, a program gets Nile's own icon (`assets/icon.html`, drawn with Nile itself) where the system shows one: an `.app` bundle on macOS, an `.exe` on Windows, and as the window icon of every Nile window that doesn't set its own (the page's `window-icon`, or the `.png` it was packed with, win).
+- `nile --brand program.exe -o out.exe [--icon ...] [--version ...]` writes the same icon and file details into any Windows program; the release workflow uses it for `nile.exe` (Linux archives carry `nile.png` and a `nile.desktop`).
+- **macOS:** the same options fill the bundle's `Info.plist` (`CFBundleShortVersionString`, copyright).
+- **Linux:** executables have no embedded icon, so `--pack` with `--icon`, or `--category "Utility;"`, also
+  writes `MyApp.desktop` and `MyApp.png` next to the program (Exec, Icon, Categories, `StartupWMClass`);
+  `--install` copies the entry to `~/.local/share/applications`. The program tells the window system its
+  name as its application id, which is how Wayland and GNOME match the window to that entry.
+- The icon of the window itself (title bar, taskbar): a packed program uses the `.png` it was packed with,
+  or the page's `<html window-icon="icon.png">`, which wins, on every platform.
 
 ## Bootstrap scripts (`run.js`)
 

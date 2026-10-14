@@ -30,7 +30,7 @@ pub use anim::{AnimEvent, AnimValue, AnimationSpec, Animator, Direction, Fill, T
 pub use page::{resolve as resolve_page, MarginBox, MarginPlace, PageStyle, Piece};
 pub use grid::{area_lines, Breadth, GridAutoFlow, GridLine, GridPlace, Track, TrackItem, TrackRepeat};
 pub use gradient::{TransformFn, ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
-pub use parse::{color_from_hex, Declaration, Rule, Stylesheet, Value};
+pub use parse::{color_from_hex, Declaration, FontFace, Rule, Stylesheet, Value};
 use parse::Cx;
 pub use selector::{ElementRef, InteractionState, NileImpl, PseudoClass, PseudoElement, Query};
 
@@ -1028,6 +1028,8 @@ pub struct StyleMap {
     pub(crate) keyframes: HashMap<String, Vec<parse::Frame>>,
     /// `@page` rules (selector, body) in source order.
     pages: Vec<(String, String)>,
+    /// `@font-face` rules in source order.
+    pub font_faces: Vec<FontFace>,
 }
 
 /// Which of `:hover`, `:active` and `:focus` appear in the stylesheets.
@@ -1036,6 +1038,9 @@ pub struct StateDeps {
     pub hover: bool,
     pub active: bool,
     pub focus: bool,
+    /// A rule has a state selector followed by a sibling combinator (`:hover + b`): a change can reach
+    /// the element's later siblings.
+    pub sibling: bool,
 }
 
 impl StateDeps {
@@ -1049,6 +1054,7 @@ impl StateDeps {
                     d.hover |= css.contains(":hover");
                     d.active |= css.contains(":active");
                     d.focus |= css.contains(":focus");
+                    d.sibling |= (css.contains(":hover") || css.contains(":active") || css.contains(":focus")) && (css.contains(" + ") || css.contains(" ~ "));
                 }
             }
         }
@@ -1161,6 +1167,34 @@ impl StyleMap {
         self.styles.iter().any(|s| !s.transitions.is_empty() || !s.animations.is_empty())
     }
 
+    /// Cascade again only the subtrees under `roots`, in place, for a change of `state` that can't
+    /// reach anywhere else (a pointer or focus change: the parent of each element whose state changed
+    /// is a root, so siblings and descendants that selectors like `:hover + b` reach are included).
+    /// Returns the styles the subtrees had before, or `None` (nothing touched) when this isn't
+    /// possible: the document changed size or there are generated `::before`/`::after`/marker boxes
+    /// (the caller does the full cascade then).
+    pub fn recascade(&mut self, doc: &Document, state: &InteractionState, viewport: (f32, f32), roots: &[NodeId]) -> Option<Vec<(NodeId, ComputedStyle)>> {
+        if self.styles.len() != doc.nodes.len() || !self.pseudo.is_empty() || !self.markers.is_empty() {
+            return None;
+        }
+        let (ua, author) = sheets_of(doc, viewport);
+        let mut caches = SelectorCaches::default();
+        let mut ctx = MatchingContext::new(MatchingMode::Normal, None, &mut caches, QuirksMode::NoQuirks, NeedsSelectorFlags::No, MatchingForInvalidation::No);
+        let uses_viewport = Cell::new(self.uses_viewport);
+        let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo: false };
+        let mut before = Vec::new();
+        let mut generated = Generated::default();
+        for &root in roots {
+            before.extend(doc.descendants(root).into_iter().chain(std::iter::once(root)).map(|n| (n, self.styles[n.0].clone())));
+            let inherited = match doc.node(root).parent {
+                Some(p) => self.styles[p.0].clone(),
+                None => ComputedStyle::default(),
+            };
+            cascade(&cx, &mut ctx, root, &inherited, &mut self.styles, &mut generated);
+        }
+        Some(before)
+    }
+
     /// The generated `::before` / `::after` box of `element`, if it has one.
     /// The `::marker` rules of a list item, if any.
     pub fn marker(&self, item: NodeId) -> Option<&MarkerStyle> {
@@ -1209,23 +1243,7 @@ pub fn compute_styles_with(doc: &Document, state: &InteractionState) -> StyleMap
 /// Like [`compute_styles_with`], with `@media` queries and `vw`/`vh` units resolved
 /// against a `viewport` of the given size in px.
 pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f32, f32)) -> StyleMap {
-    let ua = Stylesheet::parse(&format!("{UA_STYLESHEET}{}", theme_sheet()));
-    let author: Vec<Stylesheet> = doc
-        .nodes
-        .iter()
-        .filter(|n| n.tag() == Some("style"))
-        .map(|n| {
-            let css: String = n
-                .children
-                .iter()
-                .filter_map(|c| match &doc.node(*c).kind {
-                    NodeKind::Text(t) => Some(t.as_str()),
-                    _ => None,
-                })
-                .collect();
-            Stylesheet::parse_with(&css, viewport)
-        })
-        .collect();
+    let (ua, author) = sheets_of(doc, viewport);
 
     let mut styles = vec![ComputedStyle::default(); doc.nodes.len()];
     let root_style = ComputedStyle::default();
@@ -1246,8 +1264,9 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
         }
     }
     let pages: Vec<(String, String)> = author.iter().flat_map(|s| s.pages.iter().cloned()).collect();
+    let font_faces: Vec<FontFace> = author.iter().flat_map(|s| s.font_faces.iter().cloned()).collect();
     let has_pseudo = author.iter().any(|s| s.rules.iter().any(|r| r.selectors.slice().iter().any(|sel| sel.has_pseudo_element())));
-    let state_deps = StateDeps::of(author.iter().chain(std::iter::once(&ua)));
+    let state_deps = StateDeps::of(author.iter().map(|s| &**s).chain(std::iter::once(&*ua)));
     let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo };
     let mut generated = Generated::default();
     cascade(&cx, &mut ctx, Document::ROOT, &root_style, &mut styles, &mut generated);
@@ -1261,14 +1280,56 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
         markers: generated.markers,
         keyframes,
         pages,
+        font_faces,
     }
+}
+
+thread_local! {
+    /// Parsed sheets by source text and viewport (`@media` is evaluated while parsing): a restyle
+    /// after a hover shouldn't parse the same CSS again.
+    static SHEETS: std::cell::RefCell<HashMap<(String, u32, u32), Rc<Stylesheet>>> = std::cell::RefCell::default();
+    static UA_SHEET: Rc<Stylesheet> = Rc::new(Stylesheet::parse(&format!("{UA_STYLESHEET}{}", theme_sheet())));
+}
+
+/// The user-agent sheet and the document's `<style>` sheets, parsed (or taken from the cache).
+fn sheets_of(doc: &Document, viewport: (f32, f32)) -> (Rc<Stylesheet>, Vec<Rc<Stylesheet>>) {
+    let ua = UA_SHEET.with(Rc::clone);
+    let author = doc
+        .nodes
+        .iter()
+        .filter(|n| n.tag() == Some("style"))
+        .map(|n| {
+            let css: String = n
+                .children
+                .iter()
+                .filter_map(|c| match &doc.node(*c).kind {
+                    NodeKind::Text(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let key = (css, viewport.0.to_bits(), viewport.1.to_bits());
+            SHEETS.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                if let Some(hit) = cache.get(&key) {
+                    return hit.clone();
+                }
+                if cache.len() >= 64 {
+                    cache.clear();
+                }
+                let sheet = Rc::new(Stylesheet::parse_with(&key.0, viewport));
+                cache.insert(key, sheet.clone());
+                sheet
+            })
+        })
+        .collect();
+    (ua, author)
 }
 
 struct CascadeInput<'a> {
     doc: &'a Document,
     state: &'a InteractionState,
     ua: &'a Stylesheet,
-    author: &'a [Stylesheet],
+    author: &'a [Rc<Stylesheet>],
     viewport: (f32, f32),
     uses_viewport: &'a Cell<bool>,
     /// Some stylesheet has a `::before`/`::after` rule.
@@ -1285,7 +1346,7 @@ fn matching_decls<'a>(
     pseudo: bool,
 ) -> Vec<&'a Declaration> {
     let mut decls = Vec::new();
-    for sheet in std::iter::once(cx.ua).chain(cx.author.iter()) {
+    for sheet in std::iter::once(cx.ua).chain(cx.author.iter().map(|s| &**s)) {
         let mut matched: Vec<(u32, usize, &Rule)> = sheet
             .rules
             .iter()
@@ -1304,6 +1365,61 @@ fn matching_decls<'a>(
         decls.extend(matched.iter().flat_map(|(_, _, r)| r.declarations.iter()));
     }
     decls
+}
+
+/// The `font` shorthand as its longhands: `[style] [weight] size[/line-height] family[, ...]`
+/// (a declaration that isn't `font`, or one that doesn't parse, comes back unchanged / dropped).
+fn expand_font(d: Declaration) -> Vec<Declaration> {
+    if d.name != "font" {
+        return vec![d];
+    }
+    let part = |name: &str, values: Vec<Value>| Declaration { name: name.into(), values, important: d.important, raw: String::new() };
+    let (mut style, mut weight) = (None, None);
+    let mut i = 0;
+    let v = &d.values;
+    let size = loop {
+        let Some(x) = v.get(i) else { return Vec::new() };
+        i += 1;
+        match x {
+            Value::Ident(k) if k == "normal" => {}
+            Value::Ident(k) if k == "italic" || k == "oblique" => style = Some(x.clone()),
+            Value::Ident(k) if matches!(k.as_str(), "bold" | "bolder" | "lighter") => weight = Some(x.clone()),
+            Value::Ident(k) if matches!(k.as_str(), "small-caps" | "ultra-condensed" | "extra-condensed" | "condensed" | "semi-condensed" | "semi-expanded" | "expanded" | "extra-expanded" | "ultra-expanded") => {}
+            Value::Number(n) if (1.0..=1000.0).contains(n) => weight = Some(x.clone()),
+            Value::Px(_) | Value::Em(_) | Value::Rem(_) | Value::Percent(_) => break x.clone(),
+            Value::Ident(k) => {
+                let px = match k.as_str() {
+                    "xx-small" => 9.0,
+                    "x-small" => 10.0,
+                    "small" => 13.0,
+                    "medium" => 16.0,
+                    "large" => 18.0,
+                    "x-large" => 24.0,
+                    "xx-large" => 32.0,
+                    _ => return Vec::new(),
+                };
+                break Value::Px(px);
+            }
+            _ => return Vec::new(),
+        }
+    };
+    let mut out = Vec::new();
+    if let Some(x) = style {
+        out.push(part("font-style", vec![x]));
+    }
+    out.push(part("font-weight", vec![weight.unwrap_or(Value::Ident("normal".into()))]));
+    out.push(part("font-size", vec![size]));
+    if matches!(v.get(i), Some(Value::Slash)) {
+        if let Some(h) = v.get(i + 1) {
+            out.push(part("line-height", vec![h.clone()]));
+        }
+        i += 2;
+    }
+    let family: Vec<Value> = v.get(i..).unwrap_or(&[]).to_vec();
+    if !family.is_empty() {
+        out.push(part("font-family", family));
+    }
+    out
 }
 
 /// Applies `decls` to `style` (already inheriting from its parent): `!important` last,
@@ -1346,6 +1462,7 @@ fn apply_declarations(
             let raw = if d.name.starts_with("popup-") || d.name == "shape-outside" { text.clone() } else { String::new() };
             Some(Declaration { values: parse::parse_values(&text, pcx), raw, ..(*d).clone() })
         })
+        .flat_map(expand_font)
         .collect();
     for d in resolved.iter().filter(|d| d.name == "font-size") {
         apply(style, d, parent_font_size);
@@ -1725,6 +1842,24 @@ fn point_of(v: &Value) -> Option<u8> {
         Value::Number(n) if (1.0..=9.0).contains(n) && n.fract() == 0.0 => Some(*n as u8),
         _ => None,
     }
+}
+
+thread_local! {
+    /// Set by [`apply`] when a declaration names a property it doesn't know (for `@supports`).
+    static UNRECOGNISED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether `name: value` is a declaration this engine understands (what `@supports (name: value)` asks).
+pub(crate) fn supports_declaration(name: &str, value: &str, viewport: (f32, f32)) -> bool {
+    let used = Cell::new(false);
+    let pcx = Cx { viewport, uses_viewport: &used };
+    let decls = parse::parse_declarations(&format!("{name}: {value}"), &pcx);
+    let Some(d) = decls.iter().find(|d| d.name == name.trim().to_ascii_lowercase()) else { return false };
+    let mut style = ComputedStyle::default();
+    UNRECOGNISED.with(|u| u.set(false));
+    let fs = style.font_size;
+    apply(&mut style, d, fs);
+    !UNRECOGNISED.with(Cell::get)
 }
 
 fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
@@ -2149,11 +2284,31 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
             }
         }
         "font-family" => {
-            if let Some(name) = v.iter().find_map(|x| match x {
-                Value::Ident(i) | Value::Str(i) => Some(i.clone()),
-                _ => None,
-            }) {
-                s.font_family = name;
+            // The whole list, as CSS text Parley understands (a missing family falls through to the next).
+            let mut families: Vec<String> = Vec::new();
+            let mut words: Vec<&str> = Vec::new();
+            let quote = |n: &str| format!("\"{}\"", n.replace('\\', "\\\\").replace('"', "\\\""));
+            let flush = |words: &mut Vec<&str>, families: &mut Vec<String>| {
+                if !words.is_empty() {
+                    let name = words.join(" ");
+                    families.push(if words.len() > 1 { quote(&name) } else { name });
+                    words.clear();
+                }
+            };
+            for x in v {
+                match x {
+                    Value::Ident(i) => words.push(i),
+                    Value::Str(n) => {
+                        flush(&mut words, &mut families);
+                        families.push(quote(n));
+                    }
+                    Value::Comma => flush(&mut words, &mut families),
+                    _ => {}
+                }
+            }
+            flush(&mut words, &mut families);
+            if !families.is_empty() {
+                s.font_family = families.join(", ");
             }
         }
         "line-height" => {
@@ -2284,8 +2439,8 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         "align-items" => s.align_items = first.and_then(align).unwrap_or(s.align_items),
         _ => {
             // Grid and gap properties; anything else is unsupported and ignored, like a browser would.
-            if !anim::apply_properties(s, &d.name, v) {
-                grid::apply(s, &d.name, v, fs);
+            if !(anim::apply_properties(s, &d.name, v) || grid::apply(s, &d.name, v, fs)) {
+                UNRECOGNISED.with(|u| u.set(true));
             }
         }
     }
@@ -2294,6 +2449,52 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_faces_supports_and_family_lists_parse() {
+        let css = r#"
+            @font-face { font-family: "My Font"; src: local(Arial), url("a/b.woff2") format("woff2"), url(c.ttf); font-weight: bold; font-style: italic }
+            @font-face { font-family: Var; src: url('v.woff2'); font-weight: 100 900 }
+            @font-face { font-family: NoSource; src: local(Arial) }
+            @font-face { src: url(x.ttf) }
+            @supports (display: grid) { .a { color: red } }
+            @supports not (display: grid) { .b { color: red } }
+            @supports (display: flex) and (not-a-property: 1) { .c { color: red } }
+            @supports (not-a-property: 1) or (position: sticky) { .d { color: red } }
+            @supports not ((not-a-property: 1) or (also-not: x)) { .e { color: red } }
+            .f { font-family: 'Segoe UI', "Helvetica Neue", Arial Black, sans-serif }
+        "#;
+        let sheet = Stylesheet::parse(css);
+        assert_eq!(sheet.font_faces.len(), 2, "{:?}", sheet.font_faces);
+        assert_eq!(sheet.font_faces[0], parse::FontFace { family: "My Font".into(), urls: vec!["a/b.woff2".into(), "c.ttf".into()], weight: Some(700.0), italic: Some(true) });
+        assert_eq!((sheet.font_faces[1].weight, sheet.font_faces[1].italic), (None, None));
+        let selectors: Vec<String> = sheet.rules.iter().map(|r| format!("{:?}", r.declarations.first().map(|d| d.name.clone()))).collect();
+        // `.a`, `.d` and `.e` hold; `.b` and `.c` don't; `.f` is always there.
+        assert_eq!(selectors.len(), 4, "{selectors:?}");
+        let doc = Document::parse(r#"<style>.f { font-family: 'Segoe UI', "Helvetica Neue", Arial Black, sans-serif }</style><p class="f" id="p"></p>"#);
+        let styles = compute_styles(&doc);
+        let p = styles.get(doc.find(|n| n.attr("id") == Some("p")).unwrap());
+        assert_eq!(p.font_family, r#""Segoe UI", "Helvetica Neue", "arial black", sans-serif"#);
+    }
+
+    #[test]
+    fn the_font_shorthand_sets_its_longhands() {
+        let doc = Document::parse(
+            r#"<i id=a style="font: italic bold 20px/1.5 'My Font', serif"></i><i id=b style="font: 700 250px/1 sans-serif"></i>
+               <i id=c style="font-size: 30px; font: small Arial"></i><i id=d style="font: 14px sans-serif; font-weight: 300"></i><i id=e style="font: bogus"></i>"#,
+        );
+        let styles = compute_styles(&doc);
+        let st = |id: &str| styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        let a = st("a");
+        assert!(a.italic && a.font_weight == 700.0 && a.font_size == 20.0 && (a.line_height - 1.5).abs() < 1e-6, "{:?}", (a.italic, a.font_weight, a.font_size, a.line_height));
+        assert_eq!(a.font_family, r#""My Font", serif"#);
+        let b = st("b");
+        assert_eq!((b.font_weight, b.font_size, b.line_height, b.font_family.as_str()), (700.0, 250.0, 1.0, "sans-serif"));
+        let c = st("c");
+        assert_eq!((c.font_size, c.font_family.as_str()), (13.0, "arial"));
+        assert_eq!(st("d").font_weight, 300.0, "a later longhand wins");
+        assert_eq!(st("e").font_size, ComputedStyle::default().font_size, "an invalid shorthand is ignored");
+    }
 
     #[test]
     fn border_radius_takes_one_to_four_corners_and_percent() {
@@ -2829,11 +3030,11 @@ mod tests {
     fn state_deps_find_the_pseudo_classes_rules_mention() {
         let deps = |css: &str| compute_styles(&Document::parse(&format!("<style>{css}</style><p>x</p>"))).state_deps;
         // The UA sheet already mentions :focus (input borders).
-        assert_eq!(deps("p { color: red }"), StateDeps { hover: false, active: false, focus: true });
+        assert_eq!(deps("p { color: red }"), StateDeps { hover: false, active: false, focus: true, sibling: false });
         assert!(deps("a:hover { color: red }").hover);
         assert!(deps(".x:not(:hover) b { color: red }").hover);
         assert!(deps("button:active { color: red }").active);
-        let d = StateDeps { hover: false, active: false, focus: true };
+        let d = StateDeps { hover: false, active: false, focus: true, sibling: false };
         let (a, b) = (InteractionState::default(), InteractionState { hover: Some(NodeId(1)), ..Default::default() });
         assert!(!d.affected_by(&a, &b), "a hover change is invisible to a sheet with no :hover");
         assert!(d.affected_by(&a, &InteractionState { focus: Some(NodeId(1)), ..Default::default() }));

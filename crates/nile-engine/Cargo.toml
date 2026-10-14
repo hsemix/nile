@@ -8,7 +8,7 @@ license.workspace = true
 # The OS clipboard (`arboard`). Off for embedders that supply their own clipboard.
 system-clipboard = ["dep:arboard"]
 # `fetch`/`XMLHttpRequest` over http(s) (`ureq`). Without it only files and `data:` URLs load.
-net = ["dep:ureq"]
+net = ["dep:ureq", "nile-script/tls"]
 
 [dependencies]
 nile-dom.workspace = true

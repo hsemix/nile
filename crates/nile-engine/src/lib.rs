@@ -289,6 +289,113 @@ impl View {
         self.reuse_layout_if_paint_only(&old, dom_changed);
     }
 
+    /// Restyle after the interaction state went from `old` to `self.interaction`: only the subtrees
+    /// whose elements changed state are cascaded again (a hover shouldn't re-cascade the whole page).
+    /// Falls back to [`restyle`](Self::restyle) when that isn't possible (DOM changes pending,
+    /// animations running, generated content).
+    pub fn restyle_after_state(&mut self, old: InteractionState) {
+        if !self.try_partial_restyle(old) {
+            self.restyle();
+        }
+    }
+
+    fn try_partial_restyle(&mut self, old: InteractionState) -> bool {
+        let doc = self.doc.clone();
+        let doc = doc.borrow();
+        if doc.version != self.seen_version {
+            return false;
+        }
+        let new = self.interaction;
+        let deps = self.styles.state_deps;
+        // Elements whose state differs: hover and active reach the target and its ancestors.
+        let chain = |n: Option<NodeId>| {
+            let mut v = Vec::new();
+            let mut cur = n;
+            while let Some(id) = cur {
+                v.push(id);
+                cur = doc.node(id).parent;
+            }
+            v
+        };
+        let mut changed: Vec<NodeId> = Vec::new();
+        let mut diff = |a: Option<NodeId>, b: Option<NodeId>, on: bool, whole_chain: bool| {
+            if !on || a == b {
+                return;
+            }
+            if whole_chain {
+                let (ca, cb) = (chain(a), chain(b));
+                changed.extend(ca.iter().filter(|n| !cb.contains(n)).chain(cb.iter().filter(|n| !ca.contains(n))));
+            } else {
+                changed.extend(a.into_iter().chain(b));
+            }
+        };
+        diff(old.hover, new.hover, deps.hover, true);
+        diff(old.active, new.active, deps.active, true);
+        diff(old.focus, new.focus, deps.focus, false);
+        changed.sort_by_key(|n| n.0);
+        changed.dedup();
+        // Each changed element's own subtree, unless a sibling combinator can reach further: its parent's.
+        let mut roots: Vec<NodeId> = changed
+            .iter()
+            .filter(|n| deps.sibling || !doc.node(**n).parent.is_some_and(|p| changed.contains(&p)))
+            .map(|n| if deps.sibling { doc.node(*n).parent.unwrap_or(*n) } else { *n })
+            .collect();
+        roots.sort_by_key(|n| n.0);
+        roots.dedup();
+        // A root inside another root is covered by it.
+        let covered = |r: NodeId| {
+            let mut cur = doc.node(r).parent;
+            while let Some(p) = cur {
+                if roots.contains(&p) {
+                    return true;
+                }
+                cur = doc.node(p).parent;
+            }
+            false
+        };
+        let roots: Vec<NodeId> = roots.iter().copied().filter(|r| !covered(*r)).collect();
+        // While transitions or animations are set up, `base` has the targets and `styles` what shows now.
+        let animating = self.base.is_some();
+        let result = traced("style (partial)", || match &mut self.base {
+            Some(base) => base.recascade(&doc, &new, self.viewport, &roots),
+            None => self.styles.recascade(&doc, &new, self.viewport, &roots),
+        });
+        let Some(before) = result else { return false };
+        if animating {
+            // The targets are recomputed; the displayed copies follow them, then transitions start for these.
+            let ids: Vec<NodeId> = before.iter().map(|(id, _)| *id).collect();
+            let shown: Vec<nile_style::ComputedStyle> = ids.iter().map(|id| self.styles.get(*id).clone()).collect();
+            let now = self.clock.elapsed().as_secs_f64();
+            let base = self.base.as_ref().expect("animating");
+            for id in &ids {
+                self.styles.styles[id.0] = base.styles[id.0].clone();
+            }
+            self.animator.update_nodes(base, &mut self.styles, now, &ids);
+            let keep = self.layout.is_some() && ids.iter().zip(&shown).all(|(id, o)| self.styles.get(*id).same_layout_with(o, true));
+            match (&mut self.layout, keep) {
+                (Some((_, _, tree)), true) => tree.refresh_paint(&self.styles),
+                _ => self.layout = None,
+            }
+            return true;
+        }
+        // Nothing animated before; if the new rules start something, undo and let the full path set it up.
+        if before.iter().any(|(id, _)| {
+            let s = self.styles.get(*id);
+            !s.transitions.is_empty() || !s.animations.is_empty()
+        }) {
+            for (id, old) in before {
+                self.styles.styles[id.0] = old;
+            }
+            return false;
+        }
+        let keep = self.layout.is_some() && before.iter().all(|(id, o)| self.styles.get(*id).same_layout_with(o, true));
+        match (&mut self.layout, keep) {
+            (Some((_, _, tree)), true) => tree.refresh_paint(&self.styles),
+            _ => self.layout = None,
+        }
+        true
+    }
+
     /// Keep the laid-out boxes when a restyle only changed how things are painted (hover
     /// colors, fades, ...); otherwise throw them away.
     pub fn reuse_layout_if_paint_only(&mut self, old: &StyleMap, dom_changed: bool) {
@@ -613,13 +720,17 @@ impl Environment for Env {
     fn set_focus(&self, node: Option<NodeId>) {
         let mut v = self.0.borrow_mut();
         if v.interaction.focus != node {
-            let old = v.interaction.focus;
+            let before = v.interaction;
+            let old = before.focus;
             v.interaction.focus = node;
             if let Some(n) = node {
                 v.select_for_focus(n);
             }
             v.focus_changes.push((old, node));
-            v.restyle();
+            let after = v.interaction;
+            if v.styles.state_deps.affected_by(&before, &after) {
+                v.restyle_after_state(before);
+            }
         }
     }
 }
@@ -1423,7 +1534,12 @@ impl Page {
     /// pixels with its width and height.
     pub fn window_icon(&self, src: &str) -> Option<(Vec<u8>, u32, u32)> {
         let bytes = nile_dom::vfs::read(&self.path.parent()?.join(src)).ok()?;
-        let img = skia_safe::Image::from_encoded(skia_safe::Data::new_copy(&bytes))?;
+        Page::icon_from_bytes(&bytes)
+    }
+
+    /// An encoded picture (PNG, ...) as unpremultiplied RGBA pixels with its width and height.
+    pub fn icon_from_bytes(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+        let img = skia_safe::Image::from_encoded(skia_safe::Data::new_copy(bytes))?;
         let (w, h) = (img.width(), img.height());
         let info = ImageInfo::new((w, h), ColorType::RGBA8888, AlphaType::Unpremul, None);
         let mut rgba = vec![0u8; (w * h * 4) as usize];
@@ -1731,9 +1847,16 @@ impl Page {
         if hover == old {
             return false;
         }
+        let before = self.interaction();
         self.view.borrow_mut().interaction.hover = hover;
         self.tooltip_hover_changed(hover.is_some());
-        self.restyle();
+        {
+            let mut v = self.view.borrow_mut();
+            let after = v.interaction;
+            if v.styles.state_deps.affected_by(&before, &after) {
+                v.restyle_after_state(before);
+            }
+        }
         let (x, y) = self.pointer.unwrap_or_default();
         let mouse = |kind| UiEvent::Mouse { kind, x, y, button: 0 };
         if let Some(o) = old {
@@ -3319,7 +3442,7 @@ impl Page {
         }
         // A state no selector mentions can't change a style: skip the cascade (and keep the layout).
         if self.view.borrow().styles.state_deps.affected_by(&current, &next) {
-            self.restyle();
+            self.view.borrow_mut().restyle_after_state(current);
         }
         if old_focus != new_focus {
             self.focus_moved(old_focus, new_focus);
@@ -3560,6 +3683,217 @@ mod tests {
         assert_eq!(js(&mut p, "getComputedStyle(document.getElementById('a')).color"), "rgb(255, 0, 0)");
         assert_eq!(js(&mut p, "getComputedStyle(document.getElementById('b')).color"), "rgb(0, 0, 255)");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restyling_after_a_state_change_matches_a_full_cascade() {
+        let (mut p, path) = page(
+            r#"<head><style>
+                 .row:hover { background: #def; color: red }
+                 .row:hover .cell { font-weight: bold }
+                 .a:hover + .b { color: green }
+                 .a:hover ~ .c { color: blue }
+                 input:focus { border-color: orange }
+                 .row:active { margin-left: 3px }
+               </style></head><body style="margin:0">
+               <div id="list"><div class="row" id="r1"><span class="cell" id="c1">one</span></div><div class="row" id="r2"><span class="cell">two</span></div></div>
+               <p class="a" id="a">a</p><p class="b" id="b">b</p><p class="c" id="c">c</p><p class="d">d</p><input id="i"></body>"#,
+            "partial",
+        );
+        p.layout(400.0, 300.0);
+        let id = |p: &Page, s: &str| p.doc.borrow().find(|n| n.attr("id") == Some(s)).unwrap();
+        let (r1, r2, c1, a, i) = (id(&p, "r1"), id(&p, "r2"), id(&p, "c1"), id(&p, "a"), id(&p, "i"));
+        let check = |p: &Page, what: &str| {
+            let v = p.view.borrow();
+            let doc = p.doc.borrow();
+            let full = nile_style::compute_styles_in(&doc, &v.interaction, v.viewport);
+            for n in 0..doc.node_count() {
+                assert!(v.styles.styles[n] == full.styles[n], "{what}: node {n} differs after a partial restyle");
+            }
+        };
+        for (what, next) in [
+            ("hover a row", InteractionState { hover: Some(c1), ..Default::default() }),
+            ("move to the other row", InteractionState { hover: Some(r2), ..Default::default() }),
+            ("hover the sibling-combinator source", InteractionState { hover: Some(a), ..Default::default() }),
+            ("press", InteractionState { hover: Some(r1), active: Some(r1), ..Default::default() }),
+            ("focus", InteractionState { hover: None, active: None, focus: Some(i) }),
+            ("leave", InteractionState::default()),
+        ] {
+            p.set_interaction(next);
+            check(&p, what);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn partial_restyles_keep_transitions_working() {
+        let (mut p, path) = page(
+            r#"<head><style>
+                 .row { height: 30px; background: #fff; transition: background 0.1s }
+                 .row:hover { background: #def }
+               </style></head><body style="margin:0"><div class="row" id="r1">one</div><div class="row" id="r2">two</div></body>"#,
+            "partial-anim",
+        );
+        p.layout(400.0, 300.0);
+        let row = |p: &Page, s: &str| p.doc.borrow().find(|n| n.attr("id") == Some(s)).unwrap();
+        let (r1, r2) = (row(&p, "r1"), row(&p, "r2"));
+        let bg = |p: &Page, n: NodeId| p.view.borrow().styles.get(n).background;
+        // The first change after load seeds the animator (there is nothing to transition from yet).
+        p.pointer_moved(20.0, 10.0);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        p.tick();
+        let (hovered, plain) = (bg(&p, r1), bg(&p, r2));
+        assert_ne!(hovered, plain, "the first row shows the hover colour");
+        // Moving to the other row restyles only those rows and starts transitions on both.
+        p.pointer_moved(20.0, 40.0);
+        assert!(p.view.borrow().animator.is_active(), "a transition is running");
+        assert_eq!(bg(&p, r2), plain, "it starts from the old colour");
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        p.tick();
+        assert_eq!((bg(&p, r1), bg(&p, r2)), (plain, hovered), "the transitions ended on the new colours");
+        let (v, doc) = (p.view.borrow(), p.doc.borrow());
+        let full = nile_style::compute_styles_in(&doc, &v.interaction, v.viewport);
+        for n in 0..doc.node_count() {
+            assert!(v.styles.styles[n] == full.styles[n], "node {n} differs from a full cascade after the transitions ended");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn blobs_form_data_and_streams_work() {
+        let (mut p, path) = page(
+            r#"<body><form id="f"><input name="a" value="1"><input name="b" type="checkbox" checked><input name="c" type="checkbox"><select name="s"><option value="x">X</option><option value="y" selected>Y</option></select><textarea name="t">hi</textarea><button name="go">Go</button></form><script>
+              window.log = []; window.done = 0;
+              (async () => {
+                const log = window.log;
+                const blob = new Blob(["héllo ", new Uint8Array([119, 111, 114, 108, 100])], { type: "Text/Plain" });
+                log.push(blob.size + ":" + blob.type + ":" + await blob.text() + ":" + await blob.slice(7, 12).text());
+                const file = new File(["data"], "a.txt", { type: "text/plain" });
+                log.push(file.name + ":" + file.size + ":" + (file instanceof Blob) + ":" + await file.text());
+                const fd = new FormData(document.getElementById("f"));
+                log.push([...fd].map(([k, v]) => k + "=" + v).join("&"));
+                fd.append("file", file); fd.set("a", "2"); fd.append("a", "3");
+                log.push(fd.getAll("a").join(",") + ":" + fd.has("file") + ":" + fd.get("file").name);
+                // The multipart body round-trips through a Response.
+                const req = new Request("http://x/", { method: "POST", body: fd });
+                const ct = req.headers.get("content-type");
+                const back = await new Response(await req.arrayBuffer(), { headers: { "content-type": ct } }).formData();
+                log.push(ct.split(";")[0] + ":" + back.getAll("a").join(",") + ":" + back.get("s") + ":" + back.get("file").name + ":" + await back.get("file").text());
+                // Streams: a source, a transform and a reader.
+                const src = new ReadableStream({ start(c) { c.enqueue("ab"); c.enqueue("cd"); c.close(); } });
+                const up = src.pipeThrough(new TransformStream({ transform(ch, c) { c.enqueue(ch.toUpperCase()); } }));
+                let out = ""; for await (const ch of up) out += ch;
+                const r = new Response("one two").body.getReader();
+                const first = await r.read();
+                log.push(out + ":" + first.done + ":" + new TextDecoder().decode(first.value) + ":" + (await r.read()).done);
+                const [t1, t2] = new Blob(["xyz"]).stream().tee();
+                const read = async (st) => { let n = 0; for await (const c of st) n += c.length; return n; };
+                log.push((await read(t1)) + "," + (await read(t2)));
+                const sink = []; const w = new WritableStream({ write(c) { sink.push(c); } }).getWriter();
+                await w.write(1); await w.write(2); await w.close();
+                log.push(sink.join("+"));
+                window.done = 1;
+              })().catch((e) => { window.log.push("error:" + e.message); window.done = 1; });
+            </script></body>"#,
+            "blobs",
+        );
+        for _ in 0..200 {
+            p.tick();
+            if js(&mut p, "window.done") == "1" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            js(&mut p, "window.log.join('|')"),
+            "12:text/plain:héllo world:world|a.txt:4:true:data|a=1&b=on&s=y&t=hi|2,3:true:a.txt|multipart/form-data:2,3:y:a.txt:data|AB CD:false:one two:true".replace("AB CD", "ABCD") + "|3,3|1+2"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A WebSocket server for one connection: accepts, echoes data frames and answers a close.
+    fn echo_websocket_server() -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Ok((mut s, _)) = listener.accept() else { return };
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                if s.read(&mut byte).unwrap_or(0) == 0 {
+                    return;
+                }
+                head.push(byte[0]);
+            }
+            let text = String::from_utf8_lossy(&head).to_string();
+            assert!(text.starts_with("GET /chat?x=1 HTTP/1.1") && text.contains("Upgrade: websocket") && text.contains("Sec-WebSocket-Key: "), "{text}");
+            s.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: x\r\n\r\n").unwrap();
+            loop {
+                let mut h = [0u8; 2];
+                if s.read_exact(&mut h).is_err() {
+                    return;
+                }
+                let (op, masked) = (h[0] & 15, h[1] & 0x80 != 0);
+                let mut len = (h[1] & 127) as usize;
+                if len == 126 {
+                    let mut l = [0u8; 2];
+                    s.read_exact(&mut l).unwrap();
+                    len = u16::from_be_bytes(l) as usize;
+                }
+                let mut mask = [0u8; 4];
+                assert!(masked, "client frames are masked");
+                s.read_exact(&mut mask).unwrap();
+                let mut data = vec![0u8; len];
+                s.read_exact(&mut data).unwrap();
+                for (i, b) in data.iter_mut().enumerate() {
+                    *b ^= mask[i % 4];
+                }
+                // Echo (text and binary) or answer the close; a ping comes first, to be answered by the client.
+                let mut out = vec![0x80 | op, data.len() as u8];
+                if data.len() >= 126 {
+                    out = vec![0x80 | op, 126, (data.len() >> 8) as u8, data.len() as u8];
+                }
+                out.extend(&data);
+                if op == 1 && data == b"hello" {
+                    s.write_all(&[0x89, 2, b'o', b'k']).unwrap();
+                }
+                s.write_all(&out).unwrap();
+                if op == 8 {
+                    return;
+                }
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn websockets_talk_to_a_server() {
+        let port = echo_websocket_server();
+        let (mut p, path) = page(
+            &format!(r#"<body><script>
+              window.log = []; window.done = 0;
+              const ws = new WebSocket("ws://127.0.0.1:{port}/chat?x=1");
+              ws.binaryType = "arraybuffer";
+              ws.onopen = () => {{ log.push("open:" + ws.readyState); ws.send("hello"); ws.send(new Uint8Array([1, 2, 3])); ws.send("x".repeat(200)); }};
+              ws.onmessage = (e) => {{
+                log.push(typeof e.data === "string" ? e.data.slice(0, 8) + e.data.length : "bin:" + new Uint8Array(e.data).join(""));
+                if (log.length === 4) ws.close(1000, "bye");
+              }};
+              ws.onerror = (e) => log.push("error");
+              ws.onclose = (e) => {{ log.push("close:" + e.code + ":" + e.reason + ":" + ws.readyState); window.done = 1; }};
+            </script></body>"#),
+            "ws",
+        );
+        for _ in 0..400 {
+            p.tick();
+            if js(&mut p, "window.done") == "1" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(js(&mut p, "window.log.join('|')"), "open:1|hello5|bin:123|xxxxxxxx200|close:1000:bye:3");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -5266,6 +5600,24 @@ cd</textarea>
         press_key(&mut p, "Backspace", none);
         assert_eq!(js(&mut p, "document.querySelectorAll('#h table').length"), "0");
         let _ = std::fs::remove_file(path);
+    }
+
+    /// `cargo test --release -p nile-engine bench_hover -- --ignored --nocapture`: pointer moves over the 1,500-row page.
+    #[test]
+    #[ignore]
+    fn bench_hover() {
+        let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/stress.html");
+        let mut p = Page::load(file, (900.0, 640.0), 0.0);
+        p.layout(900.0, 640.0);
+        p.pointer_moved(100.0, 100.0);
+        let t = Instant::now();
+        let n = 100;
+        for i in 0..n {
+            p.pointer_moved(100.0, 60.0 + (i % 20) as f32 * 14.0);
+            p.sync();
+            p.view.borrow_mut().layout();
+        }
+        eprintln!("hover move: {:.3} ms each", t.elapsed().as_secs_f64() * 1e3 / n as f64);
     }
 
     #[test]

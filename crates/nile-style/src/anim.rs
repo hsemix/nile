@@ -298,6 +298,22 @@ const PROPS: &[&str] = &[
     "top", "right", "bottom", "left", "font-size", "letter-spacing", "flex-grow", "flex-shrink", "row-gap", "column-gap", "transform",
 ];
 
+/// Whether a `transition-property` entry covers the longhand `prop`: `all`, the same name, or a
+/// shorthand (`background`, `margin`, `border-color`, ...) that includes it.
+fn transitions_property(listed: &str, prop: &str) -> bool {
+    listed == "all"
+        || listed == prop
+        || match listed {
+            "background" => prop == "background-color",
+            "margin" | "padding" => prop.starts_with(&format!("{listed}-")),
+            "border-color" => prop.starts_with("border-") && prop.ends_with("-color"),
+            "border-width" => prop.starts_with("border-") && prop.ends_with("-width"),
+            "border" => prop.starts_with("border-") && (prop.ends_with("-color") || prop.ends_with("-width") || prop == "border-radius"),
+            "gap" => prop == "row-gap" || prop == "column-gap",
+            _ => false,
+        }
+}
+
 fn get(s: &ComputedStyle, prop: &str) -> Option<AnimValue> {
     use AnimValue::{Color as C, Length as L, Number as N};
     Some(match prop {
@@ -590,8 +606,20 @@ impl Animator {
     pub fn update(&mut self, base: &StyleMap, styles: &mut StyleMap, now: f64, restyled: bool) {
         let real = base.styles.len() - base.origins().len();
         if restyled {
-            self.start_transitions(base, real, now);
+            self.start_transitions(base, 0..real, now);
         }
+        self.advance(base, styles, now);
+    }
+
+    /// [`update`](Self::update) after only the targets of `nodes` were recomputed: transitions start
+    /// for those, everything else just moves on to `now`.
+    pub fn update_nodes(&mut self, base: &StyleMap, styles: &mut StyleMap, now: f64, nodes: &[NodeId]) {
+        self.start_transitions(base, nodes.iter().map(|n| n.0), now);
+        self.advance(base, styles, now);
+    }
+
+    fn advance(&mut self, base: &StyleMap, styles: &mut StyleMap, now: f64) {
+        let real = base.styles.len() - base.origins().len();
         // Undo last frame's overrides, then lay this frame's over the target.
         for n in self.touched.drain() {
             if let (Some(b), Some(s)) = (base.styles.get(n.0), styles.styles.get_mut(n.0)) {
@@ -652,8 +680,8 @@ impl Animator {
         self.active = active;
     }
 
-    fn start_transitions(&mut self, base: &StyleMap, real: usize, now: f64) {
-        for n in 0..real {
+    fn start_transitions(&mut self, base: &StyleMap, nodes: impl Iterator<Item = usize>, now: f64) {
+        for n in nodes {
             let node = NodeId(n);
             let st = &base.styles[n];
             if st.transitions.is_empty() {
@@ -667,7 +695,7 @@ impl Animator {
                     if old == new {
                         continue;
                     }
-                    let spec = st.transitions.iter().rev().find(|s| s.property == "all" || s.property == *prop);
+                    let spec = st.transitions.iter().rev().find(|s| transitions_property(&s.property, prop));
                     let Some(spec) = spec.filter(|s| s.duration + s.delay > 0.0) else {
                         self.transitions.remove(&(node, prop));
                         continue;

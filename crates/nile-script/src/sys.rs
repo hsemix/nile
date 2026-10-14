@@ -46,8 +46,14 @@ enum Res {
     Udp(Mutex<Option<UdpSocket>>),
 }
 
+#[cfg(feature = "tls")]
+type TlsStream = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+
 #[derive(Default)]
 struct Tcp {
+    /// Set once `tls` has run: reads and writes go through the encrypted session instead.
+    #[cfg(feature = "tls")]
+    tls: Option<Arc<Mutex<TlsStream>>>,
     stream: Option<TcpStream>,
     listener: Option<TcpListener>,
     bound: Option<SocketAddr>,
@@ -337,6 +343,59 @@ fn run(op: &str, a: &[String]) -> Result<String, String> {
     };
     match (op, &*res) {
         ("read", Res::Reader(r)) => read_from(&mut **r.lock().unwrap()),
+        #[cfg(feature = "tls")]
+        ("read", Res::Tcp(t)) if t.lock().unwrap().tls.is_some() => {
+            let tls = t.lock().unwrap().tls.clone().expect("checked");
+            let id = arg(0).to_string();
+            loop {
+                let result = {
+                    let mut buf = vec![0u8; len];
+                    tls.lock().unwrap().read(&mut buf).map(|n| (buf, n))
+                };
+                match result {
+                    Ok((_, 0)) => return Ok("E".into()),
+                    Ok((buf, n)) => return Ok(format!("D{}", b64().encode(&buf[..n]))),
+                    // Nothing yet: let a write in, and stop if the socket was closed meanwhile.
+                    Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                        if get(&id).is_err() {
+                            return Ok("E".into());
+                        }
+                        std::thread::sleep(Duration::from_millis(4));
+                    }
+                    Err(e) => return Err(io(e)),
+                }
+            }
+        }
+        #[cfg(feature = "tls")]
+        ("write", Res::Tcp(t)) if t.lock().unwrap().tls.is_some() => {
+            let data = b64().decode(arg(1)).map_err(|e| e.to_string())?;
+            let tls = t.lock().unwrap().tls.clone().expect("checked");
+            let mut s = tls.lock().unwrap();
+            s.write_all(&data).and_then(|()| s.flush()).map_err(io)?;
+            Ok(data.len().to_string())
+        }
+        #[cfg(feature = "tls")]
+        ("tls", Res::Tcp(t)) => {
+            let stream = t.lock().unwrap().stream.as_ref().ok_or("ENOTCONN: not connected")?.try_clone().map_err(io)?;
+            let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+            let config = rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+                .with_safe_default_protocol_versions()
+                .map_err(|e| format!("EIO: {e}"))?
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            let name = rustls::pki_types::ServerName::try_from(arg(1).to_string()).map_err(|e| format!("EINVAL: {e}"))?;
+            let conn = rustls::ClientConnection::new(Arc::new(config), name).map_err(|e| format!("EIO: {e}"))?;
+            let mut tls = rustls::StreamOwned::new(conn, stream);
+            // Finish the handshake now, so a bad certificate is an error of `tls()`.
+            while tls.conn.is_handshaking() {
+                tls.conn.complete_io(&mut tls.sock).map_err(|e| format!("ECONNRESET: TLS handshake failed: {e}"))?;
+            }
+            tls.sock.set_read_timeout(Some(Duration::from_millis(30))).map_err(io)?;
+            t.lock().unwrap().tls = Some(Arc::new(Mutex::new(tls)));
+            Ok(String::new())
+        }
+        #[cfg(not(feature = "tls"))]
+        ("tls", Res::Tcp(_)) => Err("ENOSYS: this build has no TLS".into()),
         ("read", Res::Tcp(t)) => {
             let mut s = t.lock().unwrap().stream.as_ref().ok_or("ENOTCONN: not connected")?.try_clone().map_err(io)?;
             read_from(&mut s)

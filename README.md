@@ -78,6 +78,15 @@ cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --typ
 cargo test --workspace
 ```
 
+## POS interface demo
+
+```sh
+cargo run -p nile-shell -- examples/pos/index.html
+```
+
+A retail counter with product search, categories, a cart, discounts, held sales,
+checkout and receipts. Uses sample data in memory; see [the example instructions](examples/pos/README.md).
+
 ## Virtual data grid demo
 
 ```sh
@@ -237,8 +246,8 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
   `<textarea>` use hard line breaks only; `selectionStart/End` count characters, not UTF-16 units; `value` lives
   in the `value` attribute (no separate default value). Sciter's `Element.value` for other behaviors isn't there.
 - Scrollbars are thin overlay bars (draggable; clicking the track jumps there), with no `scrollbar-*` styling, no
-  hover/fade behavior and no arrow buttons; clipping ignores `border-radius`.
-- JS gaps: no `Blob`/`FormData`/streams/`WebSocket`, no cookies or CORS, `fetch` follows redirects only for http(s), `@debug`/`@storage` modules and bare module specifiers (only relative and absolute paths plus `@nile`/`@sciter`/`@env`; `setModuleUrlResolver` is accepted but unused, `compress`/`decompress`/`loadLibrary`/the synchronous `import()` throw),
+  hover/fade behavior and no arrow buttons; `overflow` clipping follows `border-radius` (the padding box's rounded corners) for painting but not for hit testing.
+- JS gaps: `Blob`/`File`/`FormData`/streams are simple versions (no byte streams or backpressure) and `WebSocket` has no extensions (compression), no cookies or CORS, `fetch` follows redirects only for http(s), `@debug`/`@storage` modules and bare module specifiers (only relative and absolute paths plus `@nile`/`@sciter`/`@env`; `setModuleUrlResolver` is accepted but unused, `compress`/`decompress`/`loadLibrary`/the synchronous `import()` throw),
   `offsetParent` (approximated by the parent).
   From Sciter: class components, `componentUpdate`,
   element-level `onGlobalEvent`, `Element.value` (no native behaviors yet), `this://` URLs, and JSX shortcuts like `.class`;
@@ -246,7 +255,7 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
 - CSS gaps: tables are laid out as a grid, so `table-layout: fixed` (with a table `width`; column widths from `<col>` or the first row's cells, px or %; `examples/table-fixed.html`) is the only place column widths are honoured: automatic tables size columns from their content only, and there's no `caption-side`, row-group backgrounds or collapsed-border conflict resolution (each cell keeps its own borders and they overlap), and `display: table-*` on stray elements isn't wrapped in anonymous tables; accessibility: no text selection or caret positions, `aria-owns`/`aria-controls`, and it has not been run against a real screen reader yet; windows: owned windows (dialogs, tools, popups) stay above their owner on macOS and Windows only (the Windows path is untested), `modal(new Window(...))` and a blocking `modal({url})` aren't possible, `Window.all` only knows the windows a page opened, C hosts can't open windows yet; popup windows don't close when another application is clicked, they aren't clamped to the monitor, and tooltips stay inside their window; frames: no `:busy` (loading is synchronous), a frame is painted over everything else in the page (so a drop-down or fixed box of the outer page can't cover it), isn't clipped by an ancestor's `overflow` or moved by its transform (only its rectangle follows scrolling), Tab doesn't enter it, and scripts cross the boundary as JSON (no shared DOM objects); `float`/`clear` work on boxes and text wraps around floats line by line (floats only narrow text in the same normal-flow block formatting context: a flex/grid item, clipping, inline-block or table box ignores outer floats), `shape-outside` (`circle()`, `ellipse()`, `inset()` without `round`, `polygon()`, a reference box keyword, `shape-margin`; `examples/shape-outside.html`) makes text follow the outline, but images as shapes aren't supported and there is no `float` inside inline formatting beyond the line it starts on; named grid lines, `grid-template` shorthand, `subgrid`, `counter()`/`url()` in `content`, other pseudo-elements (`::first-line`, `::placeholder`, ...); `fixed` is pinned to the viewport (a clipping ancestor still clips it) and `sticky` slides within its parent for the page's scroll only (not inside an `overflow` container; vertical insets only), an absolute box with `auto` insets sits at its static position approximated as the start of its parent's content box, or below the previous in-flow element sibling (not after preceding text or inline content; `examples/static-position.html`), stacking contexts follow the spec for positioned boxes, `z-index`, `opacity`, `transform` and flex/grid items (`examples/stacking.html`), except that a positioned box inside an `overflow`, `opacity`, `transform` or `sticky` ancestor is painted with that ancestor instead of being lifted past it, and `isolation`/`will-change`/`mix-blend-mode` don't create contexts; multiple background layers, `background-origin`/`-clip`/`-attachment`, `object-fit`, SVG, `<img>` alt text, remote (`http`) images,
   3D transforms are flattened onto the page (`rotateX/Y/3d`, `translateZ/3d`, `scale3d`, `perspective()`, `matrix3d`, and a container's `perspective`/`perspective-origin`; hit testing and `getBoundingClientRect` follow the projection) but there is no `transform-style: preserve-3d`, `backface-visibility` or depth sorting, so nested 3D scenes paint in tree order; `double`/`groove` borders draw solid; `calc()` percentages
   resolve against the parent's laid-out content size (heights only when the element sets its own height);
-  `@supports`/`@font-face` are skipped; `@media` has no `prefers-*` beyond light/no-preference and no
+  `@font-face` loads fonts from files, `data:` URLs and a packed app (`src: url(...)` of TrueType, OpenType, WOFF or WOFF2, first one that works; `local()` sources, `unicode-range` and `font-display` are ignored; `examples/font-face.html`), and `@supports` checks property names (not values: `(display: nonsense)` counts as supported); `@media` has no `prefers-*` beyond light/no-preference and no
   `resolution`.
 - `border-radius` takes one to four values, `%`, and the per-corner longhands; elliptical radii after a `/` are read as circular (`examples/radius.html`). `:visited` isn't supported.
 - HTML gaps: `list-style-image`; `list-style-position: inside` reserves room in the item's left padding (so wrapped lines align with the first line's text rather than the marker) and `::marker` supports `color`, font properties and `content` (a string, or `""` to hide) but not `::marker` backgrounds or sizes beyond the font; inline `vertical-align` only shifts the glyphs (the line box doesn't grow, `middle`/`top`/`bottom` on inline boxes are ignored, an underline follows the shifted text), `<legend>` doesn't sit on the `<fieldset>` border, `date`/`time`/`month`/`datetime-local` inputs are text fields with field stepping but no calendar or clock popup, `type=color` has no picker popup (type a hex value), `type=number` has no wheel stepping, `valueAsNumber` or validation, and `type=file` has no drag-and-drop or `webkitdirectory`, bare text inside a closed `<details>` stays visible, `text-overflow: ellipsis` is for a single clipped line only.
@@ -264,8 +273,9 @@ float, tables, transforms, transitions and animations, and opt-in page text sele
    and background colors, borders colors, shadows, radius, transform and opacity amounts) keeps the
    laid-out boxes instead of relaying out, so hover effects and animations of those properties skip
    layout. A pointer or focus change that no selector mentions (`:hover`, `:active`, `:focus`) skips
-   the restyle too. Still open: restyling only the affected elements (a hover on a page that does
-   have `:hover` rules re-cascades everything, ~7 ms for 4,500 nodes), and keeping the layout when
+   the restyle too, and one that does cascades again only the elements whose state changed (and what
+   their selectors can reach), not the page: a hover on a 1,500-row page costs ~0.2 ms, down from ~15 ms.
+   Script changes to the DOM still re-cascade everything. Still open: keeping the layout when
    an element gains or loses a transform or opacity, when text color changes on pages with
    `::before`/`::after`, or for inline elements' backgrounds. `NILE_TRACE=1` prints per-phase timings.
 2. **Embedding API** (C ABI done; see above) — still to do: a GPU surface path, multi-button and touch input. Language bindings (Go, C#, Python) come last, once the engine covers nearly everything.
