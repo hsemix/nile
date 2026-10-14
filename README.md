@@ -78,6 +78,16 @@ cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --typ
 cargo test --workspace
 ```
 
+## Virtual data grid demo
+
+```sh
+cargo run -p nile-shell -- examples/virtual-grid/index.html
+```
+
+A grid of up to one million rows and 100 columns with virtualization on both
+axes, keyboard navigation and cell editing. Only the visible slice is mounted.
+See [the implementation walkthrough](examples/virtual-grid/README.md).
+
 ## File explorer demo
 
 ```sh
