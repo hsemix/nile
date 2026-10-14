@@ -23,7 +23,7 @@ An embedder must keep servicing ticks for asynchronous completion.
 
 `Headers`, `Request`, `Response`, `AbortController` and XMLHttpRequest are
 available. Response has text/JSON access; this is not a complete browser network
-stack. Blob, FormData, streams, WebSocket, cookies and CORS are not implemented.
+stack. `Blob`, `File`, `FormData` (also from a `<form>`; sent as `multipart/form-data`), `ReadableStream`/`WritableStream`/`TransformStream` (a simple queue-based version: `getReader`, `pipeTo`, `pipeThrough`, `tee`, async iteration, `Response.body`, `Blob.stream()`) and `WebSocket` (`ws://` and `wss://`, text and binary, ping/pong, close codes; no extensions or `bufferedAmount`) are there; cookies and CORS are not.
 Network support does not add remote `<img>` rendering or browser page navigation.
 
 Try the bundled file-request example without an external server:

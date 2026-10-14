@@ -4,6 +4,10 @@
 
 use std::path::{Path, PathBuf};
 
+/// Nile's own icon (`assets/icon.html` rendered by Nile): the window icon of a program that names none, and
+/// the icon `--pack` gives an executable or bundle when `--icon` isn't used.
+pub const DEFAULT_ICON: &[u8] = include_bytes!("../../../assets/icon-512.png");
+
 /// What the operating system shows about the program (Explorer's Details tab, Finder's Get Info,
 /// the application menu of a Linux desktop).
 #[derive(Debug, Clone, Default)]

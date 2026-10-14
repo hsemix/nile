@@ -1671,6 +1671,8 @@ dependencies = [
  "nile-dom",
  "nile-style",
  "rquickjs",
+ "rustls",
+ "webpki-roots",
 ]
 
 [[package]]

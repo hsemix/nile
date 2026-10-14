@@ -1534,7 +1534,12 @@ impl Page {
     /// pixels with its width and height.
     pub fn window_icon(&self, src: &str) -> Option<(Vec<u8>, u32, u32)> {
         let bytes = nile_dom::vfs::read(&self.path.parent()?.join(src)).ok()?;
-        let img = skia_safe::Image::from_encoded(skia_safe::Data::new_copy(&bytes))?;
+        Page::icon_from_bytes(&bytes)
+    }
+
+    /// An encoded picture (PNG, ...) as unpremultiplied RGBA pixels with its width and height.
+    pub fn icon_from_bytes(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+        let img = skia_safe::Image::from_encoded(skia_safe::Data::new_copy(bytes))?;
         let (w, h) = (img.width(), img.height());
         let info = ImageInfo::new((w, h), ColorType::RGBA8888, AlphaType::Unpremul, None);
         let mut rgba = vec![0u8; (w * h * 4) as usize];
@@ -3751,6 +3756,143 @@ mod tests {
         for n in 0..doc.node_count() {
             assert!(v.styles.styles[n] == full.styles[n], "node {n} differs from a full cascade after the transitions ended");
         }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn blobs_form_data_and_streams_work() {
+        let (mut p, path) = page(
+            r#"<body><form id="f"><input name="a" value="1"><input name="b" type="checkbox" checked><input name="c" type="checkbox"><select name="s"><option value="x">X</option><option value="y" selected>Y</option></select><textarea name="t">hi</textarea><button name="go">Go</button></form><script>
+              window.log = []; window.done = 0;
+              (async () => {
+                const log = window.log;
+                const blob = new Blob(["héllo ", new Uint8Array([119, 111, 114, 108, 100])], { type: "Text/Plain" });
+                log.push(blob.size + ":" + blob.type + ":" + await blob.text() + ":" + await blob.slice(7, 12).text());
+                const file = new File(["data"], "a.txt", { type: "text/plain" });
+                log.push(file.name + ":" + file.size + ":" + (file instanceof Blob) + ":" + await file.text());
+                const fd = new FormData(document.getElementById("f"));
+                log.push([...fd].map(([k, v]) => k + "=" + v).join("&"));
+                fd.append("file", file); fd.set("a", "2"); fd.append("a", "3");
+                log.push(fd.getAll("a").join(",") + ":" + fd.has("file") + ":" + fd.get("file").name);
+                // The multipart body round-trips through a Response.
+                const req = new Request("http://x/", { method: "POST", body: fd });
+                const ct = req.headers.get("content-type");
+                const back = await new Response(await req.arrayBuffer(), { headers: { "content-type": ct } }).formData();
+                log.push(ct.split(";")[0] + ":" + back.getAll("a").join(",") + ":" + back.get("s") + ":" + back.get("file").name + ":" + await back.get("file").text());
+                // Streams: a source, a transform and a reader.
+                const src = new ReadableStream({ start(c) { c.enqueue("ab"); c.enqueue("cd"); c.close(); } });
+                const up = src.pipeThrough(new TransformStream({ transform(ch, c) { c.enqueue(ch.toUpperCase()); } }));
+                let out = ""; for await (const ch of up) out += ch;
+                const r = new Response("one two").body.getReader();
+                const first = await r.read();
+                log.push(out + ":" + first.done + ":" + new TextDecoder().decode(first.value) + ":" + (await r.read()).done);
+                const [t1, t2] = new Blob(["xyz"]).stream().tee();
+                const read = async (st) => { let n = 0; for await (const c of st) n += c.length; return n; };
+                log.push((await read(t1)) + "," + (await read(t2)));
+                const sink = []; const w = new WritableStream({ write(c) { sink.push(c); } }).getWriter();
+                await w.write(1); await w.write(2); await w.close();
+                log.push(sink.join("+"));
+                window.done = 1;
+              })().catch((e) => { window.log.push("error:" + e.message); window.done = 1; });
+            </script></body>"#,
+            "blobs",
+        );
+        for _ in 0..200 {
+            p.tick();
+            if js(&mut p, "window.done") == "1" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            js(&mut p, "window.log.join('|')"),
+            "12:text/plain:héllo world:world|a.txt:4:true:data|a=1&b=on&s=y&t=hi|2,3:true:a.txt|multipart/form-data:2,3:y:a.txt:data|AB CD:false:one two:true".replace("AB CD", "ABCD") + "|3,3|1+2"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A WebSocket server for one connection: accepts, echoes data frames and answers a close.
+    fn echo_websocket_server() -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Ok((mut s, _)) = listener.accept() else { return };
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                if s.read(&mut byte).unwrap_or(0) == 0 {
+                    return;
+                }
+                head.push(byte[0]);
+            }
+            let text = String::from_utf8_lossy(&head).to_string();
+            assert!(text.starts_with("GET /chat?x=1 HTTP/1.1") && text.contains("Upgrade: websocket") && text.contains("Sec-WebSocket-Key: "), "{text}");
+            s.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: x\r\n\r\n").unwrap();
+            loop {
+                let mut h = [0u8; 2];
+                if s.read_exact(&mut h).is_err() {
+                    return;
+                }
+                let (op, masked) = (h[0] & 15, h[1] & 0x80 != 0);
+                let mut len = (h[1] & 127) as usize;
+                if len == 126 {
+                    let mut l = [0u8; 2];
+                    s.read_exact(&mut l).unwrap();
+                    len = u16::from_be_bytes(l) as usize;
+                }
+                let mut mask = [0u8; 4];
+                assert!(masked, "client frames are masked");
+                s.read_exact(&mut mask).unwrap();
+                let mut data = vec![0u8; len];
+                s.read_exact(&mut data).unwrap();
+                for (i, b) in data.iter_mut().enumerate() {
+                    *b ^= mask[i % 4];
+                }
+                // Echo (text and binary) or answer the close; a ping comes first, to be answered by the client.
+                let mut out = vec![0x80 | op, data.len() as u8];
+                if data.len() >= 126 {
+                    out = vec![0x80 | op, 126, (data.len() >> 8) as u8, data.len() as u8];
+                }
+                out.extend(&data);
+                if op == 1 && data == b"hello" {
+                    s.write_all(&[0x89, 2, b'o', b'k']).unwrap();
+                }
+                s.write_all(&out).unwrap();
+                if op == 8 {
+                    return;
+                }
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn websockets_talk_to_a_server() {
+        let port = echo_websocket_server();
+        let (mut p, path) = page(
+            &format!(r#"<body><script>
+              window.log = []; window.done = 0;
+              const ws = new WebSocket("ws://127.0.0.1:{port}/chat?x=1");
+              ws.binaryType = "arraybuffer";
+              ws.onopen = () => {{ log.push("open:" + ws.readyState); ws.send("hello"); ws.send(new Uint8Array([1, 2, 3])); ws.send("x".repeat(200)); }};
+              ws.onmessage = (e) => {{
+                log.push(typeof e.data === "string" ? e.data.slice(0, 8) + e.data.length : "bin:" + new Uint8Array(e.data).join(""));
+                if (log.length === 4) ws.close(1000, "bye");
+              }};
+              ws.onerror = (e) => log.push("error");
+              ws.onclose = (e) => {{ log.push("close:" + e.code + ":" + e.reason + ":" + ws.readyState); window.done = 1; }};
+            </script></body>"#),
+            "ws",
+        );
+        for _ in 0..400 {
+            p.tick();
+            if js(&mut p, "window.done") == "1" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(js(&mut p, "window.log.join('|')"), "open:1|hello5|bin:123|xxxxxxxx200|close:1000:bye:3");
         let _ = std::fs::remove_file(path);
     }
 

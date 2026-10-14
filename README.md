@@ -246,8 +246,8 @@ existing HTML/CSS/JS APIs and in-memory sample data. See
   `<textarea>` use hard line breaks only; `selectionStart/End` count characters, not UTF-16 units; `value` lives
   in the `value` attribute (no separate default value). Sciter's `Element.value` for other behaviors isn't there.
 - Scrollbars are thin overlay bars (draggable; clicking the track jumps there), with no `scrollbar-*` styling, no
-  hover/fade behavior and no arrow buttons; clipping ignores `border-radius`.
-- JS gaps: no `Blob`/`FormData`/streams/`WebSocket`, no cookies or CORS, `fetch` follows redirects only for http(s), `@debug`/`@storage` modules and bare module specifiers (only relative and absolute paths plus `@nile`/`@sciter`/`@env`; `setModuleUrlResolver` is accepted but unused, `compress`/`decompress`/`loadLibrary`/the synchronous `import()` throw),
+  hover/fade behavior and no arrow buttons; `overflow` clipping follows `border-radius` (the padding box's rounded corners) for painting but not for hit testing.
+- JS gaps: `Blob`/`File`/`FormData`/streams are simple versions (no byte streams or backpressure) and `WebSocket` has no extensions (compression), no cookies or CORS, `fetch` follows redirects only for http(s), `@debug`/`@storage` modules and bare module specifiers (only relative and absolute paths plus `@nile`/`@sciter`/`@env`; `setModuleUrlResolver` is accepted but unused, `compress`/`decompress`/`loadLibrary`/the synchronous `import()` throw),
   `offsetParent` (approximated by the parent).
   From Sciter: class components, `componentUpdate`,
   element-level `onGlobalEvent`, `Element.value` (no native behaviors yet), `this://` URLs, and JSX shortcuts like `.class`;

@@ -41,6 +41,8 @@ arboard = { version = "3.6", default-features = false }
 imagesize = "0.13"
 base64 = "0.22"
 ureq = "3.4.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 
 # Debug builds run the whole engine unoptimised, which makes scrolling and hover visibly lag
 # (a wheel tick on the Word example took ~16 ms, with spikes of ~40 ms). Optimise the

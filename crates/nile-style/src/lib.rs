@@ -1367,6 +1367,61 @@ fn matching_decls<'a>(
     decls
 }
 
+/// The `font` shorthand as its longhands: `[style] [weight] size[/line-height] family[, ...]`
+/// (a declaration that isn't `font`, or one that doesn't parse, comes back unchanged / dropped).
+fn expand_font(d: Declaration) -> Vec<Declaration> {
+    if d.name != "font" {
+        return vec![d];
+    }
+    let part = |name: &str, values: Vec<Value>| Declaration { name: name.into(), values, important: d.important, raw: String::new() };
+    let (mut style, mut weight) = (None, None);
+    let mut i = 0;
+    let v = &d.values;
+    let size = loop {
+        let Some(x) = v.get(i) else { return Vec::new() };
+        i += 1;
+        match x {
+            Value::Ident(k) if k == "normal" => {}
+            Value::Ident(k) if k == "italic" || k == "oblique" => style = Some(x.clone()),
+            Value::Ident(k) if matches!(k.as_str(), "bold" | "bolder" | "lighter") => weight = Some(x.clone()),
+            Value::Ident(k) if matches!(k.as_str(), "small-caps" | "ultra-condensed" | "extra-condensed" | "condensed" | "semi-condensed" | "semi-expanded" | "expanded" | "extra-expanded" | "ultra-expanded") => {}
+            Value::Number(n) if (1.0..=1000.0).contains(n) => weight = Some(x.clone()),
+            Value::Px(_) | Value::Em(_) | Value::Rem(_) | Value::Percent(_) => break x.clone(),
+            Value::Ident(k) => {
+                let px = match k.as_str() {
+                    "xx-small" => 9.0,
+                    "x-small" => 10.0,
+                    "small" => 13.0,
+                    "medium" => 16.0,
+                    "large" => 18.0,
+                    "x-large" => 24.0,
+                    "xx-large" => 32.0,
+                    _ => return Vec::new(),
+                };
+                break Value::Px(px);
+            }
+            _ => return Vec::new(),
+        }
+    };
+    let mut out = Vec::new();
+    if let Some(x) = style {
+        out.push(part("font-style", vec![x]));
+    }
+    out.push(part("font-weight", vec![weight.unwrap_or(Value::Ident("normal".into()))]));
+    out.push(part("font-size", vec![size]));
+    if matches!(v.get(i), Some(Value::Slash)) {
+        if let Some(h) = v.get(i + 1) {
+            out.push(part("line-height", vec![h.clone()]));
+        }
+        i += 2;
+    }
+    let family: Vec<Value> = v.get(i..).unwrap_or(&[]).to_vec();
+    if !family.is_empty() {
+        out.push(part("font-family", family));
+    }
+    out
+}
+
 /// Applies `decls` to `style` (already inheriting from its parent): `!important` last,
 /// custom properties and `var()` resolved, borders finalised. Returns the declarations
 /// as applied, so callers can read properties that aren't part of `ComputedStyle`.
@@ -1407,6 +1462,7 @@ fn apply_declarations(
             let raw = if d.name.starts_with("popup-") || d.name == "shape-outside" { text.clone() } else { String::new() };
             Some(Declaration { values: parse::parse_values(&text, pcx), raw, ..(*d).clone() })
         })
+        .flat_map(expand_font)
         .collect();
     for d in resolved.iter().filter(|d| d.name == "font-size") {
         apply(style, d, parent_font_size);
@@ -2419,6 +2475,25 @@ mod tests {
         let styles = compute_styles(&doc);
         let p = styles.get(doc.find(|n| n.attr("id") == Some("p")).unwrap());
         assert_eq!(p.font_family, r#""Segoe UI", "Helvetica Neue", "arial black", sans-serif"#);
+    }
+
+    #[test]
+    fn the_font_shorthand_sets_its_longhands() {
+        let doc = Document::parse(
+            r#"<i id=a style="font: italic bold 20px/1.5 'My Font', serif"></i><i id=b style="font: 700 250px/1 sans-serif"></i>
+               <i id=c style="font-size: 30px; font: small Arial"></i><i id=d style="font: 14px sans-serif; font-weight: 300"></i><i id=e style="font: bogus"></i>"#,
+        );
+        let styles = compute_styles(&doc);
+        let st = |id: &str| styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        let a = st("a");
+        assert!(a.italic && a.font_weight == 700.0 && a.font_size == 20.0 && (a.line_height - 1.5).abs() < 1e-6, "{:?}", (a.italic, a.font_weight, a.font_size, a.line_height));
+        assert_eq!(a.font_family, r#""My Font", serif"#);
+        let b = st("b");
+        assert_eq!((b.font_weight, b.font_size, b.line_height, b.font_family.as_str()), (700.0, 250.0, 1.0, "sans-serif"));
+        let c = st("c");
+        assert_eq!((c.font_size, c.font_family.as_str()), (13.0, "arial"));
+        assert_eq!(st("d").font_weight, 300.0, "a later longhand wins");
+        assert_eq!(st("e").font_size, ComputedStyle::default().font_size, "an invalid shorthand is ignored");
     }
 
     #[test]

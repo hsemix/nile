@@ -16,6 +16,7 @@
 //!                                       what the OS shows about it (Windows: file properties; macOS: Info.plist)
 //!        [--category Utility;]          Linux: writes `app.desktop` (+ `app.png`) next to it; `--install` copies them
 //!                                       to ~/.local/share
+//!   nile --brand program.exe -o out.exe  the same icon and details for any Windows program (release builds use it)
 //!   nile page.html --pdf out.pdf        write every page as a PDF ([--wait MS] first)
 //!        [--wait MS]                   let timers run this long before the snapshot
 
@@ -237,9 +238,15 @@ fn pack_command(args: &[String]) -> ! {
         Some(png) => std::fs::read(png).map(|b| vec![(nile_dom::vfs::ICON_FILE, b)]).unwrap_or_default(),
         None => Vec::new(),
     };
+    // No `--icon`: Nile's own icon, where the system shows one for the file (a Windows executable, a macOS bundle).
+    let bundle_wanted = icon.is_some();
+    let default_icon = std::env::temp_dir().join(format!("nile-default-icon-{}.png", std::process::id()));
+    if icon.is_none() && (cfg!(windows) || out.extension().is_some_and(|e| e == "app")) && std::fs::write(&default_icon, bundle::DEFAULT_ICON).is_ok() {
+        icon = Some(default_icon.clone());
+    }
     // macOS: an `.app` bundle (what Finder and the Dock show an icon for) when asked for with an icon or an
     // output name ending in `.app`. The archive then goes in its own file inside it.
-    let bundle_mode = cfg!(target_os = "macos") && (icon.is_some() || out.extension().is_some_and(|e| e == "app"));
+    let bundle_mode = cfg!(target_os = "macos") && (bundle_wanted || out.extension().is_some_and(|e| e == "app"));
     let archive = out.with_extension("nilepack.tmp");
     let result = nile_dom::vfs::runtime_bytes().and_then(|runtime| {
         if bundle_mode {
@@ -284,10 +291,74 @@ fn pack_command(args: &[String]) -> ! {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             let _ = (desktop, install);
             println!("wrote {} ({files} files, {} KB packed)", out.display(), stored / 1024);
+            let _ = std::fs::remove_file(&default_icon);
             std::process::exit(0);
         }
         Err(e) => {
             eprintln!("could not pack {}: {e}", folder.display());
+            let _ = std::fs::remove_file(&default_icon);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `nile --brand program.exe -o out.exe [--icon x.png] [--name N] [--version V] ...`: a copy of any Windows
+/// program with an icon and version information written into it (how the release builds get Nile's own).
+/// Elsewhere it only copies the file.
+fn brand_command(args: &[String]) -> ! {
+    let (mut input, mut out, mut icon) = (None, None, None::<PathBuf>);
+    let mut info = bundle::AppInfo::default();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-o" | "--out" => out = it.next().map(PathBuf::from),
+            "--icon" => icon = it.next().map(PathBuf::from),
+            "--name" => info.name = it.next().cloned().unwrap_or_default(),
+            "--version" => info.version = it.next().cloned().unwrap_or_default(),
+            "--description" => info.description = it.next().cloned().unwrap_or_default(),
+            "--company" => info.company = it.next().cloned().unwrap_or_default(),
+            "--copyright" => info.copyright = it.next().cloned().unwrap_or_default(),
+            _ => input = Some(PathBuf::from(a)),
+        }
+    }
+    let (Some(input), Some(out)) = (input, out) else {
+        eprintln!("usage: nile --brand <program> -o <output> [--icon icon.png] [--name N] [--version 1.2.3] [--description D] [--company C] [--copyright T]");
+        std::process::exit(2);
+    };
+    if info.name.is_empty() {
+        info.name = out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    }
+    let result = std::fs::read(&input).and_then(|bytes| {
+        #[cfg(target_os = "windows")]
+        let bytes = {
+            let default_icon = std::env::temp_dir().join(format!("nile-default-icon-{}.png", std::process::id()));
+            let icon_file = match &icon {
+                Some(i) => i.clone(),
+                None => {
+                    std::fs::write(&default_icon, bundle::DEFAULT_ICON)?;
+                    default_icon.clone()
+                }
+            };
+            let branded = bundle::with_resources(bytes, Some(&icon_file), &info);
+            let _ = std::fs::remove_file(&default_icon);
+            branded?
+        };
+        #[cfg(not(target_os = "windows"))]
+        let _ = (&icon, &info);
+        std::fs::write(&out, bytes)
+    });
+    match result {
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755));
+            }
+            println!("wrote {}", out.display());
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("could not brand {}: {e}", input.display());
             std::process::exit(1);
         }
     }
@@ -324,6 +395,9 @@ fn main() {
     // A packed app finds its files behind its own executable.
     nile_dom::vfs::mount_self();
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().is_some_and(|a| a == "--brand") {
+        brand_command(&argv[1..]);
+    }
     if argv.first().is_some_and(|a| a == "--pack") {
         pack_command(&argv[1..]);
     }

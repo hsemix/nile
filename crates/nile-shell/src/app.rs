@@ -555,11 +555,13 @@ impl App {
         }
         // The page's `window-icon`, else the icon a packed program carries.
         let packed_icon = nile_dom::vfs::mounted().then(|| nile_dom::vfs::mount_path().join(nile_dom::vfs::ICON_FILE).to_string_lossy().into_owned());
+        // ... and failing both, Nile's own icon.
         if let Some(icon) = config
             .icon
             .as_deref()
             .or(packed_icon.as_deref())
             .and_then(|i| page.window_icon(i))
+            .or_else(|| Page::icon_from_bytes(crate::bundle::DEFAULT_ICON))
             .and_then(|(rgba, w, h)| winit::window::Icon::from_rgba(rgba, w, h).ok())
         {
             attrs = attrs.with_window_icon(Some(icon));

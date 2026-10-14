@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# `wss://` (WebSocket over TLS) through `@sys`'s TCP sockets.
+tls = ["dep:rustls", "dep:webpki-roots"]
+
 [dependencies]
+rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
 nile-dom.workspace = true
 nile-style.workspace = true
 rquickjs.workspace = true

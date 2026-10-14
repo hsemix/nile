@@ -363,6 +363,203 @@
     takeRecords() { return this._queue.splice(0); }
   };
 
+  // ---- Blob, FormData, ReadableStream and friends --------------------------------
+  const partBytes = (p) => (p instanceof Blob ? p._data() : p instanceof ArrayBuffer ? new Uint8Array(p) : ArrayBuffer.isView(p) ? new Uint8Array(p.buffer, p.byteOffset, p.byteLength) : new TextEncoder().encode(String(p)));
+  g.Blob = class Blob {
+    constructor(parts = [], opts = {}) {
+      const list = Array.from(parts, partBytes);
+      let n = 0;
+      for (const b of list) n += b.length;
+      const out = new Uint8Array(n);
+      let at = 0;
+      for (const b of list) { out.set(b, at); at += b.length; }
+      Object.defineProperty(this, "_b", { value: out, writable: true });
+      this.type = opts && opts.type ? String(opts.type).toLowerCase() : "";
+    }
+    _data() { return this._b; }
+    get size() { return this._data().length; }
+    slice(start = 0, end, type = "") { return new Blob([this._data().slice(start, end)], { type }); }
+    text() { return Promise.resolve(new TextDecoder().decode(this._data())); }
+    arrayBuffer() { const d = this._data(); return Promise.resolve(d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength)); }
+    bytes() { return Promise.resolve(this._data().slice()); }
+    stream() { const d = this._data().slice(); return new ReadableStream({ start(c) { if (d.length) c.enqueue(d); c.close(); } }); }
+    get [Symbol.toStringTag]() { return "Blob"; }
+  };
+  // A queue of chunks with readers waiting on it (the part of the WHATWG streams that scripts use).
+  g.ReadableStream = class ReadableStream {
+    constructor(source = {}) {
+      const s = this;
+      Object.defineProperties(s, { _q: { value: [] }, _w: { value: [] }, _src: { value: source }, _st: { value: { done: false, err: undefined, failed: false, pulling: false, locked: false } } });
+      s._ctrl = {
+        enqueue(v) { if (s._st.done) return; const w = s._w.shift(); if (w) w.resolve({ value: v, done: false }); else s._q.push(v); },
+        close() { if (s._st.done) return; s._st.done = true; for (const w of s._w.splice(0)) w.resolve({ value: undefined, done: true }); },
+        error(e) { if (s._st.done) return; s._st.done = true; s._st.failed = true; s._st.err = e; for (const w of s._w.splice(0)) w.reject(e); },
+        get desiredSize() { return 1 - s._q.length; },
+      };
+      Promise.resolve().then(() => source.start && source.start(s._ctrl)).then(() => s._pull(), (e) => s._ctrl.error(e));
+    }
+    _pull() {
+      const st = this._st;
+      if (!this._src.pull || st.pulling || st.done || (this._q.length >= 1 && !this._w.length)) return;
+      st.pulling = true;
+      Promise.resolve(this._src.pull(this._ctrl)).then(() => { st.pulling = false; if (this._w.length) this._pull(); }, (e) => { st.pulling = false; this._ctrl.error(e); });
+    }
+    _read() {
+      if (this._q.length) { const v = this._q.shift(); this._pull(); return Promise.resolve({ value: v, done: false }); }
+      if (this._st.failed) return Promise.reject(this._st.err);
+      if (this._st.done) return Promise.resolve({ value: undefined, done: true });
+      return new Promise((resolve, reject) => { this._w.push({ resolve, reject }); this._pull(); });
+    }
+    get locked() { return this._st.locked; }
+    getReader() {
+      if (this._st.locked) throw new TypeError("the stream is locked");
+      this._st.locked = true;
+      const s = this;
+      return { read: () => s._read(), releaseLock() { s._st.locked = false; }, cancel: (r) => s.cancel(r), get closed() { return new Promise(() => {}); } };
+    }
+    cancel(reason) { this._q.length = 0; if (!this._st.done) { this._ctrl.close(); if (this._src.cancel) return Promise.resolve(this._src.cancel(reason)).then(() => undefined); } return Promise.resolve(); }
+    async pipeTo(dest, opts = {}) {
+      const w = dest.getWriter();
+      try { for (;;) { const { value, done } = await this._read(); if (done) break; await w.write(value); } if (!opts.preventClose) await w.close(); }
+      catch (e) { if (!opts.preventAbort) await w.abort(e); throw e; }
+      finally { w.releaseLock(); }
+    }
+    pipeThrough(pair, opts) { this.pipeTo(pair.writable, opts).catch(() => {}); return pair.readable; }
+    tee() {
+      const chunks = [];
+      let fin = false, failure;
+      const waiters = [];
+      const pump = (async () => { try { for (;;) { const { value, done } = await this._read(); if (done) break; chunks.push(value); waiters.splice(0).forEach((f) => f()); } } catch (e) { failure = e; } fin = true; waiters.splice(0).forEach((f) => f()); })();
+      const branch = () => { let i = 0; return new ReadableStream({ async pull(c) { while (i >= chunks.length && !fin) await new Promise((r) => waiters.push(r)); if (i < chunks.length) c.enqueue(chunks[i++]); else if (failure) c.error(failure); else c.close(); } }); };
+      void pump;
+      return [branch(), branch()];
+    }
+    async *[Symbol.asyncIterator]() { for (;;) { const { value, done } = await this._read(); if (done) return; yield value; } }
+    static from(iterable) {
+      const it = iterable[Symbol.asyncIterator] ? iterable[Symbol.asyncIterator]() : iterable[Symbol.iterator]();
+      return new ReadableStream({ async pull(c) { const r = await it.next(); if (r.done) c.close(); else c.enqueue(await r.value); } });
+    }
+  };
+  g.WritableStream = class WritableStream {
+    constructor(sink = {}) {
+      this._sink = sink; this._locked = false; this._chain = Promise.resolve();
+      this._ctrl = { error: (e) => { this._failed = e; } };
+      this._chain = Promise.resolve().then(() => sink.start && sink.start(this._ctrl));
+    }
+    get locked() { return this._locked; }
+    getWriter() {
+      if (this._locked) throw new TypeError("the stream is locked");
+      this._locked = true;
+      const s = this;
+      const queue = (fn) => (s._chain = s._chain.then(() => { if (s._failed) throw s._failed; return fn(); }));
+      return {
+        write: (chunk) => queue(() => s._sink.write && s._sink.write(chunk, s._ctrl)),
+        close: () => queue(() => s._sink.close && s._sink.close()),
+        abort: (r) => queue(() => s._sink.abort && s._sink.abort(r)).catch(() => {}),
+        releaseLock() { s._locked = false; },
+        get ready() { return Promise.resolve(); },
+        get closed() { return s._chain; },
+        desiredSize: 1,
+      };
+    }
+    abort(r) { return this.getWriter().abort(r); }
+    close() { return this.getWriter().close(); }
+  };
+  g.TransformStream = class TransformStream {
+    constructor(t = {}) {
+      let ctrl;
+      this.readable = new ReadableStream({ start(c) { ctrl = c; } });
+      const tc = { enqueue: (v) => ctrl.enqueue(v), error: (e) => ctrl.error(e), terminate: () => ctrl.close() };
+      this.writable = new WritableStream({
+        start: () => t.start && t.start(tc),
+        write: (chunk) => (t.transform ? t.transform(chunk, tc) : ctrl.enqueue(chunk)),
+        close: async () => { if (t.flush) await t.flush(tc); ctrl.close(); },
+        abort: (e) => ctrl.error(e),
+      });
+    }
+  };
+  g.TextEncoderStream = class TextEncoderStream extends TransformStream {
+    constructor() { const enc = new TextEncoder(); super({ transform(chunk, c) { c.enqueue(enc.encode(String(chunk))); } }); this.encoding = "utf-8"; }
+  };
+  g.TextDecoderStream = class TextDecoderStream extends TransformStream {
+    constructor(label = "utf-8") {
+      const dec = new TextDecoder(label); const parts = [];
+      super({
+        transform(chunk, c) { parts.push(...chunk); const text = dec.decode(Uint8Array.from(parts.splice(0))); if (text) c.enqueue(text); },
+      });
+      this.encoding = label;
+    }
+  };
+  const formKinds = new Set(["button", "submit", "reset", "image"]);
+  g.FormData = class FormData {
+    constructor(form) {
+      this._l = [];
+      if (form && typeof form.querySelectorAll === "function") {
+        for (const el of form.querySelectorAll("input, select, textarea")) {
+          const name = el.getAttribute("name");
+          if (!name || el.disabled) continue;
+          const tag = el.localName, type = (el.getAttribute("type") || "text").toLowerCase();
+          if (tag === "input") {
+            if (formKinds.has(type)) continue;
+            if ((type === "checkbox" || type === "radio") && !el.checked) continue;
+            if (type === "file") { for (const f of el.files || []) this.append(name, f); continue; }
+            this.append(name, type === "checkbox" || type === "radio" ? el.getAttribute("value") ?? "on" : el.value);
+          } else if (tag === "select") {
+            for (const o of el.querySelectorAll("option")) if (o.selected && !o.disabled) this.append(name, o.getAttribute("value") ?? o.textContent);
+          } else this.append(name, el.value);
+        }
+      }
+    }
+    _entry(value, filename) { return value instanceof Blob ? (value instanceof File && filename === undefined ? value : new File([value], filename !== undefined ? String(filename) : value.name || "blob", { type: value.type })) : String(value); }
+    append(name, value, filename) { this._l.push([String(name), this._entry(value, filename)]); }
+    set(name, value, filename) {
+      name = String(name);
+      const i = this._l.findIndex((e) => e[0] === name);
+      const entry = [name, this._entry(value, filename)];
+      if (i < 0) this._l.push(entry); else { this._l[i] = entry; this._l = this._l.filter((e, k) => k <= i || e[0] !== name); }
+    }
+    get(name) { const e = this._l.find((e) => e[0] === String(name)); return e ? e[1] : null; }
+    getAll(name) { return this._l.filter((e) => e[0] === String(name)).map((e) => e[1]); }
+    has(name) { return this._l.some((e) => e[0] === String(name)); }
+    delete(name) { this._l = this._l.filter((e) => e[0] !== String(name)); }
+    forEach(fn, self) { for (const [k, v] of this._l) fn.call(self, v, k, this); }
+    *entries() { for (const [k, v] of this._l) yield [k, v]; }
+    *keys() { for (const [k] of this._l) yield k; }
+    *values() { for (const [, v] of this._l) yield v; }
+    [Symbol.iterator]() { return this.entries(); }
+  };
+  // `multipart/form-data`: the encoded bytes and the content type (with its boundary).
+  const encodeMultipart = (fd) => {
+    const boundary = "----NileFormBoundary" + Math.random().toString(16).slice(2).padEnd(14, "0") + Date.now().toString(16);
+    const enc = new TextEncoder();
+    const quote = (s) => String(s).replace(/"/g, "%22").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+    const parts = [];
+    for (const [k, v] of fd._l) {
+      if (v instanceof Blob) {
+        parts.push(enc.encode(`--${boundary}\r\nContent-Disposition: form-data; name="${quote(k)}"; filename="${quote(v.name || "blob")}"\r\nContent-Type: ${v.type || "application/octet-stream"}\r\n\r\n`), v._data(), enc.encode("\r\n"));
+      } else parts.push(enc.encode(`--${boundary}\r\nContent-Disposition: form-data; name="${quote(k)}"\r\n\r\n${v}\r\n`));
+    }
+    parts.push(enc.encode(`--${boundary}--\r\n`));
+    return { bytes: partBytes(new Blob(parts)), type: "multipart/form-data; boundary=" + boundary };
+  };
+  const decodeMultipart = (bytes, boundary) => {
+    const fd = new FormData();
+    const text = Array.from(bytes, (b) => String.fromCharCode(b)).join(""); // latin-1: byte offsets stay character offsets
+    const parts = text.split("--" + boundary);
+    for (const part of parts.slice(1)) {
+      if (part.startsWith("--")) break;
+      const cut = part.indexOf("\r\n\r\n");
+      if (cut < 0) continue;
+      const head = part.slice(0, cut), body = part.slice(cut + 4, part.endsWith("\r\n") ? -2 : undefined);
+      const name = /name="([^"]*)"/.exec(head), file = /filename="([^"]*)"/.exec(head), type = /content-type:\s*([^\r\n]+)/i.exec(head);
+      if (!name) continue;
+      const raw = Uint8Array.from(body, (c) => c.charCodeAt(0));
+      if (file) fd.append(name[1], new File([raw], file[1], { type: type ? type[1] : "" }));
+      else fd.append(name[1], new TextDecoder().decode(raw));
+    }
+    return fd;
+  };
+
   // ---- fetch, Headers, Request, Response, AbortController, XMLHttpRequest ------
   const bytesToB64 = (u8) => {
     let bin = "";
@@ -398,6 +595,8 @@
     if (b == null) return new Uint8Array(0);
     if (typeof b === "string") return new TextEncoder().encode(b);
     if (b instanceof URLSearchParams) return new TextEncoder().encode(b.toString());
+    if (b instanceof Blob) return b._data();
+    if (b instanceof FormData) return encodeMultipart(b).bytes;
     if (b instanceof ArrayBuffer) return new Uint8Array(b);
     if (ArrayBuffer.isView(b)) return new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
     return new TextEncoder().encode(String(b));
@@ -413,6 +612,16 @@
     json() { return this.text().then((t) => JSON.parse(t)); }
     arrayBuffer() { return this._take().then((b) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)); }
     bytes() { return this._take(); }
+    blob() { return this._take().then((b) => new Blob([b], { type: (this.headers && this.headers.get("content-type")) || "" })); }
+    formData() {
+      const type = (this.headers && this.headers.get("content-type")) || "";
+      return this._take().then((b) => {
+        if (/multipart\/form-data/i.test(type)) { const m = /boundary=("?)([^";]+)\1/i.exec(type); if (m) return decodeMultipart(b, m[2]); }
+        if (/x-www-form-urlencoded/i.test(type)) { const fd = new FormData(); for (const [k, v] of new URLSearchParams(new TextDecoder().decode(b))) fd.append(k, v); return fd; }
+        throw new TypeError("the body is not form data");
+      });
+    }
+    get body() { return this._bytes.length || !this.bodyUsed ? new Blob([this._bytes]).stream() : null; }
   }
   g.Request = class Request extends Body {
     constructor(input, init = {}) {
@@ -422,7 +631,10 @@
       this.method = String(init.method || (from && from.method) || "GET").toUpperCase();
       this.headers = new Headers(init.headers || (from && from.headers));
       this.signal = init.signal || (from && from.signal) || null;
-      this._init(init.body !== undefined ? init.body : from && from._bytes);
+      const multi = init.body instanceof FormData ? encodeMultipart(init.body) : null;
+      this._init(multi ? multi.bytes : init.body !== undefined ? init.body : from && from._bytes);
+      if (multi && !this.headers.has("content-type")) this.headers.set("content-type", multi.type);
+      if (init.body instanceof Blob && init.body.type && !this.headers.has("content-type")) this.headers.set("content-type", init.body.type);
       if (typeof init.body === "string" && !this.headers.has("content-type")) this.headers.set("content-type", "text/plain;charset=UTF-8");
       if (init.body instanceof URLSearchParams && !this.headers.has("content-type")) this.headers.set("content-type", "application/x-www-form-urlencoded;charset=UTF-8");
     }
@@ -655,16 +867,25 @@
   // ---- File objects for <input type=file> --------------------------------------
   const MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
     txt: "text/plain", json: "application/json", html: "text/html", css: "text/css", js: "text/javascript", csv: "text/csv", pdf: "application/pdf" };
-  g.File = class File {
-    constructor(path) {
-      this.path = path;
-      this.name = path.split(/[\\/]/).pop();
-      this.type = MIME[(this.name.split(".").pop() || "").toLowerCase()] || "";
-      this.lastModified = 0;
+  // `new File(path)` is a file the user chose in `<input type=file>`; `new File(parts, name, options)` is a Blob with a name.
+  g.File = class File extends Blob {
+    constructor(a, name, opts = {}) {
+      const path = typeof a === "string" && name === undefined;
+      const fileName = path ? a.split(/[\\/]/).pop() : String(name);
+      super(path ? [] : a, { type: opts.type || "" });
+      this.name = fileName;
+      this.lastModified = path ? 0 : opts.lastModified === undefined ? Date.now() : opts.lastModified;
+      if (path) Object.defineProperty(this, "path", { value: a, enumerable: true });
+      if (path && !this.type) this.type = MIME[(fileName.split(".").pop() || "").toLowerCase()] || "";
     }
-    get size() { return N.fileSize(this.path); }
-    text() { return fetch(this.path).then((r) => r.text()); }
-    arrayBuffer() { return fetch(this.path).then((r) => r.arrayBuffer()); }
+    _data() {
+      if (!this.path) return super._data();
+      const r = N.fsCall("read", [this.path]);
+      if (r.startsWith("E:")) throw new Error(r.slice(2));
+      return b64ToBytes(r.slice(2));
+    }
+    get size() { return this.path ? Math.max(0, N.fileSize(this.path)) : super.size; }
+    get [Symbol.toStringTag]() { return "File"; }
   };
   Object.defineProperty(Element.prototype, "files", {
     configurable: true,
@@ -1555,6 +1776,8 @@
   class TCP extends SysStream {
     constructor() { super(Number(sysRun("tcp_new"))); }
     connect(addr) { return sysAsync("connect", this._id, ...addrOf(addr)).then(() => undefined); }
+    // Encrypt the connection (TLS, certificates checked against the bundled roots); `host` is the server's name.
+    tls(host) { return sysAsync("tls", this._id, host).then(() => undefined); }
     bind(addr) { sysRun("bind", this._id, ...addrOf(addr)); }
     listen() { sysRun("listen", this._id); }
     accept() { return sysAsync("accept", this._id).then((r) => { const s = Object.create(TCP.prototype); Object.defineProperty(s, "_id", { value: Number(r), writable: true }); return s; }); }
@@ -1636,5 +1859,144 @@
       return buf;
     },
   };
+  // ---- WebSocket (RFC 6455) over the TCP sockets above; `wss://` uses TLS when the build has it ------------
+  const wsEvent = (type, props) => { const e = new Event(type); Object.assign(e, props); return e; };
+  g.WebSocket = class WebSocket extends EventTarget {
+    constructor(url, protocols) {
+      super();
+      const u = new URL(url);
+      if (u.protocol !== "ws:" && u.protocol !== "wss:") throw new SyntaxError("the URL's scheme must be ws or wss");
+      this.url = u.href;
+      this.readyState = 0;
+      this.protocol = "";
+      this.extensions = "";
+      this.bufferedAmount = 0;
+      this.binaryType = "blob";
+      this.onopen = this.onmessage = this.onerror = this.onclose = null;
+      const wanted = protocols === undefined ? [] : Array.isArray(protocols) ? protocols : [protocols];
+      this._tcp = null; this._buf = new Uint8Array(0); this._frag = null; this._closing = false; this._chain = Promise.resolve();
+      this._run(u, wanted).catch((e) => this._fail(e));
+    }
+    async _run(u, wanted) {
+      const secure = u.protocol === "wss:";
+      const tcp = this._tcp = new sysModule.TCP();
+      await tcp.connect({ ip: u.hostname, port: Number(u.port) || (secure ? 443 : 80) });
+      if (secure) await tcp.tls(u.hostname);
+      const key = bytesToB64(sysModule.random(16));
+      const head = [`GET ${u.pathname || "/"}${u.search} HTTP/1.1`, `Host: ${u.host}`, "Upgrade: websocket", "Connection: Upgrade", `Sec-WebSocket-Key: ${key}`, "Sec-WebSocket-Version: 13"];
+      if (wanted.length) head.push(`Sec-WebSocket-Protocol: ${wanted.join(", ")}`);
+      await tcp.write(head.join("\r\n") + "\r\n\r\n");
+      // The response head, then whatever frames came with it.
+      let acc = new Uint8Array(0), end = -1;
+      while (end < 0) {
+        const chunk = await tcp.read();
+        if (!chunk) throw new Error("the server closed the connection during the handshake");
+        acc = this._cat(acc, chunk);
+        for (let i = 0; i + 3 < acc.length; i++) if (acc[i] === 13 && acc[i + 1] === 10 && acc[i + 2] === 13 && acc[i + 3] === 10) { end = i; break; }
+        if (acc.length > 65536) throw new Error("the handshake response is too long");
+      }
+      const text = new TextDecoder().decode(acc.subarray(0, end));
+      if (!/^HTTP\/1\.1 101/.test(text)) throw new Error("the server did not switch protocols: " + text.split("\r\n")[0]);
+      const sub = /^sec-websocket-protocol:\s*(.+)$/im.exec(text);
+      if (sub) this.protocol = sub[1].trim();
+      this._buf = acc.subarray(end + 4);
+      if (this.readyState !== 0) return;
+      this.readyState = 1;
+      this._emit("open", {});
+      this._frames();
+      await this._loop();
+    }
+    _cat(a, b) { const o = new Uint8Array(a.length + b.length); o.set(a); o.set(b, a.length); return o; }
+    _emit(type, props) {
+      const e = wsEvent(type, props);
+      try { this.dispatchEvent(e); } catch (err) { report(err); }
+    }
+    async _loop() {
+      for (;;) {
+        const chunk = await this._tcp.read();
+        if (!chunk) break;
+        this._buf = this._cat(this._buf, chunk);
+        this._frames();
+        if (this.readyState === 3) return;
+      }
+      this._finish(1006, "", false);
+    }
+    // Decode every complete frame in the buffer.
+    _frames() {
+      for (;;) {
+        const b = this._buf;
+        if (b.length < 2) return;
+        const fin = (b[0] & 0x80) !== 0, op = b[0] & 15, masked = (b[1] & 0x80) !== 0;
+        let len = b[1] & 127, at = 2;
+        if (len === 126) { if (b.length < 4) return; len = (b[2] << 8) | b[3]; at = 4; }
+        else if (len === 127) { if (b.length < 10) return; len = 0; for (let i = 2; i < 10; i++) len = len * 256 + b[i]; at = 10; }
+        const mask = masked ? b.subarray(at, at + 4) : null;
+        if (masked) at += 4;
+        if (b.length < at + len) return;
+        const payload = b.slice(at, at + len);
+        if (mask) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3];
+        this._buf = b.subarray(at + len);
+        this._frame(fin, op, payload);
+        if (this.readyState === 3) return;
+      }
+    }
+    _frame(fin, op, data) {
+      if (op === 0 || op === 1 || op === 2) {
+        if (op !== 0) this._frag = { op, parts: [] };
+        if (!this._frag) return;
+        this._frag.parts.push(data);
+        if (!fin) return;
+        const { op: kind, parts } = this._frag;
+        this._frag = null;
+        const all = partBytes(new Blob(parts));
+        const payload = kind === 1 ? new TextDecoder().decode(all) : this.binaryType === "arraybuffer" ? all.buffer.slice(all.byteOffset, all.byteOffset + all.byteLength) : new Blob([all]);
+        this._emit("message", { data: payload, origin: this.url, lastEventId: "", source: null });
+      } else if (op === 8) {
+        const code = data.length >= 2 ? (data[0] << 8) | data[1] : 1005;
+        const reason = data.length > 2 ? new TextDecoder().decode(data.subarray(2)) : "";
+        if (!this._closing) this._send(8, data.length >= 2 ? data.subarray(0, 2) : new Uint8Array(0));
+        this._finish(code, reason, true);
+      } else if (op === 9) this._send(10, data);
+    }
+    _send(op, payload) {
+      const n = payload.length;
+      const head = n < 126 ? [0x80 | op, 0x80 | n] : n < 65536 ? [0x80 | op, 0x80 | 126, n >> 8, n & 255] : [0x80 | op, 0x80 | 127, 0, 0, 0, 0, (n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+      const mask = sysModule.random(4);
+      const body = new Uint8Array(n);
+      for (let i = 0; i < n; i++) body[i] = payload[i] ^ mask[i & 3];
+      const frame = this._cat(this._cat(Uint8Array.from(head), mask), body);
+      this._chain = this._chain.then(() => this._tcp.write(frame)).catch(() => {});
+      return this._chain;
+    }
+    send(data) {
+      if (this.readyState === 0) throw new Error("InvalidStateError: the connection is still opening");
+      if (this.readyState !== 1) return;
+      if (typeof data === "string") this._send(1, new TextEncoder().encode(data));
+      else this._send(2, partBytes(data));
+    }
+    close(code = 1000, reason = "") {
+      if (this.readyState >= 2) return;
+      if (this.readyState === 0) { this._fail(new Error("closed before the connection was established"), true); return; }
+      this.readyState = 2;
+      this._closing = true;
+      const r = new TextEncoder().encode(String(reason));
+      this._send(8, this._cat(Uint8Array.from([code >> 8, code & 255]), r));
+      // A server that never answers doesn't keep the socket open for ever.
+      setTimeout(() => this._finish(code, reason, false), 3000);
+    }
+    _finish(code, reason, clean) {
+      if (this.readyState === 3) return;
+      this.readyState = 3;
+      try { this._tcp && this._tcp.close(); } catch {}
+      this._emit("close", { code, reason, wasClean: clean });
+    }
+    _fail(err, quiet) {
+      if (this.readyState === 3) return;
+      if (!quiet) this._emit("error", { message: err && err.message });
+      this._finish(1006, "", false);
+    }
+    static get CONNECTING() { return 0; } static get OPEN() { return 1; } static get CLOSING() { return 2; } static get CLOSED() { return 3; }
+  };
+  for (const [k, v] of [["CONNECTING", 0], ["OPEN", 1], ["CLOSING", 2], ["CLOSED", 3]]) Object.defineProperty(g.WebSocket.prototype, k, { value: v });
   Object.defineProperty(g, "__sysModule", { value: sysModule });
   }
