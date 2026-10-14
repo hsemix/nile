@@ -9,6 +9,7 @@ pub mod a11y;
 pub mod dialogs;
 pub mod editing;
 pub mod frames;
+pub mod menus;
 pub mod paged;
 mod inputs;
 mod net;
@@ -202,6 +203,8 @@ pub struct View {
     pub window_requests: Vec<WindowCommand>,
     /// How this window was opened (its id, opener, `parameters`).
     pub window_info: WindowInfo,
+    /// The `<menu>` element the page chose as the application menu bar (`Window.this.menu`).
+    pub app_menu: Option<NodeId>,
     /// Popups that are shown in windows of their own (see `Portal`).
     pub portals: Vec<Portal>,
     /// A file chooser a click on `<input type=file>` asked for; the embedder answers with
@@ -540,6 +543,12 @@ impl Environment for Env {
         self.0.borrow().window_info.clone()
     }
 
+    fn set_app_menu(&self, node: Option<NodeId>) {
+        let mut v = self.0.borrow_mut();
+        v.app_menu = node;
+        v.scroll_dirty = true;
+    }
+
     fn portal_set(&self, node: NodeId, rect: [f32; 4]) {
         let mut v = self.0.borrow_mut();
         let rect = (rect[0], rect[1], rect[2], rect[3]);
@@ -870,6 +879,7 @@ impl Page {
             resized: false,
             window_rect: None,
             window_info: info,
+            app_menu: None,
             portals: Vec::new(),
         }));
         view.borrow_mut().adopt(styles);
@@ -2238,6 +2248,9 @@ impl Page {
         if let Some(id) = self.focused_frame() {
             return self.with_frame(id, |p| p.default_key(key, mods)).unwrap_or(false);
         }
+        if self.view.borrow().app_menu.is_some() && self.menu_accelerator(key, mods) {
+            return true;
+        }
         if self.view.borrow().menu.is_none() && self.page_key(key, mods) {
             return true;
         }
@@ -3391,6 +3404,7 @@ impl Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::menus::{Accel, MenuItem};
 
     /// A page loaded from a temp file, laid out at 600x300.
     fn page(html: &str, name: &str) -> (Page, PathBuf) {
@@ -3416,6 +3430,45 @@ mod tests {
 
     fn log(p: &Page) -> Vec<String> {
         p.scripts.as_ref().unwrap().console_output()
+    }
+
+    #[test]
+    fn a_menu_element_becomes_the_application_menu() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><menu id="app"><li>File <menu>
+                 <li id="open" accesskey="CmdOrCtrl+O">Open…</li><li id="save" accesskey="Shift+CmdOrCtrl+S" disabled>Save</li><hr/><hr/>
+                 <li id="auto" checked>Auto <b>save</b></li><li id="gone" hidden>Hidden</li><li id="quit" role="quit">Quit</li></menu></li>
+               <li>Edit <menu><li id="copy" role="copy">Copy</li></menu></li></menu>
+               <input id="t" value="abc">
+               <script>window.log = []; document.getElementById('open').addEventListener('click', () => log.push('open'));
+                       document.getElementById('save').addEventListener('click', () => log.push('save'));</script></body>"#,
+            "appmenu",
+        );
+        assert!(p.app_menu().is_none());
+        js(&mut p, "Window.this.menu = document.getElementById('app'); 0");
+        let menu = p.app_menu().expect("a menu");
+        let MenuItem::Item { label, items, .. } = &menu[0] else { panic!() };
+        assert_eq!(label, "File");
+        let names: Vec<String> = items.iter().map(|i| match i { MenuItem::Item { label, enabled, checked, .. } => format!("{label}{}{}", if *enabled { "" } else { " (off)" }, if *checked { " (on)" } else { "" }), MenuItem::Separator => "-".into() }).collect();
+        assert_eq!(names, ["Open…", "Save (off)", "-", "Auto save (on)", "Quit"]);
+        let MenuItem::Item { id: open, accel, .. } = &items[0] else { panic!() };
+        assert_eq!(accel, &Accel::parse("Ctrl+o"));
+        let MenuItem::Item { id: save, .. } = &items[1] else { panic!() };
+        let MenuItem::Item { id: quit, .. } = &items[4] else { panic!() };
+        // Choosing an item fires `click`; a disabled one does nothing; window roles go to the embedder.
+        assert_eq!(p.menu_click(*open), None);
+        assert_eq!(p.menu_click(*save), None);
+        assert_eq!(p.menu_click(*quit).as_deref(), Some("quit"));
+        assert_eq!(js(&mut p, "log.join(',')"), "open");
+        // The shortcut runs it where the platform's menu doesn't.
+        let mut mods = ModifiersState::default();
+        mods |= if cfg!(target_os = "macos") { ModifiersState::SUPER } else { ModifiersState::CONTROL };
+        assert!(p.menu_accelerator("o", mods));
+        assert!(!p.menu_accelerator("o", ModifiersState::default()));
+        assert_eq!(js(&mut p, "log.join(',')"), "open,open");
+        js(&mut p, "Window.this.menu = null; 0");
+        assert!(p.app_menu().is_none());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

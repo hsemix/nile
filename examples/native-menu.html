@@ -1,0 +1,50 @@
+<!doctype html>
+<html window-title="Native menu bar" window-width="760" window-height="520">
+<head><meta charset="utf-8"><title>Native menu bar</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; color: #26343d; background: #f4f6f8; padding: 28px }
+  h1 { font-size: 20px; margin: 0 0 6px }
+  p { margin: 0 0 14px; color: #5b6b75; max-width: 560px; line-height: 1.5 }
+  #log { background: #fff; border: 1px solid #d9e0e5; border-radius: 6px; padding: 12px 14px; min-height: 150px; font: 13px monospace; white-space: pre-wrap }
+  textarea { width: 560px; height: 90px; margin: 6px 0 16px; font: 14px sans-serif }
+  /* The menu markup isn't drawn on the page: the system shows it. */
+  menu#app { display: none }
+</style></head>
+<body>
+  <h1>Native menu bar</h1>
+  <p>On macOS and Windows <code>Window.this.menu = element</code> shows this <code>&lt;menu&gt;</code> as the system menu bar. Items fire <code>click</code>; shortcuts work; <code>role</code> items (copy, paste, quit...) do the standard thing. Elsewhere, draw it yourself.</p>
+  <textarea placeholder="Select text here, then use Edit > Copy / Paste"></textarea>
+  <div id="log">Choose a menu item…</div>
+
+  <menu id="app">
+    <li>File <menu>
+      <li id="new" accesskey="CmdOrCtrl+N">New</li>
+      <li id="open" accesskey="CmdOrCtrl+O">Open…</li>
+      <li id="save" accesskey="CmdOrCtrl+S" disabled>Save</li>
+      <hr/>
+      <li id="auto" checked>Auto save</li>
+      <hr/>
+      <li id="quit" role="quit" accesskey="CmdOrCtrl+Q">Quit</li>
+    </menu></li>
+    <li>View <menu>
+      <li id="big" accesskey="CmdOrCtrl+Plus">Bigger text</li>
+      <li>Theme <menu>
+        <li id="light" checked>Light</li>
+        <li id="dark">Dark</li>
+      </menu></li>
+    </menu></li>
+  </menu>
+
+<script>
+const log = document.getElementById("log");
+const say = (t) => { log.textContent = t + "\n" + log.textContent; };
+Window.this.menu = document.getElementById("app");
+document.getElementById("app").addEventListener("click", (e) => {
+  const li = e.target.closest("li"); if (!li || li.$("menu")) return;
+  say("clicked: " + (li.id || li.textContent.trim()));
+  if (li.id === "auto") li.toggleAttribute("checked");
+  if (li.id === "light" || li.id === "dark") { document.getElementById("light").toggleAttribute("checked", li.id === "light"); document.getElementById("dark").toggleAttribute("checked", li.id === "dark"); }
+  if (li.id === "new") document.getElementById("save").removeAttribute("disabled");
+});
+</script>
+</body></html>

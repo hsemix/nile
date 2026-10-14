@@ -16,11 +16,16 @@ use winit::{
     window::{CursorIcon, Window, WindowId, WindowLevel},
 };
 
-use crate::{access, dialogs, mods_of};
+use crate::{access, dialogs, menu, mods_of};
 
 /// What other threads (the accessibility layer) send the event loop.
 pub enum UserEvent {
     Access(accesskit_winit::Event),
+    /// A menu bar item was chosen: a page item's node id, or a negative tag for a standard action.
+    Menu(isize),
+    /// Windows: a command of window `hwnd`'s menu bar, as the page item's node id.
+    #[allow(dead_code)]
+    MenuIn(isize, u64),
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -70,11 +75,14 @@ pub struct App {
     /// The page that becomes the first window once the event loop is running.
     first: Option<Page>,
     main_id: u32,
+    /// The system menu bar (macOS), and the window whose page supplies it.
+    menu: Option<menu::NativeMenu>,
+    active: u32,
 }
 
 impl App {
     pub fn new(page: Page, proxy: EventLoopProxy<UserEvent>) -> App {
-        App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0 }
+        App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0, menu: None, active: 0 }
     }
 }
 
@@ -680,6 +688,40 @@ impl App {
                 self.wins[i].sync_access();
             }
         }
+        self.sync_menu(id);
+    }
+
+    /// Show a window's `Window.this.menu` as the system menu bar: the active window's on macOS (one
+    /// bar for the app), each window's own on Windows.
+    fn sync_menu(&mut self, id: u32) {
+        let Some(menu) = self.menu.as_mut() else { return };
+        if cfg!(target_os = "macos") && id != self.active {
+            return;
+        }
+        let Some(i) = self.wins.iter().position(|w| w.id == id) else { return };
+        let items = self.wins[i].page.app_menu();
+        let name = self.wins.first().map(|w| w.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "Nile".into());
+        menu.set(&self.wins[i].window, &name, items);
+    }
+
+    /// A menu item with a standard role that the page didn't handle itself.
+    fn menu_role(&mut self, event_loop: &ActiveEventLoop, id: u32, role: &str) {
+        match role {
+            "quit" => self.close(event_loop, self.main_id, 0, "null"),
+            "close" => self.close(event_loop, id, 0, "null"),
+            "minimize" => {
+                if let Some(i) = self.index(id) {
+                    self.wins[i].window.set_minimized(true);
+                }
+            }
+            "zoom" | "maximize" => {
+                if let Some(i) = self.index(id) {
+                    let w = &self.wins[i].window;
+                    w.set_maximized(!w.is_maximized());
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Open, move and close the OS windows of `owner`'s popups to match what its page asks for, and
@@ -767,6 +809,8 @@ impl ApplicationHandler<UserEvent> for App {
         let Some(page) = self.first.take() else { return };
         let id = page.view.borrow().window_info.id;
         self.main_id = id;
+        self.active = id;
+        self.menu = menu::NativeMenu::new(self.proxy.clone());
         self.create(event_loop, page, id, None);
     }
 
@@ -788,7 +832,38 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
-        let UserEvent::Access(event) = event;
+        let event = match event {
+            UserEvent::Access(event) => event,
+            UserEvent::MenuIn(hwnd, node) => {
+                let Some(idx) = self.wins.iter().position(|w| w.window.id() == WindowId::from(hwnd as u64)) else { return };
+                let id = self.wins[idx].id;
+                let role = self.wins[idx].page.menu_click(node);
+                self.wins[idx].window.request_redraw();
+                if let Some(role) = role {
+                    self.menu_role(event_loop, id, &role);
+                }
+                if self.index(id).is_some() {
+                    self.after(event_loop, id);
+                }
+                return;
+            }
+            UserEvent::Menu(tag) => {
+                let id = self.active;
+                let Some(idx) = self.index(id) else { return };
+                let role = match menu::role_of_tag(tag) {
+                    Some(role) => self.wins[idx].page.menu_role(role),
+                    None => self.wins[idx].page.menu_click(tag as u64),
+                };
+                self.wins[idx].window.request_redraw();
+                if let Some(role) = role {
+                    self.menu_role(event_loop, id, &role);
+                }
+                if self.index(id).is_some() {
+                    self.after(event_loop, id);
+                }
+                return;
+            }
+        };
         let Some(idx) = self.wins.iter().position(|w| w.window.id() == event.window_id) else { return };
         let id = self.wins[idx].id;
         match event.window_event {
@@ -818,6 +893,9 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let Some(idx) = self.wins.iter().position(|w| w.window.id() == wid) else { return };
         let id = self.wins[idx].id;
+        if matches!(event, WindowEvent::Focused(true)) {
+            self.active = id;
+        }
         {
             let win = &mut self.wins[idx];
             win.access.process_event(&win.window.clone(), &event);

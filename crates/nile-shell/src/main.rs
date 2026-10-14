@@ -14,6 +14,7 @@
 mod access;
 mod app;
 mod dialogs;
+mod menu;
 
 use std::{path::PathBuf, rc::Rc, time::{Duration, Instant}};
 
@@ -253,7 +254,10 @@ fn main() {
         return;
     }
 
-    let event_loop = EventLoop::<app::UserEvent>::with_user_event().build().expect("event loop");
+    let mut builder = EventLoop::<app::UserEvent>::with_user_event();
+    #[cfg(target_os = "windows")]
+    menu::install_hook(&mut builder);
+    let event_loop = builder.build().expect("event loop");
     let mut app = app::App::new(page, event_loop.create_proxy());
     event_loop.run_app(&mut app).expect("run app");
 }

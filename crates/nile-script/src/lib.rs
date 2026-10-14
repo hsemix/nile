@@ -193,6 +193,8 @@ pub trait Environment {
     /// Show the popup element `node` in an OS window of its own (`rect`: its border box in viewport
     /// coordinates), or take it back.
     fn portal_set(&self, _node: NodeId, _rect: [f32; 4]) {}
+    /// The `<menu>` element chosen as the application menu bar, or none.
+    fn set_app_menu(&self, _node: Option<NodeId>) {}
     fn portal_clear(&self, _node: NodeId) {}
     /// How this window was opened.
     fn window_info(&self) -> WindowInfo {
@@ -562,6 +564,10 @@ fn install_natives(
     native!("dialog", {
         let env = env.clone();
         move |kind: String, a: String, b: String, c: String, d: String| -> Option<String> { env.dialog(&kind, [&a, &b, &c, &d]) }
+    });
+    native!("menuSet", {
+        let env = env.clone();
+        move |id: i32| env.set_app_menu(node(id))
     });
     native!("portalSet", {
         let env = env.clone();

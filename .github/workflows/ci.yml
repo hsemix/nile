@@ -28,7 +28,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee clippy.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            # The compiler's errors as one annotation (the raw log needs admin rights to download).
+            summary=$(grep -E "^(error|warning)" -A6 clippy.log | head -80 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Clippy on ${{ matrix.os }}::${summary}"
+          fi
+          exit $status
       - name: Tests
         shell: bash
         run: |
