@@ -1301,6 +1301,24 @@ pub fn layout(
     layout_with(doc, styles, text, viewport_width, viewport_height, &LayoutOptions::default())
 }
 
+/// Loads the page's `@font-face` fonts into the text engine (each source only once).
+fn register_fonts(text: &mut TextEngine, styles: &StyleMap, loader: Option<&dyn ImageLoader>) {
+    let Some(loader) = loader else { return };
+    for face in &styles.font_faces {
+        // The first source that is a usable font wins.
+        for url in &face.urls {
+            if text.has_font(&face.family, url, face.weight, face.italic) {
+                break;
+            }
+            if let Some(bytes) = loader.bytes(url) {
+                if text.register_font(&face.family, url, bytes, face.weight, face.italic) {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 pub fn layout_with(
     doc: &Document,
     styles: &StyleMap,
@@ -1312,6 +1330,7 @@ pub fn layout_with(
     let mut tree: TaffyTree<NodeCtx> = TaffyTree::new();
 
     load_images(doc, styles, options.images);
+    register_fonts(text, styles, options.images);
     let html = doc.find(|n| n.tag() == Some("html")).unwrap_or(Document::ROOT);
     // Absolute boxes with no positioned ancestor use the root as their containing block.
     CONTAINING_BLOCKS.with(|s| s.borrow_mut().push(Vec::new()));

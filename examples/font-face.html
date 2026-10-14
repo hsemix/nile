@@ -1,0 +1,32 @@
+<!doctype html>
+<html><head><title>@font-face and @supports</title>
+<style>
+  @font-face { font-family: "Fira Web"; src: url("fonts/FiraSans-Medium.woff2") format("woff2"); }
+  @font-face { font-family: "Cantarell Web"; src: url(fonts/missing.woff2) format("woff2"), url(fonts/Cantarell-Regular.ttf) format("truetype"); }
+  body { margin: 0; padding: 24px; font: 18px sans-serif; color: #223 }
+  h2 { margin: 18px 0 6px; font-size: 13px; color: #678; font-family: sans-serif }
+  .fira { font-family: "Fira Web", sans-serif; font-size: 26px }
+  .cant { font-family: "Cantarell Web", sans-serif; font-size: 26px }
+  .plain { font-family: sans-serif; font-size: 26px }
+  .fallback { font-family: "No Such Font", serif; font-size: 22px }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 4px; background: #c33; color: white; font: 13px sans-serif }
+  @supports (display: grid) { .badge.grid { background: #2a7 } }
+  @supports not (display: grid) { .badge.grid { background: #c33 } }
+  @supports (not-a-property: 1) { .badge.unknown { background: #2a7 } }
+  @supports not (not-a-property: 1) { .badge.unknown { background: #37e } }
+  @supports (position: sticky) and (display: flex) { .badge.both { background: #2a7 } }
+</style></head>
+<body>
+  <h2>WOFF2 web font (Fira Sans Medium)</h2>
+  <div class="fira">The quick brown fox jumps over the lazy dog</div>
+  <h2>TrueType after a missing first source (Cantarell)</h2>
+  <div class="cant">The quick brown fox jumps over the lazy dog</div>
+  <h2>The default sans-serif for comparison</h2>
+  <div class="plain">The quick brown fox jumps over the lazy dog</div>
+  <h2>An unknown family falls back to the next one</h2>
+  <div class="fallback">The quick brown fox jumps over the lazy dog</div>
+  <h2>@supports (green = condition holds as expected)</h2>
+  <span class="badge grid">display: grid</span>
+  <span class="badge unknown">not (not-a-property)</span>
+  <span class="badge both">sticky and flex</span>
+</body></html>

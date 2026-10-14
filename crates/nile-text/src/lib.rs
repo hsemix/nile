@@ -67,11 +67,47 @@ pub struct TextEngine {
     fonts: FontContext,
     layouts: LayoutContext<TextBrush>,
     nbsp_ratio: std::collections::HashMap<(String, u32), f32>,
+    /// `@font-face` fonts registered so far (family, weight bits, italic, source id), so each loads once.
+    registered: std::collections::HashSet<(String, u32, bool, String)>,
 }
 
 impl TextEngine {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether [`register_font`](Self::register_font) already took this font (so the caller can skip loading it).
+    pub fn has_font(&self, family: &str, id: &str, weight: Option<f32>, italic: Option<bool>) -> bool {
+        self.registered.contains(&(family.to_ascii_lowercase(), weight.map_or(0, f32::to_bits), italic.unwrap_or(false), id.to_string()))
+    }
+
+    /// Add a web font under `family` (what `@font-face` does). `bytes` may be TrueType/OpenType, a
+    /// collection, or WOFF/WOFF2. `weight` and `italic` describe this face (`None`: take them from the
+    /// font, which is what a variable font wants). `id` names the source so that registering it again
+    /// is free. False if the data isn't a usable font.
+    pub fn register_font(&mut self, family: &str, id: &str, bytes: Vec<u8>, weight: Option<f32>, italic: Option<bool>) -> bool {
+        let key = (family.to_ascii_lowercase(), weight.map_or(0, f32::to_bits), italic.unwrap_or(false), id.to_string());
+        if self.registered.contains(&key) {
+            return true;
+        }
+        let data = if bytes.starts_with(b"wOF2") {
+            wuff::decompress_woff2(&bytes).ok()
+        } else if bytes.starts_with(b"wOFF") {
+            wuff::decompress_woff1(&bytes).ok()
+        } else {
+            Some(bytes)
+        };
+        let Some(data) = data else { return false };
+        let blob = parley::fontique::Blob::from(data);
+        let info = parley::fontique::FontInfoOverride {
+            family_name: Some(family),
+            weight: weight.map(parley::fontique::FontWeight::new),
+            style: italic.map(|i| if i { parley::fontique::FontStyle::Italic } else { parley::fontique::FontStyle::Normal }),
+            ..Default::default()
+        };
+        let added = self.fonts.collection.register_fonts(blob, Some(info));
+        self.registered.insert(key);
+        !added.is_empty()
     }
 
     /// Advance of a no-break space as a fraction of the font size. Layout uses
@@ -284,5 +320,65 @@ mod tests {
     #[test]
     fn collapses() {
         assert_eq!(collapse_whitespace("  a \n\t b "), " a b ");
+    }
+
+    /// Some installed TrueType font to use as test data.
+    fn some_system_font() -> Option<Vec<u8>> {
+        [
+            "/System/Library/Fonts/Supplemental/Georgia.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            "C:\\Windows\\Fonts\\arial.ttf",
+        ]
+        .iter()
+        .find_map(|p| std::fs::read(p).ok())
+    }
+
+    fn width_in(engine: &mut TextEngine, family: &str) -> f32 {
+        let style = TextStyle {
+            font_family: family.to_string(),
+            font_size: 40.0,
+            font_weight: 400.0,
+            line_height: 1.0,
+            color: [0; 4],
+            deco: 0,
+            spacer: false,
+            shift: 0.0,
+            italic: false,
+            underline: false,
+            line_through: false,
+            letter_spacing: 0.0,
+            align: Alignment::Start,
+        };
+        let mut layout = engine.shape("Registered fonts", &style, 1.0);
+        break_lines(&mut layout, None, Alignment::Start);
+        layout.width()
+    }
+
+    #[test]
+    fn a_registered_font_is_found_under_its_family_name() {
+        let Some(bytes) = some_system_font() else { return };
+        let mut engine = TextEngine::new();
+        let before = width_in(&mut engine, "NileWebFont");
+        assert!(engine.register_font("NileWebFont", "a.ttf", bytes.clone(), None, None));
+        assert!(engine.has_font("NileWebFont", "a.ttf", None, None));
+        let after = width_in(&mut engine, "NileWebFont");
+        assert_ne!(before, after, "the fallback font was replaced by the registered one");
+        // Registering the same source again does nothing; a broken file isn't a font.
+        assert!(engine.register_font("NileWebFont", "a.ttf", Vec::new(), None, None));
+        assert!(!engine.register_font("Broken", "b.woff2", b"wOF2garbage".to_vec(), None, None));
+        assert!(!engine.register_font("Broken", "c.ttf", b"not a font".to_vec(), None, None));
+    }
+
+    #[test]
+    fn a_missing_family_falls_through_to_the_next_one() {
+        let mut engine = TextEngine::new();
+        let serif = width_in(&mut engine, "serif");
+        let sans = width_in(&mut engine, "sans-serif");
+        assert_ne!(serif, sans, "the generic families differ on this machine");
+        assert_eq!(width_in(&mut engine, "'No Such Font', serif"), serif);
+        assert_eq!(width_in(&mut engine, "\"No Such Font\", serif"), serif);
+        assert_eq!(width_in(&mut engine, "NoSuchFont, serif"), serif);
     }
 }

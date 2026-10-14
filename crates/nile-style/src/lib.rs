@@ -30,7 +30,7 @@ pub use anim::{AnimEvent, AnimValue, AnimationSpec, Animator, Direction, Fill, T
 pub use page::{resolve as resolve_page, MarginBox, MarginPlace, PageStyle, Piece};
 pub use grid::{area_lines, Breadth, GridAutoFlow, GridLine, GridPlace, Track, TrackItem, TrackRepeat};
 pub use gradient::{TransformFn, ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
-pub use parse::{color_from_hex, Declaration, Rule, Stylesheet, Value};
+pub use parse::{color_from_hex, Declaration, FontFace, Rule, Stylesheet, Value};
 use parse::Cx;
 pub use selector::{ElementRef, InteractionState, NileImpl, PseudoClass, PseudoElement, Query};
 
@@ -1028,6 +1028,8 @@ pub struct StyleMap {
     pub(crate) keyframes: HashMap<String, Vec<parse::Frame>>,
     /// `@page` rules (selector, body) in source order.
     pages: Vec<(String, String)>,
+    /// `@font-face` rules in source order.
+    pub font_faces: Vec<FontFace>,
 }
 
 /// Which of `:hover`, `:active` and `:focus` appear in the stylesheets.
@@ -1262,6 +1264,7 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
         }
     }
     let pages: Vec<(String, String)> = author.iter().flat_map(|s| s.pages.iter().cloned()).collect();
+    let font_faces: Vec<FontFace> = author.iter().flat_map(|s| s.font_faces.iter().cloned()).collect();
     let has_pseudo = author.iter().any(|s| s.rules.iter().any(|r| r.selectors.slice().iter().any(|sel| sel.has_pseudo_element())));
     let state_deps = StateDeps::of(author.iter().map(|s| &**s).chain(std::iter::once(&*ua)));
     let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo };
@@ -1277,6 +1280,7 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
         markers: generated.markers,
         keyframes,
         pages,
+        font_faces,
     }
 }
 
@@ -1784,6 +1788,24 @@ fn point_of(v: &Value) -> Option<u8> {
     }
 }
 
+thread_local! {
+    /// Set by [`apply`] when a declaration names a property it doesn't know (for `@supports`).
+    static UNRECOGNISED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether `name: value` is a declaration this engine understands (what `@supports (name: value)` asks).
+pub(crate) fn supports_declaration(name: &str, value: &str, viewport: (f32, f32)) -> bool {
+    let used = Cell::new(false);
+    let pcx = Cx { viewport, uses_viewport: &used };
+    let decls = parse::parse_declarations(&format!("{name}: {value}"), &pcx);
+    let Some(d) = decls.iter().find(|d| d.name == name.trim().to_ascii_lowercase()) else { return false };
+    let mut style = ComputedStyle::default();
+    UNRECOGNISED.with(|u| u.set(false));
+    let fs = style.font_size;
+    apply(&mut style, d, fs);
+    !UNRECOGNISED.with(Cell::get)
+}
+
 fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
     let fs = if d.name == "font-size" { parent_font_size } else { s.font_size };
     let v = &d.values;
@@ -2206,11 +2228,31 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
             }
         }
         "font-family" => {
-            if let Some(name) = v.iter().find_map(|x| match x {
-                Value::Ident(i) | Value::Str(i) => Some(i.clone()),
-                _ => None,
-            }) {
-                s.font_family = name;
+            // The whole list, as CSS text Parley understands (a missing family falls through to the next).
+            let mut families: Vec<String> = Vec::new();
+            let mut words: Vec<&str> = Vec::new();
+            let quote = |n: &str| format!("\"{}\"", n.replace('\\', "\\\\").replace('"', "\\\""));
+            let flush = |words: &mut Vec<&str>, families: &mut Vec<String>| {
+                if !words.is_empty() {
+                    let name = words.join(" ");
+                    families.push(if words.len() > 1 { quote(&name) } else { name });
+                    words.clear();
+                }
+            };
+            for x in v {
+                match x {
+                    Value::Ident(i) => words.push(i),
+                    Value::Str(n) => {
+                        flush(&mut words, &mut families);
+                        families.push(quote(n));
+                    }
+                    Value::Comma => flush(&mut words, &mut families),
+                    _ => {}
+                }
+            }
+            flush(&mut words, &mut families);
+            if !families.is_empty() {
+                s.font_family = families.join(", ");
             }
         }
         "line-height" => {
@@ -2341,8 +2383,8 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         "align-items" => s.align_items = first.and_then(align).unwrap_or(s.align_items),
         _ => {
             // Grid and gap properties; anything else is unsupported and ignored, like a browser would.
-            if !anim::apply_properties(s, &d.name, v) {
-                grid::apply(s, &d.name, v, fs);
+            if !(anim::apply_properties(s, &d.name, v) || grid::apply(s, &d.name, v, fs)) {
+                UNRECOGNISED.with(|u| u.set(true));
             }
         }
     }
@@ -2351,6 +2393,33 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_faces_supports_and_family_lists_parse() {
+        let css = r#"
+            @font-face { font-family: "My Font"; src: local(Arial), url("a/b.woff2") format("woff2"), url(c.ttf); font-weight: bold; font-style: italic }
+            @font-face { font-family: Var; src: url('v.woff2'); font-weight: 100 900 }
+            @font-face { font-family: NoSource; src: local(Arial) }
+            @font-face { src: url(x.ttf) }
+            @supports (display: grid) { .a { color: red } }
+            @supports not (display: grid) { .b { color: red } }
+            @supports (display: flex) and (not-a-property: 1) { .c { color: red } }
+            @supports (not-a-property: 1) or (position: sticky) { .d { color: red } }
+            @supports not ((not-a-property: 1) or (also-not: x)) { .e { color: red } }
+            .f { font-family: 'Segoe UI', "Helvetica Neue", Arial Black, sans-serif }
+        "#;
+        let sheet = Stylesheet::parse(css);
+        assert_eq!(sheet.font_faces.len(), 2, "{:?}", sheet.font_faces);
+        assert_eq!(sheet.font_faces[0], parse::FontFace { family: "My Font".into(), urls: vec!["a/b.woff2".into(), "c.ttf".into()], weight: Some(700.0), italic: Some(true) });
+        assert_eq!((sheet.font_faces[1].weight, sheet.font_faces[1].italic), (None, None));
+        let selectors: Vec<String> = sheet.rules.iter().map(|r| format!("{:?}", r.declarations.first().map(|d| d.name.clone()))).collect();
+        // `.a`, `.d` and `.e` hold; `.b` and `.c` don't; `.f` is always there.
+        assert_eq!(selectors.len(), 4, "{selectors:?}");
+        let doc = Document::parse(r#"<style>.f { font-family: 'Segoe UI', "Helvetica Neue", Arial Black, sans-serif }</style><p class="f" id="p"></p>"#);
+        let styles = compute_styles(&doc);
+        let p = styles.get(doc.find(|n| n.attr("id") == Some("p")).unwrap());
+        assert_eq!(p.font_family, r#""Segoe UI", "Helvetica Neue", "arial black", sans-serif"#);
+    }
 
     #[test]
     fn border_radius_takes_one_to_four_corners_and_percent() {

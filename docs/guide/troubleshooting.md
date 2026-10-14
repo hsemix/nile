@@ -31,8 +31,9 @@ Read-only selection is described in [selection](controls-and-menus.md#enable-pag
 
 Specify an appropriate symbol font family and check that it is installed on the
 target platform. Generic fallback does not cover every symbol. Prefer CSS-drawn
-simple icons if system-font differences are unacceptable. Loading custom web fonts
-with `@font-face` is not implemented.
+simple icons if system-font differences are unacceptable, or ship an icon font with
+`@font-face { font-family: Icons; src: url(icons.woff2) }` (TrueType, OpenType, WOFF and WOFF2 load
+from the page's folder or a packed app).
 
 ## A popup is clipped or appears behind content
 

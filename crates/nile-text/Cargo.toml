@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 parley.workspace = true
+wuff.workspace = true
