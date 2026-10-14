@@ -354,9 +354,13 @@ impl View {
         self.scroll_offsets.insert(node, new);
         self.scrolled.push(node);
         self.scroll_dirty = true;
-        // The drop-down is positioned for the old scroll position.
+        // Ordinary overflow scrolling only changes paint/hit-test offsets, not geometry.
+        // Native list boxes bake their scroll into ListBox; a drop-down also needs clearing.
+        let rebuild = self.menu.is_some() || self.layout.as_ref().is_some_and(|(_, _, tree)| tree.list_box(node).is_some());
         self.menu = None;
-        self.layout = None;
+        if rebuild {
+            self.layout = None;
+        }
         true
     }
 
@@ -3785,6 +3789,7 @@ cd</textarea>
         p.pointer_moved(x, y);
         p.wheel(0.0, -30.0); // wheel down: scroll content up by 30
         assert_eq!(offset(&p, "box"), (0.0, 30.0));
+        assert!(p.view.borrow().layout.is_some(), "overflow scrolling must preserve cached geometry");
         p.wheel(0.0, -100.0); // clamps at the end (120 - 50 = 70)
         assert_eq!(offset(&p, "box"), (0.0, 70.0));
         assert_eq!(p.view.borrow().scroll_y, 0.0);
