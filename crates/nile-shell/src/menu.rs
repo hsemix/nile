@@ -104,10 +104,10 @@ mod win {
                         SetMenu(hwnd, bar);
                     }
                     None => {
-                        SetMenu(hwnd, std::ptr::null_mut());
+                        SetMenu(hwnd, 0);
                     }
                 }
-                if !old.is_null() {
+                if old != 0 {
                     DestroyMenu(old);
                 }
                 DrawMenuBar(hwnd);

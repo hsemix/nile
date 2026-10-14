@@ -22,6 +22,7 @@ use crate::{access, dialogs, menu, mods_of};
 pub enum UserEvent {
     Access(accesskit_winit::Event),
     /// A menu bar item was chosen: a page item's node id, or a negative tag for a standard action.
+    #[allow(dead_code)]
     Menu(isize),
     /// Windows: a command of window `hwnd`'s menu bar, as the page item's node id.
     #[allow(dead_code)]

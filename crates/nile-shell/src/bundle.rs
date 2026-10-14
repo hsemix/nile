@@ -37,7 +37,7 @@ pub fn with_icon(runtime: Vec<u8>, icon: &Path) -> std::io::Result<Vec<u8>> {
     // RT_ICON = 3, RT_GROUP_ICON = 14; language 0 (neutral).
     let ok = unsafe {
         let h = BeginUpdateResourceW(wide.as_ptr(), 0);
-        if h.is_null() {
+        if h == 0 {
             false
         } else {
             let mut group = vec![0u8, 0, 1, 0];
