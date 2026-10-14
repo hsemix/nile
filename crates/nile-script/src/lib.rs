@@ -30,7 +30,7 @@ mod envmod;
 mod jsx;
 mod net;
 
-pub use net::{FetchRequest, FetchResponse, Fetcher, LocalFetcher};
+pub use net::{file_url, path_of_url, FetchRequest, FetchResponse, Fetcher, LocalFetcher};
 
 const EDIT: &str = include_str!("edit.js");
 const WEB: &str = include_str!("web.js");
@@ -193,6 +193,8 @@ pub trait Environment {
     /// Show the popup element `node` in an OS window of its own (`rect`: its border box in viewport
     /// coordinates), or take it back.
     fn portal_set(&self, _node: NodeId, _rect: [f32; 4]) {}
+    /// The `<menu>` element chosen as the application menu bar, or none.
+    fn set_app_menu(&self, _node: Option<NodeId>) {}
     fn portal_clear(&self, _node: NodeId) {}
     /// How this window was opened.
     fn window_info(&self) -> WindowInfo {
@@ -280,7 +282,7 @@ impl Loader for FileLoader {
         if let Some(source) = builtin {
             return Module::declare(ctx.clone(), name, source);
         }
-        let source = std::fs::read_to_string(name).map_err(|_| rquickjs::Error::new_loading(name))?;
+        let source = nile_dom::vfs::read_to_string(std::path::Path::new(name)).map_err(|_| rquickjs::Error::new_loading(name))?;
         let source = jsx::transform(&source).unwrap_or(source);
         Module::declare(ctx.clone(), name, source)
     }
@@ -562,6 +564,10 @@ fn install_natives(
     native!("dialog", {
         let env = env.clone();
         move |kind: String, a: String, b: String, c: String, d: String| -> Option<String> { env.dialog(&kind, [&a, &b, &c, &d]) }
+    });
+    native!("menuSet", {
+        let env = env.clone();
+        move |id: i32| env.set_app_menu(node(id))
     });
     native!("portalSet", {
         let env = env.clone();

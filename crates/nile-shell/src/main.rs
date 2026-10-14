@@ -8,12 +8,16 @@
 //!        [--type TEXT]                 type into the focused input ({Backspace}, {Shift+ArrowLeft}, {Cmd+a}, ... for keys)
 //!        [--compose TEXT]              show TEXT as an input method's composition at the caret
 //!        [--page N]                    with --png: render page N (1-based) of the paginated document instead
+//!   nile                                open main.html / index.html next to the program (or in the pack)
+//!   nile folder                         open the folder's main.html / index.html
+//!   nile --pack folder [-o app]         write `app`: a copy of this program with the folder's files appended
 //!   nile page.html --pdf out.pdf        write every page as a PDF ([--wait MS] first)
 //!        [--wait MS]                   let timers run this long before the snapshot
 
 mod access;
 mod app;
 mod dialogs;
+mod menu;
 
 use std::{path::PathBuf, rc::Rc, time::{Duration, Instant}};
 
@@ -182,8 +186,55 @@ fn paged_output(page: &mut Page, pdf: Option<String>, png: Option<String>, page_
     }
 }
 
+/// `nile --pack folder [-o out]`: this program with the folder's files appended, as one executable.
+fn pack_command(args: &[String]) -> ! {
+    let mut folder = None;
+    let mut out = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-o" | "--out" => out = it.next().cloned(),
+            _ => folder = Some(PathBuf::from(a)),
+        }
+    }
+    let Some(folder) = folder.filter(|f| f.is_dir()) else {
+        eprintln!("usage: nile --pack <folder> [-o <output>]");
+        std::process::exit(2);
+    };
+    if nile_dom::vfs::start_file(&folder).is_none() {
+        eprintln!("warning: {} has no main.html / index.html to start from", folder.display());
+    }
+    let name = std::fs::canonicalize(&folder).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "app".into());
+    let out = PathBuf::from(out.unwrap_or_else(|| if cfg!(windows) { format!("{name}.exe") } else { name }));
+    let result = nile_dom::vfs::runtime_bytes().and_then(|runtime| nile_dom::vfs::pack(&folder, &runtime, &out));
+    match result {
+        Ok((files, stored)) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755));
+            }
+            // A modified Mach-O has to be signed again to start on Apple silicon.
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("codesign").args(["--force", "--sign", "-"]).arg(&out).output();
+            println!("wrote {} ({files} files, {} KB packed)", out.display(), stored / 1024);
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("could not pack {}: {e}", folder.display());
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
-    let mut args = std::env::args().skip(1);
+    // A packed app finds its files behind its own executable.
+    nile_dom::vfs::mount_self();
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().is_some_and(|a| a == "--pack") {
+        pack_command(&argv[1..]);
+    }
+    let mut args = argv.into_iter();
     let mut file = None;
     let mut png = None;
     let mut pointer = None;
@@ -231,8 +282,15 @@ fn main() {
             _ => file = Some(PathBuf::from(arg)),
         }
     }
+    // No file (or a folder): the start file of the pack, the program's folder, or the folder given.
+    let file = match file {
+        Some(f) if f.is_dir() => nile_dom::vfs::start_file(&f),
+        Some(f) => Some(f),
+        None if nile_dom::vfs::mounted() => nile_dom::vfs::start_file(&nile_dom::vfs::mount_path()),
+        None => std::env::current_exe().ok().and_then(|e| e.parent().and_then(nile_dom::vfs::start_file)).or_else(|| nile_dom::vfs::start_file(std::path::Path::new("."))),
+    };
     let Some(file) = file else {
-        eprintln!("usage: nile <file.html> [--png out.png] [--width N] [--height N] [--scale N] [--hover X,Y] [--press X,Y] [--click X,Y] [--wheel X,Y,DY] [--type TEXT] [--wait MS]");
+        eprintln!("usage: nile [<file.html> | <folder>] [--png out.png] [--width N] [--height N] [--scale N] [--hover X,Y] [--press X,Y] [--click X,Y] [--wheel X,Y,DY] [--type TEXT] [--wait MS]");
         std::process::exit(2);
     };
 
@@ -253,7 +311,10 @@ fn main() {
         return;
     }
 
-    let event_loop = EventLoop::<app::UserEvent>::with_user_event().build().expect("event loop");
+    let mut builder = EventLoop::<app::UserEvent>::with_user_event();
+    #[cfg(target_os = "windows")]
+    menu::install_hook(&mut builder);
+    let event_loop = builder.build().expect("event loop");
     let mut app = app::App::new(page, event_loop.create_proxy());
     event_loop.run_app(&mut app).expect("run app");
 }

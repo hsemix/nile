@@ -950,6 +950,7 @@
   // `new Window({ url, ... })` opens another one (the shell creates it; see `WindowCommand::Open`).
   const dialog = (kind, a = "", b = "", c = "", d = "") => N.dialog(kind, String(a), String(b), String(c), String(d));
   const textOf = (n) => (Array.isArray(n) ? n.map(textOf).join("") : n == null || typeof n === "boolean" ? "" : typeof n === "object" ? "" : String(n));
+  let appMenu = null;
   class Window {
     constructor(params = {}) { openWindow(this, params, false); }
     static get this() { return thisWindow; }
@@ -998,6 +999,10 @@
     set popupWindows(v) { popupWindows = !!v; }
     get messageBoxes() { return boxMode; }
     set messageBoxes(v) { boxMode = v === "inline" ? "inline" : "native"; }
+    // The application menu bar of the window: `Window.this.menu = document.$("menu#app")`. The shell shows
+    // it as the system menu bar on macOS and Windows (elsewhere the page draws its own); null removes it.
+    get menu() { return appMenu; }
+    set menu(el) { appMenu = el || null; N.menuSet(el ? el._id : -1); }
     get isActive() { return this === thisWindow ? active : this._valid; }
     get isValid() { return this === thisWindow || this._valid; }
     // Asks the window to close; a `closerequest` listener may cancel it. `value` is what the opener's

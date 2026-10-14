@@ -31,6 +31,22 @@ pub trait Fetcher: Send + Sync {
     fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, String>;
 }
 
+/// `file://` URL of a path: slashes forward, no Windows `\\?\` prefix, and `file:///C:/x` for drive paths.
+pub fn file_url(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    let s = s.strip_prefix("//?/").unwrap_or(&s);
+    if s.starts_with('/') { format!("file://{s}") } else { format!("file:///{s}") }
+}
+
+/// The path a `file://` URL (or plain path) names; `file:///C:/x` gives `C:/x`.
+pub fn path_of_url(url: &str) -> &str {
+    let rest = url.strip_prefix("file://").unwrap_or(url);
+    match rest.as_bytes() {
+        [b'/', d, b':', ..] if d.is_ascii_alphabetic() => &rest[1..],
+        _ => rest,
+    }
+}
+
 /// Files (relative to `base`, absolute, or `file://`) and `data:` URLs; nothing else.
 pub struct LocalFetcher {
     pub base: PathBuf,
@@ -97,17 +113,18 @@ impl Fetcher for LocalFetcher {
             let mime = meta.trim_end_matches(";base64");
             return Ok(ok(body, if mime.is_empty() { "text/plain;charset=US-ASCII" } else { mime }));
         }
-        if req.url.contains("://") && !req.url.starts_with("file://") {
+        if req.url.contains("://") && !req.url.starts_with("file://") && !req.url.starts_with("this://") {
             return Err(format!("network access is not available for {}", req.url));
         }
         if !req.method.eq_ignore_ascii_case("GET") && !req.method.eq_ignore_ascii_case("HEAD") {
             return Ok(FetchResponse { status: 405, status_text: "Method Not Allowed".into(), url: req.url, ..Default::default() });
         }
-        let raw = req.url.strip_prefix("file://").unwrap_or(&req.url);
+        let mapped = nile_dom::vfs::url_to_path(&req.url).map(|p| p.to_string_lossy().into_owned());
+        let raw = mapped.as_deref().unwrap_or_else(|| path_of_url(&req.url));
         let raw = raw.split(['?', '#']).next().unwrap_or(raw);
         let rel = String::from_utf8_lossy(&percent_decode(raw)).into_owned();
         let path = if std::path::Path::new(&rel).is_absolute() { PathBuf::from(&rel) } else { self.base.join(&rel) };
-        match std::fs::read(&path) {
+        match nile_dom::vfs::read(&path) {
             Ok(body) => Ok(ok(if req.method.eq_ignore_ascii_case("HEAD") { Vec::new() } else { body }, mime_of(&rel))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Ok(FetchResponse { status: 404, status_text: "Not Found".into(), url: req.url, ..Default::default() })
@@ -158,4 +175,18 @@ pub(crate) fn b64(bytes: &[u8]) -> String {
 
 pub(crate) fn unb64(s: &str) -> Vec<u8> {
     base64::engine::general_purpose::STANDARD.decode(s).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    #[test]
+    fn file_urls_cope_with_windows_style_paths() {
+        assert_eq!(file_url(std::path::Path::new(r"\\?\C:\Users\x.html")), "file:///C:/Users/x.html");
+        assert_eq!(file_url(std::path::Path::new("/tmp/x.html")), "file:///tmp/x.html");
+        assert_eq!(path_of_url("file:///C:/Users/x.html"), "C:/Users/x.html");
+        assert_eq!(path_of_url("file:///tmp/x.html"), "/tmp/x.html");
+        assert_eq!(path_of_url("rel/x.html"), "rel/x.html");
+    }
 }

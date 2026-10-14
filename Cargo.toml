@@ -18,6 +18,7 @@ nile-engine = { path = "crates/nile-engine" }
 nile-capi = { path = "crates/nile-capi" }
 
 html5ever = "0.39"
+miniz_oxide = "0.9.1"
 markup5ever_rcdom = "0.39"
 cssparser = "0.38"
 selectors = "0.41"
@@ -29,10 +30,12 @@ rquickjs = { version = "0.14", features = ["loader"] }
 winit = "0.30"
 softbuffer = "0.4"
 accesskit = "0.25"
+windows-sys = { version = "0.52", default-features = false, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 accesskit_winit = "0.34"
 accesskit_consumer = "0.39"
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSView", "NSResponder", "NSGraphics"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObject"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSView", "NSResponder", "NSGraphics", "NSMenu", "NSMenuItem", "NSApplication", "NSEvent", "NSCell", "NSControl"] }
 arboard = { version = "3.6", default-features = false }
 imagesize = "0.13"
 base64 = "0.22"

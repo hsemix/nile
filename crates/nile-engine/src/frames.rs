@@ -171,7 +171,7 @@ impl Page {
                     continue;
                 }
                 let outbox = Rc::new(RefCell::new(Vec::new()));
-                let css = style_url.as_deref().and_then(|u| std::fs::read_to_string(self.resolve_path(u)).ok());
+                let css = style_url.as_deref().and_then(|u| nile_dom::vfs::read_to_string(&self.resolve_path(u)).ok());
                 let mut page = self.load_frame_document(&source, (w, h), Embed { outbox: outbox.clone(), css });
                 page.clipboard = Box::new(crate::MemoryClipboard::default());
                 page.view.borrow_mut().dialogs = self.view.borrow().dialogs.clone();
@@ -193,7 +193,8 @@ impl Page {
 
     /// A path from the document, relative to the page's folder.
     fn resolve_path(&self, src: &str) -> PathBuf {
-        let rel = src.strip_prefix("file://").unwrap_or(src);
+        let mapped = nile_dom::vfs::url_to_path(src).map(|p| p.to_string_lossy().into_owned());
+        let rel = mapped.as_deref().unwrap_or_else(|| nile_script::path_of_url(src));
         if std::path::Path::new(rel).is_absolute() {
             PathBuf::from(rel)
         } else {

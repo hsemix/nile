@@ -51,7 +51,7 @@ impl FileImages {
         let path = src.strip_prefix("file://").unwrap_or(src);
         // Ignore a query string or fragment.
         let path = path.split(['?', '#']).next().unwrap_or(path);
-        std::fs::read(self.base.join(path)).ok()
+        nile_dom::vfs::read(&self.base.join(path)).ok()
     }
 }
 

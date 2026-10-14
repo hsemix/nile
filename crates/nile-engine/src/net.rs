@@ -22,9 +22,11 @@ pub fn default_storage_file(page: &std::path::Path) -> Option<PathBuf> {
             }
         }
     };
-    let full = std::fs::canonicalize(page).ok()?;
+    let full = nile_dom::vfs::canonicalize(page).ok()?;
     // FNV-1a of the path keeps one file per page without odd characters in names.
-    let hash = full.to_string_lossy().bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
+    // Every packaged app has the same virtual paths, so its own file name tells them apart.
+    let who = if nile_dom::vfs::is_virtual(&full) { std::env::current_exe().ok().and_then(|e| e.file_stem().map(|s| s.to_string_lossy().into_owned())).unwrap_or_default() } else { String::new() };
+    let hash = if who.is_empty() { full.to_string_lossy().into_owned() } else { format!("{who}|{}", full.to_string_lossy()) }.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
     Some(dir.join(format!("{hash:016x}.json")))
 }
 

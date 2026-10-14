@@ -251,3 +251,37 @@ Prefer native `<button disabled>` over a visual-only disabled class. Treat
 `role="menu"` and similar roles as semantic markup; they do not create control
 behavior. Window chrome roles are an exception, handled by the shell as described
 in [the window guide](embedding.md#configure-the-development-shell-window).
+
+
+## The system menu bar (macOS and Windows)
+
+`Window.this.menu = element` shows a `<menu>` as the window's real menu bar: the top of the screen on
+macOS, the window's menu bar on Windows. Elsewhere it does nothing, so draw your own menu bar there (see
+`examples/menubar.html`). The markup is Sciter's menu markup:
+
+```html
+<menu id="app" style="display:none">
+  <li>File <menu>
+    <li id="open" accesskey="CmdOrCtrl+O">Open…</li>
+    <li id="save" accesskey="CmdOrCtrl+S" disabled>Save</li>
+    <hr/>
+    <li id="auto" checked>Auto save</li>
+    <li role="quit" accesskey="CmdOrCtrl+Q">Quit</li>
+  </menu></li>
+</menu>
+<script>Window.this.menu = document.$("menu#app")</script>
+```
+
+- A top-level `<li>` is a menu; a nested `<menu>` inside an `<li>` is its submenu; `<hr/>` is a separator.
+  `label="..."` overrides the item's text.
+- Choosing an item fires `click` on its `<li>`. `disabled`, `checked` and `hidden` follow the attributes (and
+  `el.state.checked` etc.) as the script changes them; the bar updates itself.
+- `accesskey` takes `CmdOrCtrl+Shift+S`, `Ctrl+O`, `Alt+F4`, `F5`, `^S` (Ctrl). `CmdOrCtrl` and `Ctrl` mean Cmd on
+  macOS and Ctrl on Windows; `Cmd` names the Windows or Command key explicitly. The shortcut is shown in the
+  menu and works while the window is focused.
+- `role` makes an item do a standard thing instead of firing `click`: `undo`, `redo`, `cut`, `copy`, `paste`,
+  `selectall` act on the focused page; `quit`, `close`, `minimize`, `zoom` act on the window.
+- On macOS Nile adds the standard application menu (About, Hide, Quit) and, if you did not write menus
+  titled Edit and Window, those too. Windows gets only what you write.
+- `Window.this.menu = null` removes it. `examples/native-menu.html` is a small working page.
+- C hosts can read the description with `Page::app_menu` from Rust; the C API for it is still to do.

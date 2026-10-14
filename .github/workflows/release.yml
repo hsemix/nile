@@ -1,12 +1,18 @@
 name: Release builds
 
 # Builds the `nile` shell and the `libnile` C library (with include/nile.h) for Windows, Linux and
-# macOS. Run it by hand from the Actions tab, or push a tag such as v0.1.0 to attach the archives
-# to a GitHub release.
+# macOS. It runs on every push to main (the archives are kept as workflow artifacts for 30 days),
+# by hand from the Actions tab, and when a tag such as v0.1.0 is pushed, which also attaches them to
+# a GitHub release.
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,7 +43,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p nile-shell -p nile-capi
+        shell: bash
+        run: |
+          set +e
+          cargo build --release --target ${{ matrix.target }} -p nile-shell -p nile-capi 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            summary=$(grep -E "^(error|warning)" -A6 build.log | head -80 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Build on ${{ matrix.name }}::${summary}"
+          fi
+          exit $status
       - name: Package
         shell: bash
         run: |
@@ -55,6 +70,7 @@ jobs:
         with:
           name: nile-${{ matrix.name }}
           path: nile-${{ matrix.name }}.*
+          retention-days: 30
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2

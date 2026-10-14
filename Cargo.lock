@@ -1607,6 +1607,7 @@ version = "0.1.0"
 dependencies = [
  "html5ever",
  "markup5ever_rcdom",
+ "miniz_oxide",
 ]
 
 [[package]]
@@ -1672,8 +1673,10 @@ dependencies = [
  "nile-text",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "skia-safe",
  "softbuffer",
+ "windows-sys 0.52.0",
  "winit",
 ]
 
