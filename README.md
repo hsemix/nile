@@ -47,7 +47,7 @@ maximize, move, resize, fullscreen), `nile_view_title`, `nile_view_cursor`,
 dragging). Input methods (IME): the host enables its IME while `nile_view_ime_wanted` is 1, puts the candidate window at `nile_view_ime_cursor_area`, and forwards `nile_view_ime_preedit` / `nile_view_ime_commit` / `nile_view_ime_cancel`; the `nile` binary does this through winit's `Ime` events. The composition shows underlined at the caret in text inputs and in `contenteditable` hosts (`--compose TEXT` renders one headless; `examples/ime.html`). Scripts and host call each other: `nile_view_eval`, `nile_view_call`,
 `nile_view_register_function` (scripts see it as `host.name(...)`, JSON in and out) and
 `nile_view_take_console`. The clipboard is yours through `nile_view_set_clipboard` (text, optionally HTML), native dialogs through `nile_view_set_dialogs`, file drops through `nile_view_drop_files`, and popups with their own OS windows through `nile_view_portals`/`nile_view_render_portal`.
-Single-threaded; no panic crosses the boundary. See `examples/c/render.c` for a complete program
+A program that doesn't want to write window code links `libnile_app` instead, which adds `nile_run`/`nile_run_file`/`nile_run_html` (windows and the event loop; `examples/c/app.c`). Single-threaded; no panic crosses the boundary. See `examples/c/render.c` for a complete program
 that renders a page to an image:
 
 ```sh

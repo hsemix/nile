@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "nile_shell"
+path = "src/lib.rs"
+
 [[bin]]
 name = "nile"
 path = "src/main.rs"

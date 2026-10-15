@@ -36,6 +36,20 @@ use skia_safe::{AlphaType, ColorType, EncodedImageFormat, ImageInfo};
 use winit::{event_loop::EventLoop, keyboard::ModifiersState};
 
 /// winit's modifier state as the engine's.
+/// Opens `page` in a window and runs the event loop until the last window closes; returns the
+/// exit code (`application.quit(code)`).
+pub fn run_page(mut page: Page) -> i32 {
+    page.clipboard = Box::new(SystemClipboard::default());
+    page.set_dialogs(Rc::new(dialogs::NativeDialogs));
+    let mut builder = EventLoop::<app::UserEvent>::with_user_event();
+    #[cfg(target_os = "windows")]
+    menu::install_hook(&mut builder);
+    let event_loop = builder.build().expect("event loop");
+    let mut app = app::App::new(page, event_loop.create_proxy());
+    event_loop.run_app(&mut app).expect("run app");
+    app.exit_code
+}
+
 fn mods_of(m: ModifiersState) -> Mods {
     let mut out = Mods::default();
     for (on, bit) in [(m.shift_key(), Mods::SHIFT), (m.control_key(), Mods::CONTROL), (m.alt_key(), Mods::ALT), (m.super_key(), Mods::SUPER)] {
@@ -394,10 +408,12 @@ fn linux_entry(out: &std::path::Path, icon: Option<&std::path::Path>, info: &bun
     }
 }
 
-fn main() {
+/// Runs the `nile` program with `argv` (the arguments after the program name) and returns its exit
+/// code: opens windows and runs the event loop, or renders headless (`--png`, `--pdf`), packs
+/// (`--pack`) or brands (`--brand`). This is what the `nile` binary and the `nile-app` C library call.
+pub fn run(argv: Vec<String>) -> i32 {
     // A packed app finds its files behind its own executable.
     nile_dom::vfs::mount_self();
-    let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().is_some_and(|a| a == "--brand") {
         brand_command(&argv[1..]);
     }
@@ -461,7 +477,7 @@ fn main() {
     };
     let Some(file) = file else {
         eprintln!("usage: nile [<file.html> | <folder>] [--png out.png] [--width N] [--height N] [--scale N] [--hover X,Y] [--press X,Y] [--click X,Y] [--wheel X,Y,DY] [--type TEXT] [--wait MS]");
-        std::process::exit(2);
+        return 2;
     };
 
     // A window knows its id before its scripts run, so `new Window()` at startup can name its opener.
@@ -480,11 +496,11 @@ fn main() {
     }
     if pdf.is_some() || (png.is_some() && page_no.is_some()) {
         paged_output(&mut page, pdf, png, page_no, scale, wait_ms);
-        return;
+        return 0;
     }
     if let Some(out) = png {
         render_png(&mut page, Snapshot { out, width, height, scale, pointer, typed, compose, wait_ms, settle_ms, select });
-        return;
+        return 0;
     }
 
     let mut builder = EventLoop::<app::UserEvent>::with_user_event();
@@ -494,7 +510,5 @@ fn main() {
     let mut app = app::App::new(page, event_loop.create_proxy());
     app.bootstrap = bootstrap;
     event_loop.run_app(&mut app).expect("run app");
-    if app.exit_code != 0 {
-        std::process::exit(app.exit_code);
-    }
+    app.exit_code
 }

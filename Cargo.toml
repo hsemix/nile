@@ -16,6 +16,7 @@ nile-render = { path = "crates/nile-render" }
 nile-script = { path = "crates/nile-script" }
 nile-engine = { path = "crates/nile-engine" }
 nile-capi = { path = "crates/nile-capi" }
+nile-shell = { path = "crates/nile-shell" }
 
 html5ever = "0.39"
 miniz_oxide = "0.9.1"

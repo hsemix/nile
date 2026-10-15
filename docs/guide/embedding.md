@@ -150,6 +150,23 @@ clipboard is private memory. `nile_view_selected_text` returns the input/page
 selection for a host Copy command. Update the window rectangle so script window
 measurements reflect the actual host window.
 
+### Standalone programs: `libnile_app`
+
+`libnile` is for hosts that own the window. If your program is just a Nile application, link
+`libnile_app` instead (same functions, plus the shell: windows, menus, dialogs, popups, packaging)
+and include `nile_app.h`:
+
+```c
+nile_app_register_function("greet", greet, NULL);   // host.greet(...) in scripts, from the first line
+return nile_run_html("<body>...</body>", NULL, 420, 160);   // or nile_run_file("app/main.html")
+```
+
+`nile_run(argc, argv)` takes the `nile` program's own command line (`page.html`, `--png out.png`,
+`--pack folder`, ...) with `argv[0]` skipped. All three block on the main thread until the last
+window closes and return the exit code (`application.quit(code)`). `examples/c/app.c` is a complete
+program. Build the library from source with `cargo build -p nile-app --release`; the release
+archives carry both `libnile` and `libnile_app`.
+
 ### Windows, dialogs, drops and popups
 
 `nile_view_window_config` also reports `translucent` (the window's pixels carry alpha: make the
