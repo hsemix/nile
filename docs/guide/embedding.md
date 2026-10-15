@@ -150,6 +150,27 @@ clipboard is private memory. `nile_view_selected_text` returns the input/page
 selection for a host Copy command. Update the window rectangle so script window
 measurements reflect the actual host window.
 
+### Windows, dialogs, drops and popups
+
+`nile_view_window_config` also reports `translucent` (the window's pixels carry alpha: make the
+native window transparent and present `nile_view_render`'s premultiplied BGRA with alpha; macOS
+wants straight alpha, so convert), `shadow` (`solid-with-shadow`) and `material` (0 none, 1 blur,
+2 acrylic, 3 mica, 4 tabbed, 5 sidebar, 6 hud). Scripts can change the material with
+`Window.this.material`, so read the config again after ticks and apply a new value (the `nile`
+shell's `material.rs` shows how for macOS, Windows and KDE). Forward the window's focus with
+`nile_view_window_activated` (the `activate` event).
+
+`nile_view_set_dialogs` takes callbacks for open, save and folder dialogs and message boxes, which
+scripts (`Window.this.selectFile`, `modal(<alert>...)`) and `<input type=file>` then use. A host
+that doesn't set them keeps the file-request flow below. Files dropped on the window go in through
+`nile_view_drop_files` (newline-separated paths; send a `nile_pointer_move` first so the page knows
+where). `nile_view_set_clipboard` has optional `get_html`/`set_html` callbacks for rich paste and copy.
+
+A popup shown with `popup({window: "popup"})` can have an OS window of its own: list them with
+`nile_view_portals` (JSON, rectangles in the view's logical coordinates), give each a frameless
+always-on-top window, draw it with `nile_view_render_portal`, and send its pointer, wheel and key
+input to the same view with the coordinates offset by the rectangle's origin.
+
 ### Input methods and file choosers
 
 The shell forwards native IME composition through winit. An embedding host should
