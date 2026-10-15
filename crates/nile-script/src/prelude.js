@@ -161,6 +161,7 @@
   // ---- nodes -------------------------------------------------------------
   const cache = new Map();
   let adopting = -1;
+  const customTags = new Map(); // class -> tag, for `new MyElement()` (customElements.define)
   function wrap(id) {
     if (id < 0) return null;
     let w = cache.get(id);
@@ -178,7 +179,7 @@
       // A class component (`class Clock extends Element`) is built by `new Clock(props, kids)`:
       // `adopting` hands it the element the engine made for it, or a new `<div>` outside JSX.
       if (typeof id !== "number") {
-        this._id = adopting >= 0 ? adopting : N.createElement("div");
+        this._id = adopting >= 0 ? adopting : N.createElement(customTags.get(new.target) || "div");
         cache.set(this._id, this);
       } else this._id = id;
     }

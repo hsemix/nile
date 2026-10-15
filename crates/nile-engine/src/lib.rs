@@ -4249,6 +4249,47 @@ mod tests {
     }
 
     #[test]
+    fn custom_elements_upgrade_parsed_created_and_new_elements() {
+        let (mut p, path) = page(
+            r##"<body><x-a id="p" k="1"></x-a><div id="host"></div><script>
+              window.log = [];
+              class XA extends HTMLElement {
+                static observedAttributes = ["k"];
+                n = 5;
+                connectedCallback() { log.push("conn:" + this.id + ":" + this.n); }
+                disconnectedCallback() { log.push("disc:" + this.id); }
+                attributeChangedCallback(a, o, v) { log.push("attr:" + a + ":" + o + ">" + v); }
+                hello() { return "hi " + this.localName; }
+              }
+              customElements.define("x-a", XA);
+              const c = document.createElement("x-a"); c.id = "c"; c.setAttribute("k", "2");
+              document.getElementById("host").append(c);
+              const m = new XA(); m.id = "m";
+              window.made = m;
+              try { customElements.define("bad", class extends HTMLElement {}); } catch (e) { log.push("bad:" + e.name); }
+            </script></body>"##,
+            "custom-elements",
+        );
+        p.tick();
+        let _ = js(&mut p, "0"); // let the mutation observer run
+        p.tick();
+        assert_eq!(js(&mut p, "document.getElementById('p') instanceof customElements.get('x-a')"), "true");
+        assert_eq!(js(&mut p, "document.getElementById('p').hello()"), "hi x-a");
+        assert_eq!(js(&mut p, "made.localName + ':' + (made instanceof XA)"), "x-a:true");
+        assert_eq!(js(&mut p, "document.getElementById('c') instanceof XA"), "true");
+        let log = js(&mut p, "window.log.join('|')");
+        for want in ["conn:p:5", "attr:k:null>1", "conn:c:5", "attr:k:null>2", "bad:SyntaxError"] {
+            assert!(log.contains(want), "{want} missing from {log}");
+        }
+        js(&mut p, "document.getElementById('c').remove()");
+        p.tick();
+        js(&mut p, "document.getElementById('p').setAttribute('k', '9')");
+        let log = js(&mut p, "window.log.join('|')");
+        assert!(log.contains("disc:c") && log.contains("attr:k:1>9"), "{log}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn form_controls_validate_and_match_valid_and_invalid() {
         let (mut p, path) = page(
             r##"<body><form id="f"><input id="a" required><input id="n" type="number" min="1" max="5" step="2" value="4"><input id="e" type="email" value="x@y.z"><input id="t" pattern="[a-z]+" value="abc" maxlength="5"><input id="c" type="checkbox" required><input id="d" disabled required></form><script>
