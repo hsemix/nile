@@ -69,6 +69,9 @@ paint and animation timings; `bench_scroll` (ignored test) replays wheel events 
 - **Check visual changes by rendering.** After any layout, style, text or paint
   change, render the relevant example with `--png` and look at the image.
   Tests passing isn't enough for visual work.
+- **Keep `CHANGELOG.md` current.** Every change that users or embedders could notice (features, behaviour
+  changes, fixes, removed things) gets a line under `Unreleased` in the same change, grouped by day under
+  Added / Changed / Fixed / Removed. Pure refactors and test-only edits don't need one.
 - **Add an example page** in `examples/` for each new feature (e.g.
   `examples/inline.html`) so it can be checked visually.
 - **Unit tests** go next to the code (`#[cfg(test)]`). Layout tests assert box

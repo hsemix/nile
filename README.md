@@ -159,6 +159,7 @@ cargo run -p nile-shell -- examples/system-theme/index.html
 Start with the [user guide](docs/guide/README.md). The
 [complete feature reference](docs/reference/README.md) covers CSS, DOM/events,
 web APIs, built-in modules, windows, editing, embedding and runnable examples.
+What changed and when is in the [changelog](CHANGELOG.md).
 
 ## What's supported today
 
