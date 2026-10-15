@@ -1893,21 +1893,28 @@ fn build_table(
     let mut body = Vec::new();
     let mut foot = Vec::new();
     let mut captions = Vec::new();
+    // Row groups that paint something: (group, rows in its section before it, its row count).
+    let mut groups: Vec<(NodeId, u8, usize, usize)> = Vec::new();
     for c in kids(doc, styles, id).into_iter().filter(|n| shown(n) && !styles.is_pseudo(*n)) {
         match styles.get(c).display {
             Display::TableRow => body.push(c),
             Display::TableRowGroup => {
                 let rows = with_display(c, Display::TableRow);
-                match tag(c).as_deref() {
-                    Some("thead") => head.extend(rows),
-                    Some("tfoot") => foot.extend(rows),
-                    _ => body.extend(rows),
+                let (section, list) = match tag(c).as_deref() {
+                    Some("thead") => (0, &mut head),
+                    Some("tfoot") => (2, &mut foot),
+                    _ => (1, &mut body),
+                };
+                if !rows.is_empty() && paints_box(styles.get(c)) {
+                    groups.push((c, section, list.len(), rows.len()));
                 }
+                list.extend(rows);
             }
             Display::TableCaption => captions.push(c),
             _ => {}
         }
     }
+    let section_start = [0, head.len(), head.len() + body.len()];
     let rows: Vec<NodeId> = head.into_iter().chain(body).chain(foot).collect();
 
     // Give every cell its grid rectangle, skipping slots taken by earlier row spans.
@@ -1941,7 +1948,8 @@ fn build_table(
         }
     }
     let columns = columns.max(1);
-    let first_row = captions.len();
+    let bottom_caption = |c: &NodeId| styles.get(*c).caption_bottom;
+    let first_row = captions.iter().filter(|c| !bottom_caption(c)).count();
     let line = |n: usize, span: usize| taffy::Line {
         start: taffy::style_helpers::line((n + 1) as i16),
         end: taffy::style_helpers::span(span as u16),
@@ -1949,14 +1957,36 @@ fn build_table(
 
     let mut items = Vec::new();
     // Captions sit above the grid, each on its own row.
-    for (i, cap) in captions.iter().enumerate() {
+    let (mut above, mut below) = (0, 0);
+    for cap in &captions {
         if let Some(n) = build(doc, styles, text, tree, *cap) {
             let mut st = tree.style(n).ok()?.clone();
-            st.grid_row = line(i, 1);
+            let at = if bottom_caption(cap) {
+                below += 1;
+                first_row + rows.len() + below - 1
+            } else {
+                above += 1;
+                above - 1
+            };
+            st.grid_row = line(at, 1);
             st.grid_column = line(0, columns);
             tree.set_style(n, st).ok()?;
             items.push(n);
         }
+    }
+    // A row group has no box of its own; one that paints (background, border, shadow) gets an
+    // empty item spanning its rows, behind them.
+    for (group, section, start, len) in &groups {
+        let mut st = taffy_style(styles.get(*group));
+        st.display = taffy::Display::Block;
+        st.margin = taffy::Rect::zero();
+        st.size = Size::auto();
+        st.grid_row = taffy::Line {
+            start: taffy::style_helpers::line((first_row + section_start[*section as usize] + start + 1) as i16),
+            end: taffy::style_helpers::span(*len as u16),
+        };
+        st.grid_column = line(0, columns);
+        items.push(tree.new_leaf_with_context(st, NodeCtx::Element(*group)).ok()?);
     }
     for (r, row) in rows.iter().enumerate() {
         let rs = styles.get(*row);
@@ -2072,6 +2102,36 @@ fn build_table(
             }
         }
     }
+    if !fixed && style.width != Length::Auto && ts.grid_template_columns.is_empty() {
+        // Automatic layout in a table of a given width: the free space is shared in proportion to
+        // what each column wants (its widest cell's text on one line), not equally.
+        let mut wants = vec![0.0f32; columns];
+        let mut ok = true;
+        for cell in cells.iter().filter(|c| c.cols == 1) {
+            let cs = styles.get(cell.node);
+            let own = match cs.width {
+                Length::Px(w) => w,
+                Length::Percent(_) => {
+                    ok = false;
+                    0.0
+                }
+                _ => {
+                    let raw = doc.text_content(cell.node);
+                    let line = if matches!(cs.white_space, nile_style::WhiteSpace::Pre | nile_style::WhiteSpace::PreWrap) { raw } else { raw.split_whitespace().collect::<Vec<_>>().join(" ") };
+                    let mut shaped = text.shape(&line, &text_style(cs), 1.0);
+                    nile_text::break_lines(&mut shaped, None, nile_text::Alignment::Start);
+                    shaped.width() + cs.padding.left + cs.padding.right + cs.border_width.left + cs.border_width.right
+                }
+            };
+            wants[cell.col] = wants[cell.col].max(own);
+        }
+        if ok && wants.iter().any(|w| *w > 0.0) {
+            ts.grid_template_columns = wants
+                .iter()
+                .map(|w| taffy::GridTemplateComponent::Single(track_fn(Track { min: Breadth::Auto, max: Breadth::Fr(w.max(1.0)) })))
+                .collect();
+        }
+    }
     ts.grid_auto_columns = vec![taffy::style_helpers::auto()];
     ts.grid_auto_rows = vec![taffy::style_helpers::auto()];
     if !style.border_collapse {
@@ -2090,6 +2150,11 @@ fn build_table(
     let n = tree.new_with_children(ts, &items).ok()?;
     tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
     hand_off_absolute(style, n)
+}
+
+/// Whether an element's own style paints a background, border or shadow.
+fn paints_box(s: &ComputedStyle) -> bool {
+    s.background.is_some_and(|c| c.a > 0) || s.background_image.is_some() || s.background_url.is_some() || !s.box_shadow.is_empty() || s.border_width != Edges::default()
 }
 
 /// The children of `id` with its generated `::before` and `::after` boxes around them.
@@ -4341,6 +4406,36 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
         assert_eq!(c.width, 154.0, "colspan covers both columns and the gap");
         assert_eq!(c.y, a.y + 20.0 + 4.0, "rows stack with spacing");
         assert_eq!(tb.width, 4.0 + 100.0 + 4.0 + 50.0 + 4.0, "the table shrinks to its columns");
+    }
+
+    #[test]
+    fn captions_can_sit_below_and_row_groups_paint_behind_their_rows() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><table id="t" style="border-spacing:0; caption-side:bottom">
+                 <caption id="cap" style="padding:0">Cap</caption>
+                 <thead id="h" style="background:#ccc"><tr><td id="a" style="padding:0;height:10px">a</td></tr></thead>
+                 <tbody><tr><td id="b" style="padding:0;height:10px">b</td></tr></tbody>
+                 <tfoot id="f" style="background:#fcc"><tr><td id="c" style="padding:0;height:10px">c</td></tr></tfoot>
+               </table></body>"#,
+        );
+        let (a, b, c, cap) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"), rect_of(&doc, &t, "c"), rect_of(&doc, &t, "cap"));
+        assert!(cap.y >= c.y + c.height, "the caption is below the last row: {cap:?} vs {c:?}");
+        assert!(a.y < b.y && b.y < c.y);
+        let (h, f) = (rect_of(&doc, &t, "h"), rect_of(&doc, &t, "f"));
+        assert_eq!((h.y, h.height), (a.y, a.height), "the header group's box covers its rows");
+        assert_eq!((f.y, f.height), (c.y, c.height), "so does the footer group's");
+    }
+
+    #[test]
+    fn automatic_columns_share_extra_width_in_proportion_to_their_content() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0;font:16px sans-serif"><table style="width:600px; border-spacing:0">
+                 <tr><td id="a" style="padding:0">aaaa</td><td id="b" style="padding:0">aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</td></tr>
+               </table></body>"#,
+        );
+        let (a, b) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"));
+        assert_eq!(a.width + b.width, 600.0);
+        assert!(b.width > a.width * 5.0, "the wider content gets proportionally more: {a:?} {b:?}");
     }
 
     #[test]

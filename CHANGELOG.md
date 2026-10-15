@@ -11,6 +11,7 @@ the section becomes that version's.
 ### 2026-10-15
 
 #### Added
+- Tables: `caption-side: bottom`, backgrounds/borders on `thead`/`tbody`/`tfoot` (an empty box behind their rows, also repeated with a paginated header), and automatic columns in a table with a `width` share the free space in proportion to their text instead of equally. Example `examples/table-parts.html`.
 - Sciter class components: a class extending `Element` works as a JSX tag with `this(props, kids)`,
   `render()`, `componentDidMount`, `componentDidUpdate`, `componentWillUnmount`; `componentUpdate(obj)`
   re-renders in a batched microtask; `Element.create(jsx)`, `el.post(fn)`. Example `examples/components.html`.

@@ -447,6 +447,8 @@ pub struct ComputedStyle {
     /// `border-spacing` (horizontal, vertical) and `border-collapse: collapse`; inherited.
     pub border_spacing: (f32, f32),
     pub border_collapse: bool,
+    /// `caption-side: bottom`; inherited.
+    pub caption_bottom: bool,
     /// `table-layout: fixed`.
     pub table_fixed: bool,
     /// `vertical-align` for table cells.
@@ -582,6 +584,7 @@ impl Default for ComputedStyle {
             column_gap: 0.0,
             border_spacing: (0.0, 0.0),
             border_collapse: false,
+            caption_bottom: false,
             table_fixed: false,
             vertical_align: VerticalAlign::Baseline,
             cursor: Cursor::Auto,
@@ -824,6 +827,7 @@ impl ComputedStyle {
             user_select: parent.user_select,
             border_spacing: parent.border_spacing,
             border_collapse: parent.border_collapse,
+            caption_bottom: parent.caption_bottom,
             cursor: parent.cursor,
             selection_bg: parent.selection_bg,
             letter_spacing: parent.letter_spacing,
