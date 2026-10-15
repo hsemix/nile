@@ -406,7 +406,7 @@ impl Win {
                 let page = &mut self.page;
                 #[cfg(windows)]
                 if self.config.translucent() {
-                    if let Some(hwnd) = owner_hwnd(window) {
+                    if let Some(hwnd) = owner_hwnd(&window) {
                         self.alpha.present(hwnd, size.width, size.height, |bytes| page.paint(bytes, size.width, size.height, scale));
                         return false;
                     }
