@@ -1,0 +1,25 @@
+<html><head><title>Scrollbars</title>
+<style>
+  body { font: 13px sans-serif; margin: 16px; background: #f6f7f9 }
+  .row { display: flex; gap: 14px; margin-bottom: 14px }
+  .box { width: 150px; height: 130px; overflow: auto; background: #fff; border: 1px solid #c9ccd1; border-radius: 6px; padding: 6px }
+  .box p { margin: 0 0 6px }
+  h4 { margin: 0 0 4px; font-size: 12px; color: #555 }
+  .thin { scrollbar-width: thin }
+  .none { scrollbar-width: none }
+  .colored { scrollbar-color: #2f80ed #e3ecfb }
+  .webkit::-webkit-scrollbar { width: 12px; height: 12px }
+  .webkit::-webkit-scrollbar-track { background: #1f2937 }
+  .webkit::-webkit-scrollbar-thumb { background: #f59e0b; border-radius: 3px }
+  .dark { background: #1f2937; color: #e5e7eb }
+</style></head><body>
+<div class="row">
+  <div><h4>default (hover it)</h4><div class="box" id="a"><p>Line 1</p><p>Line 2</p><p>Line 3</p><p>Line 4</p><p>Line 5</p><p>Line 6</p><p>Line 7</p><p>Line 8</p><p>Line 9</p><p>Line 10</p></div></div>
+  <div><h4>scrollbar-width: thin</h4><div class="box thin"><p>Line 1</p><p>Line 2</p><p>Line 3</p><p>Line 4</p><p>Line 5</p><p>Line 6</p><p>Line 7</p><p>Line 8</p><p>Line 9</p><p>Line 10</p></div></div>
+  <div><h4>scrollbar-width: none</h4><div class="box none"><p>Line 1</p><p>Line 2</p><p>Line 3</p><p>Line 4</p><p>Line 5</p><p>Line 6</p><p>Line 7</p><p>Line 8</p><p>Line 9</p><p>Line 10</p></div></div>
+</div>
+<div class="row">
+  <div><h4>scrollbar-color</h4><div class="box colored"><p>Line 1</p><p>Line 2</p><p>Line 3</p><p>Line 4</p><p>Line 5</p><p>Line 6</p><p>Line 7</p><p>Line 8</p><p>Line 9</p><p>Line 10</p></div></div>
+  <div><h4>::-webkit-scrollbar*</h4><div class="box webkit dark"><p>Line 1</p><p>Line 2</p><p>Line 3</p><p>Line 4</p><p>Line 5</p><p>Line 6</p><p>Line 7</p><p>Line 8</p><p>Line 9</p><p>Line 10</p></div></div>
+</div>
+</body></html>

@@ -40,6 +40,9 @@ pub struct Overlay<'a> {
     pub selected_image: Option<LRect>,
     /// Boxes `[from, to)` not to paint here (a popup that has a window of its own).
     pub skip: &'a [(usize, usize)],
+    /// The scrollbar under the pointer (its scroller, `None` for the page, and whether it is the
+    /// vertical one), and whether it is being dragged.
+    pub bar: Option<(Option<NodeId>, bool, bool)>,
 }
 
 /// Where the caret of an editing host is drawn.
@@ -85,8 +88,9 @@ impl Renderer {
             self.paint_menu(canvas, menu);
         }
         canvas.restore();
-        if let Some(t) = nile_layout::page_thumb(viewport, tree.content_height, scroll_y).filter(|_| only.is_none()) {
-            paint_thumb(canvas, &t);
+        let look = styles.page_scrollbar();
+        if let Some(t) = nile_layout::page_thumb(viewport, tree.content_height, scroll_y, look.thickness).filter(|_| only.is_none()) {
+            paint_thumb(canvas, &t, &look, bar_state(overlay, None, t.vertical));
         }
     }
 
@@ -106,7 +110,7 @@ impl Renderer {
                 let (_, container) = open.pop().expect("checked above");
                 canvas.restore();
                 if let Some(container) = container {
-                    paint_scrollbars(canvas, container, offsets);
+                    paint_scrollbars(canvas, container, offsets, styles, overlay);
                 }
             }
             if skip.iter().any(|&(s, e)| i >= s && i < e) {
@@ -201,7 +205,7 @@ impl Renderer {
         while let Some((_, container)) = open.pop() {
             canvas.restore();
             if let Some(container) = container {
-                paint_scrollbars(canvas, container, offsets);
+                paint_scrollbars(canvas, container, offsets, styles, overlay);
             }
         }
     }
@@ -1039,20 +1043,67 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
 }
 
 /// Thin overlay scrollbars for an `overflow: auto | scroll` box that has more to show.
-fn paint_scrollbars(canvas: &Canvas, b: &LayoutBox, offsets: &ScrollOffsets) {
+fn paint_scrollbars(canvas: &Canvas, b: &LayoutBox, offsets: &ScrollOffsets, styles: &StyleMap, overlay: &Overlay) {
     let Some(sb) = &b.scroll else { return };
     let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
+    let look = styles.scrollbar_look(b.node);
     for t in sb.thumbs(ox, oy) {
-        paint_thumb(canvas, &t);
+        paint_thumb(canvas, &t, &look, bar_state(overlay, Some(b.node), t.vertical));
     }
 }
 
-fn paint_thumb(canvas: &Canvas, t: &nile_layout::Thumb) {
+#[derive(Clone, Copy, PartialEq)]
+enum BarState {
+    Rest,
+    Hover,
+    Active,
+}
+
+fn bar_state(overlay: &Overlay, node: Option<NodeId>, vertical: bool) -> BarState {
+    match overlay.bar {
+        Some((n, v, active)) if n == node && v == vertical => if active { BarState::Active } else { BarState::Hover },
+        _ => BarState::Rest,
+    }
+}
+
+/// A scrollbar: while the pointer is over it (or it is dragged) it grows toward the content, shows its
+/// track and darkens the thumb.
+fn paint_thumb(canvas: &Canvas, t: &nile_layout::Thumb, look: &nile_style::ScrollbarLook, state: BarState) {
+    let grow = if state == BarState::Rest { 0.0 } else { nile_layout::SCROLLBAR_GROW };
+    let widen = |r: nile_layout::Rect| {
+        if t.vertical {
+            Rect::from_xywh(r.x - grow, r.y, r.width + grow, r.height)
+        } else {
+            Rect::from_xywh(r.x, r.y - grow, r.width, r.height + grow)
+        }
+    };
+    let thick = if t.vertical { t.rect.width } else { t.rect.height } + grow;
+    let radius = look.thumb_radius.unwrap_or(thick / 2.0);
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    paint.set_color(Color::from_argb(110, 0, 0, 0));
-    let r = Rect::from_xywh(t.rect.x, t.rect.y, t.rect.width, t.rect.height);
-    canvas.draw_round_rect(r, nile_layout::SCROLLBAR_THICK / 2.0, nile_layout::SCROLLBAR_THICK / 2.0, &paint);
+    if let Some(track) = look.track.filter(|c| c.a > 0).or_else(|| (state != BarState::Rest).then_some(CssColor { r: 0, g: 0, b: 0, a: 18 })) {
+        paint.set_color(Color::from_argb(track.a, track.r, track.g, track.b));
+        canvas.draw_round_rect(widen(t.track), thick / 2.0, thick / 2.0, &paint);
+    }
+    let (r, g, b, a) = match look.thumb {
+        Some(c) => {
+            // A chosen colour darkens a little when hovered or dragged.
+            let k = match state {
+                BarState::Rest => 1.0,
+                BarState::Hover => 0.85,
+                BarState::Active => 0.7,
+            };
+            ((f32::from(c.r) * k) as u8, (f32::from(c.g) * k) as u8, (f32::from(c.b) * k) as u8, c.a)
+        }
+        None => (0, 0, 0, match state {
+            BarState::Rest => 110,
+            BarState::Hover => 150,
+            BarState::Active => 190,
+        }),
+    };
+    paint.set_color(Color::from_argb(a, r, g, b));
+    let rect = widen(t.rect);
+    canvas.draw_round_rect(rect, radius, radius, &paint);
 }
 
 /// Highlight bytes `from..to` of a text run.

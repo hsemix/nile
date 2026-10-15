@@ -97,6 +97,10 @@ pub enum PseudoElement {
     After,
     /// A list item's marker: styled, but not a box.
     Marker,
+    /// `::-webkit-scrollbar`, `-thumb` and `-track`: the parts of a scroll container's bars.
+    Scrollbar,
+    ScrollbarThumb,
+    ScrollbarTrack,
 }
 
 impl ToCss for PseudoElement {
@@ -105,6 +109,9 @@ impl ToCss for PseudoElement {
             PseudoElement::Before => "::before",
             PseudoElement::After => "::after",
             PseudoElement::Marker => "::marker",
+            PseudoElement::Scrollbar => "::-webkit-scrollbar",
+            PseudoElement::ScrollbarThumb => "::-webkit-scrollbar-thumb",
+            PseudoElement::ScrollbarTrack => "::-webkit-scrollbar-track",
         })
     }
 }
@@ -153,6 +160,9 @@ impl<'i> Parser<'i> for NileParser {
             "before" => Ok(PseudoElement::Before),
             "after" => Ok(PseudoElement::After),
             "marker" => Ok(PseudoElement::Marker),
+            "-webkit-scrollbar" => Ok(PseudoElement::Scrollbar),
+            "-webkit-scrollbar-thumb" => Ok(PseudoElement::ScrollbarThumb),
+            "-webkit-scrollbar-track" => Ok(PseudoElement::ScrollbarTrack),
             _ => Err(ParseError::custom(SelectorParseErrorKind::UnsupportedPseudoClassOrElement)),
         }
     }

@@ -225,6 +225,38 @@ pub enum Display {
     None,
 }
 
+/// `scrollbar-width`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ScrollbarWidth {
+    #[default]
+    Auto,
+    Thin,
+    None,
+}
+
+/// What a scroll container's `::-webkit-scrollbar*` rules set.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScrollbarParts {
+    /// `::-webkit-scrollbar { width | height }` in px (`display: none` is 0).
+    pub thickness: Option<f32>,
+    pub thumb: Option<Color>,
+    pub thumb_radius: Option<f32>,
+    pub track: Option<Color>,
+}
+
+/// How a scroll container's scrollbars look: thickness, colours and the thumb's rounding.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollbarLook {
+    pub thickness: f32,
+    pub thumb: Option<Color>,
+    pub thumb_radius: Option<f32>,
+    pub track: Option<Color>,
+}
+
+/// Thickness of the default overlay scrollbar, and of `scrollbar-width: thin`.
+pub const SCROLLBAR_AUTO: f32 = 6.0;
+pub const SCROLLBAR_THIN: f32 = 4.0;
+
 /// `overflow` on one axis. `Scroll` covers both `scroll` and `auto`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum OverflowKind {
@@ -453,6 +485,9 @@ pub struct ComputedStyle {
     pub border_collapse: bool,
     /// `caption-side: bottom`; inherited.
     pub caption_bottom: bool,
+    /// `scrollbar-width` and `scrollbar-color` (thumb, track) of a scroll container.
+    pub scrollbar_width: ScrollbarWidth,
+    pub scrollbar_color: Option<(Color, Color)>,
     /// `table-layout: fixed`.
     pub table_fixed: bool,
     /// `vertical-align` for table cells.
@@ -589,6 +624,8 @@ impl Default for ComputedStyle {
             border_spacing: (0.0, 0.0),
             border_collapse: false,
             caption_bottom: false,
+            scrollbar_width: ScrollbarWidth::Auto,
+            scrollbar_color: None,
             table_fixed: false,
             vertical_align: VerticalAlign::Baseline,
             cursor: Cursor::Auto,
@@ -1067,6 +1104,9 @@ pub struct StyleMap {
     contents: HashMap<NodeId, String>,
     /// `::marker` styles of list items that have one.
     markers: HashMap<NodeId, MarkerStyle>,
+    /// `::-webkit-scrollbar*` rules of scroll containers that have any.
+    scrollbars: HashMap<NodeId, ScrollbarParts>,
+    page_bar: ScrollbarLook,
     /// `@keyframes` by name.
     pub(crate) keyframes: HashMap<String, Vec<parse::Frame>>,
     /// `@page` rules (selector, body) in source order.
@@ -1118,6 +1158,7 @@ struct Generated {
     origins: HashMap<NodeId, NodeId>,
     contents: HashMap<NodeId, String>,
     markers: HashMap<NodeId, MarkerStyle>,
+    scrollbars: HashMap<NodeId, ScrollbarParts>,
 }
 
 /// What a `::marker` rule sets for a list item's marker.
@@ -1161,6 +1202,7 @@ impl ComputedStyle {
         a.background_repeat = other.background_repeat;
         a.box_shadow = other.box_shadow.clone();
         a.selection_bg = other.selection_bg;
+        a.scrollbar_color = other.scrollbar_color;
         a.transitions = other.transitions.clone();
         a.animations = other.animations.clone();
         a.transform_origin = other.transform_origin;
@@ -1192,6 +1234,7 @@ impl StyleMap {
             && self.pseudo == other.pseudo
             && self.contents == other.contents
             && self.markers == other.markers
+            && self.scrollbars == other.scrollbars
             && self.styles.iter().zip(&other.styles).all(|(a, b)| a.same_layout_with(b, color_is_paint))
     }
 
@@ -1217,7 +1260,7 @@ impl StyleMap {
     /// possible: the document changed size or there are generated `::before`/`::after`/marker boxes
     /// (the caller does the full cascade then).
     pub fn recascade(&mut self, doc: &Document, state: &InteractionState, viewport: (f32, f32), roots: &[NodeId]) -> Option<Vec<(NodeId, ComputedStyle)>> {
-        if self.styles.len() != doc.nodes.len() || !self.pseudo.is_empty() || !self.markers.is_empty() {
+        if self.styles.len() != doc.nodes.len() || !self.pseudo.is_empty() || !self.markers.is_empty() || !self.scrollbars.is_empty() {
             return None;
         }
         let (ua, author) = sheets_of(doc, viewport);
@@ -1239,6 +1282,29 @@ impl StyleMap {
     }
 
     /// The generated `::before` / `::after` box of `element`, if it has one.
+    /// How the scrollbars of `node` look: `scrollbar-width`/`scrollbar-color` and any
+    /// `::-webkit-scrollbar*` rules (which win).
+    pub fn scrollbar_look(&self, node: NodeId) -> ScrollbarLook {
+        let s = &self.styles[node.0];
+        let parts = self.scrollbars.get(&node);
+        let thickness = parts.and_then(|p| p.thickness).unwrap_or(match s.scrollbar_width {
+            ScrollbarWidth::Auto => SCROLLBAR_AUTO,
+            ScrollbarWidth::Thin => SCROLLBAR_THIN,
+            ScrollbarWidth::None => 0.0,
+        });
+        ScrollbarLook {
+            thickness,
+            thumb: parts.and_then(|p| p.thumb).or(s.scrollbar_color.map(|c| c.0)),
+            thumb_radius: parts.and_then(|p| p.thumb_radius),
+            track: parts.and_then(|p| p.track).or(s.scrollbar_color.map(|c| c.1)),
+        }
+    }
+
+    /// The look of the page's own scrollbar: `<html>`'s, else `<body>`'s when `<html>` has none set.
+    pub fn page_scrollbar(&self) -> ScrollbarLook {
+        self.page_bar
+    }
+
     /// The `::marker` rules of a list item, if any.
     pub fn marker(&self, item: NodeId) -> Option<&MarkerStyle> {
         self.markers.get(&item)
@@ -1313,7 +1379,7 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
     let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo };
     let mut generated = Generated::default();
     cascade(&cx, &mut ctx, Document::ROOT, &root_style, &mut styles, &mut generated);
-    StyleMap {
+    let mut map = StyleMap {
         styles,
         uses_viewport: uses_viewport.get(),
         state_deps,
@@ -1321,10 +1387,15 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
         origins: generated.origins,
         contents: generated.contents,
         markers: generated.markers,
+        scrollbars: generated.scrollbars,
         keyframes,
         pages,
         font_faces,
-    }
+        page_bar: ScrollbarLook { thickness: SCROLLBAR_AUTO, thumb: None, thumb_radius: None, track: None },
+    };
+    let default = map.page_bar;
+    map.page_bar = [doc.find(|n| n.tag() == Some("html")), doc.body()].into_iter().flatten().map(|n| map.scrollbar_look(n)).find(|l| *l != default).unwrap_or(default);
+    map
 }
 
 thread_local! {
@@ -1588,6 +1659,43 @@ fn marker_style(cx: &CascadeInput, id: NodeId, element: &ComputedStyle, extra: &
     extra.markers.insert(id, MarkerStyle { style, color, content });
 }
 
+/// The `::-webkit-scrollbar*` rules of a scroll container (or the root, for the page's bars).
+fn scrollbar_parts(cx: &CascadeInput, id: NodeId, element: &ComputedStyle, extra: &mut Generated) {
+    let el = ElementRef::new(cx.doc, id, cx.state);
+    let mut parts = ScrollbarParts::default();
+    let mut any = false;
+    for kind in [PseudoElement::Scrollbar, PseudoElement::ScrollbarThumb, PseudoElement::ScrollbarTrack] {
+        let mut caches = SelectorCaches::default();
+        let mut ctx = MatchingContext::new(MatchingMode::ForStatelessPseudoElement, None, &mut caches, QuirksMode::NoQuirks, NeedsSelectorFlags::No, MatchingForInvalidation::No);
+        let wanted = |p: &PseudoElement| *p == kind;
+        ctx.pseudo_element_matching_fn = Some(&wanted);
+        let decls = matching_decls(cx, &el, &mut ctx, true);
+        if decls.is_empty() {
+            continue;
+        }
+        any = true;
+        let mut style = ComputedStyle::inherit(element);
+        style.display = Display::Block;
+        let pcx = Cx { viewport: cx.viewport, uses_viewport: cx.uses_viewport };
+        apply_declarations(&mut style, decls, element.font_size, &pcx);
+        let px = |l: Length| if let Length::Px(v) = l { Some(v) } else { None };
+        match kind {
+            PseudoElement::Scrollbar => {
+                // A vertical bar's thickness is its width, a horizontal one's its height.
+                parts.thickness = if style.display == Display::None { Some(0.0) } else { px(style.width).or(px(style.height)) };
+            }
+            PseudoElement::ScrollbarThumb => {
+                parts.thumb = style.background.filter(|c| c.a > 0);
+                parts.thumb_radius = Some(style.border_radius.tl).filter(|r| *r > 0.0);
+            }
+            _ => parts.track = style.background.filter(|c| c.a > 0),
+        }
+    }
+    if any {
+        extra.scrollbars.insert(id, parts);
+    }
+}
+
 fn pseudo_style(
     cx: &CascadeInput,
     id: NodeId,
@@ -1688,6 +1796,9 @@ fn cascade(
     if cx.has_pseudo && matches!(node.kind, NodeKind::Element { .. }) {
         if style.display == Display::ListItem {
             marker_style(cx, id, &style, extra);
+        }
+        if style.overflow_x == OverflowKind::Scroll || style.overflow_y == OverflowKind::Scroll || matches!(node.tag(), Some("html" | "body")) {
+            scrollbar_parts(cx, id, &style, extra);
         }
         pseudo_style(cx, id, &style, PseudoElement::Before, out, extra);
         pseudo_style(cx, id, &style, PseudoElement::After, out, extra);
@@ -1944,7 +2055,7 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         "overflow" | "overflow-x" | "overflow-y" => {
             let kind = |v: Option<&Value>| match v.and_then(Value::ident) {
                 Some("hidden" | "clip") => Some(OverflowKind::Hidden),
-                Some("scroll" | "auto") => Some(OverflowKind::Scroll),
+                Some("scroll" | "auto" | "scroll-indicator") => Some(OverflowKind::Scroll),
                 Some("visible") => Some(OverflowKind::Visible),
                 _ => None,
             };
@@ -2221,6 +2332,19 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         "behavior" => {
             if v.iter().any(|x| x.ident() == Some("htmlarea")) {
                 s.user_select = UserSelect::Text;
+            }
+        }
+        "scrollbar-width" => {
+            s.scrollbar_width = match first.and_then(Value::ident) {
+                Some("thin") => ScrollbarWidth::Thin,
+                Some("none") => ScrollbarWidth::None,
+                _ => ScrollbarWidth::Auto,
+            }
+        }
+        "scrollbar-color" => {
+            s.scrollbar_color = match (v.first().and_then(color), v.get(1).and_then(color)) {
+                (Some(thumb), Some(track)) => Some((thumb, track)),
+                _ => None,
             }
         }
         "text-selection-background-color" => s.selection_bg = first.and_then(color).or(s.selection_bg),

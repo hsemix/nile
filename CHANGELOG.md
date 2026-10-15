@@ -11,6 +11,8 @@ the section becomes that version's.
 ### 2026-10-15
 
 #### Added
+- Scrollbar styling: `scrollbar-width` (`auto`/`thin`/`none`), `scrollbar-color`, `overflow: scroll-indicator`, and `::-webkit-scrollbar`, `-thumb`, `-track` (thickness, colours, thumb rounding). The page's own bar follows `<html>` (else `<body>`). Example `examples/scrollbars.html`.
+- Scrollbars react to the pointer: the bar under it grows, shows its track and darkens its thumb, darker again while dragged.
 - Example `examples/combobox.html`: a filtering combobox written as a class component, with keyboard navigation and a popup list.
 - Date, month, week, `datetime-local`, time and colour inputs open pickers (calendar, month grid, week-aware calendar, hour/minute columns, saturation/hue square with hex field and swatches) from a glyph at the field's edge (the swatch for colours) or Alt+Down; they set `value` and fire `input`/`change`. Example `examples/pickers.html`.
 - Constraint validation: `validity`, `validationMessage`, `willValidate`, `checkValidity()`, `reportValidity()`, `setCustomValidity()` (form-level too) for `required`, `min`/`max`/`step`, `minlength`/`maxlength`, `pattern`, `email`, `url`; `:valid`/`:invalid` selectors.

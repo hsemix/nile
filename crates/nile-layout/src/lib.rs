@@ -210,11 +210,15 @@ pub struct ScrollBox {
     /// Size of the scrollable content from the padding box's origin (`scrollWidth/Height`).
     pub content_width: f32,
     pub content_height: f32,
+    /// Thickness of its scrollbars (`scrollbar-width`, `::-webkit-scrollbar`); 0 hides them.
+    pub thick: f32,
 }
 
 /// Overlay scrollbar metrics, shared by painting and dragging.
-pub const SCROLLBAR_THICK: f32 = 6.0;
+pub const SCROLLBAR_THICK: f32 = nile_style::SCROLLBAR_AUTO;
 pub const SCROLLBAR_EDGE: f32 = 2.0;
+/// How much wider a bar grows while the pointer is over it.
+pub const SCROLLBAR_GROW: f32 = 4.0;
 
 /// One scrollbar: its thumb and the strip it slides in, in the same coordinates as the
 /// box it belongs to.
@@ -256,8 +260,11 @@ impl Thumb {
 }
 
 /// The page's own vertical scrollbar, in viewport coordinates.
-pub fn page_thumb(viewport: (f32, f32), content_height: f32, scroll_y: f32) -> Option<Thumb> {
-    let track = Rect { x: viewport.0 - SCROLLBAR_THICK - SCROLLBAR_EDGE, y: 0.0, width: SCROLLBAR_THICK, height: viewport.1 };
+pub fn page_thumb(viewport: (f32, f32), content_height: f32, scroll_y: f32, thick: f32) -> Option<Thumb> {
+    if thick <= 0.0 {
+        return None;
+    }
+    let track = Rect { x: viewport.0 - thick - SCROLLBAR_EDGE, y: 0.0, width: thick, height: viewport.1 };
     Thumb::new(track, true, viewport.1, content_height, scroll_y)
 }
 
@@ -265,12 +272,16 @@ impl ScrollBox {
     /// The scrollbars to show at scroll offsets `(ox, oy)`.
     pub fn thumbs(&self, ox: f32, oy: f32) -> Vec<Thumb> {
         let (c, mut out) = (self.clip, Vec::new());
+        if self.thick <= 0.0 {
+            return out;
+        }
+        let thick = self.thick;
         if self.wheel_y {
-            let track = Rect { x: c.x + c.width - SCROLLBAR_THICK - SCROLLBAR_EDGE, y: c.y, width: SCROLLBAR_THICK, height: c.height };
+            let track = Rect { x: c.x + c.width - thick - SCROLLBAR_EDGE, y: c.y, width: thick, height: c.height };
             out.extend(Thumb::new(track, true, c.height, self.content_height, oy));
         }
         if self.wheel_x {
-            let track = Rect { x: c.x, y: c.y + c.height - SCROLLBAR_THICK - SCROLLBAR_EDGE, width: c.width, height: SCROLLBAR_THICK };
+            let track = Rect { x: c.x, y: c.y + c.height - thick - SCROLLBAR_EDGE, width: c.width, height: thick };
             out.extend(Thumb::new(track, false, c.width, self.content_width, ox));
         }
         out
@@ -579,6 +590,7 @@ impl LayoutTree {
                 wheel_y: s.overflow_y == OverflowKind::Scroll,
                 content_width: right - clip.x,
                 content_height: bottom - clip.y,
+                thick: styles.scrollbar_look(b.node).thickness,
             };
             self.boxes[i].scroll = Some(scroll);
         }

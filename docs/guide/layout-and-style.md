@@ -141,3 +141,20 @@ Whenever you change layout or styling, [render a PNG](cli.md) and inspect it at
 the intended window sizes. Passing JavaScript checks does not verify visual layout.
 
 Related reference: [CSS property and compatibility reference](../reference/css.md).
+
+## Style scrollbars
+
+Scroll containers (`overflow: auto | scroll`) and the page get thin overlay scrollbars that
+grow and darken under the pointer. Restyle them per container (or on `html` for the page):
+
+```css
+.list { scrollbar-width: thin; scrollbar-color: #2f80ed #e3ecfb }   /* thumb, track */
+.log  { scrollbar-width: none }                                     /* hidden, still scrolls */
+.dark::-webkit-scrollbar { width: 12px }
+.dark::-webkit-scrollbar-track { background: #1f2937 }
+.dark::-webkit-scrollbar-thumb { background: #f59e0b; border-radius: 3px }
+```
+
+`::-webkit-scrollbar*` wins over `scrollbar-width`/`scrollbar-color`. See
+[scrollbars.html](../../examples/scrollbars.html). There are no arrow buttons, idle fade-out
+or `:hover` rules on the pseudo-elements yet.

@@ -795,6 +795,8 @@ pub struct Page {
     pub page_drag: bool,
     /// A scrollbar thumb being dragged.
     pub bar_drag: Option<BarDrag>,
+    /// The scrollbar under the pointer: its scroller (`None`: the page) and whether it is the vertical one.
+    pub bar_hover: Option<(Option<NodeId>, bool)>,
     /// Undo/redo stacks of the text inputs edited so far.
     pub history: std::collections::HashMap<NodeId, History>,
     /// Blink phase of the caret and when it flips next.
@@ -1114,6 +1116,7 @@ impl Page {
             clipboard: Box::new(MemoryClipboard::default()),
             history: std::collections::HashMap::new(),
             bar_drag: None,
+            bar_hover: None,
             page_drag: false,
             caret_visible: true,
             blink_at: Instant::now() + CARET_BLINK,
@@ -1441,7 +1444,8 @@ impl Page {
         let near = |r: nile_layout::Rect, px: f32, py: f32| px >= r.x - 4.0 && px <= r.x + r.width + 4.0 && py >= r.y - 2.0 && py <= r.y + r.height + 2.0;
         let (scroll, viewport) = (v.scroll_y, v.viewport);
         let content = v.layout().content_height;
-        if let Some(t) = nile_layout::page_thumb(viewport, content, scroll) {
+        let thick = v.styles.page_scrollbar().thickness;
+        if let Some(t) = nile_layout::page_thumb(viewport, content, scroll, thick) {
             if near(t.track, x, y) {
                 return Some((None, t, near(t.rect, x, y)));
             }
@@ -1983,7 +1987,42 @@ impl Page {
             return self.splitter_drag_to(x, y);
         }
         let in_frames = self.frames_pointer_moved(x, y);
-        in_frames | self.pointer_moved_here(x, y)
+        let moved = in_frames | self.pointer_moved_here(x, y);
+        moved | self.update_bar_hover()
+    }
+
+    /// Track which scrollbar the pointer is over, for its hover look. Only looks when the pointer is
+    /// in the page's bar strip or over a scroll container, so ordinary pointer moves stay cheap.
+    fn update_bar_hover(&mut self) -> bool {
+        let now = match self.pointer {
+            Some((x, y)) if self.bar_drag.is_none() && self.near_a_bar(x) => self.scrollbar_at(x, y).map(|(n, t, _)| (n, t.vertical)),
+            Some(_) if self.bar_drag.is_some() => self.bar_hover,
+            _ => None,
+        };
+        let changed = self.bar_hover != now;
+        self.bar_hover = now;
+        changed
+    }
+
+    fn near_a_bar(&self, x: f32) -> bool {
+        if self.bar_hover.is_some() {
+            return true;
+        }
+        let v = self.view.borrow();
+        if x >= v.viewport.0 - v.styles.page_scrollbar().thickness - 12.0 {
+            return true;
+        }
+        // Without a laid-out page (it is rebuilt lazily) there is no bar to be over.
+        let Some((_, _, tree)) = v.layout.as_ref() else { return false };
+        let doc = v.doc.borrow();
+        let mut cur = v.interaction.hover;
+        while let Some(n) = cur {
+            if tree.scroll_box(n).is_some() {
+                return true;
+            }
+            cur = doc.node(n).parent;
+        }
+        false
     }
 
     fn pointer_moved_here(&mut self, x: f32, y: f32) -> bool {
@@ -2036,7 +2075,8 @@ impl Page {
     pub fn pointer_left(&mut self) -> bool {
         self.pointer = None;
         let in_frames = self.frames_pointer_left();
-        in_frames | self.refresh_hover()
+        let left_bar = self.bar_hover.take().is_some();
+        in_frames | self.refresh_hover() | left_bar
     }
 
     /// Count consecutive clicks close in time and place (1, 2, 3).
@@ -3618,6 +3658,11 @@ impl Page {
         let selection = self.selection_for_paint();
         let dom_caret = self.dom_caret_for_paint();
         let ime_underline = self.ime_underline();
+        let bar = match (&self.bar_drag, self.bar_hover) {
+            (Some(d), _) => Some((d.node, d.thumb.vertical, true)),
+            (None, Some((n, v))) => Some((n, v, false)),
+            _ => None,
+        };
         let selected_image = if portal.is_none() { self.selected_image_rect().map(|r| nile_layout::Rect { x: r.x, y: r.y, width: r.width, height: r.height }) } else { None };
         {
         let mut view = self.view.borrow_mut();
@@ -3650,7 +3695,7 @@ impl Page {
                 canvas,
                 tree,
                 &view.styles,
-                &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection, dom_caret, preedit: ime_underline, only, skip: &skip, selected_image },
+                &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection, dom_caret, preedit: ime_underline, only, skip: &skip, selected_image, bar },
             )
         });
         canvas.restore();
@@ -4782,6 +4827,48 @@ cd</textarea>
         p.release();
         let after = p.view.borrow().scroll_y;
         assert!(after > before + 300.0, "{after}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scrollbars_follow_scrollbar_width_colors_and_the_pointer() {
+        let (mut p, path) = page(
+            r##"<head><style>
+                 #thin { scrollbar-width: thin }
+                 #none { scrollbar-width: none }
+                 #wk::-webkit-scrollbar { width: 14px }
+                 #wk::-webkit-scrollbar-thumb { background: #ff0000; border-radius: 2px }
+                 #col { scrollbar-color: #00ff00 #0000ff }
+               </style></head>
+               <body style="margin:0"><div id="a" style="width:100px;height:80px;overflow:auto"><div style="height:400px">in</div></div>
+               <div id="thin" style="width:100px;height:80px;overflow:auto"><div style="height:400px">in</div></div>
+               <div id="none" style="width:100px;height:80px;overflow:auto"><div style="height:400px">in</div></div>
+               <div id="wk" style="width:100px;height:80px;overflow:auto"><div style="height:400px">in</div></div>
+               <div id="col" style="width:100px;height:80px;overflow:auto"><div style="height:400px">in</div></div></body>"##,
+            "barlook",
+        );
+        let thick = |p: &mut Page, id: &str| {
+            let node = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+            let v = p.view.borrow_mut();
+            let look = v.styles.scrollbar_look(node);
+            (look.thickness, look.thumb.map(|c| (c.r, c.g, c.b)), look.track.map(|c| (c.r, c.g, c.b)), look.thumb_radius)
+        };
+        assert_eq!(thick(&mut p, "a"), (6.0, None, None, None));
+        assert_eq!(thick(&mut p, "thin").0, 4.0);
+        assert_eq!(thick(&mut p, "none").0, 0.0);
+        assert_eq!(thick(&mut p, "wk"), (14.0, Some((255, 0, 0)), None, Some(2.0)));
+        assert_eq!(thick(&mut p, "col"), (6.0, Some((0, 255, 0)), Some((0, 0, 255)), None));
+        // A `none` bar has nothing to grab, but the wheel still scrolls.
+        let node = p.doc.borrow().find(|n| n.attr("id") == Some("none")).unwrap();
+        let sb = p.view.borrow_mut().layout().scroll_box(node).copied().unwrap();
+        assert!(sb.thumbs(0.0, 0.0).is_empty() && sb.wheel_y);
+        // The pointer over a bar marks it hovered; leaving clears it.
+        p.pointer_moved(95.0, 20.0);
+        assert!(p.bar_hover.is_some_and(|(n, v)| n.is_some() && v));
+        p.pointer_moved(30.0, 20.0);
+        assert_eq!(p.bar_hover, None);
+        p.pointer_moved(95.0, 20.0);
+        assert!(p.pointer_left() && p.bar_hover.is_none());
         let _ = std::fs::remove_file(path);
     }
 
