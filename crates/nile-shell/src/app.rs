@@ -610,6 +610,17 @@ impl App {
         if config.max_width.is_some() || config.max_height.is_some() {
             attrs = attrs.with_max_inner_size(LogicalSize::new(config.max_width.unwrap_or(f32::MAX / 4.0), config.max_height.unwrap_or(f32::MAX / 4.0)));
         }
+        // The system's drop shadow around a frameless window: `solid-with-shadow` only.
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs = attrs.with_has_shadow(!config.frameless() || config.shadow());
+        }
+        #[cfg(windows)]
+        {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs = attrs.with_undecorated_shadow(config.shadow());
+        }
         #[cfg(target_os = "macos")]
         if config.frame == Frame::Extended {
             use winit::platform::macos::WindowAttributesExtMacOS;

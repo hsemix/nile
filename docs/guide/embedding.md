@@ -52,7 +52,7 @@ toggles maximization, the buttons request native actions, and the edge margin
 allows resizing. Style the elements yourself. See [window.html](../../examples/window.html).
 
 `window-frame` accepts system frames (`default`/`standard`), `extended` (macOS
-content under the title bar), `solid`/`solid-with-shadow`, and `transparent`.
+content under the title bar), `solid` (no frame, no shadow), `solid-with-shadow` (no frame, the system's drop shadow on macOS and Windows) and `transparent`.
 
 ### Transparent and frosted windows
 
@@ -149,6 +149,44 @@ Provide system clipboard callbacks with `nile_view_set_clipboard`; the default
 clipboard is private memory. `nile_view_selected_text` returns the input/page
 selection for a host Copy command. Update the window rectangle so script window
 measurements reflect the actual host window.
+
+### Standalone programs: `libnile_app`
+
+`libnile` is for hosts that own the window. If your program is just a Nile application, link
+`libnile_app` instead (same functions, plus the shell: windows, menus, dialogs, popups, packaging)
+and include `nile_app.h`:
+
+```c
+nile_app_register_function("greet", greet, NULL);   // host.greet(...) in scripts, from the first line
+return nile_run_html("<body>...</body>", NULL, 420, 160);   // or nile_run_file("app/main.html")
+```
+
+`nile_run(argc, argv)` takes the `nile` program's own command line (`page.html`, `--png out.png`,
+`--pack folder`, ...) with `argv[0]` skipped. All three block on the main thread until the last
+window closes and return the exit code (`application.quit(code)`). `examples/c/app.c` is a complete
+program. Build the library from source with `cargo build -p nile-app --release`; the release
+archives carry both `libnile` and `libnile_app`.
+
+### Windows, dialogs, drops and popups
+
+`nile_view_window_config` also reports `translucent` (the window's pixels carry alpha: make the
+native window transparent and present `nile_view_render`'s premultiplied BGRA with alpha; macOS
+wants straight alpha, so convert), `shadow` (`solid-with-shadow`) and `material` (0 none, 1 blur,
+2 acrylic, 3 mica, 4 tabbed, 5 sidebar, 6 hud). Scripts can change the material with
+`Window.this.material`, so read the config again after ticks and apply a new value (the `nile`
+shell's `material.rs` shows how for macOS, Windows and KDE). Forward the window's focus with
+`nile_view_window_activated` (the `activate` event).
+
+`nile_view_set_dialogs` takes callbacks for open, save and folder dialogs and message boxes, which
+scripts (`Window.this.selectFile`, `modal(<alert>...)`) and `<input type=file>` then use. A host
+that doesn't set them keeps the file-request flow below. Files dropped on the window go in through
+`nile_view_drop_files` (newline-separated paths; send a `nile_pointer_move` first so the page knows
+where). `nile_view_set_clipboard` has optional `get_html`/`set_html` callbacks for rich paste and copy.
+
+A popup shown with `popup({window: "popup"})` can have an OS window of its own: list them with
+`nile_view_portals` (JSON, rectangles in the view's logical coordinates), give each a frameless
+always-on-top window, draw it with `nile_view_render_portal`, and send its pointer, wheel and key
+input to the same view with the coordinates offset by the rectangle's origin.
 
 ### Input methods and file choosers
 

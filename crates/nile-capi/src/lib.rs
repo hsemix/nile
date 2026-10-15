@@ -20,7 +20,8 @@ use std::{
 };
 
 use nile_engine::{
-    window::{self, Frame, InitialState, Resizable, WindowConfig},
+    window::{self, Frame, InitialState, Material, Resizable, WindowConfig},
+    dialogs::{Dialogs, FileFilter, MessageKind},
     Clipboard, ModifiersState, Page,
 };
 use nile_script::WindowCommand;
@@ -137,10 +138,18 @@ pub struct NileWindowConfig {
     pub x: f32,
     pub y: f32,
     /// 0 system frame, 1 extended (content under the title bar), 2 solid (no frame),
-    /// 3 transparent (no frame, see-through where the page has no background).
+    /// 3 transparent (no frame, see-through where the page has no background), 4 solid with a shadow.
     pub frame: i32,
     /// The system draws no frame, so you should honour [`nile_view_caption_press`] and resize edges.
     pub frameless: bool,
+    /// The window's pixels carry alpha (`window-frame="transparent"` or a `window-material`): make the
+    /// window transparent and present the premultiplied BGRA from [`nile_view_render`] with alpha.
+    pub translucent: bool,
+    /// The system draws a drop shadow around a frameless window (`solid-with-shadow`).
+    pub shadow: bool,
+    /// `window-material`: 0 none, 1 blur, 2 acrylic, 3 mica, 4 tabbed, 5 sidebar, 6 hud. Scripts can
+    /// change it (`Window.this.material`): read the config again after ticks and apply a new value.
+    pub material: i32,
 }
 
 /// A function the host provides for scripts: it receives the call's arguments as a JSON array
@@ -155,6 +164,10 @@ pub struct NileClipboard {
     pub get: Option<unsafe extern "C" fn(user: *mut c_void) -> *const c_char>,
     pub set: Option<unsafe extern "C" fn(text: *const c_char, user: *mut c_void)>,
     pub user: *mut c_void,
+    /// Optional: the clipboard's HTML flavour (copied immediately) or NULL; rich paste into editors.
+    pub get_html: Option<unsafe extern "C" fn(user: *mut c_void) -> *const c_char>,
+    /// Optional: put `html` on the clipboard with `text` as its plain-text form.
+    pub set_html: Option<unsafe extern "C" fn(html: *const c_char, text: *const c_char, user: *mut c_void)>,
 }
 
 struct CClipboard(NileClipboard);
@@ -169,6 +182,82 @@ impl Clipboard for CClipboard {
         if let (Some(set), Ok(c)) = (self.0.set, CString::new(text)) {
             unsafe { set(c.as_ptr(), self.0.user) }
         }
+    }
+    fn html(&mut self) -> Option<String> {
+        let p = unsafe { self.0.get_html?(self.0.user) };
+        (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+    }
+    fn set_html(&mut self, html: &str, text: &str) {
+        match (self.0.set_html, CString::new(html), CString::new(text)) {
+            (Some(set), Ok(h), Ok(t)) => unsafe { set(h.as_ptr(), t.as_ptr(), self.0.user) },
+            _ => self.set_text(text),
+        }
+    }
+}
+
+/// Native dialogs for scripts (`Window.this.selectFile`, `selectFolder`, `modal(<alert>..)`) and
+/// `<input type=file>`. Every callback blocks until the user answers; strings you return are copied
+/// immediately. Leave a callback NULL to have that dialog unavailable (scripts get `null`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NileDialogs {
+    /// Open dialog. `filters` is Sciter's `label|*.ext;*.ext|label|*.*` text (may be empty), `dir`
+    /// where to start. Return the chosen paths separated by newlines, or NULL when cancelled.
+    pub open_files: Option<unsafe extern "C" fn(multiple: bool, filters: *const c_char, caption: *const c_char, dir: *const c_char, user: *mut c_void) -> *const c_char>,
+    /// Save dialog; `extension` is the default one. Return the path or NULL.
+    pub save_file: Option<unsafe extern "C" fn(filters: *const c_char, extension: *const c_char, caption: *const c_char, path: *const c_char, user: *mut c_void) -> *const c_char>,
+    /// Folder chooser. Return the path or NULL.
+    pub pick_folder: Option<unsafe extern "C" fn(caption: *const c_char, dir: *const c_char, user: *mut c_void) -> *const c_char>,
+    /// Message box; `kind` 0 info, 1 alert, 2 error, 3 question (the only one with a second button).
+    /// Return true for OK / Yes.
+    pub message: Option<unsafe extern "C" fn(kind: i32, caption: *const c_char, text: *const c_char, user: *mut c_void) -> bool>,
+    pub user: *mut c_void,
+}
+
+struct CDialogs(NileDialogs);
+
+fn filters_text(filters: &[FileFilter]) -> CString {
+    let parts: Vec<String> = filters
+        .iter()
+        .map(|f| {
+            let exts = if f.extensions.is_empty() { "*.*".to_string() } else { f.extensions.iter().map(|e| format!("*.{e}")).collect::<Vec<_>>().join(";") };
+            format!("{}|{}", f.label, exts)
+        })
+        .collect();
+    cstring(&parts.join("|"))
+}
+
+fn answer(p: *const c_char) -> Option<String> {
+    (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()).filter(|s| !s.is_empty())
+}
+
+impl Dialogs for CDialogs {
+    fn open_files(&self, multiple: bool, filters: &[FileFilter], caption: &str, dir: &str) -> Vec<String> {
+        let Some(f) = self.0.open_files else { return Vec::new() };
+        let (flt, cap, dir) = (filters_text(filters), cstring(caption), cstring(dir));
+        let p = unsafe { f(multiple, flt.as_ptr(), cap.as_ptr(), dir.as_ptr(), self.0.user) };
+        answer(p).map(|s| s.lines().filter(|l| !l.is_empty()).map(str::to_string).collect()).unwrap_or_default()
+    }
+    fn save_file(&self, filters: &[FileFilter], extension: &str, caption: &str, path: &str) -> Option<String> {
+        let f = self.0.save_file?;
+        let (flt, ext, cap, path) = (filters_text(filters), cstring(extension), cstring(caption), cstring(path));
+        answer(unsafe { f(flt.as_ptr(), ext.as_ptr(), cap.as_ptr(), path.as_ptr(), self.0.user) })
+    }
+    fn pick_folder(&self, caption: &str, dir: &str) -> Option<String> {
+        let f = self.0.pick_folder?;
+        let (cap, dir) = (cstring(caption), cstring(dir));
+        answer(unsafe { f(cap.as_ptr(), dir.as_ptr(), self.0.user) })
+    }
+    fn message(&self, kind: MessageKind, caption: &str, text: &str) -> bool {
+        let Some(f) = self.0.message else { return true };
+        let kind = match kind {
+            MessageKind::Info => 0,
+            MessageKind::Alert => 1,
+            MessageKind::Error => 2,
+            MessageKind::Question => 3,
+        };
+        let (cap, text) = (cstring(caption), cstring(text));
+        unsafe { f(kind, cap.as_ptr(), text.as_ptr(), self.0.user) }
     }
 }
 
@@ -498,6 +587,90 @@ pub unsafe extern "C" fn nile_view_set_clipboard(view: *mut NileView, clipboard:
     }
 }
 
+/// Install native dialogs for scripts and `<input type=file>` (without them scripts get `null`
+/// and file inputs use [`nile_view_take_file_request`]). Kept across reloads.
+///
+/// # Safety
+/// `view` must be a live view; the callbacks and `user` must stay valid for its lifetime.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_set_dialogs(view: *mut NileView, dialogs: NileDialogs) {
+    if let Some(v) = view_ref(view) {
+        v.page.set_dialogs(std::rc::Rc::new(CDialogs(dialogs)));
+    }
+}
+
+/// Files were dropped on the window at the pointer's last position (tell the page where with
+/// [`nile_pointer_move`] first). `paths` are UTF-8 paths separated by newlines. A file input under
+/// the pointer takes them; elsewhere the target gets a `drop` event. Returns true if the page changed.
+///
+/// # Safety
+/// `view` must be a live view and `paths` a valid string.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_drop_files(view: *mut NileView, paths: *const c_char) -> bool {
+    let (Some(v), Some(paths)) = (view_ref(view), text(paths)) else { return false };
+    guard(false, || {
+        let list: Vec<String> = paths.lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
+        v.page.drop_files(&list)
+    })
+}
+
+/// The window became active (`active` true) or inactive: fires `activate` on `Window.this`.
+/// Returns true if the page changed.
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_window_activated(view: *mut NileView, active: bool) -> bool {
+    view_ref(view).is_some_and(|v| guard(false, || v.page.window_activated(active)))
+}
+
+/// Popups that want an OS window of their own (`popup({window: "popup"})`), as JSON
+/// `[{"id":N,"x":..,"y":..,"w":..,"h":..}]` with the border box in this view's logical coordinates (it
+/// may lie outside the view). Free the string with [`nile_string_free`]. For each: make a frameless,
+/// always-on-top window at that rectangle, draw it with [`nile_view_render_portal`], and send its
+/// pointer, wheel and key input to this same view with `x`/`y` offset by the rectangle's origin.
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_portals(view: *mut NileView) -> *mut c_char {
+    let Some(v) = view_ref(view) else { return ptr::null_mut() };
+    guard(ptr::null_mut(), || {
+        v.page.sync();
+        let items: Vec<String> = v
+            .page
+            .view
+            .borrow()
+            .portals
+            .iter()
+            .map(|p| format!("{{\"id\":{},\"x\":{},\"y\":{},\"w\":{},\"h\":{}}}", p.node.0, p.rect.0, p.rect.1, p.rect.2, p.rect.3))
+            .collect();
+        into_c(format!("[{}]", items.join(",")))
+    })
+}
+
+/// Draw one popup from [`nile_view_portals`] into its window's buffer (same format as
+/// [`nile_view_render`]): `width` x `height` physical pixels at `scale`, the popup's top-left
+/// corner at the buffer's. Returns false if `id` isn't a current popup or the arguments are wrong.
+///
+/// # Safety
+/// `pixels` must point to `len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_render_portal(view: *mut NileView, id: usize, pixels: *mut u8, len: usize, width: u32, height: u32, scale: f32) -> bool {
+    let Some(v) = view_ref(view) else { return false };
+    let need = (width as usize).saturating_mul(height as usize).saturating_mul(4);
+    if pixels.is_null() || width == 0 || height == 0 || len < need || scale <= 0.0 {
+        return false;
+    }
+    let buf = unsafe { std::slice::from_raw_parts_mut(pixels, need) };
+    guard(false, || {
+        let rect = v.page.view.borrow().portals.iter().find(|p| p.node.0 == id).map(|p| (p.node, p.rect));
+        let Some((node, rect)) = rect else { return false };
+        v.page.paint_portal(buf, width, height, scale, node, (rect.0, rect.1));
+        true
+    })
+}
+
 // ---- accessibility ----------------------------------------------------------------------------
 
 /// What an assistive-technology request asks an element to do (`nile_view_accessibility_action`).
@@ -669,8 +842,20 @@ pub unsafe extern "C" fn nile_view_window_config(view: *mut NileView, desktop_wi
                 Frame::Extended => 1,
                 Frame::Solid => 2,
                 Frame::Transparent => 3,
+                Frame::SolidShadow => 4,
             },
             frameless: c.frameless(),
+            translucent: c.translucent(),
+            shadow: c.shadow(),
+            material: match c.material {
+                Material::None => 0,
+                Material::Blur => 1,
+                Material::Acrylic => 2,
+                Material::Mica => 3,
+                Material::Tabbed => 4,
+                Material::Sidebar => 5,
+                Material::Hud => 6,
+            },
         };
         true
     })
@@ -1176,6 +1361,52 @@ mod tests {
             assert!(tick.next_ms == -1 || tick.next_ms >= 0);
             nile_view_destroy(v);
         }
+    }
+
+    #[test]
+    fn translucent_config_dialogs_drops_and_portals_reach_c() {
+        unsafe {
+            let html = s(r#"<html window-frame="solid-with-shadow" window-material="mica"><body><input id="f" type="file" style="width:200px;height:30px"><script>
+                window.dropped = ""; window.active = "";
+                document.getElementById("f").addEventListener("change", () => { window.dropped = this_files(); });
+                function this_files() { return document.getElementById("f").files.length + ":" + document.getElementById("f").files[0].name; }
+                Window.this.on("activate", (e) => { window.active += e.reason; });
+            </script></body></html>"#);
+            let v = nile_view_create_html(html.as_ptr(), ptr::null(), 300.0, 200.0);
+            let mut cfg = std::mem::zeroed::<NileWindowConfig>();
+            assert!(nile_view_window_config(v, 1000.0, 800.0, &mut cfg));
+            assert_eq!((cfg.frame, cfg.shadow, cfg.translucent, cfg.material), (4, true, true, 3));
+
+            // Dialogs: a host that answers every open dialog with one file.
+            unsafe extern "C" fn open(_m: bool, _f: *const c_char, caption: *const c_char, _d: *const c_char, _u: *mut c_void) -> *const c_char {
+                assert_eq!(CStr::from_ptr(caption).to_str().unwrap(), "Pick");
+                c"/tmp/nile-capi-dialog.txt".as_ptr()
+            }
+            nile_view_set_dialogs(v, NileDialogs { open_files: Some(open), save_file: None, pick_folder: None, message: None, user: ptr::null_mut() });
+            let mut tick = NileTick { redraw: false, next_ms: 0 };
+            nile_view_tick(v, &mut tick);
+            assert!(nile_view_eval_ok(v, "String(Window.this.selectFile({ mode: 'open', caption: 'Pick' })).endsWith('nile-capi-dialog.txt')"));
+
+            // Activation and file drops (the pointer says where).
+            assert!(nile_view_eval_ok(v, "true"));
+            nile_view_window_activated(v, true);
+            assert!(nile_view_eval_ok(v, "window.active === '1'"));
+            nile_pointer_move(v, 20.0, 15.0);
+            assert!(nile_view_drop_files(v, s("/tmp/nile-capi-drop.txt").as_ptr()));
+            assert!(nile_view_eval_ok(v, "window.dropped === '1:nile-capi-drop.txt'"));
+
+            // Portals: none yet; an unknown id is refused.
+            assert_eq!(take(nile_view_portals(v)), "[]");
+            let mut px = [0u8; 16];
+            assert!(!nile_view_render_portal(v, 12345, px.as_mut_ptr(), px.len(), 2, 2, 1.0));
+            nile_view_destroy(v);
+        }
+    }
+
+    unsafe fn nile_view_eval_ok(v: *mut NileView, code: &str) -> bool {
+        let mut out = ptr::null_mut();
+        let code = unsafe { nile_view_eval(v, s(code).as_ptr(), &mut out) };
+        code == 0 && !out.is_null() && unsafe { take(out) } == "true"
     }
 
     #[test]

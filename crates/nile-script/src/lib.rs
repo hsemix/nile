@@ -343,7 +343,19 @@ pub struct ScriptHost {
 
 /// Functions the embedder exposes to scripts as `host.name(...)`: each takes the call's
 /// arguments as a JSON array and returns a JSON value (or an empty string for `undefined`).
-type HostFns = Rc<RefCell<std::collections::HashMap<String, Rc<dyn Fn(&str) -> String>>>>;
+type HostFnMap = std::collections::HashMap<String, Rc<dyn Fn(&str) -> String>>;
+type HostFns = Rc<RefCell<HostFnMap>>;
+
+thread_local! {
+    static DEFAULT_HOST_FNS: RefCell<HostFnMap> = RefCell::default();
+}
+
+/// Expose `f` to the scripts of every page this thread creates from now on, as `host.<name>(...)`,
+/// before their first script runs (what a standalone program needs, since it makes the pages
+/// itself). A page can still register its own with [`ScriptHost::register_host_fn`].
+pub fn add_default_host_fn(name: &str, f: impl Fn(&str) -> String + 'static) {
+    DEFAULT_HOST_FNS.with(|m| m.borrow_mut().insert(name.to_string(), Rc::new(f)));
+}
 
 /// Character offset `chars` of a text node as UTF-16 units (element offsets are child indices).
 fn to_utf16(doc: &Document, node: NodeId, chars: usize) -> usize {
@@ -805,7 +817,7 @@ impl ScriptHost {
         let context = Context::full(&runtime)?;
         let log = Arc::new(Mutex::new(Vec::new()));
         let start = Instant::now();
-        let host_fns: HostFns = Rc::default();
+        let host_fns: HostFns = Rc::new(RefCell::new(DEFAULT_HOST_FNS.with(|m| m.borrow().clone())));
         let net = net::NetState::new();
         let sys = sys::SysState::default();
         let observing: Rc<std::cell::Cell<bool>> = Rc::default();

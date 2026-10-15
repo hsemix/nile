@@ -1,0 +1,21 @@
+[package]
+name = "nile-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "libnile_app: the Nile C library plus a standalone application runner (window and event loop)"
+
+[lib]
+name = "nile_app"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+# Re-exported: every `nile_*` function of libnile is part of this library too.
+nile-capi = { workspace = true, features = ["net"] }
+nile-shell.workspace = true
+nile-dom.workspace = true
+nile-engine.workspace = true
+nile-script.workspace = true
+
+[build-dependencies]
+cbindgen = { version = "0.29", default-features = false }

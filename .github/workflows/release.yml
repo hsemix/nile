@@ -1,6 +1,6 @@
 name: Release builds
 
-# Builds the `nile` shell and the `libnile` C library (with include/nile.h) for Windows, Linux and
+# Builds the `nile` shell, the `libnile` C library (include/nile.h; embedding only) and `libnile_app` (the same plus a standalone runner, include/nile_app.h) for Windows, Linux and
 # macOS. It runs on every push to main (the archives are kept as workflow artifacts for 30 days),
 # by hand from the Actions tab, and when a tag such as v0.1.0 is pushed, which also attaches them to
 # a GitHub release.
@@ -46,7 +46,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          cargo build --release --target ${{ matrix.target }} -p nile-shell -p nile-capi 2>&1 | tee build.log
+          cargo build --release --target ${{ matrix.target }} -p nile-shell -p nile-capi -p nile-app 2>&1 | tee build.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             summary=$(grep -E "^(error|warning)" -A6 build.log | head -80 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
@@ -60,10 +60,13 @@ jobs:
           mkdir "$out"
           dir=target/${{ matrix.target }}/release
           case "${{ runner.os }}" in
-            Windows) cp "$dir/nile.exe" "$dir/nile.dll" "$dir/nile.dll.lib" "$dir/nile.lib" "$out/" 2>/dev/null || cp "$dir/nile.exe" "$dir/nile.dll" "$out/" ;;
-            macOS)   cp "$dir/nile" "$dir/libnile.dylib" "$dir/libnile.a" "$out/" ;;
-            Linux)   cp "$dir/nile" "$dir/libnile.so" "$dir/libnile.a" "$out/" ;;
+            Windows)
+              cp "$dir/nile.exe" "$dir/nile.dll" "$dir/nile.dll.lib" "$dir/nile.lib" "$out/" 2>/dev/null || cp "$dir/nile.exe" "$dir/nile.dll" "$out/"
+              cp "$dir/nile_app.dll" "$dir/nile_app.dll.lib" "$dir/nile_app.lib" "$out/" 2>/dev/null || cp "$dir/nile_app.dll" "$out/" ;;
+            macOS)   cp "$dir/nile" "$dir/libnile.dylib" "$dir/libnile.a" "$dir/libnile_app.dylib" "$dir/libnile_app.a" "$out/" ;;
+            Linux)   cp "$dir/nile" "$dir/libnile.so" "$dir/libnile.a" "$dir/libnile_app.so" "$dir/libnile_app.a" "$out/" ;;
           esac
+          cp crates/nile-capi/include/nile.h crates/nile-app/include/nile_app.h "$out/"
           cp crates/nile-capi/include/nile.h LICENSE* README.md "$out/" 2>/dev/null || cp crates/nile-capi/include/nile.h README.md "$out/"
           cp assets/icon.png "$out/nile.png"
           ver=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')

@@ -63,8 +63,10 @@ pub enum Frame {
     Native,
     /// `extended`: the page draws into the title bar (system buttons stay on macOS).
     Extended,
-    /// `solid`, `solid-with-shadow`: no system frame; the page supplies the chrome.
+    /// `solid`: no system frame; the page supplies the chrome.
     Solid,
+    /// `solid-with-shadow`: like `solid`, with the system's drop shadow around the window.
+    SolidShadow,
     /// `transparent`: like `solid`, and the page's transparent areas show the desktop.
     Transparent,
 }
@@ -169,13 +171,19 @@ impl WindowConfig {
             alignment: attr("window-alignment").and_then(|a| a.trim().parse::<i32>().ok()).filter(|a| (1..=9).contains(a)).map(|a| a as u8),
             frame: match attr("window-frame").map(|s| s.trim().to_ascii_lowercase()).as_deref() {
                 Some("extended") => Frame::Extended,
-                Some("solid" | "solid-with-shadow") => Frame::Solid,
+                Some("solid") => Frame::Solid,
+                Some("solid-with-shadow") => Frame::SolidShadow,
                 Some("transparent") => Frame::Transparent,
                 _ => Frame::Native,
             },
             material: attr("window-material").map_or(Material::None, Material::parse),
             icon: attr("window-icon").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         }
+    }
+
+    /// Whether the system draws a drop shadow around a frameless window.
+    pub fn shadow(&self) -> bool {
+        self.frame == Frame::SolidShadow
     }
 
     /// Whether the window's pixels carry alpha (a transparent frame or a material behind the page).
@@ -185,7 +193,7 @@ impl WindowConfig {
 
     /// Whether the system draws no frame, so the page has to provide drag and resize handling.
     pub fn frameless(&self) -> bool {
-        matches!(self.frame, Frame::Solid | Frame::Transparent)
+        matches!(self.frame, Frame::Solid | Frame::SolidShadow | Frame::Transparent)
     }
 
     /// Inner size in logical px for a desktop of the given size, defaulting to 900x640 and
@@ -309,7 +317,8 @@ mod tests {
         assert_eq!(c.min_width, Some(320.0));
         assert_eq!(c.resizable, Resizable::Margin(8.0));
         assert!(c.minimizable && !c.maximizable);
-        assert_eq!((c.state, c.frame, c.alignment), (InitialState::Maximized, Frame::Solid, Some(5)));
+        assert_eq!((c.state, c.frame, c.alignment), (InitialState::Maximized, Frame::SolidShadow, Some(5)));
+        assert!(c.shadow() && !config(r#"<html window-frame="solid"></html>"#).shadow());
         assert!(c.frameless());
     }
 

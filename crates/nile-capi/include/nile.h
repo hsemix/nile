@@ -142,7 +142,50 @@ typedef struct NileClipboard {
   const char *(*get)(void *user);
   void (*set)(const char *text, void *user);
   void *user;
+  /**
+   * Optional: the clipboard's HTML flavour (copied immediately) or NULL; rich paste into editors.
+   */
+  const char *(*get_html)(void *user);
+  /**
+   * Optional: put `html` on the clipboard with `text` as its plain-text form.
+   */
+  void (*set_html)(const char *html, const char *text, void *user);
 } NileClipboard;
+
+/**
+ * Native dialogs for scripts (`Window.this.selectFile`, `selectFolder`, `modal(<alert>..)`) and
+ * `<input type=file>`. Every callback blocks until the user answers; strings you return are copied
+ * immediately. Leave a callback NULL to have that dialog unavailable (scripts get `null`).
+ */
+typedef struct NileDialogs {
+  /**
+   * Open dialog. `filters` is Sciter's `label|*.ext;*.ext|label|*.*` text (may be empty), `dir`
+   * where to start. Return the chosen paths separated by newlines, or NULL when cancelled.
+   */
+  const char *(*open_files)(bool multiple,
+                            const char *filters,
+                            const char *caption,
+                            const char *dir,
+                            void *user);
+  /**
+   * Save dialog; `extension` is the default one. Return the path or NULL.
+   */
+  const char *(*save_file)(const char *filters,
+                           const char *extension,
+                           const char *caption,
+                           const char *path,
+                           void *user);
+  /**
+   * Folder chooser. Return the path or NULL.
+   */
+  const char *(*pick_folder)(const char *caption, const char *dir, void *user);
+  /**
+   * Message box; `kind` 0 info, 1 alert, 2 error, 3 question (the only one with a second button).
+   * Return true for OK / Yes.
+   */
+  bool (*message)(int32_t kind, const char *caption, const char *text, void *user);
+  void *user;
+} NileDialogs;
 
 /**
  * The window settings in the page's root `<html>` element (`window-frame`, `window-width`, ...).
@@ -186,13 +229,27 @@ typedef struct NileWindowConfig {
   float y;
   /**
    * 0 system frame, 1 extended (content under the title bar), 2 solid (no frame),
-   * 3 transparent (no frame, see-through where the page has no background).
+   * 3 transparent (no frame, see-through where the page has no background), 4 solid with a shadow.
    */
   int32_t frame;
   /**
    * The system draws no frame, so you should honour [`nile_view_caption_press`] and resize edges.
    */
   bool frameless;
+  /**
+   * The window's pixels carry alpha (`window-frame="transparent"` or a `window-material`): make the
+   * window transparent and present the premultiplied BGRA from [`nile_view_render`] with alpha.
+   */
+  bool translucent;
+  /**
+   * The system draws a drop shadow around a frameless window (`solid-with-shadow`).
+   */
+  bool shadow;
+  /**
+   * `window-material`: 0 none, 1 blur, 2 acrylic, 3 mica, 4 tabbed, 5 sidebar, 6 hud. Scripts can
+   * change it (`Window.this.material`): read the config again after ticks and apply a new value.
+   */
+  int32_t material;
 } NileWindowConfig;
 
 /**
@@ -388,6 +445,63 @@ char *nile_view_selected_text(struct NileView *view);
  * `view` must be a live view; the callbacks and `user` must stay valid for its lifetime.
  */
 void nile_view_set_clipboard(struct NileView *view, struct NileClipboard clipboard);
+
+/**
+ * Install native dialogs for scripts and `<input type=file>` (without them scripts get `null`
+ * and file inputs use [`nile_view_take_file_request`]). Kept across reloads.
+ *
+ * # Safety
+ * `view` must be a live view; the callbacks and `user` must stay valid for its lifetime.
+ */
+void nile_view_set_dialogs(struct NileView *view, struct NileDialogs dialogs);
+
+/**
+ * Files were dropped on the window at the pointer's last position (tell the page where with
+ * [`nile_pointer_move`] first). `paths` are UTF-8 paths separated by newlines. A file input under
+ * the pointer takes them; elsewhere the target gets a `drop` event. Returns true if the page changed.
+ *
+ * # Safety
+ * `view` must be a live view and `paths` a valid string.
+ */
+bool nile_view_drop_files(struct NileView *view,
+                          const char *paths);
+
+/**
+ * The window became active (`active` true) or inactive: fires `activate` on `Window.this`.
+ * Returns true if the page changed.
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+bool nile_view_window_activated(struct NileView *view, bool active);
+
+/**
+ * Popups that want an OS window of their own (`popup({window: "popup"})`), as JSON
+ * `[{"id":N,"x":..,"y":..,"w":..,"h":..}]` with the border box in this view's logical coordinates (it
+ * may lie outside the view). Free the string with [`nile_string_free`]. For each: make a frameless,
+ * always-on-top window at that rectangle, draw it with [`nile_view_render_portal`], and send its
+ * pointer, wheel and key input to this same view with `x`/`y` offset by the rectangle's origin.
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+char *nile_view_portals(struct NileView *view);
+
+/**
+ * Draw one popup from [`nile_view_portals`] into its window's buffer (same format as
+ * [`nile_view_render`]): `width` x `height` physical pixels at `scale`, the popup's top-left
+ * corner at the buffer's. Returns false if `id` isn't a current popup or the arguments are wrong.
+ *
+ * # Safety
+ * `pixels` must point to `len` writable bytes.
+ */
+bool nile_view_render_portal(struct NileView *view,
+                             size_t id,
+                             uint8_t *pixels,
+                             size_t len,
+                             uint32_t width,
+                             uint32_t height,
+                             float scale);
 
 /**
  * The page's accessibility tree as JSON (`{"root", "focus", "nodes": [{"id", "role", "name",
