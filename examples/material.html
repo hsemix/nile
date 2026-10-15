@@ -7,8 +7,8 @@
       .card {
         margin: 24px; padding: 20px; height: 150px;
         border-radius: 18px;
-        background: rgba(255, 255, 255, 0.18);
-        color: #fff;
+        background: rgba(255, 255, 255, 0.35);
+        color: #1b1d22;
         box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
       }
       h3 { margin: 0 0 8px; }
@@ -19,7 +19,18 @@
     <div class="card" role="window-caption">
       <h3>Window material</h3>
       <div>window-material="sidebar" blurs what is behind the window.</div>
-      <button role="window-close">Close</button>
+      <div>
+        <button data-m="sidebar">sidebar</button>
+        <button data-m="hud">hud</button>
+        <button data-m="acrylic">acrylic</button>
+        <button data-m="mica">mica</button>
+        <button data-m="">none</button>
+        <button role="window-close">Close</button>
+      </div>
+      <script>
+        // Window.this.material changes it while the window is open.
+        document.on("click", "button[data-m]", (e, b) => { Window.this.material = b.dataset.m; });
+      </script>
     </div>
   </body>
 </html>

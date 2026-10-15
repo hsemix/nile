@@ -5,17 +5,19 @@
 use nile_engine::window::Material;
 use winit::window::Window;
 
-/// Applies `material` to a window that was created transparent (`WindowConfig::translucent`).
+/// Applies `material` to the window, replacing the one it had; `Material::None` removes it. The
+/// window is made transparent for the effect (a window created without one can't be solid again
+/// on every platform, so it stays transparent: the page paints its own background).
 pub fn apply(window: &Window, material: Material) {
-    if material == Material::None {
-        return;
+    if material != Material::None {
+        window.set_transparent(true);
     }
     #[cfg(target_os = "macos")]
     macos(window, material);
     #[cfg(windows)]
     windows(window, material);
     #[cfg(not(any(target_os = "macos", windows)))]
-    window.set_blur(true);
+    window.set_blur(material != Material::None);
     #[cfg(any(target_os = "macos", windows))]
     let _ = window;
 }
@@ -24,6 +26,7 @@ pub fn apply(window: &Window, material: Material) {
 fn windows(window: &Window, material: Material) {
     use winit::platform::windows::{BackdropType, WindowExtWindows};
     window.set_system_backdrop(match material {
+        Material::None => BackdropType::None,
         Material::Mica => BackdropType::MainWindow,
         Material::Tabbed => BackdropType::TabbedWindow,
         _ => BackdropType::TransientWindow, // acrylic
@@ -32,7 +35,8 @@ fn windows(window: &Window, material: Material) {
 
 #[cfg(target_os = "macos")]
 fn macos(window: &Window, material: Material) {
-    use objc2::MainThreadMarker;
+    use objc2::{ClassType, MainThreadMarker};
+    use objc2_foundation::NSObjectProtocol;
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSView,
         NSWindowOrderingMode,
@@ -46,6 +50,15 @@ fn macos(window: &Window, material: Material) {
     // view's layer, which always paints beneath its own subviews.
     // SAFETY: the content view is attached to a window, so its superview exists and is live.
     let Some(host) = (unsafe { content.superview() }) else { return };
+    // Take away the effect view an earlier material put there.
+    for old in host.subviews().iter() {
+        if old.isKindOfClass(NSVisualEffectView::class()) {
+            old.removeFromSuperview();
+        }
+    }
+    if material == Material::None {
+        return;
+    }
     let effect = NSVisualEffectView::new(mtm);
     effect.setMaterial(match material {
         Material::Mica => NSVisualEffectMaterial::WindowBackground,

@@ -61,7 +61,7 @@ background and draw your own rounded, translucent, shadowed shapes (`examples/tr
 `window-material="blur|acrylic|mica|tabbed|sidebar|hud"` puts the system's frosted backdrop behind
 the page, which then only needs a (semi-)transparent background (`examples/material.html`). The
 material works with any frame, including the native one. macOS uses `NSVisualEffectView`; Windows 11
-asks DWM for acrylic/Mica; KDE gets the blur protocol. Per-pixel alpha is only verified on macOS.
+asks DWM for acrylic/Mica; KDE gets the blur protocol. `Window.this.material = "mica"` (or `""`) changes it while the window is open. Per-pixel alpha is only verified on macOS: Windows draws these windows through its own alpha-carrying bitmap, Wayland uses ARGB buffers, and X11 has no alpha path yet.
 `solid-with-shadow` currently has no native shadow. Desktop transparency depends
 on the host surface; the software shell does not expose a surface alpha mode.
 

@@ -1223,6 +1223,14 @@
       return tag === "question" ? answer : "yes";
     }
     // Show popups (`element.popup()`) in OS windows of their own, so they can extend past this window.
+    // The system's frosted backdrop behind a page with a transparent background (Nile's `window-material`
+    // attribute): "blur", "acrylic", "mica", "tabbed", "sidebar", "hud" or "" for none. It is the root
+    // element's attribute, so reading and styling it work like any other.
+    get material() { return document.documentElement.getAttribute("window-material") || ""; }
+    set material(v) {
+      if (v) document.documentElement.setAttribute("window-material", String(v));
+      else document.documentElement.removeAttribute("window-material");
+    }
     get popupWindows() { return popupWindows; }
     set popupWindows(v) { popupWindows = !!v; }
     get messageBoxes() { return boxMode; }

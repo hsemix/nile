@@ -20,6 +20,8 @@
 //!   nile page.html --pdf out.pdf        write every page as a PDF ([--wait MS] first)
 //!        [--wait MS]                   let timers run this long before the snapshot
 
+#[cfg(windows)]
+mod alpha_win;
 mod access;
 mod app;
 mod bundle;

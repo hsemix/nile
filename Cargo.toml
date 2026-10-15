@@ -32,11 +32,11 @@ winit = "0.30"
 # Pinned master: 0.4.8 has no alpha modes (transparent windows); switch back once 0.5 is released.
 softbuffer = { git = "https://github.com/rust-windowing/softbuffer", rev = "9a7c9caf4ac29a8ae361d68c9a5babb97e36dc70" }
 accesskit = "0.25"
-windows-sys = { version = "0.52", default-features = false, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_UI_Controls_Dialogs", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Com"] }
+windows-sys = { version = "0.52", default-features = false, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_UI_Controls_Dialogs", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Com", "Win32_Graphics_Gdi"] }
 accesskit_winit = "0.34"
 accesskit_consumer = "0.39"
 objc2 = "0.6.5"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObject"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObject", "NSArray"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSView", "NSResponder", "NSGraphics", "NSMenu", "NSMenuItem", "NSApplication", "NSEvent", "NSCell", "NSControl", "NSVisualEffectView"] }
 arboard = { version = "3.6", default-features = false }
 imagesize = "0.13"

@@ -346,10 +346,11 @@ pub(crate) fn call(op: &str, a: &[String]) -> Result<String, String> {
                 let mut it = t.split_whitespace().filter_map(|n| n.parse::<u32>().ok());
                 Some((it.next()?, it.next()?))
             });
-            #[cfg(not(unix))]
-            let stty: Option<(u32, u32)> = None;
             let env = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+            #[cfg(unix)]
             let (rows, cols) = stty.unwrap_or((env("LINES", 24), env("COLUMNS", 80)));
+            #[cfg(not(unix))]
+            let (rows, cols) = (env("LINES", 24), env("COLUMNS", 80));
             Ok(format!("{{\"width\":{cols},\"height\":{rows}}}"))
         }
         // 0 normal, 1 raw, 2 raw with output processing (`stty` on Unix; nothing to do elsewhere).

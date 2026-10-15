@@ -4314,6 +4314,17 @@ mod tests {
     }
 
     #[test]
+    fn window_material_is_a_script_property_of_the_root_attribute() {
+        let (mut p, path) = page(r#"<html window-material="hud"><body></body></html>"#, "material");
+        assert_eq!(js(&mut p, "Window.this.material"), "hud");
+        js(&mut p, "Window.this.material = 'mica'");
+        assert_eq!(window::WindowConfig::from_document(&p.doc.borrow()).material, window::Material::Mica);
+        js(&mut p, "Window.this.material = ''");
+        assert!(!window::WindowConfig::from_document(&p.doc.borrow()).translucent());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn form_controls_validate_and_match_valid_and_invalid() {
         let (mut p, path) = page(
             r##"<body><form id="f"><input id="a" required><input id="n" type="number" min="1" max="5" step="2" value="4"><input id="e" type="email" value="x@y.z"><input id="t" pattern="[a-z]+" value="abc" maxlength="5"><input id="c" type="checkbox" required><input id="d" disabled required></form><script>

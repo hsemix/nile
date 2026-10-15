@@ -50,6 +50,9 @@ struct Win {
     id: u32,
     window: Rc<Window>,
     surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
+    /// Windows: draws translucent windows (softbuffer's backend loses the alpha channel).
+    #[cfg(windows)]
+    alpha: crate::alpha_win::Presenter,
     page: Page,
     mods: ModifiersState,
     /// The pointer shape last given to the window.
@@ -230,6 +233,13 @@ impl Win {
                 }
             }
         }
+        // `Window.this.material = ...` sets the root's `window-material`.
+        let material = WindowConfig::from_document(&self.page.doc.borrow()).material;
+        if material != self.config.material {
+            self.config.material = material;
+            material::apply(&window, material);
+            window.request_redraw();
+        }
         let title = window::current_title(&self.page.doc.borrow(), &self.config);
         if title != self.title {
             window.set_title(&title);
@@ -394,6 +404,13 @@ impl Win {
                 };
                 let scale = window.scale_factor() as f32;
                 let page = &mut self.page;
+                #[cfg(windows)]
+                if self.config.translucent() {
+                    if let Some(hwnd) = owner_hwnd(window) {
+                        self.alpha.present(hwnd, size.width, size.height, |bytes| page.paint(bytes, size.width, size.height, scale));
+                        return false;
+                    }
+                }
                 present(&mut self.surface, (w, h), self.config.translucent(), |bytes| page.paint(bytes, size.width, size.height, scale));
             }
             _ => {}
@@ -402,33 +419,50 @@ impl Win {
     }
 }
 
-/// Paint one frame into the surface. Skia writes BGRA, which is softbuffer's pixel layout on every
-/// desktop target; with `translucent` the buffer carries premultiplied alpha where the platform
-/// supports it (macOS today), else the alpha channel is dropped.
+/// Paint one frame into the surface. Skia writes premultiplied BGRA, softbuffer's pixel layout on
+/// every desktop target. With `translucent` the buffer keeps its alpha where the platform takes it:
+/// premultiplied as is (Wayland), or converted to straight alpha (macOS offers only that); elsewhere
+/// the alpha channel is dropped.
 fn present(surface: &mut softbuffer::Surface<Rc<Window>, Rc<Window>>, size: (NonZeroU32, NonZeroU32), translucent: bool, paint: impl FnOnce(&mut [u8])) {
-    let mode = if translucent && surface.supports_alpha_mode(softbuffer::AlphaMode::Premultiplied) {
-        softbuffer::AlphaMode::Premultiplied
-    } else if translucent && surface.supports_alpha_mode(softbuffer::AlphaMode::Ignored) {
-        softbuffer::AlphaMode::Ignored
-    } else {
-        softbuffer::AlphaMode::Opaque
-    };
+    use softbuffer::AlphaMode;
+    let mode = [AlphaMode::Premultiplied, AlphaMode::Postmultiplied]
+        .into_iter()
+        .find(|m| translucent && surface.supports_alpha_mode(*m))
+        .unwrap_or(if translucent && surface.supports_alpha_mode(AlphaMode::Ignored) { AlphaMode::Ignored } else { AlphaMode::Opaque });
     surface.configure(size.0, size.1, mode).expect("configure surface");
     let mut buffer = surface.next_buffer().expect("surface buffer");
     let (w, h) = (size.0.get() as usize, size.1.get() as usize);
     let stride = buffer.byte_stride().get() as usize;
+    let finish = |bytes: &mut [u8]| {
+        paint(bytes);
+        if mode == AlphaMode::Postmultiplied {
+            unpremultiply(bytes);
+        }
+    };
     if stride == w * 4 {
-        paint(&mut buffer.data_u8()[..w * h * 4]);
+        finish(&mut buffer.data_u8()[..w * h * 4]);
     } else {
         // Rows padded by the platform: paint tightly, then copy row by row.
         let mut tight = vec![0u8; w * h * 4];
-        paint(&mut tight);
+        finish(&mut tight);
         let data = buffer.data_u8();
         for y in 0..h {
             data[y * stride..y * stride + w * 4].copy_from_slice(&tight[y * w * 4..(y + 1) * w * 4]);
         }
     }
     buffer.present().expect("present");
+}
+
+/// Premultiplied BGRA -> straight alpha, in place.
+fn unpremultiply(pixels: &mut [u8]) {
+    for i in (0..pixels.len() / 4 * 4).step_by(4) {
+        let a = pixels[i + 3] as u32;
+        if a != 0 && a != 255 {
+            for c in &mut pixels[i..i + 3] {
+                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
 }
 
 /// Make `child` an owned window of `owner`: above it, hidden and closed with it. macOS: a child
@@ -633,6 +667,8 @@ impl App {
             id,
             window,
             surface,
+            #[cfg(windows)]
+            alpha: Default::default(),
             page,
             mods: ModifiersState::default(),
             cursor: None,
@@ -976,5 +1012,18 @@ impl ApplicationHandler<UserEvent> for App {
             self.close(event_loop, id, 0, "null");
         }
         self.after(event_loop, id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unpremultiply;
+
+    #[test]
+    fn straight_alpha_from_premultiplied_pixels() {
+        // BGRA: half-transparent red (premultiplied 0,0,128,128), opaque blue, empty.
+        let mut px = [0, 0, 128, 128, 255, 0, 0, 255, 0, 0, 0, 0];
+        unpremultiply(&mut px);
+        assert_eq!(px, [0, 0, 255, 128, 255, 0, 0, 255, 0, 0, 0, 0]);
     }
 }
