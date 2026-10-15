@@ -24,7 +24,7 @@ use nile_script::{Environment, ScriptHost, UiEvent, WindowCommand, WindowInfo};
 use nile_style::{compute_styles_in, Animator, InteractionState, StyleMap};
 use nile_text::TextEngine;
 use skia_safe::{surfaces, AlphaType, Color, ColorType, ImageInfo};
-use window::{Frame, Role, WindowConfig};
+use window::{Role, WindowConfig};
 
 /// Keyboard modifiers held during a key or click.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -3681,10 +3681,19 @@ impl Page {
             .iter()
             .filter_map(|tag| self.doc.borrow().find(|n| n.tag() == Some(tag)))
             .find_map(|id| self.view.borrow().styles.get(id).background)
-            .map(|c| Color::from_argb(255, c.r, c.g, c.b))
+            .map(|c| {
+                // A translucent window keeps the colour's alpha; an ordinary one shows it over white.
+                if WindowConfig::from_document(&self.doc.borrow()).translucent() {
+                    Color::from_argb(c.a, c.r, c.g, c.b)
+                } else {
+                    let a = c.a as u32;
+                    let over = |v: u8| ((v as u32 * a + 255 * (255 - a)) / 255) as u8;
+                    Color::from_argb(255, over(c.r), over(c.g), over(c.b))
+                }
+            })
             .unwrap_or_else(|| {
-                // A `window-frame: transparent` window shows the desktop where the page has no background.
-                if WindowConfig::from_document(&self.doc.borrow()).frame == Frame::Transparent { Color::TRANSPARENT } else { Color::WHITE }
+                // A transparent or material window shows what is behind it where the page has no background.
+                if WindowConfig::from_document(&self.doc.borrow()).translucent() { Color::TRANSPARENT } else { Color::WHITE }
             })
     }
 
@@ -4246,6 +4255,73 @@ mod tests {
         assert_eq!(js(&mut p, "window.log[window.log.length - 1]"), "unmount");
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(module);
+    }
+
+    #[test]
+    fn custom_elements_upgrade_parsed_created_and_new_elements() {
+        let (mut p, path) = page(
+            r##"<body><x-a id="p" k="1"></x-a><div id="host"></div><script>
+              window.log = [];
+              class XA extends HTMLElement {
+                static observedAttributes = ["k"];
+                n = 5;
+                connectedCallback() { log.push("conn:" + this.id + ":" + this.n); }
+                disconnectedCallback() { log.push("disc:" + this.id); }
+                attributeChangedCallback(a, o, v) { log.push("attr:" + a + ":" + o + ">" + v); }
+                hello() { return "hi " + this.localName; }
+              }
+              customElements.define("x-a", XA);
+              const c = document.createElement("x-a"); c.id = "c"; c.setAttribute("k", "2");
+              document.getElementById("host").append(c);
+              const m = new XA(); m.id = "m";
+              window.made = m;
+              try { customElements.define("bad", class extends HTMLElement {}); } catch (e) { log.push("bad:" + e.name); }
+            </script></body>"##,
+            "custom-elements",
+        );
+        p.tick();
+        let _ = js(&mut p, "0"); // let the mutation observer run
+        p.tick();
+        assert_eq!(js(&mut p, "document.getElementById('p') instanceof customElements.get('x-a')"), "true");
+        assert_eq!(js(&mut p, "document.getElementById('p').hello()"), "hi x-a");
+        assert_eq!(js(&mut p, "made.localName + ':' + (made instanceof XA)"), "x-a:true");
+        assert_eq!(js(&mut p, "document.getElementById('c') instanceof XA"), "true");
+        let log = js(&mut p, "window.log.join('|')");
+        for want in ["conn:p:5", "attr:k:null>1", "conn:c:5", "attr:k:null>2", "bad:SyntaxError"] {
+            assert!(log.contains(want), "{want} missing from {log}");
+        }
+        js(&mut p, "document.getElementById('c').remove()");
+        p.tick();
+        js(&mut p, "document.getElementById('p').setAttribute('k', '9')");
+        let log = js(&mut p, "window.log.join('|')");
+        assert!(log.contains("disc:c") && log.contains("attr:k:1>9"), "{log}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn translucent_windows_keep_the_canvas_alpha() {
+        let canvas = |html: &str| {
+            let (p, path) = page(html, "canvas-alpha");
+            let c = p.canvas_background();
+            let _ = std::fs::remove_file(path);
+            (c.a(), c.r())
+        };
+        // Transparent frame: no background -> clear; a translucent one keeps its alpha.
+        assert_eq!(canvas(r#"<html window-frame="transparent"><body></body></html>"#).0, 0);
+        assert_eq!(canvas(r#"<html window-material="blur" style="background: rgba(255, 0, 0, 0.5)"><body></body></html>"#), (127, 255));
+        // An ordinary window shows the same colour over white.
+        assert_eq!(canvas(r#"<html style="background: rgba(0, 0, 0, 0.5)"><body></body></html>"#), (255, 128));
+    }
+
+    #[test]
+    fn window_material_is_a_script_property_of_the_root_attribute() {
+        let (mut p, path) = page(r#"<html window-material="hud"><body></body></html>"#, "material");
+        assert_eq!(js(&mut p, "Window.this.material"), "hud");
+        js(&mut p, "Window.this.material = 'mica'");
+        assert_eq!(window::WindowConfig::from_document(&p.doc.borrow()).material, window::Material::Mica);
+        js(&mut p, "Window.this.material = ''");
+        assert!(!window::WindowConfig::from_document(&p.doc.borrow()).translucent());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

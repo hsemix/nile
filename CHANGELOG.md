@@ -12,6 +12,10 @@ the section becomes that version's.
 
 #### Added
 - `prototype: Class url(file.js)`: CSS binds a script class (extending `Element`) to every matching element. The file is loaded as a module (an export named like the class, else the default export; or a class the page defines), each element becomes an instance (fields run), methods named `"on <event> [at <selector>]"` (`^event` = capture) become handlers (returning `true` marks the event handled), `componentDidMount()` runs and `componentWillUnmount()` runs on removal. Example `examples/prototype/`.
+- Transparent windows: `window-frame="transparent"` now really shows the desktop through the page's transparent areas on macOS (straight alpha: softbuffer's macOS backend offers no premultiplied mode), and `window-material="blur|acrylic|mica|tabbed|sidebar|hud"` adds the system's frosted backdrop (macOS `NSVisualEffectView`, Windows 11 backdrop through winit, KDE blur). Examples `examples/transparent.html`, `examples/material.html`.
+- `Window.this.material` (get/set) changes `window-material` while the window is open.
+- Windows: translucent windows are drawn through a 32-bit DIB with an alpha mask (`alpha_win.rs`) because softbuffer's Win32 backend drops alpha; Wayland windows use softbuffer's ARGB buffers.
+- `customElements.define(name, Class, {extends})` (plus `get`, `getName`, `whenDefined`, `upgrade`): the Web Components way to bind a class to a tag, on the same machinery as `prototype:`. Parsed, `createElement`ed (also `{is}`), `new MyElement()` and later-inserted elements become instances; `connectedCallback`, `disconnectedCallback`, `attributeChangedCallback` (`static observedAttributes`) run. `attachShadow()` returns the element itself (no encapsulation, no slots). Example `examples/custom-elements.html`.
 - Queries started from an element accept selectors that begin with a combinator (`el.$(">strip>label")`) and read `:root` as the element itself (Sciter's shape); delegated `on()` handlers too.
 - `:focusable`/`el.state.focusable` (makes any element focusable and tabbable), `:tab-focus` (focused by the Tab key), `:owns-focus` (a descendant is focused).
 - Dynamic `import()` and module resolution accept `file://` and `this://` URLs (`__DIR__ + "x.js"`).
@@ -43,6 +47,8 @@ the section becomes that version's.
 - `el.attributes["name"]` is the attribute's value as a string and assigning to it sets the attribute (Sciter's shape, as in `label.attributes["for"]`); it used to be an `{ name, value }` object (numeric indexes and iteration still give those).
 
 #### Fixed
+- Windows CI: `tty_size` no longer calls `unwrap_or` on a constant `None` (clippy).
+- An `html`/`body` background with alpha was drawn opaque; a translucent window keeps the alpha, an ordinary window shows it over white.
 - Sibling selectors and `:nth-child` on very wide lists no longer scan the child list per element (a per-version sibling index in `Document`).
 - The pointer is an arrow, not a text cursor, over a number input's spin arrows and a date/time/colour input's picker glyph.
 - Setting `input.value` from a script no longer makes the engine fire a second `change` when the input loses focus.

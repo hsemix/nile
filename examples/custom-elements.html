@@ -1,0 +1,49 @@
+<html>
+  <head>
+    <title>Custom elements</title>
+    <style>
+      body { font: 14px sans-serif; margin: 24px; }
+      x-badge { display: inline-block; padding: 2px 10px; border-radius: 10px; background: #3a7bd5; color: #fff; margin-right: 6px; }
+      x-badge[kind="warn"] { background: #d58a3a; }
+      x-counter { display: inline-block; border: 1px solid #9aa0a8; border-radius: 4px; padding: 4px 8px; }
+      x-counter button { width: 24px; }
+      p { margin: 14px 0; }
+    </style>
+  </head>
+  <body>
+    <h3>customElements.define</h3>
+    <p><x-badge>parsed</x-badge><x-badge kind="warn">attribute</x-badge></p>
+    <p><x-counter value="2"></x-counter></p>
+    <p id="made"></p>
+    <p>Log: <span id="log"></span></p>
+    <script>
+      const log = (s) => ($("#log").textContent += s + " ");
+      class XBadge extends HTMLElement {
+        static observedAttributes = ["kind"];
+        connectedCallback() { log("badge+"); }
+        attributeChangedCallback(n, o, v) { log(`kind:${o}>${v}`); }
+      }
+      class XCounter extends HTMLElement {
+        n = 0;
+        connectedCallback() {
+          this.n = +this.getAttribute("value") || 0;
+          const root = this.attachShadow({ mode: "open" });
+          root.innerHTML = '<button>-</button><b></b><button>+</button>';
+          this.paint();
+          const [minus, plus] = this.querySelectorAll("button");
+          minus.addEventListener("click", () => { this.n--; this.paint(); });
+          plus.addEventListener("click", () => { this.n++; this.paint(); });
+        }
+        paint() { this.querySelector("b").textContent = this.n; }
+      }
+      customElements.define("x-badge", XBadge);
+      customElements.define("x-counter", XCounter);
+      const b = document.createElement("x-badge");
+      b.textContent = "created";
+      b.setAttribute("kind", "warn");
+      $("#made").append(b);
+      $("#made").append(new XBadge());
+      $("#made").lastChild.textContent = "new XBadge()";
+    </script>
+  </body>
+</html>

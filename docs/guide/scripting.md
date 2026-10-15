@@ -161,6 +161,17 @@ Handlers are methods named `on <events> [at <selector>]`. Selectors are read fro
 appears. `examples/prototype/` is a working one. `aspect:` is not supported, and removing the
 `prototype` rule from an element doesn't unbind it.
 
+### Custom elements (Web Components)
+
+`customElements.define("x-badge", XBadge)` binds a class to a tag name from script, the web's way.
+Elements already in the page, parsed later, made with `document.createElement("x-badge")` or
+`new XBadge()` become instances (fields and the constructor run, so call `super()`), and
+`connectedCallback`, `disconnectedCallback` and `attributeChangedCallback(name, old, new)` (for
+`static observedAttributes`) are called. `{extends: "button"}` with `is="..."` customises a built-in.
+`customElements.get`, `getName`, `whenDefined` and `upgrade` exist. `attachShadow()` returns the
+element itself: there is no shadow tree, style encapsulation or `<slot>`. Custom tags default to
+`display: inline`, as in a browser. `examples/custom-elements.html`.
+
 ## `@debug` and `@storage`
 
 `import * as debug from "@debug"` offers `setUnhandledExceptionHandler(fn(err))`,

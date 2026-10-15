@@ -1223,6 +1223,14 @@
       return tag === "question" ? answer : "yes";
     }
     // Show popups (`element.popup()`) in OS windows of their own, so they can extend past this window.
+    // The system's frosted backdrop behind a page with a transparent background (Nile's `window-material`
+    // attribute): "blur", "acrylic", "mica", "tabbed", "sidebar", "hud" or "" for none. It is the root
+    // element's attribute, so reading and styling it work like any other.
+    get material() { return document.documentElement.getAttribute("window-material") || ""; }
+    set material(v) {
+      if (v) document.documentElement.setAttribute("window-material", String(v));
+      else document.documentElement.removeAttribute("window-material");
+    }
     get popupWindows() { return popupWindows; }
     set popupWindows(v) { popupWindows = !!v; }
     get messageBoxes() { return boxMode; }
@@ -1803,6 +1811,122 @@
       }
     },
   });
+
+  // ---- customElements ------------------------------------------------------------------------------
+  // The web's way to bind a class to a tag, on the same machinery as `prototype:` (`protoBind`): matching
+  // elements, present or added later, become instances; `connectedCallback`, `disconnectedCallback` and
+  // `attributeChangedCallback` follow a MutationObserver. `attachShadow()` has no encapsulation: it
+  // returns the element itself.
+  const ceDefs = new Map();
+  const ceWaiting = new Map();
+  const ceDefOf = (el) => {
+    if (el.nodeType !== 1) return null;
+    const tag = el.localName;
+    const d = ceDefs.get(tag);
+    if (d && !d.ext) return d;
+    const is = el.getAttribute("is");
+    const x = is && ceDefs.get(is);
+    return x && x.ext === tag ? x : null;
+  };
+  const ceUpgrade = (el, d) => {
+    if (el._ce) return;
+    el._ce = 1;
+    if (!(el instanceof d.Cls)) protoBind(el, d.Cls);
+    if (d.attrs.length && typeof el.attributeChangedCallback === "function") {
+      for (const n of d.attrs) {
+        const v = el.getAttribute(n);
+        if (v !== null) { try { el.attributeChangedCallback(n, null, v); } catch (e) { report(e); } }
+      }
+    }
+  };
+  const ceConnect = (el) => {
+    const d = ceDefOf(el);
+    if (!d) return;
+    ceUpgrade(el, d);
+    if (el.isConnected && !el._ceOn) {
+      el._ceOn = 1;
+      if (typeof el.connectedCallback === "function") { try { el.connectedCallback(); } catch (e) { report(e); } }
+    }
+  };
+  const ceDisconnect = (el) => {
+    if (el._ceOn && !el.isConnected) {
+      el._ceOn = 0;
+      if (typeof el.disconnectedCallback === "function") { try { el.disconnectedCallback(); } catch (e) { report(e); } }
+    }
+  };
+  const ceAll = (n) => (n.nodeType === 1 ? [n, ...n.querySelectorAll("*")] : []);
+  let ceWatch = null;
+  const ceObserve = () => {
+    if (!ceWatch) {
+      ceWatch = new MutationObserver((records) => {
+        for (const r of records) {
+          for (const n of r.removedNodes) for (const e of ceAll(n)) ceDisconnect(e);
+          for (const n of r.addedNodes) for (const e of ceAll(n)) ceConnect(e);
+        }
+      });
+    }
+    ceWatch.observe(document, { childList: true, subtree: true });
+  };
+  g.customElements = {
+    define(name, Cls, options) {
+      name = String(name);
+      if (!/^[a-z][^\sA-Z]*-[^\sA-Z]*$/.test(name)) throw new SyntaxError(`"${name}" is not a valid custom element name`);
+      if (typeof Cls !== "function") throw new TypeError("customElements.define needs a class");
+      if (ceDefs.has(name)) throw new Error(`"${name}" is already defined`);
+      const ext = options && options.extends ? String(options.extends).toLowerCase() : null;
+      const attrs = Array.from(Cls.observedAttributes || [], String);
+      const d = { Cls, name, ext, attrs };
+      ceDefs.set(name, d);
+      customTags.set(Cls, ext || name);
+      ceObserve();
+      for (const el of document.querySelectorAll(ext ? `${ext}[is="${name}"]` : name)) ceConnect(el);
+      const w = ceWaiting.get(name);
+      if (w) { ceWaiting.delete(name); w.forEach((f) => f(Cls)); }
+    },
+    get(name) { const d = ceDefs.get(String(name)); return d ? d.Cls : undefined; },
+    getName(Cls) { for (const d of ceDefs.values()) if (d.Cls === Cls) return d.name; return null; },
+    whenDefined(name) {
+      name = String(name);
+      const d = ceDefs.get(name);
+      if (d) return Promise.resolve(d.Cls);
+      return new Promise((res) => { if (!ceWaiting.has(name)) ceWaiting.set(name, []); ceWaiting.get(name).push(res); });
+    },
+    upgrade(root) { for (const e of ceAll(root)) ceConnect(e); },
+  };
+  {
+    const D = Object.getPrototypeOf(document);
+    const make = D.createElement;
+    D.createElement = function (tag, options) {
+      const el = make.call(this, tag);
+      const name = options && options.is ? String(options.is) : String(tag).toLowerCase();
+      const d = ceDefs.get(name);
+      if (d && (d.ext ? d.ext === String(tag).toLowerCase() : true)) {
+        if (d.ext) el.setAttribute("is", name);
+        ceUpgrade(el, d);
+      }
+      return el;
+    };
+    // `attributeChangedCallback` is called from the setters themselves, so detached elements report too.
+    for (const m of ["setAttribute", "removeAttribute"]) {
+      const orig = Element.prototype[m];
+      Element.prototype[m] = function (n, v) {
+        if (!this._ce) return orig.call(this, n, v);
+        n = String(n);
+        const old = this.getAttribute(n);
+        const r = orig.call(this, n, v);
+        const now = this.getAttribute(n);
+        const d = ceDefOf(this);
+        if (d && old !== now && d.attrs.includes(n) && typeof this.attributeChangedCallback === "function") {
+          try { this.attributeChangedCallback(n, old, now); } catch (e) { report(e); }
+        }
+        return r;
+      };
+    }
+    Object.defineProperties(Element.prototype, {
+      shadowRoot: { get() { return this._shadow ? this : null; }, configurable: true },
+      attachShadow: { value() { this._shadow = true; return this; }, configurable: true, writable: true },
+    });
+  }
 
   // ---- date, time and colour pickers ------------------------------------------------------------
   // The engine calls `__pickerOpen(id)` when the glyph of a date/time/colour input is clicked (or Alt+Down

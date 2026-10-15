@@ -16,7 +16,7 @@ use winit::{
     window::{CursorIcon, Window, WindowId, WindowLevel},
 };
 
-use crate::{access, dialogs, menu, mods_of};
+use crate::{access, dialogs, material, menu, mods_of};
 
 /// What other threads (the accessibility layer) send the event loop.
 pub enum UserEvent {
@@ -50,6 +50,9 @@ struct Win {
     id: u32,
     window: Rc<Window>,
     surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
+    /// Windows: draws translucent windows (softbuffer's backend loses the alpha channel).
+    #[cfg(windows)]
+    alpha: crate::alpha_win::Presenter,
     page: Page,
     mods: ModifiersState,
     /// The pointer shape last given to the window.
@@ -230,6 +233,13 @@ impl Win {
                 }
             }
         }
+        // `Window.this.material = ...` sets the root's `window-material`.
+        let material = WindowConfig::from_document(&self.page.doc.borrow()).material;
+        if material != self.config.material {
+            self.config.material = material;
+            material::apply(&window, material);
+            window.request_redraw();
+        }
         let title = window::current_title(&self.page.doc.borrow(), &self.config);
         if title != self.title {
             window.set_title(&title);
@@ -392,17 +402,66 @@ impl Win {
                 let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
                     return false;
                 };
-                self.surface.resize(w, h).expect("resize surface");
-                let mut buffer = self.surface.buffer_mut().expect("surface buffer");
-                // softbuffer pixels are u32 0RGB = BGRA bytes on little-endian,
-                // which is what Skia's BGRA8888 writes.
-                let bytes = unsafe { std::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u8, buffer.len() * 4) };
-                self.page.paint(bytes, size.width, size.height, window.scale_factor() as f32);
-                buffer.present().expect("present");
+                let scale = window.scale_factor() as f32;
+                let page = &mut self.page;
+                #[cfg(windows)]
+                if self.config.translucent() {
+                    if let Some(hwnd) = owner_hwnd(window) {
+                        self.alpha.present(hwnd, size.width, size.height, |bytes| page.paint(bytes, size.width, size.height, scale));
+                        return false;
+                    }
+                }
+                present(&mut self.surface, (w, h), self.config.translucent(), |bytes| page.paint(bytes, size.width, size.height, scale));
             }
             _ => {}
         }
         false
+    }
+}
+
+/// Paint one frame into the surface. Skia writes premultiplied BGRA, softbuffer's pixel layout on
+/// every desktop target. With `translucent` the buffer keeps its alpha where the platform takes it:
+/// premultiplied as is (Wayland), or converted to straight alpha (macOS offers only that); elsewhere
+/// the alpha channel is dropped.
+fn present(surface: &mut softbuffer::Surface<Rc<Window>, Rc<Window>>, size: (NonZeroU32, NonZeroU32), translucent: bool, paint: impl FnOnce(&mut [u8])) {
+    use softbuffer::AlphaMode;
+    let mode = [AlphaMode::Premultiplied, AlphaMode::Postmultiplied]
+        .into_iter()
+        .find(|m| translucent && surface.supports_alpha_mode(*m))
+        .unwrap_or(if translucent && surface.supports_alpha_mode(AlphaMode::Ignored) { AlphaMode::Ignored } else { AlphaMode::Opaque });
+    surface.configure(size.0, size.1, mode).expect("configure surface");
+    let mut buffer = surface.next_buffer().expect("surface buffer");
+    let (w, h) = (size.0.get() as usize, size.1.get() as usize);
+    let stride = buffer.byte_stride().get() as usize;
+    let finish = |bytes: &mut [u8]| {
+        paint(bytes);
+        if mode == AlphaMode::Postmultiplied {
+            unpremultiply(bytes);
+        }
+    };
+    if stride == w * 4 {
+        finish(&mut buffer.data_u8()[..w * h * 4]);
+    } else {
+        // Rows padded by the platform: paint tightly, then copy row by row.
+        let mut tight = vec![0u8; w * h * 4];
+        finish(&mut tight);
+        let data = buffer.data_u8();
+        for y in 0..h {
+            data[y * stride..y * stride + w * 4].copy_from_slice(&tight[y * w * 4..(y + 1) * w * 4]);
+        }
+    }
+    buffer.present().expect("present");
+}
+
+/// Premultiplied BGRA -> straight alpha, in place.
+fn unpremultiply(pixels: &mut [u8]) {
+    for i in (0..pixels.len() / 4 * 4).step_by(4) {
+        let a = pixels[i + 3] as u32;
+        if a != 0 && a != 255 {
+            for c in &mut pixels[i..i + 3] {
+                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
     }
 }
 
@@ -528,7 +587,7 @@ impl App {
             .with_inner_size(LogicalSize::new(w, h))
             .with_resizable(config.resizable != Resizable::No)
             .with_decorations(!config.frameless())
-            .with_transparent(config.frame == Frame::Transparent)
+            .with_transparent(config.translucent())
             // Shown after the accessibility adapter exists (it must see the window first).
             .with_visible(false)
             .with_maximized(config.state == InitialState::Maximized)
@@ -598,6 +657,7 @@ impl App {
             InitialState::Fullscreen => window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None))),
             _ => {}
         }
+        material::apply(&window, config.material);
         let access = accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
         window.set_visible(config.state != InitialState::Hidden);
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
@@ -607,6 +667,8 @@ impl App {
             id,
             window,
             surface,
+            #[cfg(windows)]
+            alpha: Default::default(),
             page,
             mods: ModifiersState::default(),
             cursor: None,
@@ -812,11 +874,9 @@ impl App {
                 let portal = &mut self.portals[pi];
                 let size = portal.window.inner_size();
                 let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
-                portal.surface.resize(w, h).expect("resize surface");
-                let mut buffer = portal.surface.buffer_mut().expect("surface buffer");
-                let bytes = unsafe { std::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u8, buffer.len() * 4) };
-                self.wins[oi].page.paint_portal(bytes, size.width, size.height, portal.window.scale_factor() as f32, portal.node, (rect.0, rect.1));
-                buffer.present().expect("present");
+                let (scale, node) = (portal.window.scale_factor() as f32, portal.node);
+                let page = &mut self.wins[oi].page;
+                present(&mut portal.surface, (w, h), false, |bytes| page.paint_portal(bytes, size.width, size.height, scale, node, (rect.0, rect.1)));
                 return;
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -952,5 +1012,18 @@ impl ApplicationHandler<UserEvent> for App {
             self.close(event_loop, id, 0, "null");
         }
         self.after(event_loop, id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unpremultiply;
+
+    #[test]
+    fn straight_alpha_from_premultiplied_pixels() {
+        // BGRA: half-transparent red (premultiplied 0,0,128,128), opaque blue, empty.
+        let mut px = [0, 0, 128, 128, 255, 0, 0, 255, 0, 0, 0, 0];
+        unpremultiply(&mut px);
+        assert_eq!(px, [0, 0, 255, 128, 255, 0, 0, 255, 0, 0, 0, 0]);
     }
 }
