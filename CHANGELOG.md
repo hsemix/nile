@@ -47,6 +47,7 @@ the section becomes that version's.
 - `el.attributes["name"]` is the attribute's value as a string and assigning to it sets the attribute (Sciter's shape, as in `label.attributes["for"]`); it used to be an `{ name, value }` object (numeric indexes and iteration still give those).
 
 #### Fixed
+- Windows: closing a window (or resizing a translucent one) overflowed the stack: the alpha presenter's `release()` re-dropped itself. Fixed.
 - Windows CI: `tty_size` no longer calls `unwrap_or` on a constant `None` (clippy).
 - An `html`/`body` background with alpha was drawn opaque; a translucent window keeps the alpha, an ordinary window shows it over white.
 - Sibling selectors and `:nth-child` on very wide lists no longer scan the child list per element (a per-version sibling index in `Document`).

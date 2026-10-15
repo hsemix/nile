@@ -36,7 +36,12 @@ impl Presenter {
                 DeleteDC(self.dc);
             }
         }
-        *self = Presenter::default();
+        // Field by field: assigning a whole new `Presenter` would drop the old one, and `Drop` calls this.
+        self.dc = 0;
+        self.bitmap = 0;
+        self.old = 0;
+        self.bits = ptr::null_mut();
+        self.size = (0, 0);
     }
 
     fn resize(&mut self, hwnd: isize, w: u32, h: u32) -> bool {
