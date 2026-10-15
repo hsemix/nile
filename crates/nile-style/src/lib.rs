@@ -485,6 +485,18 @@ pub struct ComputedStyle {
     pub border_collapse: bool,
     /// `caption-side: bottom`; inherited.
     pub caption_bottom: bool,
+    /// `prototype: Class url(file.js)`: the script class made the element's controller, and the file it
+    /// comes from (empty for a class the page already defines).
+    pub prototype: Option<(String, String)>,
+    /// `font-variation-settings` / `font-feature-settings` as written (`"wght" 650`), for the text engine; inherited.
+    pub font_variations: String,
+    pub font_features: String,
+    /// `list-style-image: url(...)`.
+    pub list_style_image: Option<String>,
+    /// `backface-visibility: hidden`: not drawn while its transform turns it away.
+    pub backface_hidden: bool,
+    /// `transform-style: preserve-3d` (accepted; transforms of nested elements already compose in 3D).
+    pub preserve_3d: bool,
     /// `scrollbar-width` and `scrollbar-color` (thumb, track) of a scroll container.
     pub scrollbar_width: ScrollbarWidth,
     pub scrollbar_color: Option<(Color, Color)>,
@@ -624,6 +636,12 @@ impl Default for ComputedStyle {
             border_spacing: (0.0, 0.0),
             border_collapse: false,
             caption_bottom: false,
+            list_style_image: None,
+            prototype: None,
+            font_variations: String::new(),
+            font_features: String::new(),
+            backface_hidden: false,
+            preserve_3d: false,
             scrollbar_width: ScrollbarWidth::Auto,
             scrollbar_color: None,
             table_fixed: false,
@@ -860,6 +878,9 @@ impl ComputedStyle {
             text_align: parent.text_align,
             white_space: parent.white_space,
             list_style_type: parent.list_style_type,
+            list_style_image: parent.list_style_image.clone(),
+            font_variations: parent.font_variations.clone(),
+            font_features: parent.font_features.clone(),
             list_style_inside: parent.list_style_inside,
             italic: parent.italic,
             // TODO: decorations aren't really inherited in CSS; they propagate
@@ -996,6 +1017,7 @@ em, i { font-style: italic }
 u, a { text-decoration: underline }
 s, del { text-decoration: line-through }
 a { color: #0000ee }
+a:visited { color: #551a8b }
 a[href] { cursor: pointer }
 input, textarea { cursor: text }
 button, select, input[type=checkbox], input[type=radio], input[type=button], input[type=submit] { cursor: default }
@@ -1107,6 +1129,8 @@ pub struct StyleMap {
     /// `::-webkit-scrollbar*` rules of scroll containers that have any.
     scrollbars: HashMap<NodeId, ScrollbarParts>,
     page_bar: ScrollbarLook,
+    /// Some element has a `prototype` (a script class bound from CSS).
+    pub has_prototypes: bool,
     /// `@keyframes` by name.
     pub(crate) keyframes: HashMap<String, Vec<parse::Frame>>,
     /// `@page` rules (selector, body) in source order.
@@ -1136,7 +1160,7 @@ impl StateDeps {
                     let css = sel.to_css_string();
                     d.hover |= css.contains(":hover");
                     d.active |= css.contains(":active");
-                    d.focus |= css.contains(":focus");
+                    d.focus |= css.contains(":focus") || css.contains(":owns-focus");
                     d.sibling |= (css.contains(":hover") || css.contains(":active") || css.contains(":focus")) && (css.contains(" + ") || css.contains(" ~ "));
                 }
             }
@@ -1203,6 +1227,7 @@ impl ComputedStyle {
         a.box_shadow = other.box_shadow.clone();
         a.selection_bg = other.selection_bg;
         a.scrollbar_color = other.scrollbar_color;
+        a.prototype = other.prototype.clone();
         a.transitions = other.transitions.clone();
         a.animations = other.animations.clone();
         a.transform_origin = other.transform_origin;
@@ -1300,6 +1325,21 @@ impl StyleMap {
         }
     }
 
+    /// Elements whose style names a `prototype`: `(element, class, file)`.
+    pub fn prototypes(&self, doc: &Document) -> Vec<(NodeId, String, String)> {
+        if !self.has_prototypes {
+            return Vec::new();
+        }
+        doc.nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| {
+                let (class, url) = self.styles.get(i)?.prototype.clone()?;
+                matches!(n.kind, NodeKind::Element { .. }).then_some((NodeId(i), class, url))
+            })
+            .collect()
+    }
+
     /// The look of the page's own scrollbar: `<html>`'s, else `<body>`'s when `<html>` has none set.
     pub fn page_scrollbar(&self) -> ScrollbarLook {
         self.page_bar
@@ -1392,7 +1432,9 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
         pages,
         font_faces,
         page_bar: ScrollbarLook { thickness: SCROLLBAR_AUTO, thumb: None, thumb_radius: None, track: None },
+        has_prototypes: false,
     };
+    map.has_prototypes = map.styles.iter().any(|s| s.prototype.is_some());
     let default = map.page_bar;
     map.page_bar = [doc.find(|n| n.tag() == Some("html")), doc.body()].into_iter().flatten().map(|n| map.scrollbar_look(n)).find(|l| *l != default).unwrap_or(default);
     map
@@ -1573,7 +1615,7 @@ fn apply_declarations(
             // A `var()` that can't be resolved makes the declaration invalid.
             let text = substitute(&d.raw, &vars, 0)?;
             // `popup-*` values are kept as text for scripts; everything else is parsed now.
-            let raw = if d.name.starts_with("popup-") || d.name == "shape-outside" { text.clone() } else { String::new() };
+            let raw = if parse::keeps_raw(&d.name) { text.clone() } else { String::new() };
             Some(Declaration { values: parse::parse_values(&text, pcx), raw, ..(*d).clone() })
         })
         .flat_map(expand_font)
@@ -2334,6 +2376,8 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.user_select = UserSelect::Text;
             }
         }
+        "backface-visibility" => s.backface_hidden = first.and_then(Value::ident) == Some("hidden"),
+        "transform-style" => s.preserve_3d = first.and_then(Value::ident) == Some("preserve-3d"),
         "scrollbar-width" => {
             s.scrollbar_width = match first.and_then(Value::ident) {
                 Some("thin") => ScrollbarWidth::Thin,
@@ -2500,13 +2544,32 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.list_style_type = t;
             }
         }
+        // The class name keeps its case, so it is read from the text: `Tabs url(tabs.js)`.
+        "prototype" => {
+            let text = d.raw.trim();
+            let class = text.split_whitespace().next().filter(|c| !c.starts_with("url(") && *c != "none");
+            let url = text.find("url(").and_then(|i| text[i + 4..].split(')').next()).map(|u| u.trim().trim_matches(|c| c == '"' || c == '\'').to_string()).unwrap_or_default();
+            s.prototype = class.map(|c| (c.to_string(), url));
+        }
+        "font-variation-settings" => s.font_variations = if d.raw.trim() == "normal" { String::new() } else { d.raw.trim().to_string() },
+        "font-feature-settings" => s.font_features = if d.raw.trim() == "normal" { String::new() } else { d.raw.trim().to_string() },
+        "list-style-image" => {
+            s.list_style_image = v.iter().find_map(|x| match x {
+                Value::Url(u) => Some(u.clone()),
+                _ => None,
+            })
+        }
         "list-style-position" => match first.and_then(Value::ident) {
             Some("inside") => s.list_style_inside = true,
             Some("outside") => s.list_style_inside = false,
             _ => {}
         },
-        // `list-style: <type> || <position> || <image>`: the image is ignored.
+        // `list-style: <type> || <position> || <image>`.
         "list-style" => {
+            s.list_style_image = v.iter().find_map(|x| match x {
+                Value::Url(u) => Some(u.clone()),
+                _ => None,
+            });
             for pos in v.iter().filter_map(Value::ident) {
                 match pos {
                     "inside" => s.list_style_inside = true,
@@ -2644,6 +2707,36 @@ mod tests {
         let styles = compute_styles(&doc);
         let p = styles.get(doc.find(|n| n.attr("id") == Some("p")).unwrap());
         assert_eq!(p.font_family, r#""Segoe UI", "Helvetica Neue", "arial black", sans-serif"#);
+    }
+
+    #[test]
+    fn list_style_image_and_backface_properties_parse_and_inherit() {
+        let doc = Document::parse(
+            r#"<style>ul { list-style-image: url(a.png) } .s { list-style: square inside url('b.png') } .n { list-style-image: none }
+               .h { backface-visibility: hidden; transform-style: preserve-3d }</style>
+               <ul id="u"><li id="i"></li><li id="s" class="s"></li><li id="n" class="n"></li></ul><div id="h" class="h"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let image = |id: &str| style_of(&doc, &styles, id).list_style_image.clone();
+        assert_eq!(image("u").as_deref(), Some("a.png"));
+        assert_eq!(image("i").as_deref(), Some("a.png"), "inherited");
+        assert_eq!(image("s").as_deref(), Some("b.png"), "the shorthand's picture");
+        assert_eq!(image("n"), None, "none clears it");
+        let h = style_of(&doc, &styles, "h");
+        assert!(h.backface_hidden && h.preserve_3d);
+    }
+
+    #[test]
+    fn prototype_names_a_class_and_a_file() {
+        let doc = Document::parse(r#"<style>tabs { prototype: Tabs url(tabs.js) } .n { prototype: MyThing } .x { prototype: none }</style><tabs id="t" class="x"></tabs><b id="b" class="n"></b><i id="i"></i>"#);
+        let styles = compute_styles(&doc);
+        assert_eq!(style_of(&doc, &styles, "b").prototype, Some(("MyThing".into(), String::new())));
+        assert_eq!(style_of(&doc, &styles, "t").prototype, None, "a later rule's none wins");
+        assert!(styles.has_prototypes && style_of(&doc, &styles, "i").prototype.is_none());
+        let doc = Document::parse(r#"<style>tabs { prototype: Tabs url(tabs.js) }</style><tabs id="t"></tabs>"#);
+        let styles = compute_styles(&doc);
+        assert_eq!(style_of(&doc, &styles, "t").prototype, Some(("Tabs".into(), "tabs.js".into())));
+        assert_eq!(styles.prototypes(&doc).len(), 1);
     }
 
     #[test]

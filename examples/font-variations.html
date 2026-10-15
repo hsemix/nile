@@ -1,0 +1,17 @@
+<html><head><title>Font variations</title>
+<style>
+  body { font: 28px system-ui, "SF Pro Text", sans-serif; margin: 24px }
+  p { margin: 6px 0 }
+  .w100 { font-variation-settings: "wght" 100 }
+  .w400 { font-variation-settings: "wght" 400 }
+  .w900 { font-variation-settings: "wght" 900 }
+  .tab { font-feature-settings: "tnum" 1 }
+  small { display: block; font-size: 12px; color: #666 }
+</style></head><body>
+<small>font-variation-settings (shows on variable fonts: weight 100 / 400 / 900)</small>
+<p class="w100">Hamburgefonstiv 100</p>
+<p class="w400">Hamburgefonstiv 400</p>
+<p class="w900">Hamburgefonstiv 900</p>
+<small>font-feature-settings: "tnum" (tabular figures line up)</small>
+<p>1111 / 8888 default</p><p class="tab">1111 / 8888 tnum</p>
+</body></html>

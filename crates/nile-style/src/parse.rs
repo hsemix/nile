@@ -95,6 +95,12 @@ pub struct Rule {
     pub declarations: Vec<Declaration>,
 }
 
+/// Properties whose value is kept as text for the cascade to hand on (scripts read `popup-*`; the
+/// others are parsed by their own modules or the text engine).
+pub(crate) fn keeps_raw(name: &str) -> bool {
+    name.starts_with("popup-") || matches!(name, "shape-outside" | "font-variation-settings" | "font-feature-settings" | "prototype")
+}
+
 /// An `@keyframes` rule: the declarations at each offset (0..=1), in offset order.
 #[derive(Debug, Clone)]
 pub struct Keyframes {
@@ -522,7 +528,7 @@ fn declarations_in(p: &mut Parser<'_>, cx: &Cx) -> Vec<Declaration> {
                         raw = rest.trim_end().to_string();
                     }
                 }
-            } else if !raw.contains("var(") && !name.starts_with("popup-") && name != "shape-outside" {
+            } else if !raw.contains("var(") && !keeps_raw(&name) {
                 raw.clear();
             }
             Ok::<_, ParseError<()>>(Declaration { name, values, important, raw })

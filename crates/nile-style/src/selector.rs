@@ -62,6 +62,11 @@ pub enum PseudoClass {
     Hover,
     Active,
     Focus,
+    /// `:link` (a link not visited yet) and `:any-link`.
+    Link,
+    AnyLink,
+    /// `:owns-focus`: a descendant has the focus.
+    OwnsFocus,
     /// A runtime flag from [`nile_dom::STATE_NAMES`], e.g. `:checked`.
     State(&'static str),
 }
@@ -72,6 +77,9 @@ impl ToCss for PseudoClass {
             PseudoClass::Hover => ":hover",
             PseudoClass::Active => ":active",
             PseudoClass::Focus => ":focus",
+            PseudoClass::Link => ":link",
+            PseudoClass::AnyLink => ":any-link",
+            PseudoClass::OwnsFocus => ":owns-focus",
             PseudoClass::State(name) => {
                 dest.write_char(':')?;
                 return dest.write_str(name);
@@ -175,6 +183,10 @@ impl<'i> Parser<'i> for NileParser {
             "hover" => Ok(PseudoClass::Hover),
             "active" => Ok(PseudoClass::Active),
             "focus" => Ok(PseudoClass::Focus),
+            "link" => Ok(PseudoClass::Link),
+            "any-link" => Ok(PseudoClass::AnyLink),
+            "owns-focus" => Ok(PseudoClass::OwnsFocus),
+            "tab-focus" => Ok(PseudoClass::State("tabfocus")),
             _ => match nile_dom::STATE_NAMES.iter().find(|s| s.eq_ignore_ascii_case(&name)) {
                 Some(state) => Ok(PseudoClass::State(state)),
                 None => Err(ParseError::custom(SelectorParseErrorKind::UnsupportedPseudoClassOrElement)),
@@ -220,16 +232,6 @@ impl<'a> ElementRef<'a> {
         matches!(self.doc.node(id).kind, NodeKind::Element { .. })
     }
 
-    /// Element siblings of this node, in order.
-    // TODO: sibling lookups scan the parent's child list, so wide lists are
-    // quadratic. Cache element indices per node if this shows up in profiles.
-    fn sibling_elements(&self) -> Vec<NodeId> {
-        match self.doc.node(self.id).parent {
-            Some(p) => self.doc.node(p).children.iter().copied().filter(|c| self.is_element(*c)).collect(),
-            None => vec![self.id],
-        }
-    }
-
     /// True if `target` is this node or one of its descendants.
     fn contains(&self, target: Option<NodeId>) -> bool {
         let mut cur = target;
@@ -268,15 +270,11 @@ impl Element for ElementRef<'_> {
     }
 
     fn prev_sibling_element(&self) -> Option<Self> {
-        let sibs = self.sibling_elements();
-        let i = sibs.iter().position(|s| *s == self.id)?;
-        i.checked_sub(1).map(|j| self.with(sibs[j]))
+        self.doc.prev_element_sibling(self.id).map(|s| self.with(s))
     }
 
     fn next_sibling_element(&self) -> Option<Self> {
-        let sibs = self.sibling_elements();
-        let i = sibs.iter().position(|s| *s == self.id)?;
-        sibs.get(i + 1).map(|s| self.with(*s))
+        self.doc.next_element_sibling(self.id).map(|s| self.with(s))
     }
 
     fn first_element_child(&self) -> Option<Self> {
@@ -323,6 +321,9 @@ impl Element for ElementRef<'_> {
             PseudoClass::Hover => self.contains(self.state.hover),
             PseudoClass::Active => self.contains(self.state.active),
             PseudoClass::Focus => self.state.focus == Some(self.id),
+            PseudoClass::Link => self.is_link() && !self.doc.has_state(self.id, "visited"),
+            PseudoClass::AnyLink => self.is_link(),
+            PseudoClass::OwnsFocus => self.state.focus.is_some_and(|f| f != self.id && self.contains(Some(f))),
             PseudoClass::State(name) => self.doc.has_state(self.id, name),
         }
     }
@@ -384,15 +385,29 @@ impl Element for ElementRef<'_> {
 }
 
 /// A parsed selector list for `querySelector`, `matches` and friends.
-pub struct Query(selectors::SelectorList<NileImpl>);
+pub struct Query {
+    list: selectors::SelectorList<NileImpl>,
+    /// The same selectors with `:root` read as `:scope`, for queries started from an element: in
+    /// Sciter `element.$(":root > a")` means "from this element".
+    scoped: Option<selectors::SelectorList<NileImpl>>,
+}
 
 impl Query {
     /// Parse `css`; the error is a short human-readable message.
     pub fn parse(css: &str) -> Result<Query, String> {
-        let mut parser = cssparser::Parser::new(css);
-        selectors::SelectorList::parse(&NileParser, &mut parser, selectors::parser::ParseRelative::No)
-            .map(Query)
-            .map_err(|_| format!("'{css}' is not a valid selector"))
+        // A selector starting with a combinator (`>a`) is relative to the element queried from, which the
+        // parser expresses by putting `:scope` in front; other selectors are parsed as they are (the
+        // relative mode would prefix every one of them).
+        let parse = |text: &str| {
+            let mut parser = cssparser::Parser::new(text);
+            selectors::SelectorList::parse(&NileParser, &mut parser, selectors::parser::ParseRelative::No).or_else(|_| {
+                let mut parser = cssparser::Parser::new(text);
+                selectors::SelectorList::parse(&NileParser, &mut parser, selectors::parser::ParseRelative::ForScope)
+            })
+        };
+        let list = parse(css).map_err(|_| format!("'{css}' is not a valid selector"))?;
+        let scoped = css.to_ascii_lowercase().contains(":root").then(|| parse(&css.replace(":root", ":scope").replace(":ROOT", ":scope"))).and_then(Result::ok);
+        Ok(Query { list, scoped })
     }
 
     pub fn matches(&self, doc: &Document, id: NodeId) -> bool {
@@ -414,7 +429,18 @@ impl Query {
             NeedsSelectorFlags::No,
             MatchingForInvalidation::No,
         );
-        selectors::matching::matches_selector_list(&self.0, &el, &mut ctx)
+        selectors::matching::matches_selector_list(&self.list, &el, &mut ctx)
+    }
+
+    /// Whether `id` matches with `scope` as the element the query started from: `:root` and a leading
+    /// combinator (`>a`) refer to it.
+    pub fn matches_in_scope(&self, doc: &Document, id: NodeId, scope: NodeId, state: &InteractionState) -> bool {
+        use selectors::context::{MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, QuirksMode, SelectorCaches};
+        let el = ElementRef::new(doc, id, state);
+        let mut caches = SelectorCaches::default();
+        let mut ctx = MatchingContext::new(MatchingMode::Normal, None, &mut caches, QuirksMode::NoQuirks, NeedsSelectorFlags::No, MatchingForInvalidation::No);
+        ctx.scope_element = Some(ElementRef::new(doc, scope, state).opaque());
+        selectors::matching::matches_selector_list(self.scoped.as_ref().unwrap_or(&self.list), &el, &mut ctx)
     }
 
     /// Descendants of `root` (not `root` itself) that match, in document order.
@@ -423,9 +449,35 @@ impl Query {
     }
 
     pub fn select_all_with(&self, doc: &Document, root: NodeId, state: &InteractionState) -> Vec<NodeId> {
+        // The document itself and `<html>` query as the page: `:root` is `<html>` there.
+        let scoped = matches!(doc.node(root).kind, NodeKind::Element { .. }) && doc.node(root).tag() != Some("html");
         doc.descendants(root)
             .into_iter()
-            .filter(|id| matches!(doc.node(*id).kind, NodeKind::Element { .. }) && self.matches_with(doc, *id, state))
+            .filter(|id| {
+                matches!(doc.node(*id).kind, NodeKind::Element { .. })
+                    && if scoped { self.matches_in_scope(doc, *id, root, state) } else { self.matches_with(doc, *id, state) }
+            })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queries_from_an_element_read_root_and_leading_combinators_from_it() {
+        let doc = Document::parse(r#"<div id="t"><strip id="s"><label id="l">x</label></strip><panels><p id="p"></p></panels></div><strip id="outer"></strip>"#);
+        let id = |name: &str| doc.find(|n| n.attr("id") == Some(name)).unwrap();
+        let state = InteractionState::default();
+        let ids = |css: &str| Query::parse(css).unwrap().select_all_with(&doc, id("t"), &state);
+        assert_eq!(ids(":root > strip"), vec![id("s")]);
+        assert_eq!(ids(":root strip, :root p"), vec![id("s"), id("p")]);
+        assert_eq!(ids(">strip>label"), vec![id("l")]);
+        assert_eq!(ids("> label"), vec![], "only children of the element");
+        assert_eq!(ids(":scope > panels > p"), vec![id("p")]);
+        // From the page, `:root` is `<html>` as usual.
+        let page = Query::parse(":root > body").unwrap().select_all_with(&doc, Document::ROOT, &state);
+        assert_eq!(page.len(), 1);
     }
 }

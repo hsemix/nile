@@ -1704,6 +1704,106 @@
     },
   });
 
+  // ---- `prototype: Class url(file.js)` ------------------------------------------------------------
+  // The engine hands over every element whose style names a prototype (`__applyPrototypes`, after each
+  // restyle). The class comes from the file (a module export named like the class, else the default
+  // export) or from the page's own scripts; each element becomes an instance of it: fields run, its
+  // `"on click at a"` methods are subscribed, `componentDidMount()` is called.
+  const protoClasses = new Map();
+  const protoWaiting = new Map();
+  const protoBound = new WeakMap();
+  const protoClass = (name, ns) => {
+    if (ns) {
+      if (typeof ns[name] === "function") return ns[name];
+      for (const v of Object.values(ns)) if (typeof v === "function" && v.name === name) return v;
+      if (typeof ns.default === "function") return ns.default;
+    }
+    if (/^[A-Za-z_$][\w$]*$/.test(name)) {
+      try { const c = (0, eval)(name); if (typeof c === "function") return c; } catch (_) { /* not defined (yet) */ }
+    }
+    return null;
+  };
+  // `"on ^mousedown at >strip>label:not(:current)"(event, matched)`: the events, then an optional selector.
+  const handlerMethods = (Cls) => {
+    const out = [];
+    for (let p = Cls.prototype; p && p !== Element.prototype; p = Object.getPrototypeOf(p)) {
+      for (const name of Object.getOwnPropertyNames(p)) {
+        const m = /^on\s+(.*)$/.exec(name);
+        if (!m || typeof p[name] !== "function") continue;
+        const at = m[1].search(/\s+at\s+/);
+        const events = (at < 0 ? m[1] : m[1].slice(0, at)).trim();
+        const selector = at < 0 ? null : m[1].slice(at).replace(/^\s+at\s+/, "").trim();
+        out.push({ name, events, selector });
+      }
+    }
+    return out;
+  };
+  function protoBind(el, Cls) {
+    const old = protoBound.get(el);
+    if (old === Cls) return;
+    if (old) {
+      for (const h of el._protoSubs || []) el.off(h);
+      if (el._comp) { el._comp = false; liveComps--; if (typeof el.componentWillUnmount === "function") { try { el.componentWillUnmount(); } catch (e) { report(e); } } }
+    }
+    // Run the constructor and field initialisers on a throwaway instance of the element, and keep
+    // the fields it set; the element's own wrapper stays the one scripts already hold.
+    adopting = el._id;
+    let inst = null;
+    try { inst = new Cls(); } catch (e) { report(e); } finally { adopting = -1; }
+    cache.set(el._id, el);
+    if (inst) for (const k of Object.keys(inst)) if (!Object.prototype.hasOwnProperty.call(el, k)) el[k] = inst[k];
+    Object.setPrototypeOf(el, Cls.prototype);
+    protoBound.set(el, Cls);
+    el._comp = true;
+    liveComps++;
+    el._protoSubs = [];
+    for (const { name, events, selector } of handlerMethods(Cls)) {
+      const fn = Cls.prototype[name];
+      const handler = function (ev, matched) {
+        const r = fn.call(el, ev, matched);
+        // Returning true means the event is dealt with: nothing else sees or does anything about it.
+        if (r === true) { ev.stopPropagation(); ev.preventDefault(); }
+        return r;
+      };
+      el._protoSubs.push(handler);
+      el.on(events, selector, handler);
+    }
+    if (typeof el.componentDidMount === "function") { try { el.componentDidMount(); } catch (e) { report(e); } }
+    mounted();
+  }
+  Object.defineProperty(g, "__applyPrototypes", {
+    value(list) {
+      for (const [id, name, url] of list) {
+        const el = wrap(id);
+        if (!el) continue;
+        const key = url + "\n" + name;
+        const known = protoClasses.get(key);
+        if (known) { protoBind(el, known); continue; }
+        if (known === null) continue; // the file or class failed to load
+        if (!url) {
+          const C = protoClass(name);
+          if (C) { protoClasses.set(key, C); protoBind(el, C); }
+          continue; // a class a later script defines is picked up on the next restyle
+        }
+        const waiting = protoWaiting.get(key);
+        if (waiting) { waiting.add(id); continue; }
+        protoWaiting.set(key, new Set([id]));
+        const where = /^[a-z][\w+.-]*:\/\//i.test(url) || url.startsWith("/") ? url : __DIR__ + url;
+        import(where).then((ns) => {
+          const C = protoClass(name, ns);
+          protoClasses.set(key, C);
+          if (!C) console.error("prototype: " + name + " is not exported by " + url);
+          for (const i of protoWaiting.get(key) || []) { const e = wrap(i); if (e && C) protoBind(e, C); }
+          protoWaiting.delete(key);
+        }, (err) => {
+          protoClasses.set(key, null);
+          protoWaiting.delete(key);
+          console.error("prototype: cannot load " + url + ": " + (err && err.message ? err.message : err));
+        });
+      }
+    },
+  });
+
   // ---- date, time and colour pickers ------------------------------------------------------------
   // The engine calls `__pickerOpen(id)` when the glyph of a date/time/colour input is clicked (or Alt+Down
   // is pressed in one). The picker is an ordinary element shown with `popup()`.
@@ -2124,7 +2224,7 @@
   }
   sysFs.readfile = sysFs.readFile; sysFs.readfileSync = sysFs.readFileSync; sync.readfile = sync.readFile;
   // Files, sockets, processes and OS queries over the `sysCall`/`sysStart` natives (nile-script/src/sys.rs).
-  // Blocking calls return promises that `__sysDone` settles; not here: named pipes, TTYs, `fs.watch`.
+  // Blocking calls return promises that `__sysDone` settles.
   const sysRun = (op, ...a) => {
     const r = N.sysCall(op, a.map(String));
     if (r.startsWith("E:")) { const m = r.slice(2); const e = new Error(m); e.code = m.slice(0, m.indexOf(":")); throw e; }
@@ -2167,6 +2267,62 @@
     getsockname() { return JSON.parse(sysRun("sockname", this._id)); }
     getpeername() { return JSON.parse(sysRun("peername", this._id)); }
   }
+  // Named pipes: a Unix domain socket named by its path; where those don't exist the pipe is a
+  // loopback socket announced in a file under the temp folder (so only Nile programs can reach it).
+  class Pipe extends SysStream {
+    constructor() { super(Number(sysRun("pipe_new"))); this._name = ""; }
+    bind(name) { sysRun("pipe_bind", this._id, String(name)); this._name = String(name); }
+    listen() { sysRun("listen", this._id); }
+    connect(name) { return later(() => { sysRun("pipe_connect", this._id, String(name)); this._name = String(name); }); }
+    accept() {
+      return sysAsync("accept", this._id).then((r) => {
+        const p = Object.create(Pipe.prototype);
+        Object.defineProperty(p, "_id", { value: Number(r), writable: true });
+        p._name = this._name;
+        return p;
+      });
+    }
+    getsockname() { return this._name; }
+    getpeername() { return this._name; }
+  }
+  // Terminals: standard input (read) and output/error (write); `setMode` 0 normal, 1 raw, 2 raw input
+  // with output processing; `getWinSize()` is the terminal's size.
+  class TTY extends SysStream {
+    constructor(fd) { super(Number(sysRun("tty_new", fd))); this._fd = fd; }
+    setMode(mode) { sysRun("tty_mode", mode | 0); }
+    getWinSize() { return JSON.parse(sysRun("tty_size")); }
+  }
+  // `fs.watch(path, (path, events) => ...)`: events is a bitmask, 1 for a rename (something created,
+  // removed or renamed) and 2 for a change. Folders are watched with what is inside them. Written by
+  // looking at the tree every 250 ms (no operating system notifications), so it stops at 20,000 entries.
+  const WATCH_LIMIT = 20000;
+  const snapshot = (root) => {
+    const seen = new Map();
+    const visit = (path) => {
+      if (seen.size >= WATCH_LIMIT) return;
+      const st = sync.stat(path);
+      if (!st) return;
+      seen.set(path, st.st_mtime + ":" + st.st_size + ":" + st.isDirectory);
+      if (st.isDirectory) for (const entry of sync.readdir(path) || []) visit(path.replace(/[\\/]$/, "") + "/" + entry.name);
+    };
+    visit(root);
+    return seen;
+  };
+  const watchFs = (path, callback) => {
+    path = String(path);
+    if (!sync.stat(path)) throw Object.assign(new Error("ENOENT: no such file or directory: " + path), { code: "ENOENT" });
+    let before = snapshot(path);
+    const timer = setInterval(() => {
+      const now = snapshot(path);
+      const events = [];
+      for (const [p, sig] of now) { if (!before.has(p)) events.push([p, 1]); else if (before.get(p) !== sig) events.push([p, 2]); }
+      for (const p of before.keys()) if (!now.has(p)) events.push([p, 1]);
+      before = now;
+      for (const [p, e] of events) { try { callback(p, e); } catch (err) { console.error(err && err.stack ? err.stack : String(err)); } }
+    }, 250);
+    return { path, close() { clearInterval(timer); } };
+  };
+  sysFs.watch = watchFs;
   class UDP {
     constructor() { Object.defineProperty(this, "_id", { value: Number(sysRun("udp_new")), writable: true }); }
     bind(addr) { sysRun("bind", this._id, ...addrOf(addr)); }
@@ -2219,7 +2375,7 @@
   sysFs.opendir = (path) => later(() => new sysFs.Dir(path));
   sysFs.opendirSync = (path) => new sysFs.Dir(path);
   const sysModule = {
-    fs: sysFs, TCP, UDP, Process, spawn,
+    fs: sysFs, TCP, UDP, Pipe, TTY, Process, spawn,
     hrtime: () => BigInt(Math.round(N.now() * 1e6)),
     gettimeofday: () => JSON.parse(sysRun("gettimeofday")),
     uname: () => JSON.parse(sysRun("uname")),

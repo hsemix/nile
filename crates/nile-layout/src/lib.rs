@@ -172,6 +172,8 @@ pub struct LayoutBox {
     /// A `<fieldset>` whose `<legend>` sits on its top border: the horizontal span (absolute x) the
     /// border is left out of.
     pub border_gap: Option<(f32, f32)>,
+    /// `backface-visibility: hidden`.
+    pub backface_hidden: bool,
 }
 
 /// What a sticky box needs to compute its shift: its insets and its parent's vertical extent.
@@ -307,6 +309,9 @@ pub struct Placement {
     /// Inside the paged element `LayoutTree::pages[n]`: box coordinates are flow positions that
     /// appear on that element's sheets.
     pub paged: Option<usize>,
+    /// The box (or a container) has `backface-visibility: hidden` and is turned away: it is neither
+    /// painted nor hit.
+    pub hidden: bool,
 }
 
 impl Placement {
@@ -435,6 +440,8 @@ pub enum MarkerKind {
     Circle,
     Square,
     Text(Box<TextLayout>),
+    /// `list-style-image`.
+    Image(Rc<ImageData>),
 }
 
 /// One row of a [`ListBox`].
@@ -673,7 +680,7 @@ impl LayoutTree {
             let mut cur = stack.last().map_or(Placement::default(), |(_, p)| *p);
             if b.fixed {
                 // Anchored to the viewport: ignore every ancestor's scroll, clip and transform.
-                cur = Placement { xf: Affine::translate(0.0, self.page_scroll), clip: None, paged: None };
+                cur = Placement { xf: Affine::translate(0.0, self.page_scroll), clip: None, paged: None, hidden: false };
                 stack.push((b.subtree_end.max(i + 1), cur));
             }
             // A transform applies to the box itself and everything inside it.
@@ -681,7 +688,8 @@ impl LayoutTree {
                 dy if dy != 0.0 => cur.xf.then_after(Affine::translate(0.0, dy)),
                 _ => cur.xf,
             };
-            let own = Placement { xf: b.transform.map_or(base, |t| base.then_after(t)), clip: cur.clip, paged: cur.paged };
+            let xf = b.transform.map_or(base, |t| base.then_after(t));
+            let own = Placement { xf, clip: cur.clip, paged: cur.paged, hidden: cur.hidden || (b.backface_hidden && xf.faces_away()) };
             out.push(own);
             if let Some(k) = self.pages.iter().position(|pb| pb.index == i) {
                 // Everything inside is a flow position on this element's sheets.
@@ -692,8 +700,8 @@ impl LayoutTree {
                 let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
                 let clip = intersect(own.clip, own.xf.bounds(sb.clip));
                 let xf = own.xf.then_after(Affine::translate(-ox, -oy));
-                stack.push((b.subtree_end, Placement { xf, clip: Some(clip), paged: own.paged }));
-            } else if b.transform.is_some() || b.sticky.is_some() {
+                stack.push((b.subtree_end, Placement { xf, clip: Some(clip), paged: own.paged, hidden: own.hidden }));
+            } else if b.transform.is_some() || b.sticky.is_some() || own.hidden != cur.hidden {
                 stack.push((b.subtree_end.max(i + 1), own));
             }
         }
@@ -1060,6 +1068,9 @@ impl LayoutTree {
     pub fn hit_test_scrolled(&self, x: f32, y: f32, offsets: &ScrollOffsets) -> Option<NodeId> {
         let places = self.placements(offsets);
         for (b, p) in self.boxes.iter().zip(&places).rev() {
+            if p.hidden {
+                continue;
+            }
             if let Some(c) = p.clip {
                 if x < c.x || y < c.y || x >= c.x + c.width || y >= c.y + c.height {
                     continue;
@@ -1770,6 +1781,9 @@ fn load_images(doc: &Document, styles: &StyleMap, loader: Option<&dyn ImageLoade
             if let Some(url) = &s.background_url {
                 want(url);
             }
+            if let Some(url) = &s.list_style_image {
+                want(url);
+            }
         }
     });
 }
@@ -2358,6 +2372,9 @@ fn roman(n: i64, upper: bool) -> String {
 /// boxes, so those get an estimate.
 fn inside_marker_width(s: &ComputedStyle) -> f32 {
     use nile_style::ListStyleType as L;
+    if s.list_style_image.as_deref().and_then(image_for).is_some() {
+        return s.font_size * 1.6;
+    }
     match s.list_style_type {
         L::None | L::DisclosureClosed | L::DisclosureOpen => 0.0,
         L::Disc | L::Circle | L::Square => (s.font_size * 0.34).round().max(3.0) + s.font_size * 0.5,
@@ -2416,7 +2433,8 @@ fn build_markers(
         // A `::marker` rule can restyle the marker, replace it (`content`) or hide it.
         let ms = styles.marker(b.node);
         let content = ms.and_then(|m| m.content.as_deref());
-        if style.display != Display::ListItem || (style.list_style_type == nile_style::ListStyleType::None && content.is_none_or(str::is_empty)) || content == Some("") {
+        let image = style.list_style_image.as_deref().and_then(image_for).filter(|i| i.width > 0 && i.height > 0);
+        if style.display != Display::ListItem || (style.list_style_type == nile_style::ListStyleType::None && image.is_none() && content.is_none_or(str::is_empty)) || content == Some("") {
             continue;
         }
         let mstyle = ms.map_or(style, |m| &m.style);
@@ -2427,6 +2445,14 @@ fn build_markers(
         // reserves room for it in its padding (see `inside_marker_width`).
         let inside_x = b.rect.x + style.border_width.left + style.padding.left;
         let kind_and_rect = match style.list_style_type {
+            _ if content.is_none() && image.is_some() => {
+                // The picture, scaled down to about a line of text, centred on the first line.
+                let img = image.clone().expect("checked");
+                let scale = (fs * 1.2 / img.height as f32).min(1.0);
+                let (w, h) = (img.width as f32 * scale, img.height as f32 * scale);
+                let x = if style.list_style_inside { inside_x } else { b.rect.x - fs * 0.4 - w };
+                Some((MarkerKind::Image(img), Rect { x, y: top + (line_h - h) / 2.0, width: w, height: h }))
+            }
             _ if content.is_some() => {
                 let mut l = text.shape(content.unwrap_or_default(), &text_style(mstyle), 1.0);
                 break_lines(&mut l, None, Alignment::Start);
@@ -3122,13 +3148,13 @@ fn flatten(
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky, border_gap: None })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden })
         }
         Some(NodeCtx::Replaced { id, image, .. }) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky, border_gap: None })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden })
         }
         Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
@@ -3185,6 +3211,7 @@ fn flatten(
                 fixed: false,
                 sticky: None,
                 border_gap: None,
+                backface_hidden: false,
             });
             for b in placed {
                 let kid = kids[b.id as usize];
@@ -3377,6 +3404,8 @@ fn text_style(s: &ComputedStyle) -> TextStyle {
         line_through: s.line_through,
         letter_spacing: s.letter_spacing,
         align: alignment(s.text_align),
+        font_variations: s.font_variations.clone(),
+        font_features: s.font_features.clone(),
     }
 }
 
@@ -4450,6 +4479,22 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
         let b = t.boxes.iter().find(|b| doc.node(b.node).attr("id") == Some("f")).unwrap();
         let (x0, x1) = b.border_gap.expect("a gap for the legend");
         assert!(x0 <= l.x && x1 >= l.x + l.width);
+    }
+
+    #[test]
+    fn a_turned_away_backface_hidden_box_is_not_hit() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><div style="width:100px;height:100px;perspective:400px">
+                 <div id="in" style="position:relative;width:100px;height:100px;transform:rotateY(180deg)">
+                   <div id="front" style="position:absolute;left:0;top:0;width:100px;height:100px;backface-visibility:hidden"><span id="label">x</span></div>
+                   <div id="back" style="position:absolute;left:0;top:0;width:100px;height:100px;backface-visibility:hidden;transform:rotateY(180deg)"></div>
+                 </div></div></body>"#,
+        );
+        let node = |id: &str| doc.find(|n| n.attr("id") == Some(id)).unwrap();
+        let hit = t.hit_test_scrolled(50.0, 50.0, &Default::default());
+        assert_eq!(hit, Some(node("back")), "the front is turned away, the back faces us");
+        assert_ne!(hit, Some(node("front")));
+        assert!(t.boxes.iter().any(|b| b.node == node("front") && b.backface_hidden));
     }
 
     #[test]

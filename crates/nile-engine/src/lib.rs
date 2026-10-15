@@ -795,6 +795,10 @@ pub struct Page {
     pub page_drag: bool,
     /// A scrollbar thumb being dragged.
     pub bar_drag: Option<BarDrag>,
+    /// The document version `prototype`s were last handed to scripts for.
+    proto_version: Option<u64>,
+    /// The element Tab is about to focus, so `focus_moved` can mark it `:tab-focus`.
+    tab_focus_next: Option<NodeId>,
     /// The scrollbar under the pointer: its scroller (`None`: the page) and whether it is the vertical one.
     pub bar_hover: Option<(Option<NodeId>, bool)>,
     /// Undo/redo stacks of the text inputs edited so far.
@@ -1117,6 +1121,8 @@ impl Page {
             history: std::collections::HashMap::new(),
             bar_drag: None,
             bar_hover: None,
+            tab_focus_next: None,
+            proto_version: None,
             page_drag: false,
             caret_visible: true,
             blink_at: Instant::now() + CARET_BLINK,
@@ -1214,6 +1220,7 @@ impl Page {
                 std::mem::take(&mut v.scrolled),
             )
         };
+        self.apply_prototypes();
         let moved = !moves.is_empty();
         for (old, new) in moves {
             self.focus_moved(old, new);
@@ -1234,6 +1241,17 @@ impl Page {
     pub fn focus_moved(&mut self, old: Option<NodeId>, new: Option<NodeId>) {
         if old.is_some() {
             self.ime_cancel();
+        }
+        // `:tab-focus`: the element got the focus from the Tab key.
+        let by_tab = self.tab_focus_next.take();
+        {
+            let mut doc = self.doc.borrow_mut();
+            if let Some(o) = old {
+                doc.set_state(o, "tabfocus", false);
+            }
+            if let Some(n) = new {
+                doc.set_state(n, "tabfocus", by_tab == Some(n));
+            }
         }
         if let Some(o) = old {
             let before = self.view.borrow_mut().value_at_focus.take();
@@ -1550,6 +1568,7 @@ impl Page {
                 Some("input" | "button" | "select" | "textarea") => true,
                 _ => {
                     n.attr("tabindex").is_some()
+                        || doc.has_state(id, "focusable")
                         || n.attr("contenteditable").is_some_and(|v| !v.trim().eq_ignore_ascii_case("false"))
                 }
             };
@@ -1802,6 +1821,32 @@ impl Page {
             x <= rect.x + 30.0
         } else {
             x >= rect.x + rect.width - 28.0
+        }
+    }
+
+    /// Hand the elements CSS gave a `prototype: Class url(file.js)` to the script side, which loads the
+    /// class and makes each element an instance of it (`__applyPrototypes` in web.js; already bound ones
+    /// are skipped).
+    fn apply_prototypes(&mut self) {
+        let Some(host) = &self.scripts else { return };
+        let version = self.doc.borrow().version;
+        if self.proto_version == Some(version) {
+            return;
+        }
+        let list = {
+            let v = self.view.borrow();
+            if !v.styles.has_prototypes {
+                return;
+            }
+            v.styles.prototypes(&self.doc.borrow())
+        };
+        self.proto_version = Some(version);
+        if list.is_empty() {
+            return;
+        }
+        let items: Vec<String> = list.iter().map(|(n, class, url)| format!("[{},{},{}]", n.0, editing::json_string(class), editing::json_string(url))).collect();
+        if let Err(e) = host.call("__applyPrototypes", &format!("[[{}]]", items.join(","))) {
+            eprintln!("[prototype] {e}");
         }
     }
 
@@ -2490,7 +2535,7 @@ impl Page {
                 Some("a") => n.attr("href").is_some(),
                 Some("input") => n.attr("type").is_none_or(|t| !t.eq_ignore_ascii_case("hidden")),
                 Some("button" | "select" | "textarea") => true,
-                _ => false,
+                _ => doc.has_state(id, "focusable"),
             };
             let tabindex = n.attr("tabindex").and_then(|t| t.trim().parse::<i32>().ok());
             if tabindex.is_some_and(|t| t < 0) || !(natural || tabindex.is_some()) {
@@ -2522,6 +2567,7 @@ impl Page {
             (Some(i), false) => (i + order.len() - 1) % order.len(),
         };
         let state = InteractionState { focus: Some(order[next]), ..self.interaction() };
+        self.tab_focus_next = Some(order[next]);
         let changed = self.set_interaction(state);
         // Tabbing into a text input selects its contents, as browsers do.
         if self.is_text_input(order[next]) {
@@ -3021,6 +3067,24 @@ impl Page {
             self.sync();
             self.emit(details, UiEvent::Plain("toggle"));
             return true;
+        }
+        // Following a link marks it visited (`:visited`; there is no history, so only for this page's life).
+        let link = {
+            let doc = self.doc.borrow();
+            let mut cur = Some(target);
+            let mut found = None;
+            while let Some(n) = cur {
+                if doc.node(n).tag() == Some("a") && doc.node(n).attr("href").is_some() {
+                    found = Some(n);
+                    break;
+                }
+                cur = doc.node(n).parent;
+            }
+            found
+        };
+        if let Some(a) = link {
+            self.doc.borrow_mut().set_state(a, "visited", true);
+            self.sync();
         }
         // The glyph of a date, time or colour input opens its picker.
         if self.picker_opener_at_pointer(target) {
@@ -3836,6 +3900,63 @@ mod tests {
     }
 
     #[test]
+    fn the_sys_module_has_named_pipes_ttys_and_fs_watch() {
+        let dir = std::env::temp_dir().join(format!("nile-sys3-{}", std::process::id())).to_string_lossy().replace('\\', "/");
+        let (mut p, path) = page(
+            &format!(r#"<body><script type="module">
+              import * as sys from "@sys";
+              const log = []; window.log = log; window.done = 0;
+              const dec = new TextDecoder();
+              const dir = "{dir}";
+              sys.fs.mkdirSync(dir);
+              (async () => {{
+                // A named pipe: the server echoes in upper case.
+                const server = new sys.Pipe();
+                server.bind(dir + "/echo.sock");
+                server.listen();
+                const serving = server.accept().then(async (conn) => {{ const d = await conn.read(); await conn.write(dec.decode(d).toUpperCase()); conn.close(); }});
+                const client = new sys.Pipe();
+                await client.connect(dir + "/echo.sock");
+                await client.write("ping");
+                log.push("pipe:" + dec.decode(await client.read()) + ":" + client.getpeername().endsWith("echo.sock"));
+                await serving;
+                client.close(); server.close();
+                // The terminal calls answer even without a terminal; only 0, 1 and 2 are terminals.
+                const size = new sys.TTY(1).getWinSize();
+                let bad = "none";
+                try {{ new sys.TTY(7); }} catch (e) {{ bad = e.code; }}
+                log.push("tty:" + (size.width > 0 && size.height > 0) + ":" + bad);
+                // fs.watch sees a new file and then a change to it.
+                const seen = [];
+                const watch = sys.fs.watch(dir, (path, events) => seen.push(path.split("/").pop() + ":" + events));
+                let missing = "none";
+                try {{ sys.fs.watch(dir + "/nope", () => {{}}); }} catch (e) {{ missing = e.code; }}
+                await new Promise((r) => setTimeout(r, 400));
+                sys.fs.writeFileSync(dir + "/new.txt", "one");
+                await new Promise((r) => setTimeout(r, 700));
+                sys.fs.writeFileSync(dir + "/new.txt", "one two three");
+                await new Promise((r) => setTimeout(r, 700));
+                watch.close();
+                log.push("watch:" + seen.filter((s) => s.startsWith("new.txt")).join(",") + ":" + missing + ":" + (watch.path === dir));
+                window.done = 1;
+              }})().catch((e) => {{ log.push("error:" + e.message); window.done = 1; }});
+            </script></body>"#),
+            "sys3",
+        );
+        for _ in 0..800 {
+            p.tick();
+            if js(&mut p, "window.done") == "1" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let log = js(&mut p, "window.log.join('|')");
+        assert!(log.starts_with("pipe:PING:true|tty:true:EBADF|watch:new.txt:1,new.txt:2:ENOENT"), "{log}");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn linked_style_sheets_and_imports_apply() {
         let dir = std::env::temp_dir().join(format!("nile-css-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
@@ -4061,6 +4182,70 @@ mod tests {
         assert_eq!(js(&mut p, "document.getElementById('m').value"), "2026-03");
         assert!(js(&mut p, "log.join(',')").starts_with("d=2026-10-20,t=14:05"), "{}", js(&mut p, "log.join(',')"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn followed_links_match_visited_and_stop_matching_link() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><a id="l" href="#x" style="display:block;height:20px">link</a><a id="n">plain</a></body>"##,
+            "visited",
+        );
+        let q = |p: &mut Page, sel: &str| js(p, &format!("document.getElementById('l').matches('{sel}')"));
+        assert_eq!((q(&mut p, ":link"), q(&mut p, ":any-link"), q(&mut p, ":visited")), ("true".into(), "true".into(), "false".into()));
+        assert_eq!(js(&mut p, "document.getElementById('n').matches(':any-link')"), "false");
+        click(&mut p, "l");
+        assert_eq!((q(&mut p, ":link"), q(&mut p, ":any-link"), q(&mut p, ":visited")), ("false".into(), "true".into(), "true".into()));
+        // Scripts can set the flag too, as in Sciter.
+        js(&mut p, "document.getElementById('l').state.visited = false");
+        assert_eq!(q(&mut p, ":link"), "true");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn css_prototype_makes_elements_instances_of_a_script_class() {
+        let module = std::env::temp_dir().join(format!("nile-proto-{}.js", std::process::id()));
+        std::fs::write(
+            &module,
+            r#"export class Tabs extends Element {
+                 clicks = 0;
+                 componentDidMount() { window.log.push("mount:" + this.localName + ":" + this.clicks); this.state.focusable = true; }
+                 componentWillUnmount() { window.log.push("unmount"); }
+                 get current() { const l = this.$(">strip>label:current"); return l ? l.attributes["for"] : "none"; }
+                 ["on click at >strip>label"](event, label) { this.clicks++; this.$$(">strip>label").forEach((l) => l.state.current = l === label); window.log.push("click:" + label.textContent + ":" + this.current); return true; }
+                 ["on ^keydown"](event) { window.log.push("key:" + event.key); }
+               }"#,
+        )
+        .unwrap();
+        let file = module.file_name().unwrap().to_string_lossy().into_owned();
+        let (mut p, path) = page(
+            &format!(
+                r#"<head><style>tabs {{ prototype: Tabs url({file}) }} label:current {{ color: red }}</style></head>
+                   <body><script>window.log = [];</script>
+                   <tabs id="t"><strip><label for="a">A</label><label for="b">B</label></strip><panels><div id="p"><label>inner</label></div></panels></tabs></body>"#
+            ),
+            "proto",
+        );
+        for _ in 0..50 {
+            p.tick();
+            if js(&mut p, "window.log.length") != "0" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(js(&mut p, "window.log.join('|')"), "mount:tabs:0");
+        assert_eq!(js(&mut p, "document.getElementById('t') instanceof Element && typeof document.getElementById('t').current"), "string");
+        // The method-name handler: relative selector, `this` is the element, `true` stops the event.
+        js(&mut p, "document.querySelectorAll('#t > strip > label')[1].click()");
+        js(&mut p, "document.querySelector('#p label').click()"); // not a child of the strip: no handler
+        assert_eq!(js(&mut p, "window.log.slice(1).join('|')"), "click:B:b");
+        assert_eq!(js(&mut p, "document.getElementById('t').clicks"), "1");
+        assert_eq!(js(&mut p, "document.getElementById('t').matches(':focusable')"), "true");
+        // `:root` in a query started from an element is that element.
+        assert_eq!(js(&mut p, "document.getElementById('t').$(':root > strip') !== null"), "true");
+        js(&mut p, "document.getElementById('t').remove()");
+        assert_eq!(js(&mut p, "window.log[window.log.length - 1]"), "unmount");
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(module);
     }
 
     #[test]

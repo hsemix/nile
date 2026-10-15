@@ -848,8 +848,13 @@
       const wrapper = (ev) => {
         let m = el;
         if (selector) {
-          m = ev.target instanceof Element ? ev.target.closest(selector) : null;
-          if (!m || !el.contains(m)) return;
+          // The nearest element from the target up to `el` that the selector picks, read from `el`
+          // (so `>strip>label` and `:root>x` work).
+          m = null;
+          for (let n = ev.target instanceof Element ? ev.target : null; n && n !== el; n = n.parentElement) {
+            if (el.nodeType === 1 ? N.matchesIn(n._id, el._id, selector) : n.matches(selector)) { m = n; break; }
+          }
+          if (!m) return;
         }
         if (once) off(el, null, handler);
         return handler.call(el, ev, m);
@@ -881,7 +886,7 @@
   // Element.state: runtime flags. hover/active/focus come from interaction;
   // the others (checked, disabled, readonly, expanded, ...) are stored on the
   // element and matched by the same-named pseudo-classes.
-  const FLAGS = ["checked", "disabled", "readonly", "expanded", "collapsed", "current", "selected", "invalid", "busy", "valid"];
+  const FLAGS = ["checked", "disabled", "readonly", "expanded", "collapsed", "current", "selected", "invalid", "busy", "valid", "visited", "focusable", "tabfocus"];
   Object.defineProperty(Element.prototype, "state", {
     get() {
       return new Proxy({}, {
@@ -901,7 +906,12 @@
         return a;
       });
       attrs.getNamedItem = (n) => attrs.find((a) => a.name === String(n).toLowerCase()) || null;
-      return new Proxy(attrs, { get: (t, k) => (k in t || typeof k === "symbol" ? t[k] : t.getNamedItem(k) ?? undefined) });
+      // `attributes[i]` is an `{ name, value }`; `attributes.name` is the attribute's value as a string, as in
+      // Sciter (`label.attributes["for"]`), and assigning to it sets the attribute.
+      return new Proxy(attrs, {
+        get: (t, k) => (k in t || typeof k === "symbol" ? t[k] : this.getAttribute(String(k).toLowerCase()) ?? undefined),
+        set: (t, k, v) => { if (typeof k === "string" && !(k in t)) this.setAttribute(k, v); return true; },
+      });
     },
   });
 

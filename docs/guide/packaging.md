@@ -96,5 +96,8 @@ application.run();
   (a `Process` with `pid`, `stdin/stdout/stderr` pipes, `wait()`, `kill()`; the `env` option adds to the
   environment), and `hrtime`, `gettimeofday`, `uname`, `isatty`, `environ`, `getenv/setenv/unsetenv`, `cwd`,
   `chdir`, `homedir`, `tmpdir`, `exepath`, `random` (not cryptographic). Blocking calls return promises.
-  Not there: named `Pipe`s, `TTY`, `fs.watch`.
+  Also `sys.Pipe` (named pipe: `bind(name)`, `listen`, `accept`, `connect(name)`, `read`, `write`, `close`; a Unix
+  domain socket named by its path, and on Windows a loopback socket announced through a file in the temp folder,
+  so only Nile programs can reach a pipe there), `sys.TTY(fd)` (fd 0, 1 or 2: `read`, `write`, `setMode`, `getWinSize`)
+  and `fs.watch(path, (path, events) => ...)` (events 1 rename, 2 change; folders deeply; polled every 250 ms).
 - The bootstrap window is not stripped down the way Sciter's is: a bootstrap script can use the DOM and timers.

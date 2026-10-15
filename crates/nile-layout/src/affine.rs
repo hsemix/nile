@@ -54,6 +54,13 @@ impl Affine {
         Affine { a: m[0][0], c: m[0][1], e: m[0][2], b: m[1][0], d: m[1][1], f: m[1][2], g: m[2][0], h: m[2][1], i: m[2][2] }
     }
 
+    /// Whether a surface mapped by this transform shows its back to the viewer: the map flips
+    /// orientation (negative determinant), as after `rotateY(180deg)`.
+    pub fn faces_away(&self) -> bool {
+        let det = self.a * (self.d * self.i - self.f * self.h) - self.c * (self.b * self.i - self.f * self.g) + self.e * (self.b * self.h - self.d * self.g);
+        det * self.i < 0.0
+    }
+
     /// The transform that applies `other` first, then `self`.
     pub fn then_after(self, other: Affine) -> Affine {
         let (x, y) = (self.rows(), other.rows());

@@ -11,6 +11,15 @@ the section becomes that version's.
 ### 2026-10-15
 
 #### Added
+- `prototype: Class url(file.js)`: CSS binds a script class (extending `Element`) to every matching element. The file is loaded as a module (an export named like the class, else the default export; or a class the page defines), each element becomes an instance (fields run), methods named `"on <event> [at <selector>]"` (`^event` = capture) become handlers (returning `true` marks the event handled), `componentDidMount()` runs and `componentWillUnmount()` runs on removal. Example `examples/prototype/`.
+- Queries started from an element accept selectors that begin with a combinator (`el.$(">strip>label")`) and read `:root` as the element itself (Sciter's shape); delegated `on()` handlers too.
+- `:focusable`/`el.state.focusable` (makes any element focusable and tabbable), `:tab-focus` (focused by the Tab key), `:owns-focus` (a descendant is focused).
+- Dynamic `import()` and module resolution accept `file://` and `this://` URLs (`__DIR__ + "x.js"`).
+- `backface-visibility: hidden` (a flip card shows only the face turned toward you; hit testing agrees) and `transform-style` is parsed. Example `examples/flip-card.html`.
+- `:link`, `:any-link` and `:visited` (following an `<a href>` marks it visited; `el.state.visited`); UA colour for visited links.
+- `list-style-image` and the `list-style` shorthand's picture. Example `examples/list-style-image.html`.
+- `font-variation-settings` and `font-feature-settings`; variable fonts are now drawn at the right axis positions (before, only the shaping used them, so `font-weight` and axes on e.g. the macOS system font looked wrong). Example `examples/font-variations.html`.
+- `@sys`: `Pipe` (named pipes: Unix sockets; a loopback emulation on Windows), `TTY(fd)` and `fs.watch(path, cb)`. Test `the_sys_module_has_named_pipes_ttys_and_fs_watch`.
 - Scrollbar styling: `scrollbar-width` (`auto`/`thin`/`none`), `scrollbar-color`, `overflow: scroll-indicator`, and `::-webkit-scrollbar`, `-thumb`, `-track` (thickness, colours, thumb rounding). The page's own bar follows `<html>` (else `<body>`). Example `examples/scrollbars.html`.
 - Scrollbars react to the pointer: the bar under it grows, shows its track and darkens its thumb, darker again while dragged.
 - Example `examples/combobox.html`: a filtering combobox written as a class component, with keyboard navigation and a popup list.
@@ -30,7 +39,11 @@ the section becomes that version's.
   `root`, `commit`, `close`, `registerClass`; no indexes or encryption).
 - This changelog.
 
+#### Changed
+- `el.attributes["name"]` is the attribute's value as a string and assigning to it sets the attribute (Sciter's shape, as in `label.attributes["for"]`); it used to be an `{ name, value }` object (numeric indexes and iteration still give those).
+
 #### Fixed
+- Sibling selectors and `:nth-child` on very wide lists no longer scan the child list per element (a per-version sibling index in `Document`).
 - The pointer is an arrow, not a text cursor, over a number input's spin arrows and a date/time/colour input's picker glyph.
 - Setting `input.value` from a script no longer makes the engine fire a second `change` when the input loses focus.
 - Linux CI: `a_registered_font_is_found_under_its_family_name` compared widths against a fallback

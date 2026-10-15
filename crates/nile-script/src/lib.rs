@@ -233,6 +233,12 @@ impl Resolver for FileResolver {
             // `@sciter` is the same module under the name Sciter apps use.
             return Ok(if name == "@sciter" { "@nile".to_string() } else { name.to_string() });
         }
+        // `file://` and `this://app/...` URLs (`__DIR__ + "x.js"`) name files too.
+        if name.starts_with("file://") || name.starts_with("this://") {
+            let mapped = nile_dom::vfs::url_to_path(name).map(|p| p.to_string_lossy().into_owned());
+            let local = mapped.as_deref().unwrap_or_else(|| path_of_url(name));
+            return Ok(normalize(std::path::Path::new(local)));
+        }
         if name.starts_with("./") || name.starts_with("../") {
             // Inline modules are named `page.html#moduleN`; imports resolve from the page's folder.
             let base_file = base.split('#').next().unwrap_or(base);
@@ -276,7 +282,7 @@ impl Loader for FileLoader {
     ) -> rquickjs::Result<Module<'js, Declared>> {
         // Built-in modules are thin wrappers over objects the prelude defines.
         let builtin = match name {
-            "@sys" => Some("const m = globalThis.__sysModule;\nexport const fs = m.fs;\nexport const TCP = m.TCP;\nexport const UDP = m.UDP;\nexport const Process = m.Process;\nexport const spawn = m.spawn;\nexport const hrtime = m.hrtime;\nexport const gettimeofday = m.gettimeofday;\nexport const uname = m.uname;\nexport const isatty = m.isatty;\nexport const environ = m.environ;\nexport const getenv = m.getenv;\nexport const setenv = m.setenv;\nexport const unsetenv = m.unsetenv;\nexport const cwd = m.cwd;\nexport const chdir = m.chdir;\nexport const homedir = m.homedir;\nexport const tmpdir = m.tmpdir;\nexport const exepath = m.exepath;\nexport const random = m.random;\nexport default m;"),
+            "@sys" => Some("const m = globalThis.__sysModule;\nexport const fs = m.fs;\nexport const TCP = m.TCP;\nexport const UDP = m.UDP;\nexport const Pipe = m.Pipe;\nexport const TTY = m.TTY;\nexport const Process = m.Process;\nexport const spawn = m.spawn;\nexport const hrtime = m.hrtime;\nexport const gettimeofday = m.gettimeofday;\nexport const uname = m.uname;\nexport const isatty = m.isatty;\nexport const environ = m.environ;\nexport const getenv = m.getenv;\nexport const setenv = m.setenv;\nexport const unsetenv = m.unsetenv;\nexport const cwd = m.cwd;\nexport const chdir = m.chdir;\nexport const homedir = m.homedir;\nexport const tmpdir = m.tmpdir;\nexport const exepath = m.exepath;\nexport const random = m.random;\nexport default m;"),
             "@nile" => Some(
                 "const m = globalThis.__sciterModule;\nexport const { VERSION, REVISION, QUICKJS_VERSION, setModuleUrlResolver, loadLibrary, parseValue, devicePixels, on, off, once, onGlobalEvent, offGlobalEvent, $, $$, uuid, encode, decode, compress, decompress, toBase64, fromBase64, md5, crc32 } = m;\nconst imp = m.import;\nexport { imp as import };\nexport default m;",
             ),
@@ -530,6 +536,16 @@ fn install_natives(
         let d = d.borrow();
         let state = env.interaction();
         Ok(node(id).is_some_and(|n| matches!(d.node(n).kind, NodeKind::Element { .. }) && q.matches_with(&d, n, &state)))
+    } }));
+    // `matchesIn(el, scope, css)`: `css` may start with a combinator or use `:root`, both relative to `scope`.
+    native!("matchesIn", with_doc!(d => { let env = env.clone(); move |ctx: Ctx<'_>, id: i32, scope: i32, css: String| -> rquickjs::Result<bool> {
+        let q = Query::parse(&css).map_err(|e| Exception::throw_message(&ctx, &format!("SyntaxError: {e}")))?;
+        let d = d.borrow();
+        let state = env.interaction();
+        Ok(match (node(id), node(scope)) {
+            (Some(n), Some(s)) => matches!(d.node(n).kind, NodeKind::Element { .. }) && q.matches_in_scope(&d, n, s, &state),
+            _ => false,
+        })
     } }));
     native!("rect", {
         let env = env.clone();
@@ -1512,8 +1528,8 @@ mod tests {
             i.state.checked = false;
             console.log($$(':checked').length);
             const names = [...i.attributes].map((a) => a.name + '=' + a.value).join(',');
-            i.attributes.title.value = 'new';
-            console.log(names, i.getAttribute('title'), i.attributes.length, i.attributes.type.value, i.attributes.nope);
+            i.attributes.title = 'new';
+            console.log(names, i.getAttribute('title'), i.attributes.length, i.attributes.type, i.attributes.nope);
             console.log(i.value, $('#p').nodeIndex, $('#p').insertAfter(document.createElement('hr'), $('#p')).tagName, $('#p').insert);
             "#,
         )

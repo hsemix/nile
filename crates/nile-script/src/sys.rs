@@ -44,6 +44,27 @@ enum Res {
     Writer(Mutex<Option<Box<dyn Write + Send>>>),
     Tcp(Mutex<Tcp>),
     Udp(Mutex<Option<UdpSocket>>),
+    /// A named pipe (a Unix domain socket); elsewhere pipes are `Tcp` sockets on the loopback.
+    #[cfg(unix)]
+    Pipe(Mutex<Pipe>),
+    /// A terminal: standard input (0), output (1) or error (2).
+    Tty(i32),
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct Pipe {
+    listener: Option<std::os::unix::net::UnixListener>,
+    stream: Option<std::os::unix::net::UnixStream>,
+    /// The socket file a listening pipe created, removed when it closes.
+    path: Option<std::path::PathBuf>,
+}
+
+/// Where a pipe without a socket file (Windows) tells clients which loopback port it listens on.
+#[cfg(not(unix))]
+fn pipe_port_file(name: &str) -> std::path::PathBuf {
+    let clean: String = name.trim_start_matches(r"\\.\pipe\").chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    std::env::temp_dir().join(format!("nile-pipe-{clean}.port"))
 }
 
 #[cfg(feature = "tls")]
@@ -255,6 +276,84 @@ pub(crate) fn call(op: &str, a: &[String]) -> Result<String, String> {
         // ---- sockets ----
         "tcp_new" => Ok(add(Res::Tcp(Mutex::default())).to_string()),
         "udp_new" => Ok(add(Res::Udp(Mutex::new(None))).to_string()),
+        // ---- named pipes ----
+        #[cfg(unix)]
+        "pipe_new" => Ok(add(Res::Pipe(Mutex::default())).to_string()),
+        #[cfg(not(unix))]
+        "pipe_new" => Ok(add(Res::Tcp(Mutex::default())).to_string()),
+        "pipe_bind" => {
+            #[cfg(unix)]
+            {
+                let Res::Pipe(p) = &*get(arg(0))? else { return Err("EBADF: not a pipe".into()) };
+                let path = std::path::PathBuf::from(arg(1));
+                // A socket file nobody listens on is left over from a crash: reuse the name.
+                if path.exists() && std::os::unix::net::UnixStream::connect(&path).is_err() {
+                    let _ = std::fs::remove_file(&path);
+                }
+                let l = std::os::unix::net::UnixListener::bind(&path).map_err(io)?;
+                let mut p = p.lock().unwrap();
+                p.listener = Some(l);
+                p.path = Some(path);
+                Ok(String::new())
+            }
+            #[cfg(not(unix))]
+            {
+                let Res::Tcp(t) = &*get(arg(0))? else { return Err("EBADF: not a pipe".into()) };
+                let l = TcpListener::bind(("127.0.0.1", 0)).map_err(io)?;
+                let file = pipe_port_file(arg(1));
+                if file.exists() && l.local_addr().is_ok() {
+                    // Another pipe of that name is listening unless its port refuses connections.
+                    let live = std::fs::read_to_string(&file).ok().and_then(|p| p.trim().parse::<u16>().ok()).is_some_and(|p| TcpStream::connect(("127.0.0.1", p)).is_ok());
+                    if live {
+                        return Err("EADDRINUSE: the pipe name is taken".into());
+                    }
+                }
+                std::fs::write(&file, l.local_addr().map_err(io)?.port().to_string()).map_err(io)?;
+                let mut t = t.lock().unwrap();
+                t.bound = l.local_addr().ok();
+                t.listener = Some(l);
+                Ok(String::new())
+            }
+        }
+        "pipe_connect" => {
+            #[cfg(unix)]
+            {
+                let Res::Pipe(p) = &*get(arg(0))? else { return Err("EBADF: not a pipe".into()) };
+                let s = std::os::unix::net::UnixStream::connect(arg(1)).map_err(io)?;
+                p.lock().unwrap().stream = Some(s);
+                Ok(String::new())
+            }
+            #[cfg(not(unix))]
+            {
+                let Res::Tcp(t) = &*get(arg(0))? else { return Err("EBADF: not a pipe".into()) };
+                let port: u16 = std::fs::read_to_string(pipe_port_file(arg(1))).map_err(io)?.trim().parse().map_err(|_| "ECONNREFUSED: bad pipe".to_string())?;
+                t.lock().unwrap().stream = Some(TcpStream::connect(("127.0.0.1", port)).map_err(io)?);
+                Ok(String::new())
+            }
+        }
+        // ---- terminals ----
+        "tty_new" => match arg(0) {
+            "0" => Ok(add(Res::Tty(0)).to_string()),
+            "1" => Ok(add(Res::Tty(1)).to_string()),
+            "2" => Ok(add(Res::Tty(2)).to_string()),
+            _ => Err("EBADF: only standard input, output and error can be terminals".into()),
+        },
+        // `{"width":W,"height":H}`: `stty size` on Unix terminals, else $COLUMNS/$LINES, else 80x24.
+        "tty_size" => {
+            #[cfg(unix)]
+            let stty = Command::new("stty").arg("size").stdin(Stdio::inherit()).output().ok().and_then(|o| {
+                let t = String::from_utf8_lossy(&o.stdout).to_string();
+                let mut it = t.split_whitespace().filter_map(|n| n.parse::<u32>().ok());
+                Some((it.next()?, it.next()?))
+            });
+            #[cfg(not(unix))]
+            let stty: Option<(u32, u32)> = None;
+            let env = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+            let (rows, cols) = stty.unwrap_or((env("LINES", 24), env("COLUMNS", 80)));
+            Ok(format!("{{\"width\":{cols},\"height\":{rows}}}"))
+        }
+        // 0 normal, 1 raw, 2 raw with output processing (`stty` on Unix; nothing to do elsewhere).
+        "tty_mode" => tty_mode(arg(0)),
         "bind" => match &*get(arg(0))? {
             Res::Tcp(t) => {
                 let addr = resolve(arg(1), arg(2))?;
@@ -273,6 +372,8 @@ pub(crate) fn call(op: &str, a: &[String]) -> Result<String, String> {
         },
         "listen" => match &*get(arg(0))? {
             Res::Tcp(t) if t.lock().unwrap().listener.is_some() => Ok(String::new()),
+            #[cfg(unix)]
+            Res::Pipe(p) if p.lock().unwrap().listener.is_some() => Ok(String::new()),
             _ => Err("EINVAL: bind the socket first".into()),
         },
         "sockname" => match &*get(arg(0))? {
@@ -304,6 +405,16 @@ pub(crate) fn call(op: &str, a: &[String]) -> Result<String, String> {
                         }
                     }
                     Res::Writer(w) => *w.lock().unwrap() = None,
+                    #[cfg(unix)]
+                    Res::Pipe(p) => {
+                        let p = p.lock().unwrap();
+                        if let Some(s) = &p.stream {
+                            let _ = s.shutdown(Shutdown::Both);
+                        }
+                        if let Some(path) = &p.path {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -311,6 +422,23 @@ pub(crate) fn call(op: &str, a: &[String]) -> Result<String, String> {
         }
         _ => Err(format!("ENOSYS: unknown operation {op}")),
     }
+}
+
+/// 0 normal, 1 raw, 2 raw with output processing (`stty` on Unix; nothing to do elsewhere).
+#[cfg(unix)]
+fn tty_mode(mode: &str) -> Result<String, String> {
+    let args: &[&str] = match mode {
+        "1" => &["raw", "-echo"],
+        "2" => &["cbreak", "-echo"],
+        _ => &["sane"],
+    };
+    let ok = Command::new("stty").args(args).stdin(Stdio::inherit()).status().is_ok_and(|s| s.success());
+    if ok { Ok(String::new()) } else { Err("ENOTTY: not a terminal".into()) }
+}
+
+#[cfg(not(unix))]
+fn tty_mode(_mode: &str) -> Result<String, String> {
+    Ok(String::new())
 }
 
 fn unix_release() -> String {
@@ -405,6 +533,36 @@ fn run(op: &str, a: &[String]) -> Result<String, String> {
             let mut w = w.lock().unwrap();
             let w = w.as_mut().ok_or("EPIPE: closed")?;
             w.write_all(&data).and_then(|()| w.flush()).map_err(io)?;
+            Ok(data.len().to_string())
+        }
+        #[cfg(unix)]
+        ("read", Res::Pipe(p)) => {
+            let mut s = p.lock().unwrap().stream.as_ref().ok_or("ENOTCONN: not connected")?.try_clone().map_err(io)?;
+            read_from(&mut s)
+        }
+        #[cfg(unix)]
+        ("write", Res::Pipe(p)) => {
+            let data = b64().decode(arg(1)).map_err(|e| e.to_string())?;
+            let mut s = p.lock().unwrap().stream.as_ref().ok_or("ENOTCONN: not connected")?.try_clone().map_err(io)?;
+            s.write_all(&data).map_err(io)?;
+            Ok(data.len().to_string())
+        }
+        #[cfg(unix)]
+        ("accept", Res::Pipe(p)) => {
+            let l = p.lock().unwrap().listener.as_ref().ok_or("EINVAL: not listening")?.try_clone().map_err(io)?;
+            let (s, _) = l.accept().map_err(io)?;
+            Ok(add(Res::Pipe(Mutex::new(Pipe { stream: Some(s), ..Pipe::default() }))).to_string())
+        }
+        ("read", Res::Tty(0)) => read_from(&mut std::io::stdin().lock()),
+        ("write", Res::Tty(fd)) => {
+            let data = b64().decode(arg(1)).map_err(|e| e.to_string())?;
+            if *fd == 2 {
+                let mut e = std::io::stderr().lock();
+                e.write_all(&data).and_then(|()| e.flush()).map_err(io)?;
+            } else {
+                let mut o = std::io::stdout().lock();
+                o.write_all(&data).and_then(|()| o.flush()).map_err(io)?;
+            }
             Ok(data.len().to_string())
         }
         ("write", Res::Tcp(t)) => {

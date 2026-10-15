@@ -1,0 +1,14 @@
+<html><head><title>list-style-image</title>
+<style>
+  body { font: 16px sans-serif; margin: 24px }
+  ul { padding-left: 34px }
+  li { margin: 6px 0 }
+  .pics { list-style-image: url(../assets/icon-512.png) }
+  .inside { list-style: inside url(../assets/icon-512.png) }
+  .missing { list-style-image: url(nope.png) }
+</style></head><body>
+<h3>list-style-image</h3>
+<ul class="pics"><li>A picture instead of a bullet</li><li>Scaled to about a line of text</li></ul>
+<ul class="inside"><li>list-style-position: inside, set with the shorthand</li></ul>
+<ul class="missing"><li>A missing picture falls back to the bullet</li></ul>
+</body></html>

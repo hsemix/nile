@@ -58,6 +58,8 @@ pub struct Renderer {
     font_mgr: FontMgr,
     /// Skia typefaces keyed by (Parley font blob id, collection index).
     typefaces: HashMap<(u64, u32), Option<Typeface>>,
+    /// Variable fonts at the axis positions (normalized, as Parley reports them) a run uses.
+    varied: HashMap<(u64, u32, Vec<i16>), Option<Typeface>>,
     /// Decoded pictures by `ImageData::id`; `None` where decoding failed.
     pictures: HashMap<u64, Option<skia_safe::Image>>,
 }
@@ -70,7 +72,7 @@ impl Default for Renderer {
 
 impl Renderer {
     pub fn new() -> Self {
-        Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new(), pictures: HashMap::new() }
+        Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new(), varied: HashMap::new(), pictures: HashMap::new() }
     }
 
     /// Paint the whole tree.
@@ -144,6 +146,11 @@ impl Renderer {
                         canvas.save();
                         canvas.concat(&skia_safe::Matrix::new_all(t.a, t.c, t.e, t.b, t.d, t.f, t.g, t.h, t.i));
                         open.push((b.subtree_end.max(i + 1), None));
+                    }
+                    if b.backface_hidden && canvas_faces_away(canvas) {
+                        // Turned away (a flipped card's other side): neither it nor its content shows.
+                        jump = b.subtree_end.max(i + 1);
+                        continue;
                     }
                     self.paint_box(canvas, b, styles);
                     if let Some(m) = tree.marker(b.node) {
@@ -336,6 +343,11 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
             }
             MarkerKind::Square => {
                 canvas.draw_rect(Rect::from_xywh(r.x, r.y, r.width, r.height), &paint);
+            }
+            MarkerKind::Image(data) => {
+                if let Some(img) = self.picture(data) {
+                    canvas.draw_image_rect(&img, None, Rect::from_xywh(r.x, r.y, r.width, r.height), &Paint::default());
+                }
             }
             MarkerKind::Text(layout) => {
                 self.paint_text_tinted(canvas, LRect { x: r.x, y: r.y, width: r.width, height: r.height }, layout, Some([color.r, color.g, color.b, color.a]));
@@ -557,6 +569,9 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
                     continue;
                 };
 
+                // A variable font drawn at the run's axis positions (`font-variation-settings`, weight, width).
+                let coords: Vec<i16> = run.normalized_coords().iter().map(|c| c.to_bits()).collect();
+                let typeface = if coords.iter().any(|c| *c != 0) { self.variable_typeface(&typeface, font_data.data.id(), font_data.index, &coords).unwrap_or(typeface) } else { typeface };
                 let mut font = Font::from_typeface(typeface, run.font_size());
                 font.set_edging(Edging::SubpixelAntiAlias);
                 font.set_subpixel(true);
@@ -565,7 +580,6 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
                 if let Some(deg) = synth.skew() {
                     font.set_skew_x(-deg.to_radians().tan());
                 }
-                // TODO: apply variable font coords.
 
                 glyph_ids.clear();
                 positions.clear();
@@ -617,6 +631,30 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
                 }
             }
         }
+    }
+
+    fn variable_typeface(&mut self, base: &Typeface, blob_id: u64, index: u32, coords: &[i16]) -> Option<Typeface> {
+        use skia_safe::font_arguments::{variation_position::Coordinate, VariationPosition};
+        self.varied
+            .entry((blob_id, index, coords.to_vec()))
+            .or_insert_with(|| {
+                let axes = base.variation_design_parameters()?;
+                // Normalized -1..1 (default at 0) back to each axis's design units.
+                let position: Vec<Coordinate> = axes
+                    .iter()
+                    .zip(coords)
+                    .map(|(a, &n)| {
+                        let n = f32::from(n) / 16384.0;
+                        let value = if n < 0.0 { a.def + n * (a.def - a.min) } else { a.def + n * (a.max - a.def) };
+                        Coordinate { axis: a.tag, value }
+                    })
+                    .collect();
+                let args = skia_safe::FontArguments::new().set_variation_design_position(VariationPosition { coordinates: &position });
+                let made = base.clone_with_arguments(&args);
+                drop(args);
+                made
+            })
+            .clone()
     }
 
     fn typeface(&mut self, blob_id: u64, index: u32, bytes: &[u8]) -> Option<Typeface> {
@@ -1040,6 +1078,12 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
         }
         Appearance::None => {}
     }
+}
+
+/// Whether the canvas's current matrix shows the back of a surface (it flips orientation).
+fn canvas_faces_away(canvas: &Canvas) -> bool {
+    let m = canvas.local_to_device_as_3x3();
+    nile_layout::Affine { a: m[0], c: m[1], e: m[2], b: m[3], d: m[4], f: m[5], g: m[6], h: m[7], i: m[8] }.faces_away()
 }
 
 /// Thin overlay scrollbars for an `overflow: auto | scroll` box that has more to show.
