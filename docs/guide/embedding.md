@@ -53,6 +53,15 @@ allows resizing. Style the elements yourself. See [window.html](../../examples/w
 
 `window-frame` accepts system frames (`default`/`standard`), `extended` (macOS
 content under the title bar), `solid`/`solid-with-shadow`, and `transparent`.
+
+### Transparent and frosted windows
+
+`window-frame="transparent"` makes the window's pixels carry alpha: give `html` a transparent
+background and draw your own rounded, translucent, shadowed shapes (`examples/transparent.html`).
+`window-material="blur|acrylic|mica|tabbed|sidebar|hud"` puts the system's frosted backdrop behind
+the page, which then only needs a (semi-)transparent background (`examples/material.html`). The
+material works with any frame, including the native one. macOS uses `NSVisualEffectView`; Windows 11
+asks DWM for acrylic/Mica; KDE gets the blur protocol. Per-pixel alpha is only verified on macOS.
 `solid-with-shadow` currently has no native shadow. Desktop transparency depends
 on the host surface; the software shell does not expose a surface alpha mode.
 

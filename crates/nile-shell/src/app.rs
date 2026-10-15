@@ -16,7 +16,7 @@ use winit::{
     window::{CursorIcon, Window, WindowId, WindowLevel},
 };
 
-use crate::{access, dialogs, menu, mods_of};
+use crate::{access, dialogs, material, menu, mods_of};
 
 /// What other threads (the accessibility layer) send the event loop.
 pub enum UserEvent {
@@ -392,18 +392,43 @@ impl Win {
                 let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
                     return false;
                 };
-                self.surface.resize(w, h).expect("resize surface");
-                let mut buffer = self.surface.buffer_mut().expect("surface buffer");
-                // softbuffer pixels are u32 0RGB = BGRA bytes on little-endian,
-                // which is what Skia's BGRA8888 writes.
-                let bytes = unsafe { std::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u8, buffer.len() * 4) };
-                self.page.paint(bytes, size.width, size.height, window.scale_factor() as f32);
-                buffer.present().expect("present");
+                let scale = window.scale_factor() as f32;
+                let page = &mut self.page;
+                present(&mut self.surface, (w, h), self.config.translucent(), |bytes| page.paint(bytes, size.width, size.height, scale));
             }
             _ => {}
         }
         false
     }
+}
+
+/// Paint one frame into the surface. Skia writes BGRA, which is softbuffer's pixel layout on every
+/// desktop target; with `translucent` the buffer carries premultiplied alpha where the platform
+/// supports it (macOS today), else the alpha channel is dropped.
+fn present(surface: &mut softbuffer::Surface<Rc<Window>, Rc<Window>>, size: (NonZeroU32, NonZeroU32), translucent: bool, paint: impl FnOnce(&mut [u8])) {
+    let mode = if translucent && surface.supports_alpha_mode(softbuffer::AlphaMode::Premultiplied) {
+        softbuffer::AlphaMode::Premultiplied
+    } else if translucent && surface.supports_alpha_mode(softbuffer::AlphaMode::Ignored) {
+        softbuffer::AlphaMode::Ignored
+    } else {
+        softbuffer::AlphaMode::Opaque
+    };
+    surface.configure(size.0, size.1, mode).expect("configure surface");
+    let mut buffer = surface.next_buffer().expect("surface buffer");
+    let (w, h) = (size.0.get() as usize, size.1.get() as usize);
+    let stride = buffer.byte_stride().get() as usize;
+    if stride == w * 4 {
+        paint(&mut buffer.data_u8()[..w * h * 4]);
+    } else {
+        // Rows padded by the platform: paint tightly, then copy row by row.
+        let mut tight = vec![0u8; w * h * 4];
+        paint(&mut tight);
+        let data = buffer.data_u8();
+        for y in 0..h {
+            data[y * stride..y * stride + w * 4].copy_from_slice(&tight[y * w * 4..(y + 1) * w * 4]);
+        }
+    }
+    buffer.present().expect("present");
 }
 
 /// Make `child` an owned window of `owner`: above it, hidden and closed with it. macOS: a child
@@ -528,7 +553,7 @@ impl App {
             .with_inner_size(LogicalSize::new(w, h))
             .with_resizable(config.resizable != Resizable::No)
             .with_decorations(!config.frameless())
-            .with_transparent(config.frame == Frame::Transparent)
+            .with_transparent(config.translucent())
             // Shown after the accessibility adapter exists (it must see the window first).
             .with_visible(false)
             .with_maximized(config.state == InitialState::Maximized)
@@ -598,6 +623,7 @@ impl App {
             InitialState::Fullscreen => window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None))),
             _ => {}
         }
+        material::apply(&window, config.material);
         let access = accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
         window.set_visible(config.state != InitialState::Hidden);
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
@@ -812,11 +838,9 @@ impl App {
                 let portal = &mut self.portals[pi];
                 let size = portal.window.inner_size();
                 let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
-                portal.surface.resize(w, h).expect("resize surface");
-                let mut buffer = portal.surface.buffer_mut().expect("surface buffer");
-                let bytes = unsafe { std::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u8, buffer.len() * 4) };
-                self.wins[oi].page.paint_portal(bytes, size.width, size.height, portal.window.scale_factor() as f32, portal.node, (rect.0, rect.1));
-                buffer.present().expect("present");
+                let (scale, node) = (portal.window.scale_factor() as f32, portal.node);
+                let page = &mut self.wins[oi].page;
+                present(&mut portal.surface, (w, h), false, |bytes| page.paint_portal(bytes, size.width, size.height, scale, node, (rect.0, rect.1)));
                 return;
             }
             WindowEvent::CursorMoved { position, .. } => {

@@ -211,7 +211,7 @@ What changed and when is in the [changelog](CHANGELOG.md).
   `window-minimizable`/`-maximizable`, `window-state` (`shown`, `minimized`, `maximized`, `full-screen`, `hidden`),
   `window-alignment` (1-9 on the numeric keypad's layout, 5 = centre), `window-icon`, and `window-frame`
   (`default`/`standard`, `extended` (macOS: content under the title bar), `solid`/`solid-with-shadow` (no system frame),
-  `transparent`). With no system frame, elements with `role="window-caption"` drag the window (double-click
+  `transparent`), and Nile's `window-material` (`blur`, `acrylic`, `mica`, `tabbed`, `sidebar`, `hud`: the system's frosted backdrop behind a page with a transparent background; `examples/transparent.html`, `examples/material.html`). With no system frame, elements with `role="window-caption"` drag the window (double-click
   maximizes) and `role="window-minimize"`/`window-maximize`/`window-close` are the buttons; the edges resize it.
   Scripts get `document.title` (set and get), `window.close()`, `moveTo/moveBy/resizeTo/resizeBy`,
   `screenX/Y`, `outerWidth/Height` and `element.requestFullscreen()`/`document.exitFullscreen()`.
@@ -253,8 +253,10 @@ What changed and when is in the [changelog](CHANGELOG.md).
 - **Inline layout is partial.** Shrink-to-fit `inline-block` uses max-content (it won't narrow to fit a
   line), inline margins are ignored, a wrapped inline's border/radius isn't sliced at the break, only the
   innermost decorated inline is painted, and block children of an inline element don't split the run.
-- Window gaps: no `window-material`/`window-corners`, `solid-with-shadow` has no shadow, and `transparent` shows the
-  desktop only where the platform's surface supports alpha (softbuffer doesn't expose an alpha mode).
+- Window gaps: no `window-corners`, `solid-with-shadow` has no shadow, and per-pixel alpha (`transparent`, materials) is
+  only verified on macOS: softbuffer has no alpha support on Windows, X11 or Wayland yet, so there the corners are
+  opaque and a material shows only if the system draws it. `window-material` is fixed at window creation (no script
+  setter yet); Windows needs build 22523+ for `mica`/`tabbed`, KDE's blur protocol serves `blur` on Linux.
 - Editing gaps: no spell-check, drag-and-drop of text or `contenteditable="plaintext-only"` (treated as `true`); paste takes the clipboard's HTML when it has some (bold, italic, underline, links, headings, lists, quotes, images and a short list of inline styles survive; everything else is dropped; `nile-capi` hosts only exchange text) and copy writes HTML and text; undo is a snapshot of the whole editing host, so a script that rewrites the host also rewrites its history; `Range` has `cloneContents`/`extractContents`/`compareBoundaryPoints`/`comparePoint`/`intersectsNode`, but no `Range.getClientRects` or `surroundContents` across blocks, and fragments are `<div>`s marked as `nodeType` 11; `execCommand("insertTable", false, "3x2")` inserts a table (Tab and Shift+Tab move between cells, Tab in the last cell adds a row, Enter stays in the cell, Backspace and Delete don't merge cells, deleting across cells empties them), `tableInsertRowAbove/Below`, `tableInsertColumnLeft/Right`, `tableDeleteRow/Column/Table`, `tableMergeCells` and `tableSplitCell` edit the table around the caret (spans are kept consistent; `examples/image-editing.html`) but columns can't be resized by dragging, a click selects an image (outline, eight handles; corners keep the proportions, Shift frees them; one undo step) but there is no image wrapping or alignment, and `fontSize` 1-7 maps to a fixed px table; indent uses `margin-left` rather than nested lists; Page Up/Down don't move the caret; selection inside `<input>`/`<textarea>` is separate from the document selection.
 - Selection gaps: page text selection works across runs in paint order (so `z-index` reordering can scramble the
   selection order), can't start inside a link or control, has no keyboard (Shift+arrows), and ignores `user-select: none` on a span inside a selectable block (it applies per paragraph/run); `text-selection-color` isn't painted. Rich-text `Range`/`Selection` APIs are described above. Form gaps: no drag-and-drop; no `<form>` submit or validation; list boxes have no focus ring or

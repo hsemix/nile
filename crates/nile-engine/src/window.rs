@@ -21,6 +21,40 @@ impl Size {
     }
 }
 
+/// `window-material`: what the system draws behind the page's transparent areas. Nile's own
+/// attribute (Sciter has none); needs a page whose background is transparent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Material {
+    #[default]
+    None,
+    /// A frosted blur of what is behind the window (any platform that can).
+    Blur,
+    /// Windows 10/11 acrylic; elsewhere like `blur`.
+    Acrylic,
+    /// Windows 11 Mica; macOS window background.
+    Mica,
+    /// Windows 11 tabbed Mica; macOS titlebar material.
+    Tabbed,
+    /// macOS sidebar material; elsewhere like `blur`.
+    Sidebar,
+    /// macOS HUD (dark, translucent) material; elsewhere like `blur`.
+    Hud,
+}
+
+impl Material {
+    fn parse(s: &str) -> Material {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "blur" | "frosted" => Material::Blur,
+            "acrylic" => Material::Acrylic,
+            "mica" => Material::Mica,
+            "tabbed" | "mica-alt" => Material::Tabbed,
+            "sidebar" => Material::Sidebar,
+            "hud" => Material::Hud,
+            _ => Material::None,
+        }
+    }
+}
+
 /// `window-frame`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Frame {
@@ -71,6 +105,8 @@ pub struct WindowConfig {
     /// `window-alignment` 1..=9 on the numeric keypad's layout (5 centres, 7 is top-left, ...).
     pub alignment: Option<u8>,
     pub frame: Frame,
+    /// `window-material`.
+    pub material: Material,
     pub icon: Option<String>,
 }
 
@@ -137,8 +173,14 @@ impl WindowConfig {
                 Some("transparent") => Frame::Transparent,
                 _ => Frame::Native,
             },
+            material: attr("window-material").map_or(Material::None, Material::parse),
             icon: attr("window-icon").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         }
+    }
+
+    /// Whether the window's pixels carry alpha (a transparent frame or a material behind the page).
+    pub fn translucent(&self) -> bool {
+        self.frame == Frame::Transparent || self.material != Material::None
     }
 
     /// Whether the system draws no frame, so the page has to provide drag and resize handling.
@@ -243,6 +285,15 @@ mod tests {
 
     fn config(html: &str) -> WindowConfig {
         WindowConfig::from_document(&Document::parse(html))
+    }
+
+    #[test]
+    fn material_and_transparent_frames_make_a_translucent_window() {
+        assert!(!config("<html><body></body></html>").translucent());
+        let c = config(r#"<html window-material="Mica"><body></body></html>"#);
+        assert_eq!((c.material, c.frame, c.translucent()), (Material::Mica, Frame::Native, true));
+        assert!(config(r#"<html window-frame="transparent"></html>"#).translucent());
+        assert_eq!(config(r#"<html window-material="nonsense"></html>"#).material, Material::None);
     }
 
     #[test]

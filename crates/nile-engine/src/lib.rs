@@ -24,7 +24,7 @@ use nile_script::{Environment, ScriptHost, UiEvent, WindowCommand, WindowInfo};
 use nile_style::{compute_styles_in, Animator, InteractionState, StyleMap};
 use nile_text::TextEngine;
 use skia_safe::{surfaces, AlphaType, Color, ColorType, ImageInfo};
-use window::{Frame, Role, WindowConfig};
+use window::{Role, WindowConfig};
 
 /// Keyboard modifiers held during a key or click.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -3681,10 +3681,19 @@ impl Page {
             .iter()
             .filter_map(|tag| self.doc.borrow().find(|n| n.tag() == Some(tag)))
             .find_map(|id| self.view.borrow().styles.get(id).background)
-            .map(|c| Color::from_argb(255, c.r, c.g, c.b))
+            .map(|c| {
+                // A translucent window keeps the colour's alpha; an ordinary one shows it over white.
+                if WindowConfig::from_document(&self.doc.borrow()).translucent() {
+                    Color::from_argb(c.a, c.r, c.g, c.b)
+                } else {
+                    let a = c.a as u32;
+                    let over = |v: u8| ((v as u32 * a + 255 * (255 - a)) / 255) as u8;
+                    Color::from_argb(255, over(c.r), over(c.g), over(c.b))
+                }
+            })
             .unwrap_or_else(|| {
-                // A `window-frame: transparent` window shows the desktop where the page has no background.
-                if WindowConfig::from_document(&self.doc.borrow()).frame == Frame::Transparent { Color::TRANSPARENT } else { Color::WHITE }
+                // A transparent or material window shows what is behind it where the page has no background.
+                if WindowConfig::from_document(&self.doc.borrow()).translucent() { Color::TRANSPARENT } else { Color::WHITE }
             })
     }
 
@@ -4287,6 +4296,21 @@ mod tests {
         let log = js(&mut p, "window.log.join('|')");
         assert!(log.contains("disc:c") && log.contains("attr:k:1>9"), "{log}");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn translucent_windows_keep_the_canvas_alpha() {
+        let canvas = |html: &str| {
+            let (p, path) = page(html, "canvas-alpha");
+            let c = p.canvas_background();
+            let _ = std::fs::remove_file(path);
+            (c.a(), c.r())
+        };
+        // Transparent frame: no background -> clear; a translucent one keeps its alpha.
+        assert_eq!(canvas(r#"<html window-frame="transparent"><body></body></html>"#).0, 0);
+        assert_eq!(canvas(r#"<html window-material="blur" style="background: rgba(255, 0, 0, 0.5)"><body></body></html>"#), (127, 255));
+        // An ordinary window shows the same colour over white.
+        assert_eq!(canvas(r#"<html style="background: rgba(0, 0, 0, 0.5)"><body></body></html>"#), (255, 128));
     }
 
     #[test]

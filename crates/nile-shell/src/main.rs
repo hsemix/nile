@@ -24,6 +24,7 @@ mod access;
 mod app;
 mod bundle;
 mod dialogs;
+mod material;
 mod menu;
 
 use std::{path::PathBuf, rc::Rc, time::{Duration, Instant}};
