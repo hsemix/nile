@@ -69,6 +69,8 @@ struct Win {
     /// tree was last sent.
     access: accesskit_winit::Adapter,
     access_stamp: u64,
+    /// Files dropped on the window since the event loop last went idle (winit sends one event each).
+    dropped: Vec<String>,
 }
 
 pub struct App {
@@ -281,6 +283,7 @@ impl Win {
                 }
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => window.request_redraw(),
+            WindowEvent::DroppedFile(path) => self.dropped.push(path.to_string_lossy().into_owned()),
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = window.scale_factor();
                 // A frameless window's edges resize it before the page sees the pointer.
@@ -616,6 +619,7 @@ impl App {
             modal: spec.is_some_and(|s| s.modal),
             access,
             access_stamp: 0,
+            dropped: Vec::new(),
         });
         let last = self.wins.len() - 1;
         let actions = self.wins[last].sync_window();
@@ -850,6 +854,10 @@ impl ApplicationHandler<UserEvent> for App {
         let mut next: Option<std::time::Duration> = None;
         for id in self.wins.iter().map(|w| w.id).collect::<Vec<_>>() {
             let Some(i) = self.index(id) else { continue };
+            let dropped = std::mem::take(&mut self.wins[i].dropped);
+            if !dropped.is_empty() && self.wins[i].page.drop_files(&dropped) {
+                self.wins[i].window.request_redraw();
+            }
             let (changed, n) = self.wins[i].page.tick();
             if changed {
                 self.wins[i].window.request_redraw();

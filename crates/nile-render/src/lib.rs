@@ -414,7 +414,16 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
         paint_shadows(canvas, skia_rect(b.rect), &s.box_shadow, radii);
         let photo = b.bg_image.as_ref().and_then(|data| self.background_shader(data, s, b.rect));
         let border = Border { width: s.border_width, color: s.border_color, style: s.border_style };
-        paint_decorated(canvas, skia_rect(b.rect), s.background, s.background_image.as_ref(), photo, &border, radii);
+        if let Some((x0, x1)) = b.border_gap {
+            // The legend sits on the top border: clip a notch out of the box's top edge for it.
+            canvas.save();
+            let notch = Rect::from_ltrb(x0, b.rect.y - 1.0, x1, b.rect.y + s.border_width.top.max(1.0) + 1.0);
+            canvas.clip_rect(notch, skia_safe::ClipOp::Difference, false);
+            paint_decorated(canvas, skia_rect(b.rect), s.background, s.background_image.as_ref(), photo, &border, radii);
+            canvas.restore();
+        } else {
+            paint_decorated(canvas, skia_rect(b.rect), s.background, s.background_image.as_ref(), photo, &border, radii);
+        }
         paint_inset_shadows(canvas, skia_rect(b.rect), s, radii);
         if let Some(data) = &b.image {
             self.paint_picture(canvas, data, s, b.rect);
@@ -908,7 +917,7 @@ fn paint_decorated(
 /// The check or radio dot for `appearance: checkbox | radio` when checked.
 fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) {
     // Checkbox and radio marks show only when checked; a select's chevron always does.
-    if !s.checked && !matches!(s.appearance, Appearance::Select | Appearance::Progress | Appearance::Meter | Appearance::Range | Appearance::Spinner | Appearance::Swatch) {
+    if !s.checked && !matches!(s.appearance, Appearance::Select | Appearance::Progress | Appearance::Meter | Appearance::Range | Appearance::Spinner | Appearance::Swatch | Appearance::Calendar | Appearance::Clock) {
         return;
     }
     let mut paint = fill(s.color);
@@ -973,6 +982,25 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
             p.set_stroke_width(1.0);
             p.set_color(Color::from_argb(255, 118, 118, 118));
             canvas.draw_rrect(RRect::new_rect_xy(chip, 2.0, 2.0), &p);
+        }
+        Appearance::Calendar | Appearance::Clock => {
+            // A small glyph in the right padding: the opener of the date/time picker.
+            let (cx, cy) = (r.x + r.width - 13.0, r.y + r.height / 2.0);
+            paint.set_anti_alias(true);
+            paint.set_style(skia_safe::PaintStyle::Stroke);
+            paint.set_stroke_width(1.3);
+            paint.set_color(Color::from_argb(255, 90, 90, 90));
+            if s.appearance == Appearance::Calendar {
+                let body = Rect::from_xywh(cx - 6.0, cy - 5.0, 12.0, 11.0);
+                canvas.draw_rrect(RRect::new_rect_xy(body, 1.5, 1.5), &paint);
+                canvas.draw_line((cx - 6.0, cy - 1.5), (cx + 6.0, cy - 1.5), &paint);
+                canvas.draw_line((cx - 3.0, cy - 7.0), (cx - 3.0, cy - 4.0), &paint);
+                canvas.draw_line((cx + 3.0, cy - 7.0), (cx + 3.0, cy - 4.0), &paint);
+            } else {
+                canvas.draw_circle((cx, cy), 6.0, &paint);
+                canvas.draw_line((cx, cy), (cx, cy - 3.5), &paint);
+                canvas.draw_line((cx, cy), (cx + 3.0, cy + 1.5), &paint);
+            }
         }
         Appearance::Spinner => {
             // Up and down arrows stacked in the right padding.

@@ -46,7 +46,7 @@ impl Node {
 
 /// Flags scripts can set on elements, matched by the same-named pseudo-classes.
 pub const STATE_NAMES: &[&str] =
-    &["checked", "disabled", "readonly", "expanded", "collapsed", "current", "selected", "invalid", "busy"];
+    &["checked", "disabled", "readonly", "expanded", "collapsed", "current", "selected", "invalid", "busy", "valid"];
 
 #[derive(Debug, Default)]
 pub struct Document {

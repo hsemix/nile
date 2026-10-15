@@ -169,6 +169,9 @@ pub struct LayoutBox {
     pub fixed: bool,
     /// `position: sticky`: the box slides while the page scrolls (see `StickyBox::shift`).
     pub sticky: Option<StickyBox>,
+    /// A `<fieldset>` whose `<legend>` sits on its top border: the horizontal span (absolute x) the
+    /// border is left out of.
+    pub border_gap: Option<(f32, f32)>,
 }
 
 /// What a sticky box needs to compute its shift: its insets and its parent's vertical extent.
@@ -1494,6 +1497,7 @@ pub fn layout_with(
     }
     tree.lists = build_lists(doc, styles, text, &tree, options.offsets);
     tree.markers = build_markers(doc, styles, text, &tree);
+    open_legend_gaps(doc, &mut tree.boxes);
     if let Some(req) = options.menu {
         tree.menu = build_menu(doc, styles, text, &tree, req, options.offsets, (options.scroll_y, viewport_height));
     }
@@ -2150,6 +2154,21 @@ fn build_table(
     let n = tree.new_with_children(ts, &items).ok()?;
     tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
     hand_off_absolute(style, n)
+}
+
+/// A fieldset's legend sits on its top border: leave the border out behind it.
+fn open_legend_gaps(doc: &Document, boxes: &mut [LayoutBox]) {
+    for i in 0..boxes.len() {
+        let node = boxes[i].node;
+        if !matches!(boxes[i].content, BoxContent::Element) || node.0 >= doc.node_count() || doc.node(node).tag() != Some("fieldset") {
+            continue;
+        }
+        let end = boxes[i].subtree_end.clamp(i + 1, boxes.len());
+        let legend = boxes[i + 1..end].iter().find(|b| matches!(b.content, BoxContent::Element) && b.node.0 < doc.node_count() && doc.node(b.node).tag() == Some("legend") && doc.node(b.node).parent == Some(node));
+        if let Some(l) = legend {
+            boxes[i].border_gap = Some((l.rect.x - 1.0, l.rect.x + l.rect.width + 1.0));
+        }
+    }
 }
 
 /// Whether an element's own style paints a background, border or shadow.
@@ -3091,13 +3110,13 @@ fn flatten(
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky, border_gap: None })
         }
         Some(NodeCtx::Replaced { id, image, .. }) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky, border_gap: None })
         }
         Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
@@ -3153,6 +3172,7 @@ fn flatten(
                 persp: None,
                 fixed: false,
                 sticky: None,
+                border_gap: None,
             });
             for b in placed {
                 let kid = kids[b.id as usize];
@@ -4406,6 +4426,18 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
         assert_eq!(c.width, 154.0, "colspan covers both columns and the gap");
         assert_eq!(c.y, a.y + 20.0 + 4.0, "rows stack with spacing");
         assert_eq!(tb.width, 4.0 + 100.0 + 4.0 + 50.0 + 4.0, "the table shrinks to its columns");
+    }
+
+    #[test]
+    fn a_legend_sits_on_the_fieldset_border_and_leaves_a_gap_in_it() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><fieldset id="f" style="margin:0"><legend id="l" style="margin-left:10px">Title</legend><p>x</p></fieldset></body>"#,
+        );
+        let (f, l) = (rect_of(&doc, &t, "f"), rect_of(&doc, &t, "l"));
+        assert!(l.y < f.y + 8.0 && l.y + l.height > f.y + 4.0, "the legend straddles the top border: {l:?} in {f:?}");
+        let b = t.boxes.iter().find(|b| doc.node(b.node).attr("id") == Some("f")).unwrap();
+        let (x0, x1) = b.border_gap.expect("a gap for the legend");
+        assert!(x0 <= l.x && x1 >= l.x + l.width);
     }
 
     #[test]

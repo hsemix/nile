@@ -251,6 +251,10 @@ pub enum Appearance {
     Spinner,
     /// `<input type=color>`: a colour swatch in the left padding.
     Swatch,
+    /// Date inputs: a calendar glyph in the right padding (it opens the picker).
+    Calendar,
+    /// `<input type=time>`: a clock glyph in the right padding.
+    Clock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -723,6 +727,8 @@ impl ComputedStyle {
                 Appearance::Range => "range",
                 Appearance::Spinner => "spinner",
                 Appearance::Swatch => "swatch",
+                Appearance::Calendar => "calendar",
+                Appearance::Clock => "clock",
             }
             .into(),
             "box-sizing" => if self.border_box { "border-box" } else { "content-box" }.into(),
@@ -867,6 +873,37 @@ popup > menu, popup > menu.popup, popup > menu.context { display: block; border:
 menu.popup > li, menu.context > li, popup > menu > li { display: block; list-style: none; padding: 4px 18px; cursor: default }
 menu.popup > li.nile-hover, menu.context > li.nile-hover, popup > menu > li.nile-hover { background: #3a7bd5; color: #fff }
 menu.popup > li[disabled], menu.context > li[disabled], popup > menu > li[disabled] { color: #999; background: transparent !important }
+.nile-picker { display: block; background: #fff; color: #222; border: 1px solid #b4b8c0; border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,0.25); padding: 8px; font: 13px sans-serif }
+.nile-picker button { font: inherit; color: inherit; background: transparent; border: 0; border-radius: 4px; padding: 0; margin: 0; box-shadow: none; min-height: 0; cursor: default }
+.nile-picker .np-head { display: flex; align-items: center; margin-bottom: 4px }
+.nile-picker .np-title { flex: 1; text-align: center; font-weight: bold }
+.nile-picker .np-nav { width: 26px; height: 24px; font-size: 18px; line-height: 20px }
+.nile-picker .np-grid { display: grid; grid-template-columns: repeat(7, 30px); grid-auto-rows: 28px }
+.nile-picker .np-dow { text-align: center; color: #777; font-size: 11px; line-height: 28px }
+.nile-picker .np-day { text-align: center }
+.nile-picker .np-out { color: #aaa }
+.nile-picker .np-today { border: 1px solid #3a7bd5 }
+.nile-picker .np-sel { background: #3a7bd5; color: #fff }
+.nile-picker button[disabled] { color: #ccc }
+.nile-picker .np-months { display: grid; grid-template-columns: repeat(3, 62px); grid-auto-rows: 34px; gap: 2px }
+.nile-picker .np-foot { display: flex; justify-content: space-between; margin-top: 6px; padding-top: 6px; border-top: 1px solid #e3e5e8 }
+.nile-picker .np-link { color: #1d4ed8; padding: 3px 6px }
+.nile-picker .np-split { display: flex; gap: 10px }
+.nile-picker .np-clock { display: flex; gap: 4px }
+.nile-picker .np-col { display: block; width: 48px; height: 212px; overflow: auto }
+.nile-picker .np-cell { display: block; width: 100%; height: 26px; text-align: center }
+.nile-picker .np-color { width: 216px }
+.nile-picker .np-sv { position: relative; width: 216px; height: 150px; border-radius: 4px; overflow: hidden }
+.nile-picker .np-white { position: absolute; left: 0; top: 0; right: 0; bottom: 0; background: linear-gradient(to right, #ffffff, rgba(255,255,255,0)) }
+.nile-picker .np-black { position: absolute; left: 0; top: 0; right: 0; bottom: 0; background: linear-gradient(to bottom, rgba(0,0,0,0), #000000) }
+.nile-picker .np-knob { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border: 2px solid #fff; border-radius: 6px; box-shadow: 0 0 2px #000 }
+.nile-picker .np-hue { position: relative; height: 12px; margin: 10px 0; border-radius: 6px; background: linear-gradient(to right, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000) }
+.nile-picker .np-hueknob { position: absolute; top: -2px; width: 4px; height: 16px; margin-left: -2px; background: #fff; border: 1px solid #555; border-radius: 2px }
+.nile-picker .np-row { display: flex; gap: 8px; align-items: center }
+.nile-picker .np-preview { width: 28px; height: 24px; border: 1px solid #b4b8c0; border-radius: 4px }
+.nile-picker .np-hex { width: 90px }
+.nile-picker .np-swatches { display: grid; grid-template-columns: repeat(6, 28px); gap: 6px; margin-top: 10px }
+.nile-picker .np-swatch { width: 28px; height: 20px; border: 1px solid rgba(0,0,0,0.25) }
 frame { display: block; height: 150px; border: 0 }
 .nile-modal { position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 2147483600; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center }
 .nile-messagebox { min-width: 280px; max-width: 460px; background: #fff; color: #222; border: 1px solid #b4b8c0; border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,0.4); overflow: hidden }
@@ -906,7 +943,7 @@ dd { margin-left: 40px }
 pre { margin: 1em 0; white-space: pre }
 hr { display: block; height: 0; margin: 8px 0; border-top: 1px solid #9a9a9a; border-bottom: 1px solid #e5e5e5 }
 fieldset { margin: 0 2px; padding: 0.35em 0.75em 0.625em; border: 1px solid #c0c0c0 }
-legend { padding: 0 2px }
+legend { display: block; padding: 0 3px; margin: -1em 0 0.35em 0.5em; line-height: 1.2; width: fit-content }
 summary { display: list-item; list-style-type: disclosure-closed; padding-left: 1.4em; cursor: pointer }
 details[open] > summary { list-style-type: disclosure-open }
 details:not([open]) > :not(summary) { display: none }
@@ -946,6 +983,8 @@ input[type=range] { width: 129px; height: 16px; min-height: 0; margin: 2px; padd
 input[type=file] { width: auto; background: #efefef; text-align: left; cursor: default }
 input[type=number] { padding-right: 20px; appearance: spinner }
 input[type=color] { width: 86px; padding-left: 30px; appearance: swatch }
+input[type=date], input[type=month], input[type=week], input[type=datetime-local] { padding-right: 26px; appearance: calendar }
+input[type=time] { padding-right: 26px; appearance: clock }
 input[type=checkbox]:checked, input[type=radio]:checked { background: #1d4ed8; border-color: #1d4ed8; color: #ffffff }
 input[type=button], input[type=submit], input[type=reset] { width: auto; background: #efefef }
 "#;
@@ -1930,6 +1969,8 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 Some("slider-horizontal" | "range") => Appearance::Range,
                 Some("spinner" | "number-input") => Appearance::Spinner,
                 Some("swatch" | "color-well") => Appearance::Swatch,
+                Some("calendar") => Appearance::Calendar,
+                Some("clock") => Appearance::Clock,
                 Some("none") | Some("auto") => Appearance::None,
                 _ => return,
             }

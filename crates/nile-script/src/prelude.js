@@ -414,7 +414,18 @@
       const [dx, dy] = typeof a === "object" && a !== null ? [a.left || 0, a.top || 0] : [+a || 0, +b || 0];
       N.elScrollTo(this._id, s[0] + dx, s[1] + dy);
     }
-    scrollIntoView() { const r = N.rect(this._id); if (r) N.scrollTo(N.scrollY() + r[1]); }
+    // Scrolls the scrollable ancestors just enough to show the element, then the page to its top.
+    scrollIntoView() {
+      for (let p = this.parentElement; p; p = p.parentElement) {
+        const s = N.elScroll(p._id), pr = N.rect(p._id), r = N.rect(this._id);
+        if (!s || !pr || !r) continue;
+        const top = r[1] - pr[1];
+        if (top < 0) N.elScrollTo(p._id, s[0], s[1] + top);
+        else if (top + r[3] > pr[3]) N.elScrollTo(p._id, s[0], s[1] + top + r[3] - pr[3]);
+      }
+      const r = N.rect(this._id);
+      if (r) N.scrollTo(N.scrollY() + r[1]);
+    }
   }
 
   // ---- vnodes -------------------------------------------------------------
@@ -678,7 +689,7 @@
     set(v) {
       const t = this.localName;
       if (t === "select") this.selectedIndex = this.options.findIndex((o) => optValue(o) === String(v));
-      else if (t === "option" || VALUE_TAGS.has(t)) this.setAttribute("value", v);
+      else if (t === "option" || VALUE_TAGS.has(t)) { this.setAttribute("value", v); N.valueSynced(this._id); }
       else if (isForm(this)) setFormValue(this, v);
       else Object.defineProperty(this, "value", { value: v, writable: true, configurable: true, enumerable: true });
     },
@@ -870,7 +881,7 @@
   // Element.state: runtime flags. hover/active/focus come from interaction;
   // the others (checked, disabled, readonly, expanded, ...) are stored on the
   // element and matched by the same-named pseudo-classes.
-  const FLAGS = ["checked", "disabled", "readonly", "expanded", "collapsed", "current", "selected", "invalid", "busy"];
+  const FLAGS = ["checked", "disabled", "readonly", "expanded", "collapsed", "current", "selected", "invalid", "busy", "valid"];
   Object.defineProperty(Element.prototype, "state", {
     get() {
       return new Proxy({}, {

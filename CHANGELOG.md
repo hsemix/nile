@@ -11,6 +11,13 @@ the section becomes that version's.
 ### 2026-10-15
 
 #### Added
+- Example `examples/combobox.html`: a filtering combobox written as a class component, with keyboard navigation and a popup list.
+- Date, month, week, `datetime-local`, time and colour inputs open pickers (calendar, month grid, week-aware calendar, hour/minute columns, saturation/hue square with hex field and swatches) from a glyph at the field's edge (the swatch for colours) or Alt+Down; they set `value` and fire `input`/`change`. Example `examples/pickers.html`.
+- Constraint validation: `validity`, `validationMessage`, `willValidate`, `checkValidity()`, `reportValidity()`, `setCustomValidity()` (form-level too) for `required`, `min`/`max`/`step`, `minlength`/`maxlength`, `pattern`, `email`, `url`; `:valid`/`:invalid` selectors.
+- `type=number` steps with the wheel when focused and under the pointer.
+- Files dropped on a window go to the file input under the pointer (first file only unless `multiple`), else a `drop` event with `dataTransfer.files`.
+- `<legend>` sits on the fieldset's top border with a gap in the line.
+- `Element.scrollIntoView()` scrolls scrollable ancestors, not only the page.
 - Tables: `caption-side: bottom`, backgrounds/borders on `thead`/`tbody`/`tfoot` (an empty box behind their rows, also repeated with a paginated header), and automatic columns in a table with a `width` share the free space in proportion to their text instead of equally. Example `examples/table-parts.html`.
 - Sciter class components: a class extending `Element` works as a JSX tag with `this(props, kids)`,
   `render()`, `componentDidMount`, `componentDidUpdate`, `componentWillUnmount`; `componentUpdate(obj)`
@@ -22,6 +29,8 @@ the section becomes that version's.
 - This changelog.
 
 #### Fixed
+- The pointer is an arrow, not a text cursor, over a number input's spin arrows and a date/time/colour input's picker glyph.
+- Setting `input.value` from a script no longer makes the engine fire a second `change` when the input loses focus.
 - Linux CI: `a_registered_font_is_found_under_its_family_name` compared widths against a fallback
   that is the same font on Linux.
 

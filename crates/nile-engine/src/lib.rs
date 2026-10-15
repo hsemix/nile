@@ -197,6 +197,8 @@ pub struct View {
     pub caret: usize,
     /// Selections scripts set on inputs that don't have focus yet.
     pub pending_sel: std::collections::HashMap<NodeId, (usize, usize)>,
+    /// Value when the focused input got focus (or last had a script assign it), to decide whether `change` fires.
+    pub value_at_focus: Option<String>,
     /// Focus moves made by scripts, so the page can fire `blur`/`focus` for them.
     pub focus_changes: Vec<(Option<NodeId>, Option<NodeId>)>,
     /// Window actions scripts and `role="window-*"` elements asked for; the window loop applies them.
@@ -717,6 +719,14 @@ impl Environment for Env {
         }
     }
 
+    fn value_synced(&self, node: NodeId) {
+        let mut v = self.0.borrow_mut();
+        if v.interaction.focus == Some(node) && v.value_at_focus.is_some() {
+            let now = nile_layout::control_value(&v.doc.borrow(), node);
+            v.value_at_focus = Some(now);
+        }
+    }
+
     fn set_focus(&self, node: Option<NodeId>) {
         let mut v = self.0.borrow_mut();
         if v.interaction.focus != node {
@@ -781,8 +791,6 @@ pub struct Page {
     /// Time, position and count of the last primary click, for double/triple-click.
     pub last_click: Option<(Instant, (f32, f32), u32)>,
     pub clipboard: Box<dyn Clipboard>,
-    /// Value when the focused input got focus, to decide whether `change` fires.
-    pub value_at_focus: Option<String>,
     /// A mouse drag extending the page selection.
     pub page_drag: bool,
     /// A scrollbar thumb being dragged.
@@ -993,6 +1001,7 @@ impl Page {
             anchor: 0,
             caret: 0,
             pending_sel: std::collections::HashMap::new(),
+            value_at_focus: None,
             interaction,
             page_sel: None,
             edit_sel: None,
@@ -1103,7 +1112,6 @@ impl Page {
             list_cursor: None,
             last_click: None,
             clipboard: Box::new(MemoryClipboard::default()),
-            value_at_focus: None,
             history: std::collections::HashMap::new(),
             bar_drag: None,
             page_drag: false,
@@ -1225,7 +1233,7 @@ impl Page {
             self.ime_cancel();
         }
         if let Some(o) = old {
-            let before = self.value_at_focus.take();
+            let before = self.view.borrow_mut().value_at_focus.take();
             self.commit_value(o, before.clone());
             if before.is_some_and(|v| v != self.value_of(o)) {
                 self.emit(o, UiEvent::Plain("change"));
@@ -1245,7 +1253,8 @@ impl Page {
         }
         self.show_caret();
         if let Some(n) = new {
-            self.value_at_focus = self.is_text_input(n).then(|| self.value_of(n));
+            let at_focus = self.is_text_input(n).then(|| self.value_of(n));
+            self.view.borrow_mut().value_at_focus = at_focus;
             self.emit(n, UiEvent::Plain("focus"));
         }
     }
@@ -1314,6 +1323,23 @@ impl Page {
         }
         self.close_menu();
         let target = self.pointer.and_then(|(x, y)| self.hit_test(x, y));
+        // A focused number input under the pointer takes the wheel as steps (up = increase).
+        if dy != 0.0 {
+            if let (Some(focus), Some(t)) = (self.interaction().focus.filter(|f| self.is_number(*f)), target) {
+                let over = {
+                    let doc = self.doc.borrow();
+                    let mut cur = Some(t);
+                    while cur.is_some_and(|c| c != focus) {
+                        cur = doc.node(cur.unwrap()).parent;
+                    }
+                    cur.is_some()
+                };
+                if over {
+                    self.number_step(focus, if dy > 0.0 { 1.0 } else { -1.0 });
+                    return;
+                }
+            }
+        }
         self.scroll_chain(target, dx, dy);
     }
 
@@ -1574,7 +1600,7 @@ impl Page {
             return false;
         }
         self.doc.borrow_mut().set_attr(id, "value", &next);
-        self.value_at_focus = Some(next);
+        self.view.borrow_mut().value_at_focus = Some(next);
         self.sync();
         self.emit(id, UiEvent::Plain("input"));
         self.emit(id, UiEvent::Plain("change"));
@@ -1623,6 +1649,48 @@ impl Page {
             }
             None => false,
         }
+    }
+
+    /// Files dropped on the window from the desktop: a file input under the pointer (or the one
+    /// a label under it points at) takes them, as if chosen in its dialog (only the first unless
+    /// it is `multiple`); anywhere else the target gets a `drop` event whose `dataTransfer.files`
+    /// holds them. Returns whether the page changed.
+    pub fn drop_files(&mut self, paths: &[String]) -> bool {
+        if paths.is_empty() {
+            return false;
+        }
+        let Some((x, y)) = self.pointer else { return false };
+        let Some(target) = self.hit_test(x, y) else { return false };
+        let input = {
+            let doc = self.doc.borrow();
+            let is_file = |n: NodeId| doc.node(n).tag() == Some("input") && doc.node(n).attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("file"));
+            let mut found = None;
+            let mut cur = Some(target);
+            while let Some(n) = cur {
+                if is_file(n) {
+                    found = Some(n);
+                    break;
+                }
+                if doc.node(n).tag() == Some("label") {
+                    found = match doc.node(n).attr("for") {
+                        Some(id) => doc.find(|c| c.attr("id") == Some(id)),
+                        None => doc.descendants(n).into_iter().find(|d| is_file(*d)),
+                    }
+                    .filter(|c| is_file(*c));
+                    break;
+                }
+                cur = doc.node(n).parent;
+            }
+            found
+        };
+        if let Some(input) = input.filter(|i| !self.is_disabled(*i)) {
+            let multiple = self.doc.borrow().node(input).attr("multiple").is_some();
+            self.choose_files(input, if multiple { paths } else { &paths[..1] });
+            return true;
+        }
+        let list: Vec<String> = paths.iter().map(|p| editing::json_string(p)).collect();
+        let (_, changed) = self.call("__fileDrop", &format!("[{},[{}]]", target.0, list.join(",")));
+        changed
     }
 
     /// Give a file input the files the user picked (an empty list clears it) and fire
@@ -1697,15 +1765,53 @@ impl Page {
         self.doc.borrow_mut().set_attr(id, "value", &text);
         let len = text.chars().count();
         self.set_sel(len, len);
-        self.value_at_focus = Some(text);
+        self.view.borrow_mut().value_at_focus = Some(text);
         self.sync();
         self.emit(id, UiEvent::Plain("input"));
         self.emit(id, UiEvent::Plain("change"));
         true
     }
 
+    /// Whether `id` is a date/time/colour input that isn't disabled or read-only.
+    fn has_picker(&self, id: NodeId) -> bool {
+        !self.is_disabled(id)
+            && self.doc.borrow().node(id).attr("readonly").is_none()
+            && self.doc.borrow().node(id).tag() == Some("input")
+            && matches!(self.input_type(id).as_str(), "date" | "time" | "month" | "week" | "datetime-local" | "color")
+    }
+
+    /// Whether the pointer is over the part of a picker input that opens it: the glyph at the right
+    /// edge (the swatch at the left for colours).
+    fn picker_opener_at_pointer(&self, id: NodeId) -> bool {
+        if !self.has_picker(id) {
+            return false;
+        }
+        let Some((x, y)) = self.pointer else { return false };
+        let rect = {
+            let mut v = self.view.borrow_mut();
+            let offsets = v.scroll_offsets.clone();
+            v.layout().node_rect_scrolled(id, &offsets)
+        };
+        let Some(rect) = rect else { return false };
+        let _ = y;
+        if self.input_type(id) == "color" {
+            x <= rect.x + 30.0
+        } else {
+            x >= rect.x + rect.width - 28.0
+        }
+    }
+
+    /// Ask the page's script (`__pickerOpen` in web.js) to show the picker for an input.
+    fn open_picker(&mut self, id: NodeId) {
+        self.sync();
+        let (result, _) = self.call("__pickerOpen", &format!("[{}]", id.0));
+        if let Err(e) = result {
+            eprintln!("[picker] {e}");
+        }
+    }
+
     /// Which spin arrow is under the pointer: `Some(1.0)` up, `Some(-1.0)` down.
-    fn number_arrow_at_pointer(&mut self, id: NodeId) -> Option<f64> {
+    fn number_arrow_at_pointer(&self, id: NodeId) -> Option<f64> {
         let (x, y) = self.pointer?;
         let (rect, scroll) = {
             let mut v = self.view.borrow_mut();
@@ -1832,6 +1938,9 @@ impl Page {
             return c;
         }
         match self.interaction().hover {
+            // The spin arrows and the picker glyph are buttons, not text.
+            Some(n) if self.is_number(n) && self.number_arrow_at_pointer(n).is_some() => Cursor::Default,
+            Some(n) if self.picker_opener_at_pointer(n) => Cursor::Default,
             Some(n) => self.view.borrow().styles.get(n).cursor,
             None => Cursor::Auto,
         }
@@ -2873,6 +2982,11 @@ impl Page {
             self.emit(details, UiEvent::Plain("toggle"));
             return true;
         }
+        // The glyph of a date, time or colour input opens its picker.
+        if self.picker_opener_at_pointer(target) {
+            self.open_picker(target);
+            return true;
+        }
         // Elements acting as window buttons.
         let role = window::role_at(&self.doc.borrow(), target).map(|r| r.1);
         let cmd = match role {
@@ -3114,6 +3228,10 @@ impl Page {
                     None => len,
                 });
             }
+            "ArrowDown" if mods.alt_key() && self.has_picker(focus) => {
+                self.open_picker(focus);
+                return true;
+            }
             "ArrowUp" | "ArrowDown" if !multiline && self.is_number(focus) => {
                 return self.number_step(focus, if key == "ArrowUp" { 1.0 } else { -1.0 });
             }
@@ -3122,11 +3240,13 @@ impl Page {
             }
             "Enter" if multiline && !readonly => edit = Some((lo, hi, "\n".into())),
             "Enter" => {
-                let before = self.value_at_focus.clone();
+                let before = self.view.borrow().value_at_focus.clone();
                 self.commit_value(focus, before);
                 // Commit: fire `change` if the value moved since focus.
-                if self.value_at_focus.as_ref().is_some_and(|v| *v != self.value_of(focus)) {
-                    self.value_at_focus = Some(self.value_of(focus));
+                let moved = self.view.borrow().value_at_focus.as_ref().is_some_and(|v| *v != self.value_of(focus));
+                if moved {
+                    let now = self.value_of(focus);
+                    self.view.borrow_mut().value_at_focus = Some(now);
                     return self.emit(focus, UiEvent::Plain("change")).1 | true;
                 }
                 return false;
@@ -3808,6 +3928,132 @@ mod tests {
             js(&mut p, "window.log.join('|')"),
             "12:text/plain:héllo world:world|a.txt:4:true:data|a=1&b=on&s=y&t=hi|2,3:true:a.txt|multipart/form-data:2,3:y:a.txt:data|AB CD:false:one two:true".replace("AB CD", "ABCD") + "|3,3|1+2"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn dropped_files_go_to_a_file_input_or_a_drop_event() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><input id="f" type="file" style="margin:0;width:200px;height:30px"><input id="m" type="file" multiple style="margin:0;width:200px;height:30px"><div id="z" style="height:60px"></div>
+               <script>window.log = [];
+                 for (const id of ["f", "m"]) document.getElementById(id).addEventListener("change", () => log.push(id + ":" + [...document.getElementById(id).files].map((f) => f.name).join("+")));
+                 document.getElementById("z").addEventListener("drop", (e) => log.push("drop:" + e.dataTransfer.files.length + ":" + e.dataTransfer.files[0].name));</script></body>"#,
+            "drop",
+        );
+        let files = vec!["/tmp/a.txt".to_string(), "/tmp/b.txt".to_string()];
+        let over = |p: &mut Page, id: &str| {
+            let node = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+            let r = p.view.borrow_mut().layout().node_rect(node).unwrap();
+            p.pointer_moved(r.x + 5.0, r.y + 5.0);
+        };
+        over(&mut p, "f");
+        assert!(p.drop_files(&files));
+        over(&mut p, "m");
+        p.drop_files(&files);
+        over(&mut p, "z");
+        p.drop_files(&files);
+        assert_eq!(js(&mut p, "log.join('|')"), "f:a.txt|m:a.txt+b.txt|drop:2:a.txt");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn date_time_and_colour_inputs_open_pickers_that_set_the_value() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><input id="d" type="date" value="2026-10-15" style="margin:0;width:200px"><br>
+               <input id="t" type="time" value="09:30" style="margin:0;width:200px"><br>
+               <input id="c" type="color" value="#102030" style="margin:0"><br>
+               <input id="w" type="week" value="2026-W42" style="margin:0;width:200px"><br>
+               <input id="m" type="month" value="2026-10" style="margin:0;width:200px">
+               <script>window.log = [];
+                 for (const id of ["d", "t", "c", "w", "m"]) document.getElementById(id).addEventListener("change", (e) => log.push(id + "=" + e.target.value));
+               </script></body>"##,
+            "pickers",
+        );
+        let at = |p: &mut Page, id: &str| {
+            let node = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+            p.view.borrow_mut().layout().node_rect(node).unwrap()
+        };
+        let open = |p: &mut Page, id: &str, left: bool| {
+            let r = at(p, id);
+            p.pointer_moved(if left { r.x + 10.0 } else { r.x + r.width - 10.0 }, r.y + r.height / 2.0);
+            p.press();
+            p.release();
+        };
+        let count = |p: &mut Page| js(p, "document.querySelectorAll('.nile-picker').length");
+        // A click in the middle of a date field edits it; the glyph opens the calendar.
+        let r = at(&mut p, "d");
+        p.pointer_moved(r.x + 20.0, r.y + 8.0);
+        p.press();
+        p.release();
+        assert_eq!(count(&mut p), "0");
+        assert_eq!(p.cursor(), nile_style::Cursor::Text, "the text of the field");
+        p.pointer_moved(r.x + r.width - 10.0, r.y + 8.0);
+        assert_eq!(p.cursor(), nile_style::Cursor::Default, "the glyph is a button");
+        open(&mut p, "d", false);
+        assert_eq!(count(&mut p), "1");
+        js(&mut p, "[...document.querySelectorAll('.np-day:not(.np-out)')].find((b) => b.textContent === '20').click()");
+        assert_eq!(js(&mut p, "document.getElementById('d').value"), "2026-10-20");
+        assert_eq!(count(&mut p), "0", "choosing a day closes the picker");
+        open(&mut p, "t", false);
+        js(&mut p, "document.querySelectorAll('.np-col')[0].children[14].click()");
+        js(&mut p, "document.querySelectorAll('.np-col')[1].children[5].click()");
+        assert_eq!(js(&mut p, "document.getElementById('t').value"), "14:05");
+        open(&mut p, "c", true);
+        assert_eq!(count(&mut p), "1");
+        js(&mut p, "document.querySelector('.np-swatch').click()");
+        assert_eq!(js(&mut p, "document.getElementById('c').value"), "#000000");
+        js(&mut p, "const f = document.querySelector('.np-hex'); f.value = '#336699'; f.dispatchEvent(new Event('change', { bubbles: true }))");
+        assert_eq!(js(&mut p, "document.getElementById('c').value"), "#336699");
+        // Escape closes a picker (this one covers the fields below it); then the week and month pickers.
+        press_key(&mut p, "Escape", ModifiersState::default());
+        assert_eq!(count(&mut p), "0");
+        open(&mut p, "w", false);
+        assert_eq!(js(&mut p, "[...document.querySelectorAll('.nile-picker')].map((x) => x.getAttribute('aria-label')).join()"), "Choose week");
+        js(&mut p, "[...document.querySelectorAll('.np-day:not(.np-out)')].find((b) => b.textContent === '1').click()");
+        assert_eq!(js(&mut p, "document.getElementById('w').value"), "2026-W40");
+        open(&mut p, "m", false);
+        js(&mut p, "[...document.querySelectorAll('.np-cell')].find((b) => b.textContent === 'Mar').click()");
+        assert_eq!(js(&mut p, "document.getElementById('m').value"), "2026-03");
+        assert!(js(&mut p, "log.join(',')").starts_with("d=2026-10-20,t=14:05"), "{}", js(&mut p, "log.join(',')"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn form_controls_validate_and_match_valid_and_invalid() {
+        let (mut p, path) = page(
+            r##"<body><form id="f"><input id="a" required><input id="n" type="number" min="1" max="5" step="2" value="4"><input id="e" type="email" value="x@y.z"><input id="t" pattern="[a-z]+" value="abc" maxlength="5"><input id="c" type="checkbox" required><input id="d" disabled required></form><script>
+              window.log = [];
+              const $ = (s) => document.querySelector(s);
+              const v = (id) => { const x = $(id).validity; return Object.keys(x).filter((k) => x[k] === true && k !== "valid").join("+") || "ok"; };
+              document.addEventListener("DOMContentLoaded", () => {
+                log.push(v("#a"), v("#n"), v("#e"), v("#t"), v("#c"), v("#d"), $("#d").willValidate);
+              });
+              window.later = () => {
+                $("#a").value = "x"; $("#n").value = "3"; $("#e").value = "nope"; $("#t").value = "ABCDEFG"; $("#c").checked = true;
+                return new Promise((r) => setTimeout(r, 30)).then(() => {
+                  log.push(v("#a"), v("#n"), v("#e"), v("#t"), v("#c"), $("#f").checkValidity(), $("#e").validationMessage !== "");
+                  $("#e").setCustomValidity("custom"); log.push($("#e").validationMessage);
+                  window.done = 1;
+                });
+              };
+            </script></body>"##,
+            "validity",
+        );
+        let doc_invalid = |p: &mut Page, id: &str, flag: &str| js(p, &format!("document.querySelector('#{id}').matches(':{flag}')"));
+        assert_eq!(js(&mut p, "log.join('|')"), "valueMissing|stepMismatch|ok|ok|valueMissing|ok|false");
+        assert_eq!(doc_invalid(&mut p, "a", "invalid"), "true");
+        assert_eq!(doc_invalid(&mut p, "e", "valid"), "true");
+        assert_eq!(doc_invalid(&mut p, "d", "invalid"), "false");
+        js(&mut p, "later()");
+        for _ in 0..100 {
+            p.tick();
+            if js(&mut p, "window.done") == "1" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(js(&mut p, "log.slice(7).join('|')"), "ok|ok|typeMismatch|patternMismatch+tooLong|ok|false|true|custom");
+        assert_eq!(doc_invalid(&mut p, "e", "invalid"), "true");
         let _ = std::fs::remove_file(path);
     }
 
@@ -5357,6 +5603,18 @@ cd</textarea>
         p.press();
         p.release();
         assert_eq!(val(&mut p, "d"), "0.3");
+        // Over the spin arrows the pointer is an arrow, over the text an I-beam.
+        p.pointer_moved(r.x + r.width - 8.0, r.y + 3.0);
+        assert_eq!(p.cursor(), nile_style::Cursor::Default);
+        p.pointer_moved(r.x + 10.0, r.y + 5.0);
+        assert_eq!(p.cursor(), nile_style::Cursor::Text);
+        // The wheel over the focused input steps it (up increases) instead of scrolling the page.
+        p.pointer_moved(r.x + 10.0, r.y + 5.0);
+        p.wheel(0.0, 10.0);
+        assert_eq!(val(&mut p, "d"), "0.4");
+        p.wheel(0.0, -10.0);
+        p.wheel(0.0, -10.0);
+        assert_eq!(val(&mut p, "d"), "0.2");
         let _ = std::fs::remove_file(path);
     }
 

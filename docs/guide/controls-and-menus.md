@@ -61,12 +61,26 @@ fields, file inputs, progress/meter, fieldsets, and details/summary disclosure.
 See [inputs.html](../../examples/inputs.html), [number.html](../../examples/number.html)
 and [controls2.html](../../examples/controls2.html).
 
-Number controls step with arrows and respect min/max; range controls drag and emit
-input/change. Date/time fields offer digit editing and field stepping, without a
-calendar/clock popup. Color inputs accept hex text, without a color-picker popup.
-File inputs request a native chooser in the shell; scripts read `.files` entries
-with name/size/type and `.text()`. Other hosts must implement the chooser request
-API. These controls do not add automatic form validation/submission.
+Number controls step with arrows, the wheel (focused, pointer over it) and respect
+min/max; range controls drag and emit input/change. Date, month, week,
+datetime-local and time fields offer digit editing and field stepping, and a
+glyph at the right edge (Alt+Down also) opens a calendar, month grid or clock;
+colour inputs open a picker from their swatch (a saturation/hue square, hex field and
+swatches). Each sets `value` and fires `input`/`change`; Esc closes it
+([pickers.html](../../examples/pickers.html)). File inputs request a native chooser in the
+shell and also accept files dropped on them (elsewhere a `drop` event carries
+`e.dataTransfer.files`); scripts read `.files` entries with name/size/type and
+`.text()`. Other hosts must implement the chooser request API and call
+`nile_view`/`Page::drop_files` themselves.
+
+### Validation
+
+`required`, `min`/`max`/`step`, `minlength`/`maxlength`, `pattern`, `type=email` and
+`type=url` are checked: `el.validity` (`valueMissing`, `typeMismatch`, `rangeUnderflow`, ...),
+`el.validationMessage`, `el.checkValidity()` (fires `invalid`), `reportValidity()`,
+`setCustomValidity(msg)`, and the same on a `<form>`. `:valid` and `:invalid` select
+controls by their current state. Nile shows no message bubbles and does not block form
+submission.
 
 ## Enable page-text selection
 

@@ -128,6 +128,8 @@ re-renders). When a parent re-renders with `patch`, matching component elements 
 `key`, else class) and get `this(props, kids)` + `render()` again. `Element.create(jsx)` builds an
 element from JSX, `el.post(fn)` runs `fn` after the current event. `examples/components.html`.
 
+A custom control (a combobox, say) is a class component: render an input and a button, keep the text in a field, expose it as `get value`/`set value`, open a list with `popup()` (remove the list element when the popup's `close` fires), and fire `input`/`change` yourself; give the root an ARIA `role` and `aria-expanded` for assistive technology. `examples/combobox.html` is a complete one with filtering and arrow-key navigation. A control is created with `Element.create(<ComboBox .../>)` or as JSX inside `content()`/`append()`; binding a class to a tag from CSS (`prototype:`) is not supported yet.
+
 ### `Element.value` of a form
 
 `<form>` (or any element with `behavior="form"`) reports its named controls as an object:

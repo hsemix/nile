@@ -165,6 +165,8 @@ pub trait Environment {
     fn interaction(&self) -> InteractionState;
     /// Move keyboard focus (`el.focus()` / `el.blur()`).
     fn set_focus(&self, node: Option<NodeId>);
+    /// A script assigned the focused input's value: that is not an edit to fire `change` for.
+    fn value_synced(&self, _node: NodeId) {}
     /// `[scrollLeft, scrollTop, scrollWidth, scrollHeight]` of an element that clips its content.
     fn element_scroll(&self, node: NodeId) -> Option<[f32; 4]>;
     /// `[sheet count, current sheet (1-based)]` of a `page-view: paged` element: the sheet with the
@@ -549,6 +551,11 @@ fn install_natives(
         let Some([(an, ao), (fnode, fo)]) = env.edit_selection() else { return Vec::new() };
         let d = d.borrow();
         vec![an.0 as f64, to_utf16(&d, an, ao) as f64, fnode.0 as f64, to_utf16(&d, fnode, fo) as f64]
+    } }));
+    native!("valueSynced", with_doc!(_d => { let env = env.clone(); move |id: i32| {
+        if let Some(n) = node(id) {
+            env.value_synced(n);
+        }
     } }));
     native!("selSet", with_doc!(d => { let env = env.clone(); move |an: i32, ao: f64, fnode: i32, fo: f64| {
         let (Some(an), Some(fnode)) = (node(an), node(fnode)) else { return };
