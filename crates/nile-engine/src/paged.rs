@@ -78,6 +78,7 @@ impl Page {
                 only: Some(only),
                 skip: &[],
                 selected_image: None,
+                bar: None,
             };
             if let Some(repeat) = &head {
                 canvas.save();

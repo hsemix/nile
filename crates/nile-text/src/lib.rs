@@ -46,6 +46,9 @@ pub struct TextStyle {
     pub line_through: bool,
     pub letter_spacing: f32,
     pub align: Alignment,
+    /// `font-variation-settings` and `font-feature-settings` in CSS syntax (`"wght" 650, "wdth" 80`); empty for none.
+    pub font_variations: String,
+    pub font_features: String,
 }
 
 /// A box of known size placed inline at a byte offset of the text.
@@ -132,6 +135,8 @@ impl TextEngine {
             line_through: false,
             letter_spacing: 0.0,
             align: Alignment::Start,
+            font_variations: String::new(),
+            font_features: String::new(),
         };
         let mut layout = self.shape("\u{a0}", &style, 1.0);
         break_lines(&mut layout, None, Alignment::Start);
@@ -170,6 +175,12 @@ impl TextEngine {
         b.push_default(StyleProperty::Underline(base.underline));
         b.push_default(StyleProperty::Strikethrough(base.line_through));
         b.push_default(StyleProperty::LetterSpacing(base.letter_spacing));
+        if !base.font_variations.is_empty() {
+            b.push_default(StyleProperty::FontVariations(parley::style::FontVariations::Source(Cow::Owned(base.font_variations.clone()))));
+        }
+        if !base.font_features.is_empty() {
+            b.push_default(StyleProperty::FontFeatures(parley::style::FontFeatures::Source(Cow::Owned(base.font_features.clone()))));
+        }
         for (range, s) in spans {
             if range.is_empty() || *s == *base {
                 continue;
@@ -183,6 +194,12 @@ impl TextEngine {
             b.push(StyleProperty::Underline(s.underline), range.clone());
             b.push(StyleProperty::Strikethrough(s.line_through), range.clone());
             b.push(StyleProperty::LetterSpacing(s.letter_spacing), range.clone());
+            if s.font_variations != base.font_variations {
+                b.push(StyleProperty::FontVariations(parley::style::FontVariations::Source(Cow::Owned(s.font_variations.clone()))), range.clone());
+            }
+            if s.font_features != base.font_features {
+                b.push(StyleProperty::FontFeatures(parley::style::FontFeatures::Source(Cow::Owned(s.font_features.clone()))), range.clone());
+            }
         }
         // Symbol characters the system fallback misses get named fallback fonts.
         for (i, c) in text.char_indices().filter(|(_, c)| is_symbol_gap(*c)) {
@@ -303,6 +320,8 @@ mod tests {
             line_through: false,
             letter_spacing: 0.0,
             align: Alignment::Start,
+            font_variations: String::new(),
+            font_features: String::new(),
         };
         let mut layout = engine.shape("the quick brown fox jumps over the lazy dog", &style, 1.0);
         break_lines(&mut layout, None, Alignment::Start);
@@ -350,6 +369,8 @@ mod tests {
             line_through: false,
             letter_spacing: 0.0,
             align: Alignment::Start,
+            font_variations: String::new(),
+            font_features: String::new(),
         };
         let mut layout = engine.shape("Registered fonts", &style, 1.0);
         break_lines(&mut layout, None, Alignment::Start);

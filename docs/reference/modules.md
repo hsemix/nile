@@ -147,7 +147,9 @@ finally { await file.close(); }
 `Dir.next()` returns a promise of an entry or `undefined` at the end;
 `for await (const entry of dir)` is supported. `close()` ends iteration.
 The directory's entries are enumerated up front, not lazily streamed from OS.
-Named pipes, TTY wrappers and filesystem watchers are not supplied.
+`sys.Pipe` (named pipes), `sys.TTY(fd)` and `fs.watch(path, cb)` exist. On Windows a pipe is a loopback socket
+announced in a file in the temp folder, so it only connects Nile to Nile; `TTY` sizes and modes use `stty` on Unix
+and fixed defaults elsewhere; `fs.watch` polls every 250 ms (events 1 = rename, 2 = change, 20,000 entries at most).
 
 ## `@sys` processes
 

@@ -46,7 +46,10 @@ impl Node {
 
 /// Flags scripts can set on elements, matched by the same-named pseudo-classes.
 pub const STATE_NAMES: &[&str] =
-    &["checked", "disabled", "readonly", "expanded", "collapsed", "current", "selected", "invalid", "busy"];
+    &["checked", "disabled", "readonly", "expanded", "collapsed", "current", "selected", "invalid", "busy", "valid", "visited", "focusable", "tabfocus"];
+
+/// The document version an index of (previous, next) element siblings was built for, and the index.
+type SiblingIndex = (u64, Vec<(u32, u32)>);
 
 #[derive(Debug, Default)]
 pub struct Document {
@@ -57,6 +60,8 @@ pub struct Document {
     pub version: u64,
     /// Runtime state flags (Sciter's `Element.state`), as bits of `STATE_NAMES`.
     states: std::collections::HashMap<NodeId, u32>,
+    /// Previous/next element sibling of every node, for the document `version` it was built at.
+    siblings: std::cell::RefCell<Option<SiblingIndex>>,
 }
 
 mod include;
@@ -119,6 +124,42 @@ impl Document {
 
     pub fn node(&self, id: NodeId) -> &Node {
         &self.nodes[id.0]
+    }
+
+    /// The element before `id` among its parent's children (the nearest earlier sibling that is an
+    /// element). Answered from an index built once per document version, so walking a wide list
+    /// is linear, not quadratic.
+    pub fn prev_element_sibling(&self, id: NodeId) -> Option<NodeId> {
+        self.sibling_pair(id).0
+    }
+
+    /// The element after `id` among its parent's children.
+    pub fn next_element_sibling(&self, id: NodeId) -> Option<NodeId> {
+        self.sibling_pair(id).1
+    }
+
+    fn sibling_pair(&self, id: NodeId) -> (Option<NodeId>, Option<NodeId>) {
+        const NONE: u32 = u32::MAX;
+        let mut cache = self.siblings.borrow_mut();
+        if cache.as_ref().is_none_or(|(v, links)| *v != self.version || links.len() != self.nodes.len()) {
+            let mut links = vec![(NONE, NONE); self.nodes.len()];
+            for node in &self.nodes {
+                let mut before = NONE;
+                for &c in &node.children {
+                    if !matches!(self.nodes[c.0].kind, NodeKind::Element { .. }) {
+                        continue;
+                    }
+                    links[c.0].0 = before;
+                    if before != NONE {
+                        links[before as usize].1 = c.0 as u32;
+                    }
+                    before = c.0 as u32;
+                }
+            }
+            *cache = Some((self.version, links));
+        }
+        let (p, n) = cache.as_ref().expect("built above").1[id.0];
+        ((p != NONE).then_some(NodeId(p as usize)), (n != NONE).then_some(NodeId(n as usize)))
     }
 
     /// The `<body>` element, if present.
@@ -458,6 +499,22 @@ mod tests {
                 ScriptSource::Inline("b()".into())
             ]
         );
+    }
+
+    #[test]
+    fn element_siblings_skip_text_and_follow_mutations() {
+        let mut doc = Document::parse("<ul id=l><li id=a>1</li> text <li id=b>2</li><li id=c>3</li></ul>");
+        let by = |doc: &Document, id: &str| doc.find(|n| n.attr("id") == Some(id)).unwrap();
+        let (a, b, c) = (by(&doc, "a"), by(&doc, "b"), by(&doc, "c"));
+        assert_eq!((doc.prev_element_sibling(a), doc.next_element_sibling(a)), (None, Some(b)));
+        assert_eq!((doc.prev_element_sibling(b), doc.next_element_sibling(b)), (Some(a), Some(c)));
+        assert_eq!(doc.next_element_sibling(c), None);
+        let ul = by(&doc, "l");
+        let d = doc.create_element("li");
+        doc.append_child(ul, d).unwrap();
+        assert_eq!(doc.next_element_sibling(c), Some(d));
+        doc.detach(b);
+        assert_eq!((doc.prev_element_sibling(c), doc.next_element_sibling(a)), (Some(a), Some(c)));
     }
 
     #[test]

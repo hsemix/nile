@@ -251,6 +251,7 @@ pub(crate) fn apply(s: &mut ComputedStyle, name: &str, v: &[Value], fs: f32) -> 
             Some("auto") => s.table_fixed = false,
             _ => {}
         },
+        "caption-side" => s.caption_bottom = matches!(first.and_then(Value::ident), Some("bottom" | "bottom-outside")),
         "border-collapse" => match first.and_then(Value::ident) {
             Some("collapse") => s.border_collapse = true,
             Some("separate") => s.border_collapse = false,

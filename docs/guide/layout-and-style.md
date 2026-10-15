@@ -124,8 +124,9 @@ Transforms, opacity, gradients, transitions and keyframe animations are availabl
 Listen for `transitionend`, `animationstart` and `animationend` to coordinate
 application state. `transitioncancel` and `animationiteration` are not implemented.
 See [anim-events.html](../../examples/anim-events.html). 3D transforms and perspective
-project onto the page, but preserve-3d, backface visibility and depth sorting are
-not implemented; do not expect a full 3D scene graph.
+project onto the page. `backface-visibility: hidden` hides a face while its composed
+transform turns it away ([flip-card.html](../../examples/flip-card.html)); there is no
+depth sorting, so do not expect a full 3D scene graph.
 
 An absolute child is positioned against its nearest positioned ancestor. Use
 `position: relative` on a menu's container and `position: absolute` on its popup.
@@ -141,3 +142,20 @@ Whenever you change layout or styling, [render a PNG](cli.md) and inspect it at
 the intended window sizes. Passing JavaScript checks does not verify visual layout.
 
 Related reference: [CSS property and compatibility reference](../reference/css.md).
+
+## Style scrollbars
+
+Scroll containers (`overflow: auto | scroll`) and the page get thin overlay scrollbars that
+grow and darken under the pointer. Restyle them per container (or on `html` for the page):
+
+```css
+.list { scrollbar-width: thin; scrollbar-color: #2f80ed #e3ecfb }   /* thumb, track */
+.log  { scrollbar-width: none }                                     /* hidden, still scrolls */
+.dark::-webkit-scrollbar { width: 12px }
+.dark::-webkit-scrollbar-track { background: #1f2937 }
+.dark::-webkit-scrollbar-thumb { background: #f59e0b; border-radius: 3px }
+```
+
+`::-webkit-scrollbar*` wins over `scrollbar-width`/`scrollbar-color`. See
+[scrollbars.html](../../examples/scrollbars.html). There are no arrow buttons, idle fade-out
+or `:hover` rules on the pseudo-elements yet.

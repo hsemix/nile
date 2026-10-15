@@ -1,0 +1,221 @@
+<html>
+  <head>
+    <title>Combobox</title>
+    <style>
+      body {
+        font: 14px sans-serif;
+        margin: 24px;
+      }
+      .combo {
+        display: inline-flex;
+        align-items: stretch;
+        width: 220px;
+        border: 1px solid #9aa0a8;
+        border-radius: 4px;
+        background: #fff;
+      }
+      .combo.open {
+        border-color: #3a7bd5;
+      }
+      .combo input {
+        flex: 1;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        padding: 5px 8px;
+        min-width: 0;
+      }
+      .combo button {
+        border: 0;
+        background: transparent;
+        width: 26px;
+        padding: 0;
+        cursor: default;
+      }
+      .combo-list {
+        background: #fff;
+        border: 1px solid #b4b8c0;
+        border-radius: 4px;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+        padding: 3px 0;
+        max-height: 160px;
+        overflow: auto;
+      }
+      .combo-list div {
+        padding: 4px 10px;
+        cursor: default;
+      }
+      .combo-list div.on {
+        background: #3a7bd5;
+        color: #fff;
+      }
+      .chev {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border: solid #555;
+        border-width: 0 2px 2px 0;
+        transform: rotate(45deg);
+        margin-top: -3px;
+      }
+      p {
+        margin: 18px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>A combobox written in JavaScript</h3>
+    <div id="host"></div>
+    <p>Value: <b id="out"></b></p>
+    <script type="module">
+      // Custom controls are class components: `value`, events and a popup are all it needs.
+      class ComboBox extends Element {
+        this(props) {
+          this.items = props.items || [];
+          if (this._text === undefined) this._text = props.value || "";
+        }
+        get value() {
+          return this._text;
+        }
+        set value(v) {
+          this.componentUpdate({ _text: String(v) });
+        }
+
+        render() {
+          return (
+            <div
+              class={"combo" + (this.state.expanded ? " open" : "")}
+              role="combobox"
+              aria-expanded={this.state.expanded ? "true" : "false"}
+            >
+              <input
+                type="text"
+                value={this._text}
+                placeholder="Type or pick..."
+              />
+              <button type="button" aria-label="Show options">
+                <span class="chev"></span>
+              </button>
+            </div>
+          );
+        }
+
+        componentDidMount() {
+          this.on("input", "input", (e) => {
+            this._text = e.target.value;
+            this.open();
+            this.fire(false);
+          });
+          this.on("click", "button", () =>
+            this.list ? this.close() : this.open(true),
+          );
+          this.on("keydown", "input", (e) => {
+            if (e.key === "ArrowDown") {
+              if (!this.list) this.open();
+              this.move(1);
+              e.preventDefault();
+            } else if (e.key === "ArrowUp") {
+              this.move(-1);
+              e.preventDefault();
+            } else if (e.key === "Enter" && this.list) {
+              this.choose(this.shown[this.at]);
+              e.preventDefault();
+            } else if (e.key === "Escape") this.close();
+          });
+        }
+
+        fire(done) {
+          this.dispatchEvent(
+            new Event(done ? "change" : "input", { bubbles: true }),
+          );
+        }
+
+        // The items matching what is typed (all of them right after opening with the button).
+        open(all = false) {
+          const q = this._text.toLowerCase();
+          this.shown = this.items.filter(
+            (s) => all || !q || s.toLowerCase().includes(q),
+          );
+          this.at = Math.max(0, this.shown.indexOf(this._text));
+          const list = (
+            <div class="combo-list">
+              {this.shown.map((s, i) => (
+                <div class={i === this.at ? "on" : ""} data-i={i}>
+                  {s}
+                </div>
+              ))}
+            </div>
+          );
+          if (this.popupWindow) this.popupWindow.close();
+          if (!this.shown.length) {
+            this.list = null;
+            return;
+          }
+          const el = Element.create(list);
+          el.style.width = this.getBoundingClientRect().width + "px";
+          el.on("mousedown", "div[data-i]", (e, row) => {
+            e.preventDefault();
+            this.choose(this.shown[+row.dataset.i]);
+          });
+          this.list = el;
+          this.popupWindow = this.popup(el, { anchorAt: 1, popupAt: 7 });
+          this.popupWindow?.on("close", () => {
+            el.remove();
+            this.list = null;
+            this.popupWindow = null;
+            this.state.expanded = false;
+            this.componentUpdate();
+          });
+          this.state.expanded = true;
+          this.componentUpdate();
+        }
+
+        move(d) {
+          if (!this.list) return;
+          this.at = (this.at + d + this.shown.length) % this.shown.length;
+          this.list.children.forEach((row, i) =>
+            row.classList.toggle("on", i === this.at),
+          );
+          this.list.children[this.at].scrollIntoView();
+        }
+
+        choose(text) {
+          if (text === undefined) return;
+          this.componentUpdate({ _text: text });
+          this.close();
+          this.post(() => {
+            const i = this.$("input");
+            i.setSelectionRange(text.length, text.length);
+          });
+          this.fire(true);
+        }
+
+        close() {
+          if (this.popupWindow) this.popupWindow.close();
+        }
+      }
+
+      const combo = Element.create(
+        <ComboBox
+          items={[
+            "Apple",
+            "Apricot",
+            "Banana",
+            "Blueberry",
+            "Cherry",
+            "Grape",
+            "Mango",
+            "Orange",
+            "Peach",
+          ]}
+          value="Banana"
+        />,
+      );
+      $("#host").append(combo);
+      const show = () => ($("#out").textContent = combo.value);
+      combo.on("change", show);
+      combo.on("input", show);
+      show();
+    </script>
+  </body>
+</html>

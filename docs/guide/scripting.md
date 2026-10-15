@@ -128,11 +128,38 @@ re-renders). When a parent re-renders with `patch`, matching component elements 
 `key`, else class) and get `this(props, kids)` + `render()` again. `Element.create(jsx)` builds an
 element from JSX, `el.post(fn)` runs `fn` after the current event. `examples/components.html`.
 
+A custom control (a combobox, say) is a class component: render an input and a button, keep the text in a field, expose it as `get value`/`set value`, open a list with `popup()` (remove the list element when the popup's `close` fires), and fire `input`/`change` yourself; give the root an ARIA `role` and `aria-expanded` for assistive technology. `examples/combobox.html` is a complete one with filtering and arrow-key navigation. A control is created with `Element.create(<ComboBox .../>)` or as JSX inside `content()`/`append()`; a class can also be bound to a tag from CSS, see below.
+
 ### `Element.value` of a form
 
 `<form>` (or any element with `behavior="form"`) reports its named controls as an object:
 strings for text, numbers for `number`/`range`, booleans for checkboxes, the chosen value for a
 radio group. Assigning an object sets the controls it names.
+
+### Classes bound from CSS
+
+`prototype: ClassName url(file.js)` in a rule makes every matching element an instance of the
+class (`export class ClassName extends Element`, from the file, or a class your page scripts
+define). Plain markup then gets behaviour with no script on the page:
+
+```css
+stepper-box { prototype: StepperBox url(stepper.js) }
+```
+```js
+export class StepperBox extends Element {
+  count = 0;                                   // fields run before componentDidMount
+  componentDidMount() { this.state.focusable = true; /* build content, read attributes */ }
+  componentWillUnmount() {}
+  ["on click at button.inc"](event, button) { this.count++; return true; }   // true: handled
+  ["on ^keydown"](event) { /* ^ = capture phase */ }
+}
+```
+
+Handlers are methods named `on <events> [at <selector>]`. Selectors are read from the element:
+`>strip>label` means children of it, and `:root` is the element itself, also in
+`this.$(...)`. The class loads asynchronously, so `componentDidMount` runs a moment after the page
+appears. `examples/prototype/` is a working one. `aspect:` is not supported, and removing the
+`prototype` rule from an element doesn't unbind it.
 
 ## `@debug` and `@storage`
 

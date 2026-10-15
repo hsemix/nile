@@ -40,6 +40,9 @@ pub struct Overlay<'a> {
     pub selected_image: Option<LRect>,
     /// Boxes `[from, to)` not to paint here (a popup that has a window of its own).
     pub skip: &'a [(usize, usize)],
+    /// The scrollbar under the pointer (its scroller, `None` for the page, and whether it is the
+    /// vertical one), and whether it is being dragged.
+    pub bar: Option<(Option<NodeId>, bool, bool)>,
 }
 
 /// Where the caret of an editing host is drawn.
@@ -55,6 +58,8 @@ pub struct Renderer {
     font_mgr: FontMgr,
     /// Skia typefaces keyed by (Parley font blob id, collection index).
     typefaces: HashMap<(u64, u32), Option<Typeface>>,
+    /// Variable fonts at the axis positions (normalized, as Parley reports them) a run uses.
+    varied: HashMap<(u64, u32, Vec<i16>), Option<Typeface>>,
     /// Decoded pictures by `ImageData::id`; `None` where decoding failed.
     pictures: HashMap<u64, Option<skia_safe::Image>>,
 }
@@ -67,7 +72,7 @@ impl Default for Renderer {
 
 impl Renderer {
     pub fn new() -> Self {
-        Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new(), pictures: HashMap::new() }
+        Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new(), varied: HashMap::new(), pictures: HashMap::new() }
     }
 
     /// Paint the whole tree.
@@ -85,8 +90,9 @@ impl Renderer {
             self.paint_menu(canvas, menu);
         }
         canvas.restore();
-        if let Some(t) = nile_layout::page_thumb(viewport, tree.content_height, scroll_y).filter(|_| only.is_none()) {
-            paint_thumb(canvas, &t);
+        let look = styles.page_scrollbar();
+        if let Some(t) = nile_layout::page_thumb(viewport, tree.content_height, scroll_y, look.thickness).filter(|_| only.is_none()) {
+            paint_thumb(canvas, &t, &look, bar_state(overlay, None, t.vertical));
         }
     }
 
@@ -106,7 +112,7 @@ impl Renderer {
                 let (_, container) = open.pop().expect("checked above");
                 canvas.restore();
                 if let Some(container) = container {
-                    paint_scrollbars(canvas, container, offsets);
+                    paint_scrollbars(canvas, container, offsets, styles, overlay);
                 }
             }
             if skip.iter().any(|&(s, e)| i >= s && i < e) {
@@ -140,6 +146,11 @@ impl Renderer {
                         canvas.save();
                         canvas.concat(&skia_safe::Matrix::new_all(t.a, t.c, t.e, t.b, t.d, t.f, t.g, t.h, t.i));
                         open.push((b.subtree_end.max(i + 1), None));
+                    }
+                    if b.backface_hidden && canvas_faces_away(canvas) {
+                        // Turned away (a flipped card's other side): neither it nor its content shows.
+                        jump = b.subtree_end.max(i + 1);
+                        continue;
                     }
                     self.paint_box(canvas, b, styles);
                     if let Some(m) = tree.marker(b.node) {
@@ -201,7 +212,7 @@ impl Renderer {
         while let Some((_, container)) = open.pop() {
             canvas.restore();
             if let Some(container) = container {
-                paint_scrollbars(canvas, container, offsets);
+                paint_scrollbars(canvas, container, offsets, styles, overlay);
             }
         }
     }
@@ -333,6 +344,11 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
             MarkerKind::Square => {
                 canvas.draw_rect(Rect::from_xywh(r.x, r.y, r.width, r.height), &paint);
             }
+            MarkerKind::Image(data) => {
+                if let Some(img) = self.picture(data) {
+                    canvas.draw_image_rect(&img, None, Rect::from_xywh(r.x, r.y, r.width, r.height), &Paint::default());
+                }
+            }
             MarkerKind::Text(layout) => {
                 self.paint_text_tinted(canvas, LRect { x: r.x, y: r.y, width: r.width, height: r.height }, layout, Some([color.r, color.g, color.b, color.a]));
             }
@@ -414,7 +430,16 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
         paint_shadows(canvas, skia_rect(b.rect), &s.box_shadow, radii);
         let photo = b.bg_image.as_ref().and_then(|data| self.background_shader(data, s, b.rect));
         let border = Border { width: s.border_width, color: s.border_color, style: s.border_style };
-        paint_decorated(canvas, skia_rect(b.rect), s.background, s.background_image.as_ref(), photo, &border, radii);
+        if let Some((x0, x1)) = b.border_gap {
+            // The legend sits on the top border: clip a notch out of the box's top edge for it.
+            canvas.save();
+            let notch = Rect::from_ltrb(x0, b.rect.y - 1.0, x1, b.rect.y + s.border_width.top.max(1.0) + 1.0);
+            canvas.clip_rect(notch, skia_safe::ClipOp::Difference, false);
+            paint_decorated(canvas, skia_rect(b.rect), s.background, s.background_image.as_ref(), photo, &border, radii);
+            canvas.restore();
+        } else {
+            paint_decorated(canvas, skia_rect(b.rect), s.background, s.background_image.as_ref(), photo, &border, radii);
+        }
         paint_inset_shadows(canvas, skia_rect(b.rect), s, radii);
         if let Some(data) = &b.image {
             self.paint_picture(canvas, data, s, b.rect);
@@ -544,6 +569,9 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
                     continue;
                 };
 
+                // A variable font drawn at the run's axis positions (`font-variation-settings`, weight, width).
+                let coords: Vec<i16> = run.normalized_coords().iter().map(|c| c.to_bits()).collect();
+                let typeface = if coords.iter().any(|c| *c != 0) { self.variable_typeface(&typeface, font_data.data.id(), font_data.index, &coords).unwrap_or(typeface) } else { typeface };
                 let mut font = Font::from_typeface(typeface, run.font_size());
                 font.set_edging(Edging::SubpixelAntiAlias);
                 font.set_subpixel(true);
@@ -552,7 +580,6 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
                 if let Some(deg) = synth.skew() {
                     font.set_skew_x(-deg.to_radians().tan());
                 }
-                // TODO: apply variable font coords.
 
                 glyph_ids.clear();
                 positions.clear();
@@ -604,6 +631,30 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
                 }
             }
         }
+    }
+
+    fn variable_typeface(&mut self, base: &Typeface, blob_id: u64, index: u32, coords: &[i16]) -> Option<Typeface> {
+        use skia_safe::font_arguments::{variation_position::Coordinate, VariationPosition};
+        self.varied
+            .entry((blob_id, index, coords.to_vec()))
+            .or_insert_with(|| {
+                let axes = base.variation_design_parameters()?;
+                // Normalized -1..1 (default at 0) back to each axis's design units.
+                let position: Vec<Coordinate> = axes
+                    .iter()
+                    .zip(coords)
+                    .map(|(a, &n)| {
+                        let n = f32::from(n) / 16384.0;
+                        let value = if n < 0.0 { a.def + n * (a.def - a.min) } else { a.def + n * (a.max - a.def) };
+                        Coordinate { axis: a.tag, value }
+                    })
+                    .collect();
+                let args = skia_safe::FontArguments::new().set_variation_design_position(VariationPosition { coordinates: &position });
+                let made = base.clone_with_arguments(&args);
+                drop(args);
+                made
+            })
+            .clone()
     }
 
     fn typeface(&mut self, blob_id: u64, index: u32, bytes: &[u8]) -> Option<Typeface> {
@@ -908,7 +959,7 @@ fn paint_decorated(
 /// The check or radio dot for `appearance: checkbox | radio` when checked.
 fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) {
     // Checkbox and radio marks show only when checked; a select's chevron always does.
-    if !s.checked && !matches!(s.appearance, Appearance::Select | Appearance::Progress | Appearance::Meter | Appearance::Range | Appearance::Spinner | Appearance::Swatch) {
+    if !s.checked && !matches!(s.appearance, Appearance::Select | Appearance::Progress | Appearance::Meter | Appearance::Range | Appearance::Spinner | Appearance::Swatch | Appearance::Calendar | Appearance::Clock) {
         return;
     }
     let mut paint = fill(s.color);
@@ -974,6 +1025,25 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
             p.set_color(Color::from_argb(255, 118, 118, 118));
             canvas.draw_rrect(RRect::new_rect_xy(chip, 2.0, 2.0), &p);
         }
+        Appearance::Calendar | Appearance::Clock => {
+            // A small glyph in the right padding: the opener of the date/time picker.
+            let (cx, cy) = (r.x + r.width - 13.0, r.y + r.height / 2.0);
+            paint.set_anti_alias(true);
+            paint.set_style(skia_safe::PaintStyle::Stroke);
+            paint.set_stroke_width(1.3);
+            paint.set_color(Color::from_argb(255, 90, 90, 90));
+            if s.appearance == Appearance::Calendar {
+                let body = Rect::from_xywh(cx - 6.0, cy - 5.0, 12.0, 11.0);
+                canvas.draw_rrect(RRect::new_rect_xy(body, 1.5, 1.5), &paint);
+                canvas.draw_line((cx - 6.0, cy - 1.5), (cx + 6.0, cy - 1.5), &paint);
+                canvas.draw_line((cx - 3.0, cy - 7.0), (cx - 3.0, cy - 4.0), &paint);
+                canvas.draw_line((cx + 3.0, cy - 7.0), (cx + 3.0, cy - 4.0), &paint);
+            } else {
+                canvas.draw_circle((cx, cy), 6.0, &paint);
+                canvas.draw_line((cx, cy), (cx, cy - 3.5), &paint);
+                canvas.draw_line((cx, cy), (cx + 3.0, cy + 1.5), &paint);
+            }
+        }
         Appearance::Spinner => {
             // Up and down arrows stacked in the right padding.
             let cx = r.x + r.width - 11.0;
@@ -1010,21 +1080,74 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
     }
 }
 
+/// Whether the canvas's current matrix shows the back of a surface (it flips orientation).
+fn canvas_faces_away(canvas: &Canvas) -> bool {
+    let m = canvas.local_to_device_as_3x3();
+    nile_layout::Affine { a: m[0], c: m[1], e: m[2], b: m[3], d: m[4], f: m[5], g: m[6], h: m[7], i: m[8] }.faces_away()
+}
+
 /// Thin overlay scrollbars for an `overflow: auto | scroll` box that has more to show.
-fn paint_scrollbars(canvas: &Canvas, b: &LayoutBox, offsets: &ScrollOffsets) {
+fn paint_scrollbars(canvas: &Canvas, b: &LayoutBox, offsets: &ScrollOffsets, styles: &StyleMap, overlay: &Overlay) {
     let Some(sb) = &b.scroll else { return };
     let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
+    let look = styles.scrollbar_look(b.node);
     for t in sb.thumbs(ox, oy) {
-        paint_thumb(canvas, &t);
+        paint_thumb(canvas, &t, &look, bar_state(overlay, Some(b.node), t.vertical));
     }
 }
 
-fn paint_thumb(canvas: &Canvas, t: &nile_layout::Thumb) {
+#[derive(Clone, Copy, PartialEq)]
+enum BarState {
+    Rest,
+    Hover,
+    Active,
+}
+
+fn bar_state(overlay: &Overlay, node: Option<NodeId>, vertical: bool) -> BarState {
+    match overlay.bar {
+        Some((n, v, active)) if n == node && v == vertical => if active { BarState::Active } else { BarState::Hover },
+        _ => BarState::Rest,
+    }
+}
+
+/// A scrollbar: while the pointer is over it (or it is dragged) it grows toward the content, shows its
+/// track and darkens the thumb.
+fn paint_thumb(canvas: &Canvas, t: &nile_layout::Thumb, look: &nile_style::ScrollbarLook, state: BarState) {
+    let grow = if state == BarState::Rest { 0.0 } else { nile_layout::SCROLLBAR_GROW };
+    let widen = |r: nile_layout::Rect| {
+        if t.vertical {
+            Rect::from_xywh(r.x - grow, r.y, r.width + grow, r.height)
+        } else {
+            Rect::from_xywh(r.x, r.y - grow, r.width, r.height + grow)
+        }
+    };
+    let thick = if t.vertical { t.rect.width } else { t.rect.height } + grow;
+    let radius = look.thumb_radius.unwrap_or(thick / 2.0);
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    paint.set_color(Color::from_argb(110, 0, 0, 0));
-    let r = Rect::from_xywh(t.rect.x, t.rect.y, t.rect.width, t.rect.height);
-    canvas.draw_round_rect(r, nile_layout::SCROLLBAR_THICK / 2.0, nile_layout::SCROLLBAR_THICK / 2.0, &paint);
+    if let Some(track) = look.track.filter(|c| c.a > 0).or_else(|| (state != BarState::Rest).then_some(CssColor { r: 0, g: 0, b: 0, a: 18 })) {
+        paint.set_color(Color::from_argb(track.a, track.r, track.g, track.b));
+        canvas.draw_round_rect(widen(t.track), thick / 2.0, thick / 2.0, &paint);
+    }
+    let (r, g, b, a) = match look.thumb {
+        Some(c) => {
+            // A chosen colour darkens a little when hovered or dragged.
+            let k = match state {
+                BarState::Rest => 1.0,
+                BarState::Hover => 0.85,
+                BarState::Active => 0.7,
+            };
+            ((f32::from(c.r) * k) as u8, (f32::from(c.g) * k) as u8, (f32::from(c.b) * k) as u8, c.a)
+        }
+        None => (0, 0, 0, match state {
+            BarState::Rest => 110,
+            BarState::Hover => 150,
+            BarState::Active => 190,
+        }),
+    };
+    paint.set_color(Color::from_argb(a, r, g, b));
+    let rect = widen(t.rect);
+    canvas.draw_round_rect(rect, radius, radius, &paint);
 }
 
 /// Highlight bytes `from..to` of a text run.

@@ -225,6 +225,38 @@ pub enum Display {
     None,
 }
 
+/// `scrollbar-width`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ScrollbarWidth {
+    #[default]
+    Auto,
+    Thin,
+    None,
+}
+
+/// What a scroll container's `::-webkit-scrollbar*` rules set.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScrollbarParts {
+    /// `::-webkit-scrollbar { width | height }` in px (`display: none` is 0).
+    pub thickness: Option<f32>,
+    pub thumb: Option<Color>,
+    pub thumb_radius: Option<f32>,
+    pub track: Option<Color>,
+}
+
+/// How a scroll container's scrollbars look: thickness, colours and the thumb's rounding.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollbarLook {
+    pub thickness: f32,
+    pub thumb: Option<Color>,
+    pub thumb_radius: Option<f32>,
+    pub track: Option<Color>,
+}
+
+/// Thickness of the default overlay scrollbar, and of `scrollbar-width: thin`.
+pub const SCROLLBAR_AUTO: f32 = 6.0;
+pub const SCROLLBAR_THIN: f32 = 4.0;
+
 /// `overflow` on one axis. `Scroll` covers both `scroll` and `auto`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum OverflowKind {
@@ -251,6 +283,10 @@ pub enum Appearance {
     Spinner,
     /// `<input type=color>`: a colour swatch in the left padding.
     Swatch,
+    /// Date inputs: a calendar glyph in the right padding (it opens the picker).
+    Calendar,
+    /// `<input type=time>`: a clock glyph in the right padding.
+    Clock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -447,6 +483,23 @@ pub struct ComputedStyle {
     /// `border-spacing` (horizontal, vertical) and `border-collapse: collapse`; inherited.
     pub border_spacing: (f32, f32),
     pub border_collapse: bool,
+    /// `caption-side: bottom`; inherited.
+    pub caption_bottom: bool,
+    /// `prototype: Class url(file.js)`: the script class made the element's controller, and the file it
+    /// comes from (empty for a class the page already defines).
+    pub prototype: Option<(String, String)>,
+    /// `font-variation-settings` / `font-feature-settings` as written (`"wght" 650`), for the text engine; inherited.
+    pub font_variations: String,
+    pub font_features: String,
+    /// `list-style-image: url(...)`.
+    pub list_style_image: Option<String>,
+    /// `backface-visibility: hidden`: not drawn while its transform turns it away.
+    pub backface_hidden: bool,
+    /// `transform-style: preserve-3d` (accepted; transforms of nested elements already compose in 3D).
+    pub preserve_3d: bool,
+    /// `scrollbar-width` and `scrollbar-color` (thumb, track) of a scroll container.
+    pub scrollbar_width: ScrollbarWidth,
+    pub scrollbar_color: Option<(Color, Color)>,
     /// `table-layout: fixed`.
     pub table_fixed: bool,
     /// `vertical-align` for table cells.
@@ -582,6 +635,15 @@ impl Default for ComputedStyle {
             column_gap: 0.0,
             border_spacing: (0.0, 0.0),
             border_collapse: false,
+            caption_bottom: false,
+            list_style_image: None,
+            prototype: None,
+            font_variations: String::new(),
+            font_features: String::new(),
+            backface_hidden: false,
+            preserve_3d: false,
+            scrollbar_width: ScrollbarWidth::Auto,
+            scrollbar_color: None,
             table_fixed: false,
             vertical_align: VerticalAlign::Baseline,
             cursor: Cursor::Auto,
@@ -720,6 +782,8 @@ impl ComputedStyle {
                 Appearance::Range => "range",
                 Appearance::Spinner => "spinner",
                 Appearance::Swatch => "swatch",
+                Appearance::Calendar => "calendar",
+                Appearance::Clock => "clock",
             }
             .into(),
             "box-sizing" => if self.border_box { "border-box" } else { "content-box" }.into(),
@@ -814,6 +878,9 @@ impl ComputedStyle {
             text_align: parent.text_align,
             white_space: parent.white_space,
             list_style_type: parent.list_style_type,
+            list_style_image: parent.list_style_image.clone(),
+            font_variations: parent.font_variations.clone(),
+            font_features: parent.font_features.clone(),
             list_style_inside: parent.list_style_inside,
             italic: parent.italic,
             // TODO: decorations aren't really inherited in CSS; they propagate
@@ -824,6 +891,7 @@ impl ComputedStyle {
             user_select: parent.user_select,
             border_spacing: parent.border_spacing,
             border_collapse: parent.border_collapse,
+            caption_bottom: parent.caption_bottom,
             cursor: parent.cursor,
             selection_bg: parent.selection_bg,
             letter_spacing: parent.letter_spacing,
@@ -863,6 +931,37 @@ popup > menu, popup > menu.popup, popup > menu.context { display: block; border:
 menu.popup > li, menu.context > li, popup > menu > li { display: block; list-style: none; padding: 4px 18px; cursor: default }
 menu.popup > li.nile-hover, menu.context > li.nile-hover, popup > menu > li.nile-hover { background: #3a7bd5; color: #fff }
 menu.popup > li[disabled], menu.context > li[disabled], popup > menu > li[disabled] { color: #999; background: transparent !important }
+.nile-picker { display: block; background: #fff; color: #222; border: 1px solid #b4b8c0; border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,0.25); padding: 8px; font: 13px sans-serif }
+.nile-picker button { font: inherit; color: inherit; background: transparent; border: 0; border-radius: 4px; padding: 0; margin: 0; box-shadow: none; min-height: 0; cursor: default }
+.nile-picker .np-head { display: flex; align-items: center; margin-bottom: 4px }
+.nile-picker .np-title { flex: 1; text-align: center; font-weight: bold }
+.nile-picker .np-nav { width: 26px; height: 24px; font-size: 18px; line-height: 20px }
+.nile-picker .np-grid { display: grid; grid-template-columns: repeat(7, 30px); grid-auto-rows: 28px }
+.nile-picker .np-dow { text-align: center; color: #777; font-size: 11px; line-height: 28px }
+.nile-picker .np-day { text-align: center }
+.nile-picker .np-out { color: #aaa }
+.nile-picker .np-today { border: 1px solid #3a7bd5 }
+.nile-picker .np-sel { background: #3a7bd5; color: #fff }
+.nile-picker button[disabled] { color: #ccc }
+.nile-picker .np-months { display: grid; grid-template-columns: repeat(3, 62px); grid-auto-rows: 34px; gap: 2px }
+.nile-picker .np-foot { display: flex; justify-content: space-between; margin-top: 6px; padding-top: 6px; border-top: 1px solid #e3e5e8 }
+.nile-picker .np-link { color: #1d4ed8; padding: 3px 6px }
+.nile-picker .np-split { display: flex; gap: 10px }
+.nile-picker .np-clock { display: flex; gap: 4px }
+.nile-picker .np-col { display: block; width: 48px; height: 212px; overflow: auto }
+.nile-picker .np-cell { display: block; width: 100%; height: 26px; text-align: center }
+.nile-picker .np-color { width: 216px }
+.nile-picker .np-sv { position: relative; width: 216px; height: 150px; border-radius: 4px; overflow: hidden }
+.nile-picker .np-white { position: absolute; left: 0; top: 0; right: 0; bottom: 0; background: linear-gradient(to right, #ffffff, rgba(255,255,255,0)) }
+.nile-picker .np-black { position: absolute; left: 0; top: 0; right: 0; bottom: 0; background: linear-gradient(to bottom, rgba(0,0,0,0), #000000) }
+.nile-picker .np-knob { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border: 2px solid #fff; border-radius: 6px; box-shadow: 0 0 2px #000 }
+.nile-picker .np-hue { position: relative; height: 12px; margin: 10px 0; border-radius: 6px; background: linear-gradient(to right, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000) }
+.nile-picker .np-hueknob { position: absolute; top: -2px; width: 4px; height: 16px; margin-left: -2px; background: #fff; border: 1px solid #555; border-radius: 2px }
+.nile-picker .np-row { display: flex; gap: 8px; align-items: center }
+.nile-picker .np-preview { width: 28px; height: 24px; border: 1px solid #b4b8c0; border-radius: 4px }
+.nile-picker .np-hex { width: 90px }
+.nile-picker .np-swatches { display: grid; grid-template-columns: repeat(6, 28px); gap: 6px; margin-top: 10px }
+.nile-picker .np-swatch { width: 28px; height: 20px; border: 1px solid rgba(0,0,0,0.25) }
 frame { display: block; height: 150px; border: 0 }
 .nile-modal { position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 2147483600; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center }
 .nile-messagebox { min-width: 280px; max-width: 460px; background: #fff; color: #222; border: 1px solid #b4b8c0; border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,0.4); overflow: hidden }
@@ -902,7 +1001,7 @@ dd { margin-left: 40px }
 pre { margin: 1em 0; white-space: pre }
 hr { display: block; height: 0; margin: 8px 0; border-top: 1px solid #9a9a9a; border-bottom: 1px solid #e5e5e5 }
 fieldset { margin: 0 2px; padding: 0.35em 0.75em 0.625em; border: 1px solid #c0c0c0 }
-legend { padding: 0 2px }
+legend { display: block; padding: 0 3px; margin: -1em 0 0.35em 0.5em; line-height: 1.2; width: fit-content }
 summary { display: list-item; list-style-type: disclosure-closed; padding-left: 1.4em; cursor: pointer }
 details[open] > summary { list-style-type: disclosure-open }
 details:not([open]) > :not(summary) { display: none }
@@ -918,6 +1017,7 @@ em, i { font-style: italic }
 u, a { text-decoration: underline }
 s, del { text-decoration: line-through }
 a { color: #0000ee }
+a:visited { color: #551a8b }
 a[href] { cursor: pointer }
 input, textarea { cursor: text }
 button, select, input[type=checkbox], input[type=radio], input[type=button], input[type=submit] { cursor: default }
@@ -942,6 +1042,8 @@ input[type=range] { width: 129px; height: 16px; min-height: 0; margin: 2px; padd
 input[type=file] { width: auto; background: #efefef; text-align: left; cursor: default }
 input[type=number] { padding-right: 20px; appearance: spinner }
 input[type=color] { width: 86px; padding-left: 30px; appearance: swatch }
+input[type=date], input[type=month], input[type=week], input[type=datetime-local] { padding-right: 26px; appearance: calendar }
+input[type=time] { padding-right: 26px; appearance: clock }
 input[type=checkbox]:checked, input[type=radio]:checked { background: #1d4ed8; border-color: #1d4ed8; color: #ffffff }
 input[type=button], input[type=submit], input[type=reset] { width: auto; background: #efefef }
 "#;
@@ -1024,6 +1126,11 @@ pub struct StyleMap {
     contents: HashMap<NodeId, String>,
     /// `::marker` styles of list items that have one.
     markers: HashMap<NodeId, MarkerStyle>,
+    /// `::-webkit-scrollbar*` rules of scroll containers that have any.
+    scrollbars: HashMap<NodeId, ScrollbarParts>,
+    page_bar: ScrollbarLook,
+    /// Some element has a `prototype` (a script class bound from CSS).
+    pub has_prototypes: bool,
     /// `@keyframes` by name.
     pub(crate) keyframes: HashMap<String, Vec<parse::Frame>>,
     /// `@page` rules (selector, body) in source order.
@@ -1053,7 +1160,7 @@ impl StateDeps {
                     let css = sel.to_css_string();
                     d.hover |= css.contains(":hover");
                     d.active |= css.contains(":active");
-                    d.focus |= css.contains(":focus");
+                    d.focus |= css.contains(":focus") || css.contains(":owns-focus");
                     d.sibling |= (css.contains(":hover") || css.contains(":active") || css.contains(":focus")) && (css.contains(" + ") || css.contains(" ~ "));
                 }
             }
@@ -1075,6 +1182,7 @@ struct Generated {
     origins: HashMap<NodeId, NodeId>,
     contents: HashMap<NodeId, String>,
     markers: HashMap<NodeId, MarkerStyle>,
+    scrollbars: HashMap<NodeId, ScrollbarParts>,
 }
 
 /// What a `::marker` rule sets for a list item's marker.
@@ -1118,6 +1226,8 @@ impl ComputedStyle {
         a.background_repeat = other.background_repeat;
         a.box_shadow = other.box_shadow.clone();
         a.selection_bg = other.selection_bg;
+        a.scrollbar_color = other.scrollbar_color;
+        a.prototype = other.prototype.clone();
         a.transitions = other.transitions.clone();
         a.animations = other.animations.clone();
         a.transform_origin = other.transform_origin;
@@ -1149,6 +1259,7 @@ impl StyleMap {
             && self.pseudo == other.pseudo
             && self.contents == other.contents
             && self.markers == other.markers
+            && self.scrollbars == other.scrollbars
             && self.styles.iter().zip(&other.styles).all(|(a, b)| a.same_layout_with(b, color_is_paint))
     }
 
@@ -1174,7 +1285,7 @@ impl StyleMap {
     /// possible: the document changed size or there are generated `::before`/`::after`/marker boxes
     /// (the caller does the full cascade then).
     pub fn recascade(&mut self, doc: &Document, state: &InteractionState, viewport: (f32, f32), roots: &[NodeId]) -> Option<Vec<(NodeId, ComputedStyle)>> {
-        if self.styles.len() != doc.nodes.len() || !self.pseudo.is_empty() || !self.markers.is_empty() {
+        if self.styles.len() != doc.nodes.len() || !self.pseudo.is_empty() || !self.markers.is_empty() || !self.scrollbars.is_empty() {
             return None;
         }
         let (ua, author) = sheets_of(doc, viewport);
@@ -1196,6 +1307,44 @@ impl StyleMap {
     }
 
     /// The generated `::before` / `::after` box of `element`, if it has one.
+    /// How the scrollbars of `node` look: `scrollbar-width`/`scrollbar-color` and any
+    /// `::-webkit-scrollbar*` rules (which win).
+    pub fn scrollbar_look(&self, node: NodeId) -> ScrollbarLook {
+        let s = &self.styles[node.0];
+        let parts = self.scrollbars.get(&node);
+        let thickness = parts.and_then(|p| p.thickness).unwrap_or(match s.scrollbar_width {
+            ScrollbarWidth::Auto => SCROLLBAR_AUTO,
+            ScrollbarWidth::Thin => SCROLLBAR_THIN,
+            ScrollbarWidth::None => 0.0,
+        });
+        ScrollbarLook {
+            thickness,
+            thumb: parts.and_then(|p| p.thumb).or(s.scrollbar_color.map(|c| c.0)),
+            thumb_radius: parts.and_then(|p| p.thumb_radius),
+            track: parts.and_then(|p| p.track).or(s.scrollbar_color.map(|c| c.1)),
+        }
+    }
+
+    /// Elements whose style names a `prototype`: `(element, class, file)`.
+    pub fn prototypes(&self, doc: &Document) -> Vec<(NodeId, String, String)> {
+        if !self.has_prototypes {
+            return Vec::new();
+        }
+        doc.nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| {
+                let (class, url) = self.styles.get(i)?.prototype.clone()?;
+                matches!(n.kind, NodeKind::Element { .. }).then_some((NodeId(i), class, url))
+            })
+            .collect()
+    }
+
+    /// The look of the page's own scrollbar: `<html>`'s, else `<body>`'s when `<html>` has none set.
+    pub fn page_scrollbar(&self) -> ScrollbarLook {
+        self.page_bar
+    }
+
     /// The `::marker` rules of a list item, if any.
     pub fn marker(&self, item: NodeId) -> Option<&MarkerStyle> {
         self.markers.get(&item)
@@ -1270,7 +1419,7 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
     let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo };
     let mut generated = Generated::default();
     cascade(&cx, &mut ctx, Document::ROOT, &root_style, &mut styles, &mut generated);
-    StyleMap {
+    let mut map = StyleMap {
         styles,
         uses_viewport: uses_viewport.get(),
         state_deps,
@@ -1278,10 +1427,17 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
         origins: generated.origins,
         contents: generated.contents,
         markers: generated.markers,
+        scrollbars: generated.scrollbars,
         keyframes,
         pages,
         font_faces,
-    }
+        page_bar: ScrollbarLook { thickness: SCROLLBAR_AUTO, thumb: None, thumb_radius: None, track: None },
+        has_prototypes: false,
+    };
+    map.has_prototypes = map.styles.iter().any(|s| s.prototype.is_some());
+    let default = map.page_bar;
+    map.page_bar = [doc.find(|n| n.tag() == Some("html")), doc.body()].into_iter().flatten().map(|n| map.scrollbar_look(n)).find(|l| *l != default).unwrap_or(default);
+    map
 }
 
 thread_local! {
@@ -1459,7 +1615,7 @@ fn apply_declarations(
             // A `var()` that can't be resolved makes the declaration invalid.
             let text = substitute(&d.raw, &vars, 0)?;
             // `popup-*` values are kept as text for scripts; everything else is parsed now.
-            let raw = if d.name.starts_with("popup-") || d.name == "shape-outside" { text.clone() } else { String::new() };
+            let raw = if parse::keeps_raw(&d.name) { text.clone() } else { String::new() };
             Some(Declaration { values: parse::parse_values(&text, pcx), raw, ..(*d).clone() })
         })
         .flat_map(expand_font)
@@ -1543,6 +1699,43 @@ fn marker_style(cx: &CascadeInput, id: NodeId, element: &ComputedStyle, extra: &
     let content = declared.map(|_| content_text(&applied, cx.doc, id).unwrap_or_default());
     let color = color_set.then_some(style.color);
     extra.markers.insert(id, MarkerStyle { style, color, content });
+}
+
+/// The `::-webkit-scrollbar*` rules of a scroll container (or the root, for the page's bars).
+fn scrollbar_parts(cx: &CascadeInput, id: NodeId, element: &ComputedStyle, extra: &mut Generated) {
+    let el = ElementRef::new(cx.doc, id, cx.state);
+    let mut parts = ScrollbarParts::default();
+    let mut any = false;
+    for kind in [PseudoElement::Scrollbar, PseudoElement::ScrollbarThumb, PseudoElement::ScrollbarTrack] {
+        let mut caches = SelectorCaches::default();
+        let mut ctx = MatchingContext::new(MatchingMode::ForStatelessPseudoElement, None, &mut caches, QuirksMode::NoQuirks, NeedsSelectorFlags::No, MatchingForInvalidation::No);
+        let wanted = |p: &PseudoElement| *p == kind;
+        ctx.pseudo_element_matching_fn = Some(&wanted);
+        let decls = matching_decls(cx, &el, &mut ctx, true);
+        if decls.is_empty() {
+            continue;
+        }
+        any = true;
+        let mut style = ComputedStyle::inherit(element);
+        style.display = Display::Block;
+        let pcx = Cx { viewport: cx.viewport, uses_viewport: cx.uses_viewport };
+        apply_declarations(&mut style, decls, element.font_size, &pcx);
+        let px = |l: Length| if let Length::Px(v) = l { Some(v) } else { None };
+        match kind {
+            PseudoElement::Scrollbar => {
+                // A vertical bar's thickness is its width, a horizontal one's its height.
+                parts.thickness = if style.display == Display::None { Some(0.0) } else { px(style.width).or(px(style.height)) };
+            }
+            PseudoElement::ScrollbarThumb => {
+                parts.thumb = style.background.filter(|c| c.a > 0);
+                parts.thumb_radius = Some(style.border_radius.tl).filter(|r| *r > 0.0);
+            }
+            _ => parts.track = style.background.filter(|c| c.a > 0),
+        }
+    }
+    if any {
+        extra.scrollbars.insert(id, parts);
+    }
 }
 
 fn pseudo_style(
@@ -1645,6 +1838,9 @@ fn cascade(
     if cx.has_pseudo && matches!(node.kind, NodeKind::Element { .. }) {
         if style.display == Display::ListItem {
             marker_style(cx, id, &style, extra);
+        }
+        if style.overflow_x == OverflowKind::Scroll || style.overflow_y == OverflowKind::Scroll || matches!(node.tag(), Some("html" | "body")) {
+            scrollbar_parts(cx, id, &style, extra);
         }
         pseudo_style(cx, id, &style, PseudoElement::Before, out, extra);
         pseudo_style(cx, id, &style, PseudoElement::After, out, extra);
@@ -1901,7 +2097,7 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         "overflow" | "overflow-x" | "overflow-y" => {
             let kind = |v: Option<&Value>| match v.and_then(Value::ident) {
                 Some("hidden" | "clip") => Some(OverflowKind::Hidden),
-                Some("scroll" | "auto") => Some(OverflowKind::Scroll),
+                Some("scroll" | "auto" | "scroll-indicator") => Some(OverflowKind::Scroll),
                 Some("visible") => Some(OverflowKind::Visible),
                 _ => None,
             };
@@ -1926,6 +2122,8 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 Some("slider-horizontal" | "range") => Appearance::Range,
                 Some("spinner" | "number-input") => Appearance::Spinner,
                 Some("swatch" | "color-well") => Appearance::Swatch,
+                Some("calendar") => Appearance::Calendar,
+                Some("clock") => Appearance::Clock,
                 Some("none") | Some("auto") => Appearance::None,
                 _ => return,
             }
@@ -2178,6 +2376,21 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.user_select = UserSelect::Text;
             }
         }
+        "backface-visibility" => s.backface_hidden = first.and_then(Value::ident) == Some("hidden"),
+        "transform-style" => s.preserve_3d = first.and_then(Value::ident) == Some("preserve-3d"),
+        "scrollbar-width" => {
+            s.scrollbar_width = match first.and_then(Value::ident) {
+                Some("thin") => ScrollbarWidth::Thin,
+                Some("none") => ScrollbarWidth::None,
+                _ => ScrollbarWidth::Auto,
+            }
+        }
+        "scrollbar-color" => {
+            s.scrollbar_color = match (v.first().and_then(color), v.get(1).and_then(color)) {
+                (Some(thumb), Some(track)) => Some((thumb, track)),
+                _ => None,
+            }
+        }
         "text-selection-background-color" => s.selection_bg = first.and_then(color).or(s.selection_bg),
         "text-selection" => s.selection_bg = v.get(1).and_then(color).or(s.selection_bg),
         "transform" => {
@@ -2331,13 +2544,32 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.list_style_type = t;
             }
         }
+        // The class name keeps its case, so it is read from the text: `Tabs url(tabs.js)`.
+        "prototype" => {
+            let text = d.raw.trim();
+            let class = text.split_whitespace().next().filter(|c| !c.starts_with("url(") && *c != "none");
+            let url = text.find("url(").and_then(|i| text[i + 4..].split(')').next()).map(|u| u.trim().trim_matches(|c| c == '"' || c == '\'').to_string()).unwrap_or_default();
+            s.prototype = class.map(|c| (c.to_string(), url));
+        }
+        "font-variation-settings" => s.font_variations = if d.raw.trim() == "normal" { String::new() } else { d.raw.trim().to_string() },
+        "font-feature-settings" => s.font_features = if d.raw.trim() == "normal" { String::new() } else { d.raw.trim().to_string() },
+        "list-style-image" => {
+            s.list_style_image = v.iter().find_map(|x| match x {
+                Value::Url(u) => Some(u.clone()),
+                _ => None,
+            })
+        }
         "list-style-position" => match first.and_then(Value::ident) {
             Some("inside") => s.list_style_inside = true,
             Some("outside") => s.list_style_inside = false,
             _ => {}
         },
-        // `list-style: <type> || <position> || <image>`: the image is ignored.
+        // `list-style: <type> || <position> || <image>`.
         "list-style" => {
+            s.list_style_image = v.iter().find_map(|x| match x {
+                Value::Url(u) => Some(u.clone()),
+                _ => None,
+            });
             for pos in v.iter().filter_map(Value::ident) {
                 match pos {
                     "inside" => s.list_style_inside = true,
@@ -2475,6 +2707,36 @@ mod tests {
         let styles = compute_styles(&doc);
         let p = styles.get(doc.find(|n| n.attr("id") == Some("p")).unwrap());
         assert_eq!(p.font_family, r#""Segoe UI", "Helvetica Neue", "arial black", sans-serif"#);
+    }
+
+    #[test]
+    fn list_style_image_and_backface_properties_parse_and_inherit() {
+        let doc = Document::parse(
+            r#"<style>ul { list-style-image: url(a.png) } .s { list-style: square inside url('b.png') } .n { list-style-image: none }
+               .h { backface-visibility: hidden; transform-style: preserve-3d }</style>
+               <ul id="u"><li id="i"></li><li id="s" class="s"></li><li id="n" class="n"></li></ul><div id="h" class="h"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let image = |id: &str| style_of(&doc, &styles, id).list_style_image.clone();
+        assert_eq!(image("u").as_deref(), Some("a.png"));
+        assert_eq!(image("i").as_deref(), Some("a.png"), "inherited");
+        assert_eq!(image("s").as_deref(), Some("b.png"), "the shorthand's picture");
+        assert_eq!(image("n"), None, "none clears it");
+        let h = style_of(&doc, &styles, "h");
+        assert!(h.backface_hidden && h.preserve_3d);
+    }
+
+    #[test]
+    fn prototype_names_a_class_and_a_file() {
+        let doc = Document::parse(r#"<style>tabs { prototype: Tabs url(tabs.js) } .n { prototype: MyThing } .x { prototype: none }</style><tabs id="t" class="x"></tabs><b id="b" class="n"></b><i id="i"></i>"#);
+        let styles = compute_styles(&doc);
+        assert_eq!(style_of(&doc, &styles, "b").prototype, Some(("MyThing".into(), String::new())));
+        assert_eq!(style_of(&doc, &styles, "t").prototype, None, "a later rule's none wins");
+        assert!(styles.has_prototypes && style_of(&doc, &styles, "i").prototype.is_none());
+        let doc = Document::parse(r#"<style>tabs { prototype: Tabs url(tabs.js) }</style><tabs id="t"></tabs>"#);
+        let styles = compute_styles(&doc);
+        assert_eq!(style_of(&doc, &styles, "t").prototype, Some(("Tabs".into(), "tabs.js".into())));
+        assert_eq!(styles.prototypes(&doc).len(), 1);
     }
 
     #[test]

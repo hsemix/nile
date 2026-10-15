@@ -1703,6 +1703,487 @@
       return !e.defaultPrevented;
     },
   });
+
+  // ---- `prototype: Class url(file.js)` ------------------------------------------------------------
+  // The engine hands over every element whose style names a prototype (`__applyPrototypes`, after each
+  // restyle). The class comes from the file (a module export named like the class, else the default
+  // export) or from the page's own scripts; each element becomes an instance of it: fields run, its
+  // `"on click at a"` methods are subscribed, `componentDidMount()` is called.
+  const protoClasses = new Map();
+  const protoWaiting = new Map();
+  const protoBound = new WeakMap();
+  const protoClass = (name, ns) => {
+    if (ns) {
+      if (typeof ns[name] === "function") return ns[name];
+      for (const v of Object.values(ns)) if (typeof v === "function" && v.name === name) return v;
+      if (typeof ns.default === "function") return ns.default;
+    }
+    if (/^[A-Za-z_$][\w$]*$/.test(name)) {
+      try { const c = (0, eval)(name); if (typeof c === "function") return c; } catch (_) { /* not defined (yet) */ }
+    }
+    return null;
+  };
+  // `"on ^mousedown at >strip>label:not(:current)"(event, matched)`: the events, then an optional selector.
+  const handlerMethods = (Cls) => {
+    const out = [];
+    for (let p = Cls.prototype; p && p !== Element.prototype; p = Object.getPrototypeOf(p)) {
+      for (const name of Object.getOwnPropertyNames(p)) {
+        const m = /^on\s+(.*)$/.exec(name);
+        if (!m || typeof p[name] !== "function") continue;
+        const at = m[1].search(/\s+at\s+/);
+        const events = (at < 0 ? m[1] : m[1].slice(0, at)).trim();
+        const selector = at < 0 ? null : m[1].slice(at).replace(/^\s+at\s+/, "").trim();
+        out.push({ name, events, selector });
+      }
+    }
+    return out;
+  };
+  function protoBind(el, Cls) {
+    const old = protoBound.get(el);
+    if (old === Cls) return;
+    if (old) {
+      for (const h of el._protoSubs || []) el.off(h);
+      if (el._comp) { el._comp = false; liveComps--; if (typeof el.componentWillUnmount === "function") { try { el.componentWillUnmount(); } catch (e) { report(e); } } }
+    }
+    // Run the constructor and field initialisers on a throwaway instance of the element, and keep
+    // the fields it set; the element's own wrapper stays the one scripts already hold.
+    adopting = el._id;
+    let inst = null;
+    try { inst = new Cls(); } catch (e) { report(e); } finally { adopting = -1; }
+    cache.set(el._id, el);
+    if (inst) for (const k of Object.keys(inst)) if (!Object.prototype.hasOwnProperty.call(el, k)) el[k] = inst[k];
+    Object.setPrototypeOf(el, Cls.prototype);
+    protoBound.set(el, Cls);
+    el._comp = true;
+    liveComps++;
+    el._protoSubs = [];
+    for (const { name, events, selector } of handlerMethods(Cls)) {
+      const fn = Cls.prototype[name];
+      const handler = function (ev, matched) {
+        const r = fn.call(el, ev, matched);
+        // Returning true means the event is dealt with: nothing else sees or does anything about it.
+        if (r === true) { ev.stopPropagation(); ev.preventDefault(); }
+        return r;
+      };
+      el._protoSubs.push(handler);
+      el.on(events, selector, handler);
+    }
+    if (typeof el.componentDidMount === "function") { try { el.componentDidMount(); } catch (e) { report(e); } }
+    mounted();
+  }
+  Object.defineProperty(g, "__applyPrototypes", {
+    value(list) {
+      for (const [id, name, url] of list) {
+        const el = wrap(id);
+        if (!el) continue;
+        const key = url + "\n" + name;
+        const known = protoClasses.get(key);
+        if (known) { protoBind(el, known); continue; }
+        if (known === null) continue; // the file or class failed to load
+        if (!url) {
+          const C = protoClass(name);
+          if (C) { protoClasses.set(key, C); protoBind(el, C); }
+          continue; // a class a later script defines is picked up on the next restyle
+        }
+        const waiting = protoWaiting.get(key);
+        if (waiting) { waiting.add(id); continue; }
+        protoWaiting.set(key, new Set([id]));
+        const where = /^[a-z][\w+.-]*:\/\//i.test(url) || url.startsWith("/") ? url : __DIR__ + url;
+        import(where).then((ns) => {
+          const C = protoClass(name, ns);
+          protoClasses.set(key, C);
+          if (!C) console.error("prototype: " + name + " is not exported by " + url);
+          for (const i of protoWaiting.get(key) || []) { const e = wrap(i); if (e && C) protoBind(e, C); }
+          protoWaiting.delete(key);
+        }, (err) => {
+          protoClasses.set(key, null);
+          protoWaiting.delete(key);
+          console.error("prototype: cannot load " + url + ": " + (err && err.message ? err.message : err));
+        });
+      }
+    },
+  });
+
+  // ---- date, time and colour pickers ------------------------------------------------------------
+  // The engine calls `__pickerOpen(id)` when the glyph of a date/time/colour input is clicked (or Alt+Down
+  // is pressed in one). The picker is an ordinary element shown with `popup()`.
+  const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  const DOW = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+  const z2 = (n) => String(n).padStart(2, "0");
+  const daysIn = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const dateOf = (v) => { const m = /^(\d{4,})-(\d\d)-(\d\d)/.exec(v || ""); return m ? [+m[1], +m[2], +m[3]] : null; };
+  const timeOf = (v) => { const m = /(\d\d):(\d\d)/.exec(String(v || "").split("T").pop()); return m ? [+m[1], +m[2]] : null; };
+  const monthOf = (v) => { const m = /^(\d{4,})-(\d\d)$/.exec(v || ""); return m ? [+m[1], +m[2]] : null; };
+  const isoWeek = (y, m, d) => {
+    const t = new Date(Date.UTC(y, m - 1, d));
+    t.setUTCDate(t.getUTCDate() - ((t.getUTCDay() + 6) % 7) + 3);
+    const jan4 = new Date(Date.UTC(t.getUTCFullYear(), 0, 4));
+    return [t.getUTCFullYear(), 1 + Math.round(((t - jan4) / 864e5 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7)];
+  };
+  const weekOf = (v) => {
+    const m = /^(\d{4})-W(\d\d)$/.exec(v || "");
+    if (!m) return null;
+    const jan4 = new Date(Date.UTC(+m[1], 0, 4));
+    const monday = new Date(jan4.getTime() - ((jan4.getUTCDay() + 6) % 7) * 864e5 + (+m[2] - 1) * 7 * 864e5);
+    return [monday.getUTCFullYear(), monday.getUTCMonth() + 1, monday.getUTCDate()];
+  };
+  const todayParts = () => { const d = new Date(); return [d.getFullYear(), d.getMonth() + 1, d.getDate()]; };
+  const ymd = (y, m, d) => `${String(y).padStart(4, "0")}-${z2(m)}-${z2(d)}`;
+  const h = (tag, cls, text, attrs) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = text;
+    if (attrs) for (const k of Object.keys(attrs)) e.setAttribute(k, attrs[k]);
+    return e;
+  };
+  const setInput = (input, value, finished = true) => {
+    if (input.value !== value) { input.value = value; input.dispatchEvent(new Event("input", { bubbles: true })); }
+    if (finished) input.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const hsv2rgb = (hh, s, v) => {
+    const f = (n) => { const k = (n + hh / 60) % 6; return v - v * s * Math.max(0, Math.min(k, 4 - k, 1)); };
+    return [f(5), f(3), f(1)].map((x) => Math.round(x * 255));
+  };
+  const rgb2hsv = (r, g, b) => {
+    r /= 255; g /= 255; b /= 255;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+    let hh = 0;
+    if (d) hh = mx === r ? ((g - b) / d + 6) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    return [hh * 60, mx ? d / mx : 0, mx];
+  };
+  const hex = (rgb) => "#" + rgb.map((x) => z2(x.toString(16))).join("");
+  const unhex = (v) => { const m = /^#?([0-9a-f]{6})$/i.exec(v || ""); return m ? [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16)) : null; };
+
+  // A month grid; `pick(y, m, d)` is called with the chosen day.
+  function calendar(input, kind, shown, selected, pick, week) {
+    const box = h("div", "np-cal");
+    const lo = input.getAttribute("min") || "", hiLimit = input.getAttribute("max") || "";
+    const draw = () => {
+      box.textContent = "";
+      const head = h("div", "np-head");
+      const prev = h("button", "np-nav", "‹", { type: "button", "aria-label": "Previous month" });
+      const next = h("button", "np-nav", "›", { type: "button", "aria-label": "Next month" });
+      head.append(prev, h("div", "np-title", MONTHS[shown[1] - 1] + " " + shown[0]), next);
+      const move = (d) => { const t = new Date(Date.UTC(shown[0], shown[1] - 1 + d, 1)); shown = [t.getUTCFullYear(), t.getUTCMonth() + 1]; draw(); };
+      prev.addEventListener("click", () => move(-1));
+      next.addEventListener("click", () => move(1));
+      box.append(head);
+      const grid = h("div", "np-grid");
+      for (const d of DOW) grid.append(h("span", "np-dow", d));
+      const first = new Date(Date.UTC(shown[0], shown[1] - 1, 1)).getUTCDay();
+      const today = todayParts();
+      for (let i = 0; i < 42; i++) {
+        const t = new Date(Date.UTC(shown[0], shown[1] - 1, 1 - first + i));
+        const y = t.getUTCFullYear(), m = t.getUTCMonth() + 1, d = t.getUTCDate();
+        const cell = h("button", "np-day", String(d), { type: "button" });
+        if (m !== shown[1]) cell.classList.add("np-out");
+        if (selected && selected[0] === y && selected[1] === m && selected[2] === d) cell.classList.add("np-sel");
+        if (week && selected) {
+          const a = isoWeek(y, m, d), b = isoWeek(selected[0], selected[1], selected[2]);
+          if (a[0] === b[0] && a[1] === b[1]) cell.classList.add("np-sel");
+        }
+        if (today[0] === y && today[1] === m && today[2] === d) cell.classList.add("np-today");
+        const iso = ymd(y, m, d);
+        if ((lo && iso < lo.slice(0, 10)) || (hiLimit && iso > hiLimit.slice(0, 10))) cell.setAttribute("disabled", "");
+        else cell.addEventListener("click", () => pick(y, m, d));
+        grid.append(cell);
+      }
+      box.append(grid);
+    };
+    draw();
+    return box;
+  }
+  // Show the chosen hour and minute about a third of the way down their columns.
+  const revealChosen = (root) => {
+    for (const l of root.querySelectorAll(".np-col")) {
+      const at = Array.from(l.children).findIndex((c) => c.classList.contains("np-sel"));
+      if (at > 0) l.scrollTop = Math.max(0, (at - 3) * 26);
+    }
+  };
+  // Two scrolling columns of hours and minutes.
+  function clock(input, current, pick) {
+    const step = Math.max(1, Math.round((+input.getAttribute("step") || 60) / 60));
+    const box = h("div", "np-clock");
+    const col = (n, step_, value, set) => {
+      const list = h("div", "np-col");
+      for (let i = 0; i < n; i += step_) {
+        const b = h("button", "np-cell" + (i === value ? " np-sel" : ""), z2(i), { type: "button" });
+        b.addEventListener("click", () => set(i));
+        list.append(b);
+      }
+      return list;
+    };
+    let [hh, mm] = current || [0, 0];
+    const redraw = () => {
+      box.textContent = "";
+      const hours = col(24, 1, hh, (v) => { hh = v; pick(hh, mm, false); redraw(); });
+      const mins = col(60, step, mm, (v) => { mm = v; pick(hh, mm, true); redraw(); });
+      box.append(hours, mins);
+      if (box.isConnected) revealChosen(box);
+    };
+    redraw();
+    return box;
+  }
+  function monthGrid(input, selected, pick) {
+    const box = h("div", "np-cal");
+    let year = selected ? selected[0] : todayParts()[0];
+    const draw = () => {
+      box.textContent = "";
+      const head = h("div", "np-head");
+      const prev = h("button", "np-nav", "‹", { type: "button" }), next = h("button", "np-nav", "›", { type: "button" });
+      prev.addEventListener("click", () => { year--; draw(); });
+      next.addEventListener("click", () => { year++; draw(); });
+      head.append(prev, h("div", "np-title", String(year)), next);
+      box.append(head);
+      const grid = h("div", "np-months");
+      MONTHS.forEach((name, i) => {
+        const b = h("button", "np-cell" + (selected && selected[0] === year && selected[1] === i + 1 ? " np-sel" : ""), name.slice(0, 3), { type: "button" });
+        b.addEventListener("click", () => pick(year, i + 1));
+        grid.append(b);
+      });
+      box.append(grid);
+    };
+    draw();
+    return box;
+  }
+  function colorPicker(input) {
+    const start = unhex(input.value) || [0, 0, 0];
+    let [hue, sat, val] = rgb2hsv(...start);
+    const box = h("div", "np-color");
+    const sv = h("div", "np-sv"), white = h("div", "np-white"), black = h("div", "np-black"), knob = h("div", "np-knob");
+    sv.append(white, black, knob);
+    const hueBar = h("div", "np-hue"), hueKnob = h("div", "np-hueknob");
+    hueBar.append(hueKnob);
+    const row = h("div", "np-row"), preview = h("div", "np-preview");
+    const field = h("input", "np-hex", null, { type: "text", maxlength: "7", spellcheck: "false" });
+    row.append(preview, field);
+    const swatches = h("div", "np-swatches");
+    const show = (commit) => {
+      const rgb = hsv2rgb(hue, sat, val), value = hex(rgb);
+      sv.style.backgroundColor = hex(hsv2rgb(hue, 1, 1));
+      knob.style.left = Math.round(sat * 100) + "%";
+      knob.style.top = Math.round((1 - val) * 100) + "%";
+      hueKnob.style.left = Math.round((hue / 360) * 100) + "%";
+      preview.style.backgroundColor = value;
+      if (field.value !== value) field.value = value;
+      if (commit !== undefined) setInput(input, value, commit);
+    };
+    const drag = (el, move) => {
+      el.addEventListener("mousedown", (e) => {
+        const r = el.getBoundingClientRect();
+        const at = (ev) => move(Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)), Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height)));
+        at(e); show(false);
+        const onMove = (ev) => { at(ev); show(false); };
+        const onUp = () => { document.removeEventListener("mousemove", onMove, true); document.removeEventListener("mouseup", onUp, true); show(true); };
+        document.addEventListener("mousemove", onMove, true);
+        document.addEventListener("mouseup", onUp, true);
+      });
+    };
+    drag(sv, (x, y) => { sat = x; val = 1 - y; });
+    drag(hueBar, (x) => { hue = x * 360; });
+    field.addEventListener("input", () => { const c = unhex(field.value); if (c) { [hue, sat, val] = rgb2hsv(...c); show(false); } });
+    field.addEventListener("change", () => { const c = unhex(field.value); if (c) { [hue, sat, val] = rgb2hsv(...c); show(true); } });
+    for (const c of ["#000000", "#ffffff", "#e53935", "#fb8c00", "#fdd835", "#43a047", "#00acc1", "#1e88e5", "#5e35b1", "#d81b60", "#795548", "#757575"]) {
+      const b = h("button", "np-swatch", null, { type: "button", "aria-label": c, title: c });
+      b.style.backgroundColor = c;
+      b.addEventListener("click", () => { [hue, sat, val] = rgb2hsv(...unhex(c)); show(true); });
+      swatches.append(b);
+    }
+    box.append(sv, hueBar, row, swatches);
+    show();
+    return box;
+  }
+  Object.defineProperty(g, "__pickerOpen", {
+    value(id) {
+      const input = wrap(id);
+      if (!input || input.localName !== "input") return;
+      const kind = (input.getAttribute("type") || "").toLowerCase();
+      const pop = h("div", "nile-picker", null, { role: "dialog", "aria-label": "Choose " + kind });
+      let win;
+      const close = () => { if (win) win.close(); };
+      const foot = (extra) => {
+        const f = h("div", "np-foot");
+        const now = h("button", "np-link", kind === "time" ? "Now" : "Today", { type: "button" });
+        const clear = h("button", "np-link", "Clear", { type: "button" });
+        now.addEventListener("click", extra);
+        clear.addEventListener("click", () => { setInput(input, ""); close(); });
+        f.append(now, clear);
+        return f;
+      };
+      if (kind === "date") {
+        const sel = dateOf(input.value), t = sel || todayParts();
+        pop.append(calendar(input, kind, [t[0], t[1]], sel, (y, m, d) => { setInput(input, ymd(y, m, d)); close(); }),
+          foot(() => { const n = todayParts(); setInput(input, ymd(...n)); close(); }));
+      } else if (kind === "week") {
+        const sel = weekOf(input.value), t = sel || todayParts();
+        pop.append(calendar(input, kind, [t[0], t[1]], sel, (y, m, d) => { const w = isoWeek(y, m, d); setInput(input, `${w[0]}-W${z2(w[1])}`); close(); }, true),
+          foot(() => { const n = todayParts(), w = isoWeek(...n); setInput(input, `${w[0]}-W${z2(w[1])}`); close(); }));
+      } else if (kind === "month") {
+        const sel = monthOf(input.value);
+        pop.append(monthGrid(input, sel, (y, m) => { setInput(input, `${String(y).padStart(4, "0")}-${z2(m)}`); close(); }),
+          foot(() => { const n = todayParts(); setInput(input, `${String(n[0]).padStart(4, "0")}-${z2(n[1])}`); close(); }));
+      } else if (kind === "time") {
+        pop.append(clock(input, timeOf(input.value), (hh, mm, done) => { setInput(input, `${z2(hh)}:${z2(mm)}`, done); if (done) close(); }),
+          foot(() => { const d = new Date(); setInput(input, `${z2(d.getHours())}:${z2(d.getMinutes())}`); close(); }));
+      } else if (kind === "datetime-local") {
+        const v = input.value, sel = dateOf(v), time = timeOf(v) || [0, 0], t = sel || todayParts();
+        let day = sel, hm = time;
+        const put = (finished) => { if (day) setInput(input, `${ymd(...day)}T${z2(hm[0])}:${z2(hm[1])}`, finished); };
+        const row = h("div", "np-split");
+        row.append(calendar(input, kind, [t[0], t[1]], sel, (y, m, d) => { day = [y, m, d]; put(true); close(); }),
+          clock(input, time, (hh, mm, done) => { hm = [hh, mm]; if (!day) day = todayParts(); put(done); }));
+        pop.append(row, foot(() => { const d = new Date(); setInput(input, `${ymd(d.getFullYear(), d.getMonth() + 1, d.getDate())}T${z2(d.getHours())}:${z2(d.getMinutes())}`); close(); }));
+      } else if (kind === "color") {
+        pop.append(colorPicker(input));
+      } else return;
+      // Presses on the picker keep the input's focus (except in its hex field).
+      pop.addEventListener("mousedown", (e) => { if (!(e.target && e.target.localName === "input")) e.preventDefault(); });
+      win = input.popup(pop, { anchorAt: 1, popupAt: 7 });
+      if (!win) return;
+      win.on("close", () => pop.remove());
+      revealChosen(pop);
+    },
+  });
+
+  // Files dropped on the window (not on a file input): a `drop` event with `dataTransfer.files`.
+  Object.defineProperty(g, "__fileDrop", {
+    value(id, paths) {
+      const target = wrap(id);
+      if (!target) return;
+      const files = paths.map((p) => new File(p));
+      const e = new Event("drop", { bubbles: true, cancelable: true });
+      e.dataTransfer = { files, types: ["Files"], items: files.map((f) => ({ kind: "file", type: f.type, getAsFile: () => f })), dropEffect: "copy" };
+      e.files = files;
+      target.dispatchEvent(e);
+    },
+  });
+
+  // ---- constraint validation ------------------------------------------------------------------
+  // `validity`, `checkValidity()`, `setCustomValidity()` ... computed from the attributes, and the
+  // `:valid` / `:invalid` flags kept up to date on input/change events, `value` assignments and
+  // attribute changes (the flags are what the selectors match).
+  const NOT_VALIDATED = new Set(["hidden", "button", "submit", "reset", "image"]);
+  const kindOf = (el) => (el.getAttribute("type") || "text").toLowerCase();
+  const validatable = (el) => {
+    const t = el.localName;
+    if (t === "input") { if (NOT_VALIDATED.has(kindOf(el))) return false; }
+    else if (t !== "textarea" && t !== "select") return false;
+    return !el.disabled && !el.hasAttribute("readonly") && !el.closest("datalist");
+  };
+  const numeric = (v) => (v === null || v === undefined || v === "" ? NaN : Number(v));
+  const VALIDITY_KEYS = ["valueMissing", "typeMismatch", "patternMismatch", "tooLong", "tooShort", "rangeUnderflow", "rangeOverflow", "stepMismatch", "badInput", "customError"];
+  function computeValidity(el) {
+    const v = Object.fromEntries(VALIDITY_KEYS.map((k) => [k, false]));
+    if (!validatable(el)) { v.valid = true; return v; }
+    const tag = el.localName, kind = tag === "input" ? kindOf(el) : tag;
+    const value = tag === "select" ? el.value : String(el.value ?? "");
+    const required = el.hasAttribute("required");
+    if (required) {
+      if (kind === "checkbox") v.valueMissing = !el.checked;
+      else if (kind === "radio") {
+        const name = el.getAttribute("name");
+        const scope = el.closest("form") || document;
+        v.valueMissing = !name ? !el.checked : !scope.querySelectorAll("input[type=radio]").some((r) => r.getAttribute("name") === name && r.checked);
+      } else v.valueMissing = value === "";
+    }
+    if (value !== "" && kind !== "checkbox" && kind !== "radio" && kind !== "select") {
+      if (kind === "email" && !/^[^\s@]+@[^\s@]+$/.test(value)) v.typeMismatch = true;
+      if (kind === "url") { try { new URL(value); } catch (_) { v.typeMismatch = true; } }
+      const pat = el.getAttribute("pattern");
+      if (pat && (kind === "text" || kind === "search" || kind === "tel" || kind === "url" || kind === "email" || kind === "password")) {
+        try { v.patternMismatch = !new RegExp("^(?:" + pat + ")$", "u").test(value); } catch (_) { /* an invalid pattern is ignored */ }
+      }
+      const len = [...value].length, max = numeric(el.getAttribute("maxlength")), min = numeric(el.getAttribute("minlength"));
+      if (!Number.isNaN(max) && len > max) v.tooLong = true;
+      if (!Number.isNaN(min) && len < min) v.tooShort = true;
+      const lo = el.getAttribute("min"), hi = el.getAttribute("max");
+      if (kind === "number" || kind === "range") {
+        const n = Number(value);
+        if (Number.isNaN(n)) v.badInput = true;
+        else {
+          if (lo !== null && !Number.isNaN(numeric(lo)) && n < Number(lo)) v.rangeUnderflow = true;
+          if (hi !== null && !Number.isNaN(numeric(hi)) && n > Number(hi)) v.rangeOverflow = true;
+          const stepAttr = el.getAttribute("step");
+          if (stepAttr !== "any") {
+            const step = Number.isNaN(numeric(stepAttr)) || Number(stepAttr) <= 0 ? 1 : Number(stepAttr);
+            const base = Number.isNaN(numeric(lo)) ? 0 : Number(lo);
+            const k = (n - base) / step;
+            if (Math.abs(k - Math.round(k)) > 1e-7) v.stepMismatch = true;
+          }
+        }
+      } else if (kind === "date" || kind === "month" || kind === "week" || kind === "time" || kind === "datetime-local") {
+        // The formats sort as text.
+        if (lo && value < lo) v.rangeUnderflow = true;
+        if (hi && value > hi) v.rangeOverflow = true;
+      }
+    }
+    v.customError = !!el._customValidity;
+    v.valid = !VALIDITY_KEYS.some((k) => v[k]);
+    return v;
+  }
+  const MESSAGES = { customError: null, valueMissing: "Please fill out this field.", typeMismatch: "Please enter a valid value.", patternMismatch: "Please match the requested format.", tooLong: "Please shorten this text.", tooShort: "Please lengthen this text.", rangeUnderflow: "The value is too small.", rangeOverflow: "The value is too large.", stepMismatch: "Please enter a valid value.", badInput: "Please enter a number." };
+  const defineOn = (name, desc) => Object.defineProperty(Element.prototype, name, { configurable: true, ...desc });
+  const validity = (el) => (validatable(el) || el.localName === "input" || el.localName === "textarea" || el.localName === "select" ? computeValidity(el) : undefined);
+  defineOn("validity", { get() { return validity(this); } });
+  defineOn("willValidate", { get() { return validatable(this); } });
+  defineOn("validationMessage", {
+    get() {
+      const v = computeValidity(this);
+      if (v.valid) return "";
+      return v.customError ? this._customValidity : MESSAGES[VALIDITY_KEYS.find((k) => v[k])] || "";
+    },
+  });
+  const revalidate = (el) => {
+    if (el.nodeType !== 1 || !(el.localName === "input" || el.localName === "textarea" || el.localName === "select")) return;
+    if (!validatable(el)) { N.setState(el._id, "valid", false); N.setState(el._id, "invalid", false); return; }
+    const ok = computeValidity(el).valid;
+    N.setState(el._id, "valid", ok);
+    N.setState(el._id, "invalid", !ok);
+  };
+  defineOn("setCustomValidity", { value(msg) { this._customValidity = String(msg ?? ""); revalidate(this); }, writable: true });
+  defineOn("checkValidity", {
+    value() {
+      if (this.localName === "form" || this.localName === "fieldset") {
+        let ok = true;
+        for (const c of this.querySelectorAll("input, select, textarea")) if (!c.checkValidity()) ok = false;
+        return ok;
+      }
+      if (!validatable(this)) return true;
+      const ok = computeValidity(this).valid;
+      revalidate(this);
+      if (!ok) this.dispatchEvent(new Event("invalid", { cancelable: true }));
+      return ok;
+    },
+    writable: true,
+  });
+  defineOn("reportValidity", {
+    value() {
+      const ok = this.checkValidity();
+      if (!ok && this.localName !== "form" && this.focus) this.focus();
+      return ok;
+    },
+    writable: true,
+  });
+  // Keep the flags current. Nothing is observed on a page without controls.
+  const refreshAll = (root) => { for (const c of root.querySelectorAll("input, select, textarea")) revalidate(c); };
+  g.__refreshValidity = (el) => revalidate(el);
+  document.addEventListener("DOMContentLoaded", () => {
+    const body = document.documentElement;
+    if (!body.querySelector("input, select, textarea")) { watchControls(); return; }
+    refreshAll(body);
+    watchControls();
+  });
+  function watchControls() {
+    const again = (e) => { const t = e.target; if (t && t.nodeType === 1) { revalidate(t); if (t.localName === "input" && kindOf(t) === "radio") refreshAll(t.closest("form") || document.documentElement); } };
+    document.addEventListener("input", again, true);
+    document.addEventListener("change", again, true);
+    new MutationObserver((records) => {
+      for (const r of records) {
+        if (r.type === "attributes") revalidate(r.target);
+        else for (const n of r.addedNodes) if (n.nodeType === 1) { revalidate(n); if (n.querySelectorAll) refreshAll(n); }
+      }
+    }).observe(document.documentElement, { attributes: true, childList: true, subtree: true, attributeFilter: ["required", "min", "max", "step", "pattern", "minlength", "maxlength", "type", "value", "disabled", "readonly", "checked"] });
+  }
   Object.defineProperty(g, "__sciterModule", { value: sciterModule });
   Object.defineProperty(g, "__envModule", { value: envModule });
   // `@sys`: the file-system part of Sciter's NodeJS-style module (docs.sciter.com JS.runtime/module-sys),
@@ -1743,7 +2224,7 @@
   }
   sysFs.readfile = sysFs.readFile; sysFs.readfileSync = sysFs.readFileSync; sync.readfile = sync.readFile;
   // Files, sockets, processes and OS queries over the `sysCall`/`sysStart` natives (nile-script/src/sys.rs).
-  // Blocking calls return promises that `__sysDone` settles; not here: named pipes, TTYs, `fs.watch`.
+  // Blocking calls return promises that `__sysDone` settles.
   const sysRun = (op, ...a) => {
     const r = N.sysCall(op, a.map(String));
     if (r.startsWith("E:")) { const m = r.slice(2); const e = new Error(m); e.code = m.slice(0, m.indexOf(":")); throw e; }
@@ -1786,6 +2267,62 @@
     getsockname() { return JSON.parse(sysRun("sockname", this._id)); }
     getpeername() { return JSON.parse(sysRun("peername", this._id)); }
   }
+  // Named pipes: a Unix domain socket named by its path; where those don't exist the pipe is a
+  // loopback socket announced in a file under the temp folder (so only Nile programs can reach it).
+  class Pipe extends SysStream {
+    constructor() { super(Number(sysRun("pipe_new"))); this._name = ""; }
+    bind(name) { sysRun("pipe_bind", this._id, String(name)); this._name = String(name); }
+    listen() { sysRun("listen", this._id); }
+    connect(name) { return later(() => { sysRun("pipe_connect", this._id, String(name)); this._name = String(name); }); }
+    accept() {
+      return sysAsync("accept", this._id).then((r) => {
+        const p = Object.create(Pipe.prototype);
+        Object.defineProperty(p, "_id", { value: Number(r), writable: true });
+        p._name = this._name;
+        return p;
+      });
+    }
+    getsockname() { return this._name; }
+    getpeername() { return this._name; }
+  }
+  // Terminals: standard input (read) and output/error (write); `setMode` 0 normal, 1 raw, 2 raw input
+  // with output processing; `getWinSize()` is the terminal's size.
+  class TTY extends SysStream {
+    constructor(fd) { super(Number(sysRun("tty_new", fd))); this._fd = fd; }
+    setMode(mode) { sysRun("tty_mode", mode | 0); }
+    getWinSize() { return JSON.parse(sysRun("tty_size")); }
+  }
+  // `fs.watch(path, (path, events) => ...)`: events is a bitmask, 1 for a rename (something created,
+  // removed or renamed) and 2 for a change. Folders are watched with what is inside them. Written by
+  // looking at the tree every 250 ms (no operating system notifications), so it stops at 20,000 entries.
+  const WATCH_LIMIT = 20000;
+  const snapshot = (root) => {
+    const seen = new Map();
+    const visit = (path) => {
+      if (seen.size >= WATCH_LIMIT) return;
+      const st = sync.stat(path);
+      if (!st) return;
+      seen.set(path, st.st_mtime + ":" + st.st_size + ":" + st.isDirectory);
+      if (st.isDirectory) for (const entry of sync.readdir(path) || []) visit(path.replace(/[\\/]$/, "") + "/" + entry.name);
+    };
+    visit(root);
+    return seen;
+  };
+  const watchFs = (path, callback) => {
+    path = String(path);
+    if (!sync.stat(path)) throw Object.assign(new Error("ENOENT: no such file or directory: " + path), { code: "ENOENT" });
+    let before = snapshot(path);
+    const timer = setInterval(() => {
+      const now = snapshot(path);
+      const events = [];
+      for (const [p, sig] of now) { if (!before.has(p)) events.push([p, 1]); else if (before.get(p) !== sig) events.push([p, 2]); }
+      for (const p of before.keys()) if (!now.has(p)) events.push([p, 1]);
+      before = now;
+      for (const [p, e] of events) { try { callback(p, e); } catch (err) { console.error(err && err.stack ? err.stack : String(err)); } }
+    }, 250);
+    return { path, close() { clearInterval(timer); } };
+  };
+  sysFs.watch = watchFs;
   class UDP {
     constructor() { Object.defineProperty(this, "_id", { value: Number(sysRun("udp_new")), writable: true }); }
     bind(addr) { sysRun("bind", this._id, ...addrOf(addr)); }
@@ -1838,7 +2375,7 @@
   sysFs.opendir = (path) => later(() => new sysFs.Dir(path));
   sysFs.opendirSync = (path) => new sysFs.Dir(path);
   const sysModule = {
-    fs: sysFs, TCP, UDP, Process, spawn,
+    fs: sysFs, TCP, UDP, Pipe, TTY, Process, spawn,
     hrtime: () => BigInt(Math.round(N.now() * 1e6)),
     gettimeofday: () => JSON.parse(sysRun("gettimeofday")),
     uname: () => JSON.parse(sysRun("uname")),

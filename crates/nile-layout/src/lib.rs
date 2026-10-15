@@ -169,6 +169,11 @@ pub struct LayoutBox {
     pub fixed: bool,
     /// `position: sticky`: the box slides while the page scrolls (see `StickyBox::shift`).
     pub sticky: Option<StickyBox>,
+    /// A `<fieldset>` whose `<legend>` sits on its top border: the horizontal span (absolute x) the
+    /// border is left out of.
+    pub border_gap: Option<(f32, f32)>,
+    /// `backface-visibility: hidden`.
+    pub backface_hidden: bool,
 }
 
 /// What a sticky box needs to compute its shift: its insets and its parent's vertical extent.
@@ -207,11 +212,15 @@ pub struct ScrollBox {
     /// Size of the scrollable content from the padding box's origin (`scrollWidth/Height`).
     pub content_width: f32,
     pub content_height: f32,
+    /// Thickness of its scrollbars (`scrollbar-width`, `::-webkit-scrollbar`); 0 hides them.
+    pub thick: f32,
 }
 
 /// Overlay scrollbar metrics, shared by painting and dragging.
-pub const SCROLLBAR_THICK: f32 = 6.0;
+pub const SCROLLBAR_THICK: f32 = nile_style::SCROLLBAR_AUTO;
 pub const SCROLLBAR_EDGE: f32 = 2.0;
+/// How much wider a bar grows while the pointer is over it.
+pub const SCROLLBAR_GROW: f32 = 4.0;
 
 /// One scrollbar: its thumb and the strip it slides in, in the same coordinates as the
 /// box it belongs to.
@@ -253,8 +262,11 @@ impl Thumb {
 }
 
 /// The page's own vertical scrollbar, in viewport coordinates.
-pub fn page_thumb(viewport: (f32, f32), content_height: f32, scroll_y: f32) -> Option<Thumb> {
-    let track = Rect { x: viewport.0 - SCROLLBAR_THICK - SCROLLBAR_EDGE, y: 0.0, width: SCROLLBAR_THICK, height: viewport.1 };
+pub fn page_thumb(viewport: (f32, f32), content_height: f32, scroll_y: f32, thick: f32) -> Option<Thumb> {
+    if thick <= 0.0 {
+        return None;
+    }
+    let track = Rect { x: viewport.0 - thick - SCROLLBAR_EDGE, y: 0.0, width: thick, height: viewport.1 };
     Thumb::new(track, true, viewport.1, content_height, scroll_y)
 }
 
@@ -262,12 +274,16 @@ impl ScrollBox {
     /// The scrollbars to show at scroll offsets `(ox, oy)`.
     pub fn thumbs(&self, ox: f32, oy: f32) -> Vec<Thumb> {
         let (c, mut out) = (self.clip, Vec::new());
+        if self.thick <= 0.0 {
+            return out;
+        }
+        let thick = self.thick;
         if self.wheel_y {
-            let track = Rect { x: c.x + c.width - SCROLLBAR_THICK - SCROLLBAR_EDGE, y: c.y, width: SCROLLBAR_THICK, height: c.height };
+            let track = Rect { x: c.x + c.width - thick - SCROLLBAR_EDGE, y: c.y, width: thick, height: c.height };
             out.extend(Thumb::new(track, true, c.height, self.content_height, oy));
         }
         if self.wheel_x {
-            let track = Rect { x: c.x, y: c.y + c.height - SCROLLBAR_THICK - SCROLLBAR_EDGE, width: c.width, height: SCROLLBAR_THICK };
+            let track = Rect { x: c.x, y: c.y + c.height - thick - SCROLLBAR_EDGE, width: c.width, height: thick };
             out.extend(Thumb::new(track, false, c.width, self.content_width, ox));
         }
         out
@@ -293,6 +309,9 @@ pub struct Placement {
     /// Inside the paged element `LayoutTree::pages[n]`: box coordinates are flow positions that
     /// appear on that element's sheets.
     pub paged: Option<usize>,
+    /// The box (or a container) has `backface-visibility: hidden` and is turned away: it is neither
+    /// painted nor hit.
+    pub hidden: bool,
 }
 
 impl Placement {
@@ -421,6 +440,8 @@ pub enum MarkerKind {
     Circle,
     Square,
     Text(Box<TextLayout>),
+    /// `list-style-image`.
+    Image(Rc<ImageData>),
 }
 
 /// One row of a [`ListBox`].
@@ -576,6 +597,7 @@ impl LayoutTree {
                 wheel_y: s.overflow_y == OverflowKind::Scroll,
                 content_width: right - clip.x,
                 content_height: bottom - clip.y,
+                thick: styles.scrollbar_look(b.node).thickness,
             };
             self.boxes[i].scroll = Some(scroll);
         }
@@ -658,7 +680,7 @@ impl LayoutTree {
             let mut cur = stack.last().map_or(Placement::default(), |(_, p)| *p);
             if b.fixed {
                 // Anchored to the viewport: ignore every ancestor's scroll, clip and transform.
-                cur = Placement { xf: Affine::translate(0.0, self.page_scroll), clip: None, paged: None };
+                cur = Placement { xf: Affine::translate(0.0, self.page_scroll), clip: None, paged: None, hidden: false };
                 stack.push((b.subtree_end.max(i + 1), cur));
             }
             // A transform applies to the box itself and everything inside it.
@@ -666,7 +688,8 @@ impl LayoutTree {
                 dy if dy != 0.0 => cur.xf.then_after(Affine::translate(0.0, dy)),
                 _ => cur.xf,
             };
-            let own = Placement { xf: b.transform.map_or(base, |t| base.then_after(t)), clip: cur.clip, paged: cur.paged };
+            let xf = b.transform.map_or(base, |t| base.then_after(t));
+            let own = Placement { xf, clip: cur.clip, paged: cur.paged, hidden: cur.hidden || (b.backface_hidden && xf.faces_away()) };
             out.push(own);
             if let Some(k) = self.pages.iter().position(|pb| pb.index == i) {
                 // Everything inside is a flow position on this element's sheets.
@@ -677,8 +700,8 @@ impl LayoutTree {
                 let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
                 let clip = intersect(own.clip, own.xf.bounds(sb.clip));
                 let xf = own.xf.then_after(Affine::translate(-ox, -oy));
-                stack.push((b.subtree_end, Placement { xf, clip: Some(clip), paged: own.paged }));
-            } else if b.transform.is_some() || b.sticky.is_some() {
+                stack.push((b.subtree_end, Placement { xf, clip: Some(clip), paged: own.paged, hidden: own.hidden }));
+            } else if b.transform.is_some() || b.sticky.is_some() || own.hidden != cur.hidden {
                 stack.push((b.subtree_end.max(i + 1), own));
             }
         }
@@ -1045,6 +1068,9 @@ impl LayoutTree {
     pub fn hit_test_scrolled(&self, x: f32, y: f32, offsets: &ScrollOffsets) -> Option<NodeId> {
         let places = self.placements(offsets);
         for (b, p) in self.boxes.iter().zip(&places).rev() {
+            if p.hidden {
+                continue;
+            }
             if let Some(c) = p.clip {
                 if x < c.x || y < c.y || x >= c.x + c.width || y >= c.y + c.height {
                     continue;
@@ -1494,6 +1520,7 @@ pub fn layout_with(
     }
     tree.lists = build_lists(doc, styles, text, &tree, options.offsets);
     tree.markers = build_markers(doc, styles, text, &tree);
+    open_legend_gaps(doc, &mut tree.boxes);
     if let Some(req) = options.menu {
         tree.menu = build_menu(doc, styles, text, &tree, req, options.offsets, (options.scroll_y, viewport_height));
     }
@@ -1754,6 +1781,9 @@ fn load_images(doc: &Document, styles: &StyleMap, loader: Option<&dyn ImageLoade
             if let Some(url) = &s.background_url {
                 want(url);
             }
+            if let Some(url) = &s.list_style_image {
+                want(url);
+            }
         }
     });
 }
@@ -1893,21 +1923,28 @@ fn build_table(
     let mut body = Vec::new();
     let mut foot = Vec::new();
     let mut captions = Vec::new();
+    // Row groups that paint something: (group, rows in its section before it, its row count).
+    let mut groups: Vec<(NodeId, u8, usize, usize)> = Vec::new();
     for c in kids(doc, styles, id).into_iter().filter(|n| shown(n) && !styles.is_pseudo(*n)) {
         match styles.get(c).display {
             Display::TableRow => body.push(c),
             Display::TableRowGroup => {
                 let rows = with_display(c, Display::TableRow);
-                match tag(c).as_deref() {
-                    Some("thead") => head.extend(rows),
-                    Some("tfoot") => foot.extend(rows),
-                    _ => body.extend(rows),
+                let (section, list) = match tag(c).as_deref() {
+                    Some("thead") => (0, &mut head),
+                    Some("tfoot") => (2, &mut foot),
+                    _ => (1, &mut body),
+                };
+                if !rows.is_empty() && paints_box(styles.get(c)) {
+                    groups.push((c, section, list.len(), rows.len()));
                 }
+                list.extend(rows);
             }
             Display::TableCaption => captions.push(c),
             _ => {}
         }
     }
+    let section_start = [0, head.len(), head.len() + body.len()];
     let rows: Vec<NodeId> = head.into_iter().chain(body).chain(foot).collect();
 
     // Give every cell its grid rectangle, skipping slots taken by earlier row spans.
@@ -1941,7 +1978,8 @@ fn build_table(
         }
     }
     let columns = columns.max(1);
-    let first_row = captions.len();
+    let bottom_caption = |c: &NodeId| styles.get(*c).caption_bottom;
+    let first_row = captions.iter().filter(|c| !bottom_caption(c)).count();
     let line = |n: usize, span: usize| taffy::Line {
         start: taffy::style_helpers::line((n + 1) as i16),
         end: taffy::style_helpers::span(span as u16),
@@ -1949,14 +1987,36 @@ fn build_table(
 
     let mut items = Vec::new();
     // Captions sit above the grid, each on its own row.
-    for (i, cap) in captions.iter().enumerate() {
+    let (mut above, mut below) = (0, 0);
+    for cap in &captions {
         if let Some(n) = build(doc, styles, text, tree, *cap) {
             let mut st = tree.style(n).ok()?.clone();
-            st.grid_row = line(i, 1);
+            let at = if bottom_caption(cap) {
+                below += 1;
+                first_row + rows.len() + below - 1
+            } else {
+                above += 1;
+                above - 1
+            };
+            st.grid_row = line(at, 1);
             st.grid_column = line(0, columns);
             tree.set_style(n, st).ok()?;
             items.push(n);
         }
+    }
+    // A row group has no box of its own; one that paints (background, border, shadow) gets an
+    // empty item spanning its rows, behind them.
+    for (group, section, start, len) in &groups {
+        let mut st = taffy_style(styles.get(*group));
+        st.display = taffy::Display::Block;
+        st.margin = taffy::Rect::zero();
+        st.size = Size::auto();
+        st.grid_row = taffy::Line {
+            start: taffy::style_helpers::line((first_row + section_start[*section as usize] + start + 1) as i16),
+            end: taffy::style_helpers::span(*len as u16),
+        };
+        st.grid_column = line(0, columns);
+        items.push(tree.new_leaf_with_context(st, NodeCtx::Element(*group)).ok()?);
     }
     for (r, row) in rows.iter().enumerate() {
         let rs = styles.get(*row);
@@ -2072,6 +2132,36 @@ fn build_table(
             }
         }
     }
+    if !fixed && style.width != Length::Auto && ts.grid_template_columns.is_empty() {
+        // Automatic layout in a table of a given width: the free space is shared in proportion to
+        // what each column wants (its widest cell's text on one line), not equally.
+        let mut wants = vec![0.0f32; columns];
+        let mut ok = true;
+        for cell in cells.iter().filter(|c| c.cols == 1) {
+            let cs = styles.get(cell.node);
+            let own = match cs.width {
+                Length::Px(w) => w,
+                Length::Percent(_) => {
+                    ok = false;
+                    0.0
+                }
+                _ => {
+                    let raw = doc.text_content(cell.node);
+                    let line = if matches!(cs.white_space, nile_style::WhiteSpace::Pre | nile_style::WhiteSpace::PreWrap) { raw } else { raw.split_whitespace().collect::<Vec<_>>().join(" ") };
+                    let mut shaped = text.shape(&line, &text_style(cs), 1.0);
+                    nile_text::break_lines(&mut shaped, None, nile_text::Alignment::Start);
+                    shaped.width() + cs.padding.left + cs.padding.right + cs.border_width.left + cs.border_width.right
+                }
+            };
+            wants[cell.col] = wants[cell.col].max(own);
+        }
+        if ok && wants.iter().any(|w| *w > 0.0) {
+            ts.grid_template_columns = wants
+                .iter()
+                .map(|w| taffy::GridTemplateComponent::Single(track_fn(Track { min: Breadth::Auto, max: Breadth::Fr(w.max(1.0)) })))
+                .collect();
+        }
+    }
     ts.grid_auto_columns = vec![taffy::style_helpers::auto()];
     ts.grid_auto_rows = vec![taffy::style_helpers::auto()];
     if !style.border_collapse {
@@ -2090,6 +2180,26 @@ fn build_table(
     let n = tree.new_with_children(ts, &items).ok()?;
     tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
     hand_off_absolute(style, n)
+}
+
+/// A fieldset's legend sits on its top border: leave the border out behind it.
+fn open_legend_gaps(doc: &Document, boxes: &mut [LayoutBox]) {
+    for i in 0..boxes.len() {
+        let node = boxes[i].node;
+        if !matches!(boxes[i].content, BoxContent::Element) || node.0 >= doc.node_count() || doc.node(node).tag() != Some("fieldset") {
+            continue;
+        }
+        let end = boxes[i].subtree_end.clamp(i + 1, boxes.len());
+        let legend = boxes[i + 1..end].iter().find(|b| matches!(b.content, BoxContent::Element) && b.node.0 < doc.node_count() && doc.node(b.node).tag() == Some("legend") && doc.node(b.node).parent == Some(node));
+        if let Some(l) = legend {
+            boxes[i].border_gap = Some((l.rect.x - 1.0, l.rect.x + l.rect.width + 1.0));
+        }
+    }
+}
+
+/// Whether an element's own style paints a background, border or shadow.
+fn paints_box(s: &ComputedStyle) -> bool {
+    s.background.is_some_and(|c| c.a > 0) || s.background_image.is_some() || s.background_url.is_some() || !s.box_shadow.is_empty() || s.border_width != Edges::default()
 }
 
 /// The children of `id` with its generated `::before` and `::after` boxes around them.
@@ -2262,6 +2372,9 @@ fn roman(n: i64, upper: bool) -> String {
 /// boxes, so those get an estimate.
 fn inside_marker_width(s: &ComputedStyle) -> f32 {
     use nile_style::ListStyleType as L;
+    if s.list_style_image.as_deref().and_then(image_for).is_some() {
+        return s.font_size * 1.6;
+    }
     match s.list_style_type {
         L::None | L::DisclosureClosed | L::DisclosureOpen => 0.0,
         L::Disc | L::Circle | L::Square => (s.font_size * 0.34).round().max(3.0) + s.font_size * 0.5,
@@ -2320,7 +2433,8 @@ fn build_markers(
         // A `::marker` rule can restyle the marker, replace it (`content`) or hide it.
         let ms = styles.marker(b.node);
         let content = ms.and_then(|m| m.content.as_deref());
-        if style.display != Display::ListItem || (style.list_style_type == nile_style::ListStyleType::None && content.is_none_or(str::is_empty)) || content == Some("") {
+        let image = style.list_style_image.as_deref().and_then(image_for).filter(|i| i.width > 0 && i.height > 0);
+        if style.display != Display::ListItem || (style.list_style_type == nile_style::ListStyleType::None && image.is_none() && content.is_none_or(str::is_empty)) || content == Some("") {
             continue;
         }
         let mstyle = ms.map_or(style, |m| &m.style);
@@ -2331,6 +2445,14 @@ fn build_markers(
         // reserves room for it in its padding (see `inside_marker_width`).
         let inside_x = b.rect.x + style.border_width.left + style.padding.left;
         let kind_and_rect = match style.list_style_type {
+            _ if content.is_none() && image.is_some() => {
+                // The picture, scaled down to about a line of text, centred on the first line.
+                let img = image.clone().expect("checked");
+                let scale = (fs * 1.2 / img.height as f32).min(1.0);
+                let (w, h) = (img.width as f32 * scale, img.height as f32 * scale);
+                let x = if style.list_style_inside { inside_x } else { b.rect.x - fs * 0.4 - w };
+                Some((MarkerKind::Image(img), Rect { x, y: top + (line_h - h) / 2.0, width: w, height: h }))
+            }
             _ if content.is_some() => {
                 let mut l = text.shape(content.unwrap_or_default(), &text_style(mstyle), 1.0);
                 break_lines(&mut l, None, Alignment::Start);
@@ -3026,13 +3148,13 @@ fn flatten(
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden })
         }
         Some(NodeCtx::Replaced { id, image, .. }) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden })
         }
         Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
@@ -3088,6 +3210,8 @@ fn flatten(
                 persp: None,
                 fixed: false,
                 sticky: None,
+                border_gap: None,
+                backface_hidden: false,
             });
             for b in placed {
                 let kid = kids[b.id as usize];
@@ -3280,6 +3404,8 @@ fn text_style(s: &ComputedStyle) -> TextStyle {
         line_through: s.line_through,
         letter_spacing: s.letter_spacing,
         align: alignment(s.text_align),
+        font_variations: s.font_variations.clone(),
+        font_features: s.font_features.clone(),
     }
 }
 
@@ -4341,6 +4467,64 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
         assert_eq!(c.width, 154.0, "colspan covers both columns and the gap");
         assert_eq!(c.y, a.y + 20.0 + 4.0, "rows stack with spacing");
         assert_eq!(tb.width, 4.0 + 100.0 + 4.0 + 50.0 + 4.0, "the table shrinks to its columns");
+    }
+
+    #[test]
+    fn a_legend_sits_on_the_fieldset_border_and_leaves_a_gap_in_it() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><fieldset id="f" style="margin:0"><legend id="l" style="margin-left:10px">Title</legend><p>x</p></fieldset></body>"#,
+        );
+        let (f, l) = (rect_of(&doc, &t, "f"), rect_of(&doc, &t, "l"));
+        assert!(l.y < f.y + 8.0 && l.y + l.height > f.y + 4.0, "the legend straddles the top border: {l:?} in {f:?}");
+        let b = t.boxes.iter().find(|b| doc.node(b.node).attr("id") == Some("f")).unwrap();
+        let (x0, x1) = b.border_gap.expect("a gap for the legend");
+        assert!(x0 <= l.x && x1 >= l.x + l.width);
+    }
+
+    #[test]
+    fn a_turned_away_backface_hidden_box_is_not_hit() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><div style="width:100px;height:100px;perspective:400px">
+                 <div id="in" style="position:relative;width:100px;height:100px;transform:rotateY(180deg)">
+                   <div id="front" style="position:absolute;left:0;top:0;width:100px;height:100px;backface-visibility:hidden"><span id="label">x</span></div>
+                   <div id="back" style="position:absolute;left:0;top:0;width:100px;height:100px;backface-visibility:hidden;transform:rotateY(180deg)"></div>
+                 </div></div></body>"#,
+        );
+        let node = |id: &str| doc.find(|n| n.attr("id") == Some(id)).unwrap();
+        let hit = t.hit_test_scrolled(50.0, 50.0, &Default::default());
+        assert_eq!(hit, Some(node("back")), "the front is turned away, the back faces us");
+        assert_ne!(hit, Some(node("front")));
+        assert!(t.boxes.iter().any(|b| b.node == node("front") && b.backface_hidden));
+    }
+
+    #[test]
+    fn captions_can_sit_below_and_row_groups_paint_behind_their_rows() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><table id="t" style="border-spacing:0; caption-side:bottom">
+                 <caption id="cap" style="padding:0">Cap</caption>
+                 <thead id="h" style="background:#ccc"><tr><td id="a" style="padding:0;height:10px">a</td></tr></thead>
+                 <tbody><tr><td id="b" style="padding:0;height:10px">b</td></tr></tbody>
+                 <tfoot id="f" style="background:#fcc"><tr><td id="c" style="padding:0;height:10px">c</td></tr></tfoot>
+               </table></body>"#,
+        );
+        let (a, b, c, cap) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"), rect_of(&doc, &t, "c"), rect_of(&doc, &t, "cap"));
+        assert!(cap.y >= c.y + c.height, "the caption is below the last row: {cap:?} vs {c:?}");
+        assert!(a.y < b.y && b.y < c.y);
+        let (h, f) = (rect_of(&doc, &t, "h"), rect_of(&doc, &t, "f"));
+        assert_eq!((h.y, h.height), (a.y, a.height), "the header group's box covers its rows");
+        assert_eq!((f.y, f.height), (c.y, c.height), "so does the footer group's");
+    }
+
+    #[test]
+    fn automatic_columns_share_extra_width_in_proportion_to_their_content() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0;font:16px sans-serif"><table style="width:600px; border-spacing:0">
+                 <tr><td id="a" style="padding:0">aaaa</td><td id="b" style="padding:0">aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</td></tr>
+               </table></body>"#,
+        );
+        let (a, b) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"));
+        assert_eq!(a.width + b.width, 600.0);
+        assert!(b.width > a.width * 5.0, "the wider content gets proportionally more: {a:?} {b:?}");
     }
 
     #[test]

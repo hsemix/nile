@@ -75,6 +75,12 @@ fn table_parts(boxes: &[crate::LayoutBox], base: usize, doc: &Document, group: &
         if header_rows.is_empty() {
             continue;
         }
+        // A group that paints a background has a box of its own behind its rows.
+        for (j, g) in boxes.iter().enumerate().take(end).skip(k + 1) {
+            if matches!(g.content, BoxContent::Element) && g.node.0 < doc.node_count() && doc.node(g.node).tag() == Some(group) {
+                ranges.push((base + j, base + j + 1));
+            }
+        }
         for (j, cell) in boxes.iter().enumerate().take(end).skip(k + 1) {
             if matches!(cell.content, BoxContent::Element) && doc.node(cell.node).parent.is_some_and(|p| header_rows.contains(&p)) && doc.node(cell.node).tag() != Some("tr") {
                 ranges.push((base + j, cell.subtree_end.max(base + j + 1)));

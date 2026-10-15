@@ -414,7 +414,18 @@
       const [dx, dy] = typeof a === "object" && a !== null ? [a.left || 0, a.top || 0] : [+a || 0, +b || 0];
       N.elScrollTo(this._id, s[0] + dx, s[1] + dy);
     }
-    scrollIntoView() { const r = N.rect(this._id); if (r) N.scrollTo(N.scrollY() + r[1]); }
+    // Scrolls the scrollable ancestors just enough to show the element, then the page to its top.
+    scrollIntoView() {
+      for (let p = this.parentElement; p; p = p.parentElement) {
+        const s = N.elScroll(p._id), pr = N.rect(p._id), r = N.rect(this._id);
+        if (!s || !pr || !r) continue;
+        const top = r[1] - pr[1];
+        if (top < 0) N.elScrollTo(p._id, s[0], s[1] + top);
+        else if (top + r[3] > pr[3]) N.elScrollTo(p._id, s[0], s[1] + top + r[3] - pr[3]);
+      }
+      const r = N.rect(this._id);
+      if (r) N.scrollTo(N.scrollY() + r[1]);
+    }
   }
 
   // ---- vnodes -------------------------------------------------------------
@@ -678,7 +689,7 @@
     set(v) {
       const t = this.localName;
       if (t === "select") this.selectedIndex = this.options.findIndex((o) => optValue(o) === String(v));
-      else if (t === "option" || VALUE_TAGS.has(t)) this.setAttribute("value", v);
+      else if (t === "option" || VALUE_TAGS.has(t)) { this.setAttribute("value", v); N.valueSynced(this._id); }
       else if (isForm(this)) setFormValue(this, v);
       else Object.defineProperty(this, "value", { value: v, writable: true, configurable: true, enumerable: true });
     },
@@ -837,8 +848,13 @@
       const wrapper = (ev) => {
         let m = el;
         if (selector) {
-          m = ev.target instanceof Element ? ev.target.closest(selector) : null;
-          if (!m || !el.contains(m)) return;
+          // The nearest element from the target up to `el` that the selector picks, read from `el`
+          // (so `>strip>label` and `:root>x` work).
+          m = null;
+          for (let n = ev.target instanceof Element ? ev.target : null; n && n !== el; n = n.parentElement) {
+            if (el.nodeType === 1 ? N.matchesIn(n._id, el._id, selector) : n.matches(selector)) { m = n; break; }
+          }
+          if (!m) return;
         }
         if (once) off(el, null, handler);
         return handler.call(el, ev, m);
@@ -870,7 +886,7 @@
   // Element.state: runtime flags. hover/active/focus come from interaction;
   // the others (checked, disabled, readonly, expanded, ...) are stored on the
   // element and matched by the same-named pseudo-classes.
-  const FLAGS = ["checked", "disabled", "readonly", "expanded", "collapsed", "current", "selected", "invalid", "busy"];
+  const FLAGS = ["checked", "disabled", "readonly", "expanded", "collapsed", "current", "selected", "invalid", "busy", "valid", "visited", "focusable", "tabfocus"];
   Object.defineProperty(Element.prototype, "state", {
     get() {
       return new Proxy({}, {
@@ -890,7 +906,12 @@
         return a;
       });
       attrs.getNamedItem = (n) => attrs.find((a) => a.name === String(n).toLowerCase()) || null;
-      return new Proxy(attrs, { get: (t, k) => (k in t || typeof k === "symbol" ? t[k] : t.getNamedItem(k) ?? undefined) });
+      // `attributes[i]` is an `{ name, value }`; `attributes.name` is the attribute's value as a string, as in
+      // Sciter (`label.attributes["for"]`), and assigning to it sets the attribute.
+      return new Proxy(attrs, {
+        get: (t, k) => (k in t || typeof k === "symbol" ? t[k] : this.getAttribute(String(k).toLowerCase()) ?? undefined),
+        set: (t, k, v) => { if (typeof k === "string" && !(k in t)) this.setAttribute(k, v); return true; },
+      });
     },
   });
 

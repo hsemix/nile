@@ -1,0 +1,102 @@
+<html>
+  <head>
+    <style>
+      body {
+        font: 14px sans-serif;
+        margin: 10px;
+      }
+      table {
+        margin-bottom: 14px;
+      }
+      td,
+      th {
+        padding: 4px 8px;
+      }
+      .a {
+        width: 420px;
+      }
+      .b {
+        border-collapse: collapse;
+      }
+      .b td,
+      .b th {
+        border: 1px solid #888;
+      }
+      .b td.thick {
+        border: 4px solid #c33;
+      }
+      thead {
+        background: #dde;
+      }
+      tbody {
+        background: #efe;
+      }
+      tfoot {
+        background: #fed;
+      }
+      caption {
+        background: #ffc;
+        padding: 3px;
+      }
+      .c {
+        caption-side: bottom;
+      }
+    </style>
+  </head>
+  <body>
+    <p>
+      Automatic columns share a 420px table in proportion to their text; the
+      second table has <code>caption-side: bottom</code> and shaded
+      thead/tbody/tfoot; the third collapses borders.
+    </p>
+    <table class="a">
+      <tr>
+        <td>Short</td>
+        <td>
+          A much longer cell that has plenty of words in it so it wants room
+        </td>
+        <td>x</td>
+      </tr>
+      <tr>
+        <td>Another row</td>
+        <td>b</td>
+        <td>yyyyyyyy</td>
+      </tr>
+    </table>
+    <table class="c">
+      <caption>
+        Caption at bottom
+      </caption>
+      <thead>
+        <tr>
+          <th>H1</th>
+          <th>H2</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>1</td>
+          <td>2</td>
+        </tr>
+      </tbody>
+      <tfoot>
+        <tr>
+          <td>f1</td>
+          <td>f2</td>
+        </tr>
+      </tfoot>
+    </table>
+    <table class="b">
+      <tr>
+        <td>one</td>
+        <td class="thick">two</td>
+        <td>three</td>
+      </tr>
+      <tr>
+        <td>four</td>
+        <td>five</td>
+        <td>six</td>
+      </tr>
+    </table>
+  </body>
+</html>

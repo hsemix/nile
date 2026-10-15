@@ -1,0 +1,19 @@
+<html><head><title>prototype:</title>
+<style>
+  body { font: 15px sans-serif; margin: 28px }
+  /* The class comes from the file; every <stepper-box> becomes an instance of it. */
+  stepper-box { prototype: StepperBox url(stepper.js); display: inline-flex; width: 130px; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid #b4b8c0; border-radius: 8px; background: #fff; margin: 6px 12px 6px 0 }
+  stepper-box b { min-width: 28px; text-align: center }
+  stepper-box button { width: 26px; height: 26px; padding: 0 }
+  stepper-box:owns-focus { border-color: #3a7bd5 }
+  stepper-box:focusable { outline: 0 }
+  stepper-box:tab-focus { box-shadow: 0 0 0 3px rgba(58,123,213,.35) }
+  p { color: #555 }
+</style></head>
+<body>
+<h3>CSS-bound script classes</h3>
+<p>Plain elements, no JavaScript on the page: <code>prototype: StepperBox url(stepper.js)</code> in the style sheet gives each one its behaviour. Click the buttons, or focus one (Tab) and use the arrow keys.</p>
+<stepper-box min="0" max="10" value="3"></stepper-box>
+<stepper-box min="-5" max="5" value="0"></stepper-box>
+<stepper-box value="100"></stepper-box>
+</body></html>

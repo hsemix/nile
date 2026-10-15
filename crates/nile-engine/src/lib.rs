@@ -197,6 +197,8 @@ pub struct View {
     pub caret: usize,
     /// Selections scripts set on inputs that don't have focus yet.
     pub pending_sel: std::collections::HashMap<NodeId, (usize, usize)>,
+    /// Value when the focused input got focus (or last had a script assign it), to decide whether `change` fires.
+    pub value_at_focus: Option<String>,
     /// Focus moves made by scripts, so the page can fire `blur`/`focus` for them.
     pub focus_changes: Vec<(Option<NodeId>, Option<NodeId>)>,
     /// Window actions scripts and `role="window-*"` elements asked for; the window loop applies them.
@@ -717,6 +719,14 @@ impl Environment for Env {
         }
     }
 
+    fn value_synced(&self, node: NodeId) {
+        let mut v = self.0.borrow_mut();
+        if v.interaction.focus == Some(node) && v.value_at_focus.is_some() {
+            let now = nile_layout::control_value(&v.doc.borrow(), node);
+            v.value_at_focus = Some(now);
+        }
+    }
+
     fn set_focus(&self, node: Option<NodeId>) {
         let mut v = self.0.borrow_mut();
         if v.interaction.focus != node {
@@ -781,12 +791,16 @@ pub struct Page {
     /// Time, position and count of the last primary click, for double/triple-click.
     pub last_click: Option<(Instant, (f32, f32), u32)>,
     pub clipboard: Box<dyn Clipboard>,
-    /// Value when the focused input got focus, to decide whether `change` fires.
-    pub value_at_focus: Option<String>,
     /// A mouse drag extending the page selection.
     pub page_drag: bool,
     /// A scrollbar thumb being dragged.
     pub bar_drag: Option<BarDrag>,
+    /// The document version `prototype`s were last handed to scripts for.
+    proto_version: Option<u64>,
+    /// The element Tab is about to focus, so `focus_moved` can mark it `:tab-focus`.
+    tab_focus_next: Option<NodeId>,
+    /// The scrollbar under the pointer: its scroller (`None`: the page) and whether it is the vertical one.
+    pub bar_hover: Option<(Option<NodeId>, bool)>,
     /// Undo/redo stacks of the text inputs edited so far.
     pub history: std::collections::HashMap<NodeId, History>,
     /// Blink phase of the caret and when it flips next.
@@ -993,6 +1007,7 @@ impl Page {
             anchor: 0,
             caret: 0,
             pending_sel: std::collections::HashMap::new(),
+            value_at_focus: None,
             interaction,
             page_sel: None,
             edit_sel: None,
@@ -1103,9 +1118,11 @@ impl Page {
             list_cursor: None,
             last_click: None,
             clipboard: Box::new(MemoryClipboard::default()),
-            value_at_focus: None,
             history: std::collections::HashMap::new(),
             bar_drag: None,
+            bar_hover: None,
+            tab_focus_next: None,
+            proto_version: None,
             page_drag: false,
             caret_visible: true,
             blink_at: Instant::now() + CARET_BLINK,
@@ -1203,6 +1220,7 @@ impl Page {
                 std::mem::take(&mut v.scrolled),
             )
         };
+        self.apply_prototypes();
         let moved = !moves.is_empty();
         for (old, new) in moves {
             self.focus_moved(old, new);
@@ -1224,8 +1242,19 @@ impl Page {
         if old.is_some() {
             self.ime_cancel();
         }
+        // `:tab-focus`: the element got the focus from the Tab key.
+        let by_tab = self.tab_focus_next.take();
+        {
+            let mut doc = self.doc.borrow_mut();
+            if let Some(o) = old {
+                doc.set_state(o, "tabfocus", false);
+            }
+            if let Some(n) = new {
+                doc.set_state(n, "tabfocus", by_tab == Some(n));
+            }
+        }
         if let Some(o) = old {
-            let before = self.value_at_focus.take();
+            let before = self.view.borrow_mut().value_at_focus.take();
             self.commit_value(o, before.clone());
             if before.is_some_and(|v| v != self.value_of(o)) {
                 self.emit(o, UiEvent::Plain("change"));
@@ -1245,7 +1274,8 @@ impl Page {
         }
         self.show_caret();
         if let Some(n) = new {
-            self.value_at_focus = self.is_text_input(n).then(|| self.value_of(n));
+            let at_focus = self.is_text_input(n).then(|| self.value_of(n));
+            self.view.borrow_mut().value_at_focus = at_focus;
             self.emit(n, UiEvent::Plain("focus"));
         }
     }
@@ -1314,6 +1344,23 @@ impl Page {
         }
         self.close_menu();
         let target = self.pointer.and_then(|(x, y)| self.hit_test(x, y));
+        // A focused number input under the pointer takes the wheel as steps (up = increase).
+        if dy != 0.0 {
+            if let (Some(focus), Some(t)) = (self.interaction().focus.filter(|f| self.is_number(*f)), target) {
+                let over = {
+                    let doc = self.doc.borrow();
+                    let mut cur = Some(t);
+                    while cur.is_some_and(|c| c != focus) {
+                        cur = doc.node(cur.unwrap()).parent;
+                    }
+                    cur.is_some()
+                };
+                if over {
+                    self.number_step(focus, if dy > 0.0 { 1.0 } else { -1.0 });
+                    return;
+                }
+            }
+        }
         self.scroll_chain(target, dx, dy);
     }
 
@@ -1415,7 +1462,8 @@ impl Page {
         let near = |r: nile_layout::Rect, px: f32, py: f32| px >= r.x - 4.0 && px <= r.x + r.width + 4.0 && py >= r.y - 2.0 && py <= r.y + r.height + 2.0;
         let (scroll, viewport) = (v.scroll_y, v.viewport);
         let content = v.layout().content_height;
-        if let Some(t) = nile_layout::page_thumb(viewport, content, scroll) {
+        let thick = v.styles.page_scrollbar().thickness;
+        if let Some(t) = nile_layout::page_thumb(viewport, content, scroll, thick) {
             if near(t.track, x, y) {
                 return Some((None, t, near(t.rect, x, y)));
             }
@@ -1520,6 +1568,7 @@ impl Page {
                 Some("input" | "button" | "select" | "textarea") => true,
                 _ => {
                     n.attr("tabindex").is_some()
+                        || doc.has_state(id, "focusable")
                         || n.attr("contenteditable").is_some_and(|v| !v.trim().eq_ignore_ascii_case("false"))
                 }
             };
@@ -1574,7 +1623,7 @@ impl Page {
             return false;
         }
         self.doc.borrow_mut().set_attr(id, "value", &next);
-        self.value_at_focus = Some(next);
+        self.view.borrow_mut().value_at_focus = Some(next);
         self.sync();
         self.emit(id, UiEvent::Plain("input"));
         self.emit(id, UiEvent::Plain("change"));
@@ -1623,6 +1672,48 @@ impl Page {
             }
             None => false,
         }
+    }
+
+    /// Files dropped on the window from the desktop: a file input under the pointer (or the one
+    /// a label under it points at) takes them, as if chosen in its dialog (only the first unless
+    /// it is `multiple`); anywhere else the target gets a `drop` event whose `dataTransfer.files`
+    /// holds them. Returns whether the page changed.
+    pub fn drop_files(&mut self, paths: &[String]) -> bool {
+        if paths.is_empty() {
+            return false;
+        }
+        let Some((x, y)) = self.pointer else { return false };
+        let Some(target) = self.hit_test(x, y) else { return false };
+        let input = {
+            let doc = self.doc.borrow();
+            let is_file = |n: NodeId| doc.node(n).tag() == Some("input") && doc.node(n).attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("file"));
+            let mut found = None;
+            let mut cur = Some(target);
+            while let Some(n) = cur {
+                if is_file(n) {
+                    found = Some(n);
+                    break;
+                }
+                if doc.node(n).tag() == Some("label") {
+                    found = match doc.node(n).attr("for") {
+                        Some(id) => doc.find(|c| c.attr("id") == Some(id)),
+                        None => doc.descendants(n).into_iter().find(|d| is_file(*d)),
+                    }
+                    .filter(|c| is_file(*c));
+                    break;
+                }
+                cur = doc.node(n).parent;
+            }
+            found
+        };
+        if let Some(input) = input.filter(|i| !self.is_disabled(*i)) {
+            let multiple = self.doc.borrow().node(input).attr("multiple").is_some();
+            self.choose_files(input, if multiple { paths } else { &paths[..1] });
+            return true;
+        }
+        let list: Vec<String> = paths.iter().map(|p| editing::json_string(p)).collect();
+        let (_, changed) = self.call("__fileDrop", &format!("[{},[{}]]", target.0, list.join(",")));
+        changed
     }
 
     /// Give a file input the files the user picked (an empty list clears it) and fire
@@ -1697,15 +1788,79 @@ impl Page {
         self.doc.borrow_mut().set_attr(id, "value", &text);
         let len = text.chars().count();
         self.set_sel(len, len);
-        self.value_at_focus = Some(text);
+        self.view.borrow_mut().value_at_focus = Some(text);
         self.sync();
         self.emit(id, UiEvent::Plain("input"));
         self.emit(id, UiEvent::Plain("change"));
         true
     }
 
+    /// Whether `id` is a date/time/colour input that isn't disabled or read-only.
+    fn has_picker(&self, id: NodeId) -> bool {
+        !self.is_disabled(id)
+            && self.doc.borrow().node(id).attr("readonly").is_none()
+            && self.doc.borrow().node(id).tag() == Some("input")
+            && matches!(self.input_type(id).as_str(), "date" | "time" | "month" | "week" | "datetime-local" | "color")
+    }
+
+    /// Whether the pointer is over the part of a picker input that opens it: the glyph at the right
+    /// edge (the swatch at the left for colours).
+    fn picker_opener_at_pointer(&self, id: NodeId) -> bool {
+        if !self.has_picker(id) {
+            return false;
+        }
+        let Some((x, y)) = self.pointer else { return false };
+        let rect = {
+            let mut v = self.view.borrow_mut();
+            let offsets = v.scroll_offsets.clone();
+            v.layout().node_rect_scrolled(id, &offsets)
+        };
+        let Some(rect) = rect else { return false };
+        let _ = y;
+        if self.input_type(id) == "color" {
+            x <= rect.x + 30.0
+        } else {
+            x >= rect.x + rect.width - 28.0
+        }
+    }
+
+    /// Hand the elements CSS gave a `prototype: Class url(file.js)` to the script side, which loads the
+    /// class and makes each element an instance of it (`__applyPrototypes` in web.js; already bound ones
+    /// are skipped).
+    fn apply_prototypes(&mut self) {
+        let Some(host) = &self.scripts else { return };
+        let version = self.doc.borrow().version;
+        if self.proto_version == Some(version) {
+            return;
+        }
+        let list = {
+            let v = self.view.borrow();
+            if !v.styles.has_prototypes {
+                return;
+            }
+            v.styles.prototypes(&self.doc.borrow())
+        };
+        self.proto_version = Some(version);
+        if list.is_empty() {
+            return;
+        }
+        let items: Vec<String> = list.iter().map(|(n, class, url)| format!("[{},{},{}]", n.0, editing::json_string(class), editing::json_string(url))).collect();
+        if let Err(e) = host.call("__applyPrototypes", &format!("[[{}]]", items.join(","))) {
+            eprintln!("[prototype] {e}");
+        }
+    }
+
+    /// Ask the page's script (`__pickerOpen` in web.js) to show the picker for an input.
+    fn open_picker(&mut self, id: NodeId) {
+        self.sync();
+        let (result, _) = self.call("__pickerOpen", &format!("[{}]", id.0));
+        if let Err(e) = result {
+            eprintln!("[picker] {e}");
+        }
+    }
+
     /// Which spin arrow is under the pointer: `Some(1.0)` up, `Some(-1.0)` down.
-    fn number_arrow_at_pointer(&mut self, id: NodeId) -> Option<f64> {
+    fn number_arrow_at_pointer(&self, id: NodeId) -> Option<f64> {
         let (x, y) = self.pointer?;
         let (rect, scroll) = {
             let mut v = self.view.borrow_mut();
@@ -1832,6 +1987,9 @@ impl Page {
             return c;
         }
         match self.interaction().hover {
+            // The spin arrows and the picker glyph are buttons, not text.
+            Some(n) if self.is_number(n) && self.number_arrow_at_pointer(n).is_some() => Cursor::Default,
+            Some(n) if self.picker_opener_at_pointer(n) => Cursor::Default,
             Some(n) => self.view.borrow().styles.get(n).cursor,
             None => Cursor::Auto,
         }
@@ -1874,7 +2032,42 @@ impl Page {
             return self.splitter_drag_to(x, y);
         }
         let in_frames = self.frames_pointer_moved(x, y);
-        in_frames | self.pointer_moved_here(x, y)
+        let moved = in_frames | self.pointer_moved_here(x, y);
+        moved | self.update_bar_hover()
+    }
+
+    /// Track which scrollbar the pointer is over, for its hover look. Only looks when the pointer is
+    /// in the page's bar strip or over a scroll container, so ordinary pointer moves stay cheap.
+    fn update_bar_hover(&mut self) -> bool {
+        let now = match self.pointer {
+            Some((x, y)) if self.bar_drag.is_none() && self.near_a_bar(x) => self.scrollbar_at(x, y).map(|(n, t, _)| (n, t.vertical)),
+            Some(_) if self.bar_drag.is_some() => self.bar_hover,
+            _ => None,
+        };
+        let changed = self.bar_hover != now;
+        self.bar_hover = now;
+        changed
+    }
+
+    fn near_a_bar(&self, x: f32) -> bool {
+        if self.bar_hover.is_some() {
+            return true;
+        }
+        let v = self.view.borrow();
+        if x >= v.viewport.0 - v.styles.page_scrollbar().thickness - 12.0 {
+            return true;
+        }
+        // Without a laid-out page (it is rebuilt lazily) there is no bar to be over.
+        let Some((_, _, tree)) = v.layout.as_ref() else { return false };
+        let doc = v.doc.borrow();
+        let mut cur = v.interaction.hover;
+        while let Some(n) = cur {
+            if tree.scroll_box(n).is_some() {
+                return true;
+            }
+            cur = doc.node(n).parent;
+        }
+        false
     }
 
     fn pointer_moved_here(&mut self, x: f32, y: f32) -> bool {
@@ -1927,7 +2120,8 @@ impl Page {
     pub fn pointer_left(&mut self) -> bool {
         self.pointer = None;
         let in_frames = self.frames_pointer_left();
-        in_frames | self.refresh_hover()
+        let left_bar = self.bar_hover.take().is_some();
+        in_frames | self.refresh_hover() | left_bar
     }
 
     /// Count consecutive clicks close in time and place (1, 2, 3).
@@ -2341,7 +2535,7 @@ impl Page {
                 Some("a") => n.attr("href").is_some(),
                 Some("input") => n.attr("type").is_none_or(|t| !t.eq_ignore_ascii_case("hidden")),
                 Some("button" | "select" | "textarea") => true,
-                _ => false,
+                _ => doc.has_state(id, "focusable"),
             };
             let tabindex = n.attr("tabindex").and_then(|t| t.trim().parse::<i32>().ok());
             if tabindex.is_some_and(|t| t < 0) || !(natural || tabindex.is_some()) {
@@ -2373,6 +2567,7 @@ impl Page {
             (Some(i), false) => (i + order.len() - 1) % order.len(),
         };
         let state = InteractionState { focus: Some(order[next]), ..self.interaction() };
+        self.tab_focus_next = Some(order[next]);
         let changed = self.set_interaction(state);
         // Tabbing into a text input selects its contents, as browsers do.
         if self.is_text_input(order[next]) {
@@ -2873,6 +3068,29 @@ impl Page {
             self.emit(details, UiEvent::Plain("toggle"));
             return true;
         }
+        // Following a link marks it visited (`:visited`; there is no history, so only for this page's life).
+        let link = {
+            let doc = self.doc.borrow();
+            let mut cur = Some(target);
+            let mut found = None;
+            while let Some(n) = cur {
+                if doc.node(n).tag() == Some("a") && doc.node(n).attr("href").is_some() {
+                    found = Some(n);
+                    break;
+                }
+                cur = doc.node(n).parent;
+            }
+            found
+        };
+        if let Some(a) = link {
+            self.doc.borrow_mut().set_state(a, "visited", true);
+            self.sync();
+        }
+        // The glyph of a date, time or colour input opens its picker.
+        if self.picker_opener_at_pointer(target) {
+            self.open_picker(target);
+            return true;
+        }
         // Elements acting as window buttons.
         let role = window::role_at(&self.doc.borrow(), target).map(|r| r.1);
         let cmd = match role {
@@ -3114,6 +3332,10 @@ impl Page {
                     None => len,
                 });
             }
+            "ArrowDown" if mods.alt_key() && self.has_picker(focus) => {
+                self.open_picker(focus);
+                return true;
+            }
             "ArrowUp" | "ArrowDown" if !multiline && self.is_number(focus) => {
                 return self.number_step(focus, if key == "ArrowUp" { 1.0 } else { -1.0 });
             }
@@ -3122,11 +3344,13 @@ impl Page {
             }
             "Enter" if multiline && !readonly => edit = Some((lo, hi, "\n".into())),
             "Enter" => {
-                let before = self.value_at_focus.clone();
+                let before = self.view.borrow().value_at_focus.clone();
                 self.commit_value(focus, before);
                 // Commit: fire `change` if the value moved since focus.
-                if self.value_at_focus.as_ref().is_some_and(|v| *v != self.value_of(focus)) {
-                    self.value_at_focus = Some(self.value_of(focus));
+                let moved = self.view.borrow().value_at_focus.as_ref().is_some_and(|v| *v != self.value_of(focus));
+                if moved {
+                    let now = self.value_of(focus);
+                    self.view.borrow_mut().value_at_focus = Some(now);
                     return self.emit(focus, UiEvent::Plain("change")).1 | true;
                 }
                 return false;
@@ -3498,6 +3722,11 @@ impl Page {
         let selection = self.selection_for_paint();
         let dom_caret = self.dom_caret_for_paint();
         let ime_underline = self.ime_underline();
+        let bar = match (&self.bar_drag, self.bar_hover) {
+            (Some(d), _) => Some((d.node, d.thumb.vertical, true)),
+            (None, Some((n, v))) => Some((n, v, false)),
+            _ => None,
+        };
         let selected_image = if portal.is_none() { self.selected_image_rect().map(|r| nile_layout::Rect { x: r.x, y: r.y, width: r.width, height: r.height }) } else { None };
         {
         let mut view = self.view.borrow_mut();
@@ -3530,7 +3759,7 @@ impl Page {
                 canvas,
                 tree,
                 &view.styles,
-                &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection, dom_caret, preedit: ime_underline, only, skip: &skip, selected_image },
+                &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection, dom_caret, preedit: ime_underline, only, skip: &skip, selected_image, bar },
             )
         });
         canvas.restore();
@@ -3666,6 +3895,63 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(js(&mut p, "window.log.join('|')"), "file:world:11|proc:hi:0|tcp:ping|udp:dgram|os:string:true:8:bigint:true|env:1");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_sys_module_has_named_pipes_ttys_and_fs_watch() {
+        let dir = std::env::temp_dir().join(format!("nile-sys3-{}", std::process::id())).to_string_lossy().replace('\\', "/");
+        let (mut p, path) = page(
+            &format!(r#"<body><script type="module">
+              import * as sys from "@sys";
+              const log = []; window.log = log; window.done = 0;
+              const dec = new TextDecoder();
+              const dir = "{dir}";
+              sys.fs.mkdirSync(dir);
+              (async () => {{
+                // A named pipe: the server echoes in upper case.
+                const server = new sys.Pipe();
+                server.bind(dir + "/echo.sock");
+                server.listen();
+                const serving = server.accept().then(async (conn) => {{ const d = await conn.read(); await conn.write(dec.decode(d).toUpperCase()); conn.close(); }});
+                const client = new sys.Pipe();
+                await client.connect(dir + "/echo.sock");
+                await client.write("ping");
+                log.push("pipe:" + dec.decode(await client.read()) + ":" + client.getpeername().endsWith("echo.sock"));
+                await serving;
+                client.close(); server.close();
+                // The terminal calls answer even without a terminal; only 0, 1 and 2 are terminals.
+                const size = new sys.TTY(1).getWinSize();
+                let bad = "none";
+                try {{ new sys.TTY(7); }} catch (e) {{ bad = e.code; }}
+                log.push("tty:" + (size.width > 0 && size.height > 0) + ":" + bad);
+                // fs.watch sees a new file and then a change to it.
+                const seen = [];
+                const watch = sys.fs.watch(dir, (path, events) => seen.push(path.split("/").pop() + ":" + events));
+                let missing = "none";
+                try {{ sys.fs.watch(dir + "/nope", () => {{}}); }} catch (e) {{ missing = e.code; }}
+                await new Promise((r) => setTimeout(r, 400));
+                sys.fs.writeFileSync(dir + "/new.txt", "one");
+                await new Promise((r) => setTimeout(r, 700));
+                sys.fs.writeFileSync(dir + "/new.txt", "one two three");
+                await new Promise((r) => setTimeout(r, 700));
+                watch.close();
+                log.push("watch:" + seen.filter((s) => s.startsWith("new.txt")).join(",") + ":" + missing + ":" + (watch.path === dir));
+                window.done = 1;
+              }})().catch((e) => {{ log.push("error:" + e.message); window.done = 1; }});
+            </script></body>"#),
+            "sys3",
+        );
+        for _ in 0..800 {
+            p.tick();
+            if js(&mut p, "window.done") == "1" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let log = js(&mut p, "window.log.join('|')");
+        assert!(log.starts_with("pipe:PING:true|tty:true:EBADF|watch:new.txt:1,new.txt:2:ENOENT"), "{log}");
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_file(path);
     }
@@ -3808,6 +4094,196 @@ mod tests {
             js(&mut p, "window.log.join('|')"),
             "12:text/plain:héllo world:world|a.txt:4:true:data|a=1&b=on&s=y&t=hi|2,3:true:a.txt|multipart/form-data:2,3:y:a.txt:data|AB CD:false:one two:true".replace("AB CD", "ABCD") + "|3,3|1+2"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn dropped_files_go_to_a_file_input_or_a_drop_event() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><input id="f" type="file" style="margin:0;width:200px;height:30px"><input id="m" type="file" multiple style="margin:0;width:200px;height:30px"><div id="z" style="height:60px"></div>
+               <script>window.log = [];
+                 for (const id of ["f", "m"]) document.getElementById(id).addEventListener("change", () => log.push(id + ":" + [...document.getElementById(id).files].map((f) => f.name).join("+")));
+                 document.getElementById("z").addEventListener("drop", (e) => log.push("drop:" + e.dataTransfer.files.length + ":" + e.dataTransfer.files[0].name));</script></body>"#,
+            "drop",
+        );
+        let files = vec!["/tmp/a.txt".to_string(), "/tmp/b.txt".to_string()];
+        let over = |p: &mut Page, id: &str| {
+            let node = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+            let r = p.view.borrow_mut().layout().node_rect(node).unwrap();
+            p.pointer_moved(r.x + 5.0, r.y + 5.0);
+        };
+        over(&mut p, "f");
+        assert!(p.drop_files(&files));
+        over(&mut p, "m");
+        p.drop_files(&files);
+        over(&mut p, "z");
+        p.drop_files(&files);
+        assert_eq!(js(&mut p, "log.join('|')"), "f:a.txt|m:a.txt+b.txt|drop:2:a.txt");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn date_time_and_colour_inputs_open_pickers_that_set_the_value() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><input id="d" type="date" value="2026-10-15" style="margin:0;width:200px"><br>
+               <input id="t" type="time" value="09:30" style="margin:0;width:200px"><br>
+               <input id="c" type="color" value="#102030" style="margin:0"><br>
+               <input id="w" type="week" value="2026-W42" style="margin:0;width:200px"><br>
+               <input id="m" type="month" value="2026-10" style="margin:0;width:200px">
+               <script>window.log = [];
+                 for (const id of ["d", "t", "c", "w", "m"]) document.getElementById(id).addEventListener("change", (e) => log.push(id + "=" + e.target.value));
+               </script></body>"##,
+            "pickers",
+        );
+        let at = |p: &mut Page, id: &str| {
+            let node = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+            p.view.borrow_mut().layout().node_rect(node).unwrap()
+        };
+        let open = |p: &mut Page, id: &str, left: bool| {
+            let r = at(p, id);
+            p.pointer_moved(if left { r.x + 10.0 } else { r.x + r.width - 10.0 }, r.y + r.height / 2.0);
+            p.press();
+            p.release();
+        };
+        let count = |p: &mut Page| js(p, "document.querySelectorAll('.nile-picker').length");
+        // A click in the middle of a date field edits it; the glyph opens the calendar.
+        let r = at(&mut p, "d");
+        p.pointer_moved(r.x + 20.0, r.y + 8.0);
+        p.press();
+        p.release();
+        assert_eq!(count(&mut p), "0");
+        assert_eq!(p.cursor(), nile_style::Cursor::Text, "the text of the field");
+        p.pointer_moved(r.x + r.width - 10.0, r.y + 8.0);
+        assert_eq!(p.cursor(), nile_style::Cursor::Default, "the glyph is a button");
+        open(&mut p, "d", false);
+        assert_eq!(count(&mut p), "1");
+        js(&mut p, "[...document.querySelectorAll('.np-day:not(.np-out)')].find((b) => b.textContent === '20').click()");
+        assert_eq!(js(&mut p, "document.getElementById('d').value"), "2026-10-20");
+        assert_eq!(count(&mut p), "0", "choosing a day closes the picker");
+        open(&mut p, "t", false);
+        js(&mut p, "document.querySelectorAll('.np-col')[0].children[14].click()");
+        js(&mut p, "document.querySelectorAll('.np-col')[1].children[5].click()");
+        assert_eq!(js(&mut p, "document.getElementById('t').value"), "14:05");
+        open(&mut p, "c", true);
+        assert_eq!(count(&mut p), "1");
+        js(&mut p, "document.querySelector('.np-swatch').click()");
+        assert_eq!(js(&mut p, "document.getElementById('c').value"), "#000000");
+        js(&mut p, "const f = document.querySelector('.np-hex'); f.value = '#336699'; f.dispatchEvent(new Event('change', { bubbles: true }))");
+        assert_eq!(js(&mut p, "document.getElementById('c').value"), "#336699");
+        // Escape closes a picker (this one covers the fields below it); then the week and month pickers.
+        press_key(&mut p, "Escape", ModifiersState::default());
+        assert_eq!(count(&mut p), "0");
+        open(&mut p, "w", false);
+        assert_eq!(js(&mut p, "[...document.querySelectorAll('.nile-picker')].map((x) => x.getAttribute('aria-label')).join()"), "Choose week");
+        js(&mut p, "[...document.querySelectorAll('.np-day:not(.np-out)')].find((b) => b.textContent === '1').click()");
+        assert_eq!(js(&mut p, "document.getElementById('w').value"), "2026-W40");
+        open(&mut p, "m", false);
+        js(&mut p, "[...document.querySelectorAll('.np-cell')].find((b) => b.textContent === 'Mar').click()");
+        assert_eq!(js(&mut p, "document.getElementById('m').value"), "2026-03");
+        assert!(js(&mut p, "log.join(',')").starts_with("d=2026-10-20,t=14:05"), "{}", js(&mut p, "log.join(',')"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn followed_links_match_visited_and_stop_matching_link() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><a id="l" href="#x" style="display:block;height:20px">link</a><a id="n">plain</a></body>"##,
+            "visited",
+        );
+        let q = |p: &mut Page, sel: &str| js(p, &format!("document.getElementById('l').matches('{sel}')"));
+        assert_eq!((q(&mut p, ":link"), q(&mut p, ":any-link"), q(&mut p, ":visited")), ("true".into(), "true".into(), "false".into()));
+        assert_eq!(js(&mut p, "document.getElementById('n').matches(':any-link')"), "false");
+        click(&mut p, "l");
+        assert_eq!((q(&mut p, ":link"), q(&mut p, ":any-link"), q(&mut p, ":visited")), ("false".into(), "true".into(), "true".into()));
+        // Scripts can set the flag too, as in Sciter.
+        js(&mut p, "document.getElementById('l').state.visited = false");
+        assert_eq!(q(&mut p, ":link"), "true");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn css_prototype_makes_elements_instances_of_a_script_class() {
+        let module = std::env::temp_dir().join(format!("nile-proto-{}.js", std::process::id()));
+        std::fs::write(
+            &module,
+            r#"export class Tabs extends Element {
+                 clicks = 0;
+                 componentDidMount() { window.log.push("mount:" + this.localName + ":" + this.clicks); this.state.focusable = true; }
+                 componentWillUnmount() { window.log.push("unmount"); }
+                 get current() { const l = this.$(">strip>label:current"); return l ? l.attributes["for"] : "none"; }
+                 ["on click at >strip>label"](event, label) { this.clicks++; this.$$(">strip>label").forEach((l) => l.state.current = l === label); window.log.push("click:" + label.textContent + ":" + this.current); return true; }
+                 ["on ^keydown"](event) { window.log.push("key:" + event.key); }
+               }"#,
+        )
+        .unwrap();
+        let file = module.file_name().unwrap().to_string_lossy().into_owned();
+        let (mut p, path) = page(
+            &format!(
+                r#"<head><style>tabs {{ prototype: Tabs url({file}) }} label:current {{ color: red }}</style></head>
+                   <body><script>window.log = [];</script>
+                   <tabs id="t"><strip><label for="a">A</label><label for="b">B</label></strip><panels><div id="p"><label>inner</label></div></panels></tabs></body>"#
+            ),
+            "proto",
+        );
+        for _ in 0..50 {
+            p.tick();
+            if js(&mut p, "window.log.length") != "0" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(js(&mut p, "window.log.join('|')"), "mount:tabs:0");
+        assert_eq!(js(&mut p, "document.getElementById('t') instanceof Element && typeof document.getElementById('t').current"), "string");
+        // The method-name handler: relative selector, `this` is the element, `true` stops the event.
+        js(&mut p, "document.querySelectorAll('#t > strip > label')[1].click()");
+        js(&mut p, "document.querySelector('#p label').click()"); // not a child of the strip: no handler
+        assert_eq!(js(&mut p, "window.log.slice(1).join('|')"), "click:B:b");
+        assert_eq!(js(&mut p, "document.getElementById('t').clicks"), "1");
+        assert_eq!(js(&mut p, "document.getElementById('t').matches(':focusable')"), "true");
+        // `:root` in a query started from an element is that element.
+        assert_eq!(js(&mut p, "document.getElementById('t').$(':root > strip') !== null"), "true");
+        js(&mut p, "document.getElementById('t').remove()");
+        assert_eq!(js(&mut p, "window.log[window.log.length - 1]"), "unmount");
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(module);
+    }
+
+    #[test]
+    fn form_controls_validate_and_match_valid_and_invalid() {
+        let (mut p, path) = page(
+            r##"<body><form id="f"><input id="a" required><input id="n" type="number" min="1" max="5" step="2" value="4"><input id="e" type="email" value="x@y.z"><input id="t" pattern="[a-z]+" value="abc" maxlength="5"><input id="c" type="checkbox" required><input id="d" disabled required></form><script>
+              window.log = [];
+              const $ = (s) => document.querySelector(s);
+              const v = (id) => { const x = $(id).validity; return Object.keys(x).filter((k) => x[k] === true && k !== "valid").join("+") || "ok"; };
+              document.addEventListener("DOMContentLoaded", () => {
+                log.push(v("#a"), v("#n"), v("#e"), v("#t"), v("#c"), v("#d"), $("#d").willValidate);
+              });
+              window.later = () => {
+                $("#a").value = "x"; $("#n").value = "3"; $("#e").value = "nope"; $("#t").value = "ABCDEFG"; $("#c").checked = true;
+                return new Promise((r) => setTimeout(r, 30)).then(() => {
+                  log.push(v("#a"), v("#n"), v("#e"), v("#t"), v("#c"), $("#f").checkValidity(), $("#e").validationMessage !== "");
+                  $("#e").setCustomValidity("custom"); log.push($("#e").validationMessage);
+                  window.done = 1;
+                });
+              };
+            </script></body>"##,
+            "validity",
+        );
+        let doc_invalid = |p: &mut Page, id: &str, flag: &str| js(p, &format!("document.querySelector('#{id}').matches(':{flag}')"));
+        assert_eq!(js(&mut p, "log.join('|')"), "valueMissing|stepMismatch|ok|ok|valueMissing|ok|false");
+        assert_eq!(doc_invalid(&mut p, "a", "invalid"), "true");
+        assert_eq!(doc_invalid(&mut p, "e", "valid"), "true");
+        assert_eq!(doc_invalid(&mut p, "d", "invalid"), "false");
+        js(&mut p, "later()");
+        for _ in 0..100 {
+            p.tick();
+            if js(&mut p, "window.done") == "1" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(js(&mut p, "log.slice(7).join('|')"), "ok|ok|typeMismatch|patternMismatch+tooLong|ok|false|true|custom");
+        assert_eq!(doc_invalid(&mut p, "e", "invalid"), "true");
         let _ = std::fs::remove_file(path);
     }
 
@@ -4536,6 +5012,48 @@ cd</textarea>
         p.release();
         let after = p.view.borrow().scroll_y;
         assert!(after > before + 300.0, "{after}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scrollbars_follow_scrollbar_width_colors_and_the_pointer() {
+        let (mut p, path) = page(
+            r##"<head><style>
+                 #thin { scrollbar-width: thin }
+                 #none { scrollbar-width: none }
+                 #wk::-webkit-scrollbar { width: 14px }
+                 #wk::-webkit-scrollbar-thumb { background: #ff0000; border-radius: 2px }
+                 #col { scrollbar-color: #00ff00 #0000ff }
+               </style></head>
+               <body style="margin:0"><div id="a" style="width:100px;height:80px;overflow:auto"><div style="height:400px">in</div></div>
+               <div id="thin" style="width:100px;height:80px;overflow:auto"><div style="height:400px">in</div></div>
+               <div id="none" style="width:100px;height:80px;overflow:auto"><div style="height:400px">in</div></div>
+               <div id="wk" style="width:100px;height:80px;overflow:auto"><div style="height:400px">in</div></div>
+               <div id="col" style="width:100px;height:80px;overflow:auto"><div style="height:400px">in</div></div></body>"##,
+            "barlook",
+        );
+        let thick = |p: &mut Page, id: &str| {
+            let node = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
+            let v = p.view.borrow_mut();
+            let look = v.styles.scrollbar_look(node);
+            (look.thickness, look.thumb.map(|c| (c.r, c.g, c.b)), look.track.map(|c| (c.r, c.g, c.b)), look.thumb_radius)
+        };
+        assert_eq!(thick(&mut p, "a"), (6.0, None, None, None));
+        assert_eq!(thick(&mut p, "thin").0, 4.0);
+        assert_eq!(thick(&mut p, "none").0, 0.0);
+        assert_eq!(thick(&mut p, "wk"), (14.0, Some((255, 0, 0)), None, Some(2.0)));
+        assert_eq!(thick(&mut p, "col"), (6.0, Some((0, 255, 0)), Some((0, 0, 255)), None));
+        // A `none` bar has nothing to grab, but the wheel still scrolls.
+        let node = p.doc.borrow().find(|n| n.attr("id") == Some("none")).unwrap();
+        let sb = p.view.borrow_mut().layout().scroll_box(node).copied().unwrap();
+        assert!(sb.thumbs(0.0, 0.0).is_empty() && sb.wheel_y);
+        // The pointer over a bar marks it hovered; leaving clears it.
+        p.pointer_moved(95.0, 20.0);
+        assert!(p.bar_hover.is_some_and(|(n, v)| n.is_some() && v));
+        p.pointer_moved(30.0, 20.0);
+        assert_eq!(p.bar_hover, None);
+        p.pointer_moved(95.0, 20.0);
+        assert!(p.pointer_left() && p.bar_hover.is_none());
         let _ = std::fs::remove_file(path);
     }
 
@@ -5357,6 +5875,18 @@ cd</textarea>
         p.press();
         p.release();
         assert_eq!(val(&mut p, "d"), "0.3");
+        // Over the spin arrows the pointer is an arrow, over the text an I-beam.
+        p.pointer_moved(r.x + r.width - 8.0, r.y + 3.0);
+        assert_eq!(p.cursor(), nile_style::Cursor::Default);
+        p.pointer_moved(r.x + 10.0, r.y + 5.0);
+        assert_eq!(p.cursor(), nile_style::Cursor::Text);
+        // The wheel over the focused input steps it (up increases) instead of scrolling the page.
+        p.pointer_moved(r.x + 10.0, r.y + 5.0);
+        p.wheel(0.0, 10.0);
+        assert_eq!(val(&mut p, "d"), "0.4");
+        p.wheel(0.0, -10.0);
+        p.wheel(0.0, -10.0);
+        assert_eq!(val(&mut p, "d"), "0.2");
         let _ = std::fs::remove_file(path);
     }
 
