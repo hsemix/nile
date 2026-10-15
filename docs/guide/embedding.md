@@ -52,7 +52,7 @@ toggles maximization, the buttons request native actions, and the edge margin
 allows resizing. Style the elements yourself. See [window.html](../../examples/window.html).
 
 `window-frame` accepts system frames (`default`/`standard`), `extended` (macOS
-content under the title bar), `solid`/`solid-with-shadow`, and `transparent`.
+content under the title bar), `solid` (no frame, no shadow), `solid-with-shadow` (no frame, the system's drop shadow on macOS and Windows) and `transparent`.
 
 ### Transparent and frosted windows
 

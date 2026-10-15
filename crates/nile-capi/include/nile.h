@@ -186,7 +186,7 @@ typedef struct NileWindowConfig {
   float y;
   /**
    * 0 system frame, 1 extended (content under the title bar), 2 solid (no frame),
-   * 3 transparent (no frame, see-through where the page has no background).
+   * 3 transparent (no frame, see-through where the page has no background), 4 solid with a shadow.
    */
   int32_t frame;
   /**

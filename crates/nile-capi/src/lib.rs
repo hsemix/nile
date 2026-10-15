@@ -137,7 +137,7 @@ pub struct NileWindowConfig {
     pub x: f32,
     pub y: f32,
     /// 0 system frame, 1 extended (content under the title bar), 2 solid (no frame),
-    /// 3 transparent (no frame, see-through where the page has no background).
+    /// 3 transparent (no frame, see-through where the page has no background), 4 solid with a shadow.
     pub frame: i32,
     /// The system draws no frame, so you should honour [`nile_view_caption_press`] and resize edges.
     pub frameless: bool,
@@ -669,6 +669,7 @@ pub unsafe extern "C" fn nile_view_window_config(view: *mut NileView, desktop_wi
                 Frame::Extended => 1,
                 Frame::Solid => 2,
                 Frame::Transparent => 3,
+                Frame::SolidShadow => 4,
             },
             frameless: c.frameless(),
         };
