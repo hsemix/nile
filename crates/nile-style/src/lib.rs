@@ -506,6 +506,9 @@ pub struct ComputedStyle {
     pub table_fixed: bool,
     /// `vertical-align` for table cells.
     pub vertical_align: VerticalAlign,
+    /// `width: fit-content | max-content | min-content` (the box shrinks to its content, up to the
+    /// space available; `min-content` is treated like `max-content`).
+    pub width_fit: bool,
     /// `cursor`; inherited.
     pub cursor: Cursor,
     /// `color-scheme`; inherited. Only the root's counts for the user-agent sheet.
@@ -653,6 +656,7 @@ impl Default for ComputedStyle {
             table_fixed: false,
             vertical_align: VerticalAlign::Baseline,
             cursor: Cursor::Auto,
+            width_fit: false,
             color_scheme: ColorScheme::Light,
             accent_color: None,
             popup_position: None,
@@ -1030,7 +1034,7 @@ a { color: #0000ee }
 a:visited { color: #551a8b }
 a[href] { cursor: pointer }
 input, textarea { cursor: text }
-button, select, input[type=checkbox], input[type=radio], input[type=button], input[type=submit] { cursor: default }
+button, select, input[type=checkbox], input[type=radio], input[type=button], input[type=submit], input[type=reset], input[type=range], input[type=file], progress, meter { cursor: default }
 :disabled { cursor: not-allowed }
 button { text-align: center }
 button, input { display: inline-block; font-size: 13px; color: #000000; padding: 3px 8px;
@@ -1059,8 +1063,8 @@ input[type=button], input[type=submit], input[type=reset] { width: auto; backgro
 "#;
 
 /// The look of the platform's own controls, layered over the neutral base sheet (later rules win at
-/// equal specificity, so each repeats the base selectors it changes). There are no `:hover`/`:active`
-/// rules here on purpose: they would make every page restyle on pointer moves (see `StateDeps`).
+/// equal specificity, so each repeats the base selectors it changes). The `:hover`/`:active`/`:focus-visible`
+/// rules mean every page restyles on pointer moves, which the partial restyle keeps cheap (see `StateDeps`).
 const THEME_WINDOWS: &str = r#"
 html { font-family: "Segoe UI", sans-serif }
 button, input, textarea, select { font-family: "Segoe UI", sans-serif }
@@ -1075,6 +1079,11 @@ input[type=radio] { border-radius: 9px }
 input[type=checkbox]:checked, input[type=radio]:checked { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
 input[type=file] { background: #fdfdfd }
 input[type=button], input[type=submit], input[type=reset] { background: #fdfdfd; border-color: #d1d1d1; border-bottom-color: #b8b8b8 }
+button:hover:not(:disabled), select:hover:not(:disabled), input[type=button]:hover:not(:disabled), input[type=submit]:hover:not(:disabled), input[type=reset]:hover:not(:disabled), input[type=file]:hover:not(:disabled) { background: #f6f6f6; border-color: #d1d1d1; border-bottom-color: #b8b8b8 }
+button:active:not(:disabled), select:active:not(:disabled), input[type=button]:active:not(:disabled), input[type=submit]:active:not(:disabled), input[type=reset]:active:not(:disabled), input[type=file]:active:not(:disabled) { background: #f0f0f0; color: #5d5d5d }
+input:hover:not(:disabled):not(:focus):not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]):not([type=reset]):not([type=range]):not([type=file]), textarea:hover:not(:disabled):not(:focus) { background: #f9f9f9 }
+input[type=checkbox]:hover:not(:checked):not(:disabled), input[type=radio]:hover:not(:checked):not(:disabled) { border-color: #3d3d3d }
+button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, input[type=button]:focus-visible, input[type=submit]:focus-visible, input[type=file]:focus-visible { box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px #1a1a1a }
 "#;
 
 const THEME_MACOS: &str = r#"
@@ -1089,6 +1098,10 @@ input[type=radio] { border-radius: 7px }
 input[type=checkbox]:checked, input[type=radio]:checked { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
 input[type=file] { background: #ffffff }
 input[type=button], input[type=submit], input[type=reset] { background: #ffffff }
+button:hover:not(:disabled), select:hover:not(:disabled), input[type=button]:hover:not(:disabled), input[type=submit]:hover:not(:disabled), input[type=reset]:hover:not(:disabled), input[type=file]:hover:not(:disabled) { background: #f7f7f7 }
+button:active:not(:disabled), select:active:not(:disabled), input[type=button]:active:not(:disabled), input[type=submit]:active:not(:disabled), input[type=reset]:active:not(:disabled), input[type=file]:active:not(:disabled) { background: #e6e6e6 }
+input[type=checkbox]:hover:not(:checked):not(:disabled), input[type=radio]:hover:not(:checked):not(:disabled) { border-color: #8e8e8e }
+button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, input[type=button]:focus-visible, input[type=submit]:focus-visible, input[type=file]:focus-visible { box-shadow: 0 0 0 3px @ACCENT_A@ }
 "#;
 
 const THEME_LINUX: &str = r#"
@@ -1103,6 +1116,10 @@ input[type=radio] { border-radius: 8px }
 input[type=checkbox]:checked, input[type=radio]:checked { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
 input[type=file] { background: #f6f5f4 }
 input[type=button], input[type=submit], input[type=reset] { background: #f6f5f4 }
+button:hover:not(:disabled), select:hover:not(:disabled), input[type=button]:hover:not(:disabled), input[type=submit]:hover:not(:disabled), input[type=reset]:hover:not(:disabled), input[type=file]:hover:not(:disabled) { background: #fafaf9; border-color: #c4beb8 }
+button:active:not(:disabled), select:active:not(:disabled), input[type=button]:active:not(:disabled), input[type=submit]:active:not(:disabled), input[type=reset]:active:not(:disabled), input[type=file]:active:not(:disabled) { background: #e4e0dc }
+input[type=checkbox]:hover:not(:checked):not(:disabled), input[type=radio]:hover:not(:checked):not(:disabled) { border-color: #8e8984 }
+button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, input[type=button]:focus-visible, input[type=submit]:focus-visible, input[type=file]:focus-visible { box-shadow: 0 0 0 2px @ACCENT@ }
 "#;
 
 /// Applied over the light sheets when the system is dark and the page says it supports it
@@ -1140,6 +1157,11 @@ button:disabled, input:disabled, textarea:disabled, select:disabled { color: #7a
 input[type=checkbox], input[type=radio] { background: #2d2d2d; border-color: #9a9a9a }
 input[type=checkbox]:checked, input[type=radio]:checked { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
 input[type=file], input[type=button], input[type=submit], input[type=reset] { background: #2d2d2d; border-color: #3a3a3a; border-bottom-color: #4d4d4d }
+button:hover:not(:disabled), select:hover:not(:disabled), input[type=button]:hover:not(:disabled), input[type=submit]:hover:not(:disabled), input[type=reset]:hover:not(:disabled), input[type=file]:hover:not(:disabled) { background: #323232; border-color: #3a3a3a; border-bottom-color: #4d4d4d }
+button:active:not(:disabled), select:active:not(:disabled), input[type=button]:active:not(:disabled), input[type=submit]:active:not(:disabled), input[type=reset]:active:not(:disabled), input[type=file]:active:not(:disabled) { background: #272727; color: #cfcfcf }
+input:hover:not(:disabled):not(:focus):not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]):not([type=reset]):not([type=range]):not([type=file]), textarea:hover:not(:disabled):not(:focus) { background: #323232 }
+input[type=checkbox]:hover:not(:checked):not(:disabled), input[type=radio]:hover:not(:checked):not(:disabled) { border-color: #ffffff }
+button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, input[type=button]:focus-visible, input[type=submit]:focus-visible, input[type=file]:focus-visible { box-shadow: 0 0 0 2px #202020, 0 0 0 4px #ffffff }
 "#;
 
 const DARK_MACOS: &str = r#"
@@ -1151,6 +1173,10 @@ button:disabled, input:disabled, textarea:disabled, select:disabled { color: #77
 input[type=checkbox], input[type=radio] { background: #1e1e1e; border-color: #6a6a6a }
 input[type=checkbox]:checked, input[type=radio]:checked { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
 input[type=file], input[type=button], input[type=submit], input[type=reset] { background: #636366 }
+button:hover:not(:disabled), select:hover:not(:disabled), input[type=button]:hover:not(:disabled), input[type=submit]:hover:not(:disabled), input[type=reset]:hover:not(:disabled), input[type=file]:hover:not(:disabled) { background: #6c6c70 }
+button:active:not(:disabled), select:active:not(:disabled), input[type=button]:active:not(:disabled), input[type=submit]:active:not(:disabled), input[type=reset]:active:not(:disabled), input[type=file]:active:not(:disabled) { background: #58585b }
+input[type=checkbox]:hover:not(:checked):not(:disabled), input[type=radio]:hover:not(:checked):not(:disabled) { border-color: #9a9a9a }
+button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, input[type=button]:focus-visible, input[type=submit]:focus-visible, input[type=file]:focus-visible { box-shadow: 0 0 0 3px @ACCENT_A@ }
 "#;
 
 const DARK_LINUX: &str = r#"
@@ -1162,6 +1188,10 @@ button:disabled, input:disabled, textarea:disabled, select:disabled { color: #8a
 input[type=checkbox], input[type=radio] { background: #2b2b2b; border-color: #5a5a5a }
 input[type=checkbox]:checked, input[type=radio]:checked { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
 input[type=file], input[type=button], input[type=submit], input[type=reset] { background: #3d3d3d }
+button:hover:not(:disabled), select:hover:not(:disabled), input[type=button]:hover:not(:disabled), input[type=submit]:hover:not(:disabled), input[type=reset]:hover:not(:disabled), input[type=file]:hover:not(:disabled) { background: #454545 }
+button:active:not(:disabled), select:active:not(:disabled), input[type=button]:active:not(:disabled), input[type=submit]:active:not(:disabled), input[type=reset]:active:not(:disabled), input[type=file]:active:not(:disabled) { background: #333333 }
+input[type=checkbox]:hover:not(:checked):not(:disabled), input[type=radio]:hover:not(:checked):not(:disabled) { border-color: #8a8a8a }
+button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, input[type=button]:focus-visible, input[type=submit]:focus-visible, input[type=file]:focus-visible { box-shadow: 0 0 0 2px @ACCENT@ }
 "#;
 
 /// Which platform's look is in use: the running platform's, or `NILE_THEME=windows|macos|linux`.
@@ -2275,7 +2305,15 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 _ => return,
             }
         }
-        "width" => s.width = l(first).unwrap_or(s.width),
+        "width" => {
+            if matches!(first.and_then(Value::ident), Some("fit-content" | "max-content" | "min-content")) {
+                s.width_fit = true;
+                s.width = Length::Auto;
+            } else if let Some(v) = l(first) {
+                s.width = v;
+                s.width_fit = false;
+            }
+        }
         "height" => s.height = l(first).unwrap_or(s.height),
         "min-width" => s.min_width = l(first).unwrap_or(s.min_width),
         "min-height" => s.min_height = l(first).unwrap_or(s.min_height),
@@ -3439,8 +3477,8 @@ mod tests {
     #[test]
     fn state_deps_find_the_pseudo_classes_rules_mention() {
         let deps = |css: &str| compute_styles(&Document::parse(&format!("<style>{css}</style><p>x</p>"))).state_deps;
-        // The UA sheet already mentions :focus (input borders).
-        assert_eq!(deps("p { color: red }"), StateDeps { hover: false, active: false, focus: true, sibling: false });
+        // The UA sheet mentions :hover, :active and :focus (the controls' states), so every page has them.
+        assert_eq!(deps("p { color: red }"), StateDeps { hover: true, active: true, focus: true, sibling: false });
         assert!(deps("a:hover { color: red }").hover);
         assert!(deps(".x:not(:hover) b { color: red }").hover);
         assert!(deps("button:active { color: red }").active);

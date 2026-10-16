@@ -5555,6 +5555,23 @@ cd</textarea>
     }
 
     #[test]
+    fn range_progress_meter_and_file_inputs_show_the_arrow() {
+        use nile_style::Cursor;
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><input id="r" type="range"><br><progress id="p" value="3" max="10"></progress><br><meter id="m" value="0.4"></meter><br><input id="f" type="file"><br><input id="t" type="text"></body>"##,
+            "cursor-controls",
+        );
+        let mut at = |id: &str| {
+            let (x, y) = center(&p, id);
+            p.pointer_moved(x, y);
+            p.cursor()
+        };
+        assert_eq!((at("r"), at("p"), at("m"), at("f")), (Cursor::Default, Cursor::Default, Cursor::Default, Cursor::Default));
+        assert_eq!(at("t"), Cursor::Text);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn window_roles_and_script_calls_queue_window_commands() {
         let (mut p, path) = page(
             r#"<html window-frame="solid"><body style="margin:0">

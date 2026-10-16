@@ -1893,6 +1893,19 @@ fn build(
             };
             let n = tree.new_with_children(ts, &children).ok()?;
             tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
+            // `width: fit-content`: size the box on its own at max-content and give it that width,
+            // never wider than its container.
+            if style.width_fit && matches!(style.display, Display::Block | Display::Flex | Display::ListItem) {
+                tree.compute_layout_with_measure(n, Size { width: AvailableSpace::MaxContent, height: AvailableSpace::MaxContent }, |inputs, _id, ctx, st| measure_node(inputs, ctx, st)).ok()?;
+                let outer = tree.layout(n).ok()?.size.width;
+                let frame = style.padding.left + style.padding.right + style.border_width.left + style.border_width.right;
+                let mut st = tree.style(n).ok()?.clone();
+                st.size.width = Dimension::length(if style.border_box { outer } else { (outer - frame).max(0.0) });
+                if st.max_size.width == LengthPercentageAuto::auto() {
+                    st.max_size.width = LengthPercentageAuto::percent(1.0);
+                }
+                tree.set_style(n, st).ok()?;
+            }
             hand_off_absolute(style, n)
         }
     }
@@ -4568,6 +4581,21 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
         let b = t.boxes.iter().find(|b| doc.node(b.node).attr("id") == Some("f")).unwrap();
         let (x0, x1) = b.border_gap.expect("a gap for the legend");
         assert!(x0 <= l.x && x1 >= l.x + l.width);
+        // The legend shrinks to its text, so the notch is only as wide as the label.
+        assert!(l.width < 200.0 && x1 - x0 < 220.0, "legend {} wide, gap {}", l.width, x1 - x0);
+    }
+
+    #[test]
+    fn width_fit_content_shrinks_a_block_to_its_content_but_not_past_its_container() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><div id="a" style="width:fit-content;padding:0 10px">short</div>
+               <div id="b" style="width:fit-content">a long line of text that wraps because it is wider than the container allows it to be, again and again</div>
+               <div id="c" style="width:max-content">x</div></body>"#,
+        );
+        let (a, b, c) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"), rect_of(&doc, &t, "c"));
+        assert!(a.width > 20.0 && a.width < 120.0, "shrunk: {}", a.width);
+        assert!(b.width <= 800.0 && b.width > 300.0, "capped at the container: {}", b.width);
+        assert!(c.width < 40.0, "{}", c.width);
     }
 
     #[test]

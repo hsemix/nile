@@ -67,6 +67,8 @@ pub enum PseudoClass {
     AnyLink,
     /// `:owns-focus`: a descendant has the focus.
     OwnsFocus,
+    /// `:focus-visible`: focused by the keyboard, or a control that takes typing.
+    FocusVisible,
     /// A runtime flag from [`nile_dom::STATE_NAMES`], e.g. `:checked`.
     State(&'static str),
 }
@@ -80,6 +82,7 @@ impl ToCss for PseudoClass {
             PseudoClass::Link => ":link",
             PseudoClass::AnyLink => ":any-link",
             PseudoClass::OwnsFocus => ":owns-focus",
+            PseudoClass::FocusVisible => ":focus-visible",
             PseudoClass::State(name) => {
                 dest.write_char(':')?;
                 return dest.write_str(name);
@@ -186,6 +189,7 @@ impl<'i> Parser<'i> for NileParser {
             "link" => Ok(PseudoClass::Link),
             "any-link" => Ok(PseudoClass::AnyLink),
             "owns-focus" => Ok(PseudoClass::OwnsFocus),
+            "focus-visible" => Ok(PseudoClass::FocusVisible),
             "tab-focus" => Ok(PseudoClass::State("tabfocus")),
             _ => match nile_dom::STATE_NAMES.iter().find(|s| s.eq_ignore_ascii_case(&name)) {
                 Some(state) => Ok(PseudoClass::State(state)),
@@ -233,6 +237,19 @@ impl<'a> ElementRef<'a> {
     }
 
     /// True if `target` is this node or one of its descendants.
+    /// A control the user types into (the focus ring is always shown for these).
+    fn takes_typing(&self) -> bool {
+        let n = self.doc.node(self.id);
+        match n.tag() {
+            Some("textarea") => true,
+            Some("input") => !matches!(
+                n.attr("type").map(str::to_ascii_lowercase).as_deref(),
+                Some("checkbox" | "radio" | "button" | "submit" | "reset" | "file" | "range" | "color" | "image" | "hidden")
+            ),
+            _ => n.attr("contenteditable").is_some_and(|v| !v.eq_ignore_ascii_case("false")),
+        }
+    }
+
     fn contains(&self, target: Option<NodeId>) -> bool {
         let mut cur = target;
         while let Some(n) = cur {
@@ -323,6 +340,7 @@ impl Element for ElementRef<'_> {
             PseudoClass::Focus => self.state.focus == Some(self.id),
             PseudoClass::Link => self.is_link() && !self.doc.has_state(self.id, "visited"),
             PseudoClass::AnyLink => self.is_link(),
+            PseudoClass::FocusVisible => self.state.focus == Some(self.id) && (self.doc.has_state(self.id, "tabfocus") || self.takes_typing()),
             PseudoClass::OwnsFocus => self.state.focus.is_some_and(|f| f != self.id && self.contains(Some(f))),
             PseudoClass::State(name) => self.doc.has_state(self.id, name),
         }
