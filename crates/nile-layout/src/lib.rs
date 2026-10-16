@@ -2342,6 +2342,17 @@ fn is_password(node: &nile_dom::Node) -> bool {
     node.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("password"))
 }
 
+thread_local! {
+    /// `nile-password-char` per password input, keyed by (document address, node): recorded when the
+    /// input is laid out so `caret_byte`/`caret_char`, which only see the document, agree with it.
+    static MASKS: std::cell::RefCell<std::collections::HashMap<(usize, NodeId), char>> = std::cell::RefCell::default();
+}
+
+/// The character a password input shows for each typed one.
+fn mask_char(doc: &Document, id: NodeId) -> char {
+    MASKS.with(|m| m.borrow().get(&(doc as *const Document as usize, id)).copied()).unwrap_or('\u{2022}')
+}
+
 /// The current value of a form control: the `value` attribute, or for a
 /// `<textarea>` without one its initial text content.
 pub fn control_value(doc: &Document, id: NodeId) -> String {
@@ -2381,7 +2392,7 @@ fn control_display(doc: &Document, id: NodeId) -> (String, bool) {
         let chars: Vec<char> = value.chars().collect();
         let at = p.at.min(chars.len());
         let end = p.end.clamp(at, chars.len());
-        let hide = |s: &[char]| if is_password(node) { "\u{2022}".repeat(s.len()) } else { s.iter().collect() };
+        let hide = |s: &[char]| if is_password(node) { mask_char(doc, id).to_string().repeat(s.len()) } else { s.iter().collect() };
         return (format!("{}{}{}", hide(&chars[..at]), p.text, hide(&chars[end..])).replace('\n', if multiline { "\n" } else { " " }), false);
     }
     if value.is_empty() {
@@ -2391,7 +2402,7 @@ fn control_display(doc: &Document, id: NodeId) -> (String, bool) {
         return (if is_placeholder { ph } else { "\u{200b}".into() }, is_placeholder);
     }
     if is_password(node) {
-        ("\u{2022}".repeat(value.chars().count()), false)
+        (mask_char(doc, id).to_string().repeat(value.chars().count()), false)
     } else if multiline {
         let tail = if value.ends_with('\n') { "\u{200b}" } else { "" };
         (format!("{value}{tail}"), false)
@@ -2405,7 +2416,7 @@ pub fn caret_byte(doc: &Document, node: NodeId, char_idx: usize) -> usize {
     let n = doc.node(node);
     let value = control_value(doc, node);
     if is_password(n) {
-        return char_idx.min(value.chars().count()) * '\u{2022}'.len_utf8();
+        return char_idx.min(value.chars().count()) * mask_char(doc, node).len_utf8();
     }
     value.char_indices().nth(char_idx).map_or(value.len(), |(i, _)| i)
 }
@@ -2415,7 +2426,7 @@ pub fn caret_char(doc: &Document, node: NodeId, display_byte: usize) -> usize {
     let n = doc.node(node);
     let value = control_value(doc, node);
     if is_password(n) {
-        return (display_byte / '\u{2022}'.len_utf8()).min(value.chars().count());
+        return (display_byte / mask_char(doc, node).len_utf8()).min(value.chars().count());
     }
     value.char_indices().take_while(|(i, _)| *i < display_byte).count()
 }
@@ -2696,6 +2707,13 @@ fn build_control_text(
 ) -> Option<taffy::NodeId> {
     let node = doc.node(id);
     let style = styles.get(id);
+    MASKS.with(|m| {
+        let key = (doc as *const Document as usize, id);
+        match style.password_char {
+            Some(c) => m.borrow_mut().insert(key, c),
+            None => m.borrow_mut().remove(&key),
+        }
+    });
     let (display, is_placeholder) = control_display(doc, id);
     let mut ts = text_style(style);
     if is_placeholder {
@@ -3950,6 +3968,24 @@ mod tests {
         let idx = tree.text_index_at(id("a"), a_rect.x + 1.0, a_rect.y + a_rect.height / 2.0).unwrap();
         assert!(idx <= 1, "clicking the left edge puts the caret at the start, got {idx}");
         assert!(tree.text_index_at(id("a"), a_rect.x + 500.0, a_rect.y + 8.0).unwrap() > 5);
+    }
+
+    #[test]
+    fn password_char_is_set_by_css() {
+        let doc = Document::parse(
+            r#"<style>#c { nile-password-char: "*" } #e { nile-password-char: '●' }</style>
+               <body><input id="c" type="password" value="abc"><input id="e" type="password" value="abc"><input id="p" type="password" value="abc"></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let mut text = TextEngine::new();
+        layout(&doc, &styles, &mut text, 800.0, 100.0);
+        let id = |s: &str| doc.find(|n| n.attr("id") == Some(s)).unwrap();
+        assert_eq!(control_display(&doc, id("c")).0, "***");
+        assert_eq!(control_display(&doc, id("e")).0, "●●●");
+        assert_eq!(control_display(&doc, id("p")).0, "\u{2022}\u{2022}\u{2022}");
+        assert_eq!(caret_byte(&doc, id("c"), 2), 2);
+        assert_eq!(caret_byte(&doc, id("e"), 2), 6);
+        assert_eq!(caret_char(&doc, id("e"), 6), 2);
     }
 
     #[test]

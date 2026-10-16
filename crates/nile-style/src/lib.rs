@@ -514,6 +514,8 @@ pub struct ComputedStyle {
     /// `prototype: Class url(file.js)`: the script class made the element's controller, and the file it
     /// comes from (empty for a class the page already defines).
     pub prototype: Option<(String, String)>,
+    /// `nile-password-char: "*"`: the character a password input shows for each typed one (default `•`).
+    pub password_char: Option<char>,
     /// `font-variation-settings` / `font-feature-settings` as written (`"wght" 650`), for the text engine; inherited.
     pub font_variations: String,
     pub font_features: String,
@@ -671,6 +673,7 @@ impl Default for ComputedStyle {
             caption_bottom: false,
             list_style_image: None,
             prototype: None,
+            password_char: None,
             font_variations: String::new(),
             font_features: String::new(),
             backface_hidden: false,
@@ -2778,6 +2781,7 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
             let url = text.find("url(").and_then(|i| text[i + 4..].split(')').next()).map(|u| u.trim().trim_matches(|c| c == '"' || c == '\'').to_string()).unwrap_or_default();
             s.prototype = class.map(|c| (c.to_string(), url));
         }
+        "nile-password-char" => s.password_char = d.raw.trim().trim_matches(|c| c == '"' || c == '\'').chars().next().filter(|_| d.raw.trim() != "none"),
         "font-variation-settings" => s.font_variations = if d.raw.trim() == "normal" { String::new() } else { d.raw.trim().to_string() },
         "font-feature-settings" => s.font_features = if d.raw.trim() == "normal" { String::new() } else { d.raw.trim().to_string() },
         "list-style-image" => {
