@@ -54,6 +54,15 @@ allows resizing. Style the elements yourself. See [window.html](../../examples/w
 `window-frame` accepts system frames (`default`/`standard`), `extended` (macOS
 content under the title bar), `solid` (no frame, no shadow), `solid-with-shadow` (no frame, the system's drop shadow on macOS and Windows) and `transparent`.
 
+### Snap Layouts (Windows 11)
+
+In a frameless window, mark the maximize button `role="window-maximize"` and Windows 11 shows its
+Snap Layouts flyout when the pointer rests on it (`examples/snap-layouts.html`). The system owns the
+pointer over that button, so the page still gets `:hover` but not a `click` event there; the click
+maximizes or restores the window itself. A window with `window-maximizable="false"` or a fixed size
+doesn't offer it. C hosts can use `nile` windows' same trick with their own hit test and
+`Page::maximize_button_rect` (not yet in the C API).
+
 ### Transparent and frosted windows
 
 A frameless window (`solid`, `solid-with-shadow`, `transparent`) is clipped to the corner radius of

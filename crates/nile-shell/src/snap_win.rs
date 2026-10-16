@@ -1,0 +1,108 @@
+//! Windows 11 Snap Layouts for frameless windows. The flyout appears when the pointer rests on a
+//! maximize button that the window reports as one: the window answers `WM_NCHITTEST` with
+//! `HTMAXBUTTON` over the page's `role="window-maximize"` element. Windows then owns the pointer
+//! there, so hover is fed back to the page (`NOTIFY`) and the click is carried out here as a system
+//! maximize or restore. Written without a Windows compiler to hand: CI compiles it.
+
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
+
+use windows_sys::Win32::{
+    Foundation::POINT,
+    Graphics::Gdi::ScreenToClient,
+    UI::{
+        Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT},
+        Shell::{DefSubclassProc, SetWindowSubclass},
+        WindowsAndMessaging::{IsZoomed, PostMessageW, HTMAXBUTTON, SC_MAXIMIZE, SC_RESTORE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND},
+    },
+};
+
+type Rect4 = (i32, i32, i32, i32);
+
+/// 0: the pointer left the button, 1: it is over it.
+type Notify = Box<dyn Fn(isize, u8) + Send + Sync>;
+
+static NOTIFY: OnceLock<Notify> = OnceLock::new();
+/// Per window: the maximize button's rectangle (left, top, right, bottom) in physical client pixels.
+static RECTS: Mutex<Option<HashMap<isize, Rect4>>> = Mutex::new(None);
+
+const SUBCLASS_ID: usize = 0x4e49_4c45; // "NILE"
+
+/// Where hover changes go (the event loop's proxy, from the shell).
+pub fn set_notify(f: impl Fn(isize, u8) + Send + Sync + 'static) {
+    let _ = NOTIFY.set(Box::new(f));
+}
+
+/// Start answering hit tests for `hwnd`. Call once, after the window exists.
+pub fn install(hwnd: isize) {
+    // SAFETY: the window belongs to this thread and outlives the subclass (it is removed with it).
+    unsafe {
+        SetWindowSubclass(hwnd, Some(proc), SUBCLASS_ID, 0);
+    }
+}
+
+/// The maximize button's rectangle in physical client pixels, or `None` when the window has none
+/// (or can't be maximized).
+pub fn set_rect(hwnd: isize, rect: Option<Rect4>) {
+    if let Ok(mut all) = RECTS.lock() {
+        let map = all.get_or_insert_with(HashMap::new);
+        match rect {
+            Some(r) => {
+                map.insert(hwnd, r);
+            }
+            None => {
+                map.remove(&hwnd);
+            }
+        }
+    }
+}
+
+fn rect_of(hwnd: isize) -> Option<Rect4> {
+    RECTS.lock().ok()?.as_ref()?.get(&hwnd).copied()
+}
+
+fn notify(hwnd: isize, state: u8) {
+    if let Some(f) = NOTIFY.get() {
+        f(hwnd, state);
+    }
+}
+
+unsafe extern "system" fn proc(hwnd: isize, msg: u32, wparam: usize, lparam: isize, _id: usize, _data: usize) -> isize {
+    match msg {
+        WM_NCHITTEST => {
+            if let Some((l, t, r, b)) = rect_of(hwnd) {
+                // The point comes in screen coordinates, packed as two signed 16-bit halves.
+                let mut p = POINT { x: i32::from(lparam as i16), y: i32::from((lparam >> 16) as i16) };
+                // SAFETY: `hwnd` is the window this subclass is installed on.
+                unsafe { ScreenToClient(hwnd, &mut p) };
+                if p.x >= l && p.x < r && p.y >= t && p.y < b {
+                    return HTMAXBUTTON as isize;
+                }
+            }
+        }
+        WM_NCMOUSEMOVE if wparam == HTMAXBUTTON as usize => {
+            // Ask for the leave message, which non-client areas don't send unless told to.
+            let mut track = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE | TME_NONCLIENT, hwndTrack: hwnd, dwHoverTime: 0 };
+            // SAFETY: `track` is a valid, initialised TRACKMOUSEEVENT.
+            unsafe { TrackMouseEvent(&mut track) };
+            notify(hwnd, 1);
+        }
+        WM_NCMOUSELEAVE => notify(hwnd, 0),
+        // The button belongs to the page, so the click is ours: swallow the press, and on release do
+        // what a caption button does.
+        WM_NCLBUTTONDOWN if wparam == HTMAXBUTTON as usize => return 0,
+        WM_NCLBUTTONUP if wparam == HTMAXBUTTON as usize => {
+            // SAFETY: plain window queries and a posted system command on this window.
+            unsafe {
+                let command = if IsZoomed(hwnd) != 0 { SC_RESTORE } else { SC_MAXIMIZE };
+                PostMessageW(hwnd, WM_SYSCOMMAND, command as usize, 0);
+            }
+            return 0;
+        }
+        _ => {}
+    }
+    // SAFETY: forwards the message unchanged to the next handler in the chain.
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
