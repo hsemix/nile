@@ -246,7 +246,7 @@ typedef struct NileWindowConfig {
    */
   bool shadow;
   /**
-   * `window-material`: 0 none, 1 blur, 2 acrylic, 3 mica, 4 tabbed, 5 sidebar, 6 hud. Scripts can
+   * `window-material`: 0 none (or unset), 1 blur, 2 acrylic, 3 mica, 4 tabbed, 5 sidebar, 6 hud. Scripts can
    * change it (`Window.this.material`): read the config again after ticks and apply a new value.
    */
   int32_t material;

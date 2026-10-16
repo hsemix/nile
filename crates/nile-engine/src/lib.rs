@@ -3674,6 +3674,13 @@ impl Page {
         true
     }
 
+    /// The corner radius (logical px) of the root `<html>` element: a frameless or translucent window
+    /// is clipped to it, so the system's material and the page's own pixels share one rounded shape.
+    pub fn window_corner_radius(&self) -> f32 {
+        let Some(root) = self.doc.borrow().find(|n| n.tag() == Some("html")) else { return 0.0 };
+        self.view.borrow().styles.try_get(root).map_or(0.0, |s| s.border_radius.tl.max(0.0))
+    }
+
     /// CSS canvas background: the root element's background, or the body's if
     /// the root has none, fills the whole viewport. Defaults to white.
     pub fn canvas_background(&self) -> Color {
@@ -4321,6 +4328,16 @@ mod tests {
         assert_eq!(window::WindowConfig::from_document(&p.doc.borrow()).material, window::Material::Mica);
         js(&mut p, "Window.this.material = ''");
         assert!(!window::WindowConfig::from_document(&p.doc.borrow()).translucent());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_window_corner_radius_is_the_roots_border_radius() {
+        let (p, path) = page(r#"<html style="border-radius: 18px"><body></body></html>"#, "corner");
+        assert_eq!(p.window_corner_radius(), 18.0);
+        let _ = std::fs::remove_file(path);
+        let (p, path) = page("<html><body></body></html>", "corner0");
+        assert_eq!(p.window_corner_radius(), 0.0);
         let _ = std::fs::remove_file(path);
     }
 
