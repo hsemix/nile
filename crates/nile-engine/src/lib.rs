@@ -551,6 +551,10 @@ impl Environment for Env {
         v.styles.styles.get(node.0)?.css_value(property)
     }
 
+    fn system_dark(&self) -> bool {
+        nile_style::system_theme().dark
+    }
+
     fn viewport(&self) -> (f32, f32) {
         self.0.borrow().viewport
     }
@@ -1198,6 +1202,16 @@ impl Page {
         let mut v = self.view.borrow_mut();
         v.set_viewport(width, height);
         v.layout();
+    }
+
+    /// The system theme (dark/light, accent colour; see `nile_style::set_system_theme`) changed:
+    /// restyle this page and its frames so `prefers-color-scheme`, system colours and the accent apply.
+    pub fn system_theme_changed(&mut self) {
+        self.view.borrow_mut().restyle();
+        let frames = self.frames.clone();
+        for slot in frames.borrow_mut().slots.values_mut() {
+            slot.page.system_theme_changed();
+        }
     }
 
     /// Restyle after an interaction state change.

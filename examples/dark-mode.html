@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>Dark mode</title>
+<style>
+  :root { color-scheme: light dark }
+  body { font: 14px sans-serif; margin: 20px }
+  h3 { margin: 14px 0 6px; font-size: 13px }
+  .row { display: flex; gap: 10px; align-items: center; margin: 8px 0 }
+  /* System colours follow the theme; the media query only where you want to differ. */
+  .card { padding: 12px 16px; border: 1px solid ButtonBorder; border-radius: 8px; background: Field; color: FieldText; width: 300px }
+  .accent { background: AccentColor; color: AccentColorText; padding: 4px 10px; border-radius: 4px }
+  .note { color: #8a5a00 }
+  @media (prefers-color-scheme: dark) { .note { color: #ffd479 } }
+</style>
+<h3>Controls (follow the system theme because the page says <code>color-scheme: light dark</code>)</h3>
+<div class="row">
+  <button>Button</button>
+  <input value="Text input">
+  <select><option>Select</option><option>Two</option></select>
+  <input type="checkbox" checked> <input type="radio" checked> <input type="checkbox">
+</div>
+<div class="row">
+  <progress value="40" max="100"></progress>
+  <input type="range" value="4" max="10">
+  <meter value="0.7"></meter>
+  <input type="date" value="2026-10-16">
+</div>
+<div class="row"><textarea>Some text</textarea><button disabled>Disabled</button><input disabled value="Disabled"></div>
+<h3>System colours and the media query</h3>
+<div class="card">A card in <code>Field</code>/<code>FieldText</code> with a <code>ButtonBorder</code> edge.
+  <span class="accent">AccentColor</span></div>
+<p class="note">This note changes colour in the dark media query.</p>
+<p>A <a href="#x">link</a> and some <mark>marked</mark> text, with a <input type="checkbox" style="accent-color: #d33a3a" checked> custom accent.</p>
+<hr>
+<fieldset><legend>Fieldset</legend>Inside</fieldset>

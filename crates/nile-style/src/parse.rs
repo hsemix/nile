@@ -429,7 +429,7 @@ fn media_feature(f: &str, vw: f32, vh: f32) -> bool {
     let Some(value) = value else { return matches!(name, "color" | "hover" | "pointer") };
     match name {
         "orientation" => (value == "landscape") == (vw >= vh) && matches!(value, "landscape" | "portrait"),
-        "prefers-color-scheme" => value == "light",
+        "prefers-color-scheme" => value == if crate::system::system_theme().dark { "dark" } else { "light" },
         "prefers-reduced-motion" => value == "no-preference",
         "hover" => value == "hover",
         "pointer" => value == "fine",

@@ -62,6 +62,8 @@ pub struct Renderer {
     varied: HashMap<(u64, u32, Vec<i16>), Option<Typeface>>,
     /// Decoded pictures by `ImageData::id`; `None` where decoding failed.
     pictures: HashMap<u64, Option<skia_safe::Image>>,
+    /// The system theme's colours for what no stylesheet reaches (set at the start of each paint).
+    pal: nile_style::Palette,
 }
 
 impl Default for Renderer {
@@ -72,11 +74,12 @@ impl Default for Renderer {
 
 impl Renderer {
     pub fn new() -> Self {
-        Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new(), varied: HashMap::new(), pictures: HashMap::new() }
+        Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new(), varied: HashMap::new(), pictures: HashMap::new(), pal: nile_style::Palette::new(false, nile_style::default_accent()) }
     }
 
     /// Paint the whole tree.
     pub fn paint(&mut self, canvas: &Canvas, tree: &LayoutTree, styles: &StyleMap, overlay: &Overlay) {
+        self.pal = styles.palette();
         let Overlay { scroll_y, viewport, only, selected_image, .. } = *overlay;
         let base = canvas.local_to_device_as_3x3();
         canvas.save();
@@ -92,7 +95,7 @@ impl Renderer {
         canvas.restore();
         let look = styles.page_scrollbar();
         if let Some(t) = nile_layout::page_thumb(viewport, tree.content_height, scroll_y, look.thickness).filter(|_| only.is_none()) {
-            paint_thumb(canvas, &t, &look, bar_state(overlay, None, t.vertical));
+            paint_thumb(canvas, &t, &look, bar_state(overlay, None, t.vertical), styles.dark);
         }
     }
 
@@ -187,7 +190,8 @@ impl Renderer {
                     }
                 }
                 BoxContent::Text(content) => {
-                    let highlight = styles.get(b.node).selection_bg;
+                    let accent = styles.palette().accent;
+                    let highlight = styles.get(b.node).selection_bg.or(Some(CssColor { r: accent.r, g: accent.g, b: accent.b, a: 90 }));
                     if let Some((_, from, to)) = selection.filter(|(n, ..)| content.owners.iter().any(|(_, o)| o == n)) {
                         paint_selection(canvas, b.rect, content, from, to, highlight);
                     }
@@ -366,7 +370,7 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
                 continue;
             }
             if item.selected {
-                canvas.draw_rect(Rect::from_xywh(r.x + b.left, top, r.width - b.left - b.right, l.row_height), &fill(CssColor::rgb(29, 78, 216)));
+                canvas.draw_rect(Rect::from_xywh(r.x + b.left, top, r.width - b.left - b.right, l.row_height), &fill(self.pal.accent));
             }
             let line_h = item.text.height();
             let at = LRect { x: r.x + b.left + l.pad_x + if item.indent { 12.0 } else { 0.0 }, y: top + (l.row_height - line_h) / 2.0, width: r.width, height: line_h };
@@ -389,8 +393,8 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
     fn paint_menu(&mut self, canvas: &Canvas, m: &MenuBox) {
         let r = m.rect;
         let panel = RRect::new_rect_xy(skia_rect(r), 3.0, 3.0);
-        canvas.draw_rrect(panel, &fill(CssColor::rgb(255, 255, 255)));
-        let mut border = fill(CssColor::rgb(118, 118, 118));
+        canvas.draw_rrect(panel, &fill(self.pal.panel));
+        let mut border = fill(self.pal.panel_border);
         border.set_style(skia_safe::PaintStyle::Stroke);
         border.set_stroke_width(1.0);
         canvas.draw_rrect(RRect::new_rect_xy(Rect::from_xywh(r.x + 0.5, r.y + 0.5, r.width - 1.0, r.height - 1.0), 3.0, 3.0), &border);
@@ -403,14 +407,14 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
             }
             let on = m.highlight == Some(i) && !item.disabled;
             if on {
-                canvas.draw_rect(Rect::from_xywh(r.x + 1.0, top, r.width - 2.0, m.row_height), &fill(CssColor::rgb(29, 78, 216)));
+                canvas.draw_rect(Rect::from_xywh(r.x + 1.0, top, r.width - 2.0, m.row_height), &fill(self.pal.accent));
             }
             let line_h = item.text.height();
             let at = LRect { x: r.x + m.pad_x + if item.indent { 12.0 } else { 0.0 }, y: top + (m.row_height - line_h) / 2.0, width: r.width, height: line_h };
             // Text carries its own color; selected-row and disabled rows are tinted by an overlay.
-            self.paint_text_tinted(canvas, at, &item.text, if on { Some([255, 255, 255, 255]) } else if item.header { Some([70, 70, 70, 255]) } else if item.disabled { Some([150, 150, 150, 255]) } else { None });
+            self.paint_text_tinted(canvas, at, &item.text, if on { Some([self.pal.accent_text.r, self.pal.accent_text.g, self.pal.accent_text.b, 255]) } else if item.header { Some(if self.pal.dark { [190, 190, 190, 255] } else { [70, 70, 70, 255] }) } else if item.disabled { Some([150, 150, 150, 255]) } else { None });
             if m.selected == Some(i) && !on {
-                canvas.draw_rect(Rect::from_xywh(r.x + 2.0, top + 2.0, 2.0, m.row_height - 4.0), &fill(CssColor::rgb(29, 78, 216)));
+                canvas.draw_rect(Rect::from_xywh(r.x + 2.0, top + 2.0, 2.0, m.row_height - 4.0), &fill(self.pal.accent));
             }
         }
         canvas.restore();
@@ -418,7 +422,7 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
             let track = r.height - 4.0;
             let thumb = (track * track / (track + m.max_scroll)).max(16.0).min(track);
             let at = r.y + 2.0 + (track - thumb) * m.scroll / m.max_scroll;
-            let mut paint = fill(CssColor { r: 0, g: 0, b: 0, a: 110 });
+            let mut paint = fill(if self.pal.dark { CssColor { r: 255, g: 255, b: 255, a: 110 } } else { CssColor { r: 0, g: 0, b: 0, a: 110 } });
             paint.set_anti_alias(true);
             canvas.draw_rrect(RRect::new_rect_xy(Rect::from_xywh(r.x + r.width - 6.0, at, 4.0, thumb), 2.0, 2.0), &paint);
         }
@@ -430,6 +434,15 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
         paint_shadows(canvas, skia_rect(b.rect), &s.box_shadow, radii);
         let photo = b.bg_image.as_ref().and_then(|data| self.background_shader(data, s, b.rect));
         let mut border = Border { width: s.border_width, color: s.border_color, style: s.border_style };
+        // A checked box takes the author's `accent-color` (the user-agent sheet paints the system accent).
+        let accent_box = s.checked && matches!(s.appearance, Appearance::Checkbox | Appearance::Radio);
+        let background = match (accent_box, s.accent_color) {
+            (true, Some(a)) => {
+                border.color = nile_style::Edges::all(a);
+                Some(a)
+            }
+            _ => s.background,
+        };
         // A collapsed-table cell leaves out the sides whose border lost to its neighbour's.
         let h = b.border_hidden;
         if h.top || h.right || h.bottom || h.left {
@@ -444,16 +457,16 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
             canvas.save();
             let notch = Rect::from_ltrb(x0, b.rect.y - 1.0, x1, b.rect.y + s.border_width.top.max(1.0) + 1.0);
             canvas.clip_rect(notch, skia_safe::ClipOp::Difference, false);
-            paint_decorated(canvas, skia_rect(b.rect), s.background, s.background_image.as_ref(), photo, &border, radii);
+            paint_decorated(canvas, skia_rect(b.rect), background, s.background_image.as_ref(), photo, &border, radii);
             canvas.restore();
         } else {
-            paint_decorated(canvas, skia_rect(b.rect), s.background, s.background_image.as_ref(), photo, &border, radii);
+            paint_decorated(canvas, skia_rect(b.rect), background, s.background_image.as_ref(), photo, &border, radii);
         }
         paint_inset_shadows(canvas, skia_rect(b.rect), s, radii);
         if let Some(data) = &b.image {
             self.paint_picture(canvas, data, s, b.rect);
         }
-        paint_control_mark(canvas, s, b.rect);
+        paint_control_mark(canvas, s, b.rect, &styles.palette());
     }
 
     fn picture(&mut self, data: &ImageData) -> Option<skia_safe::Image> {
@@ -966,12 +979,17 @@ fn paint_decorated(
 }
 
 /// The check or radio dot for `appearance: checkbox | radio` when checked.
-fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) {
+fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect, pal: &nile_style::Palette) {
+    let accent = s.accent_color.unwrap_or(pal.accent);
+    let glyph = if pal.dark { 190 } else { 90 };
     // Checkbox and radio marks show only when checked; a select's chevron always does.
     if !s.checked && !matches!(s.appearance, Appearance::Select | Appearance::Progress | Appearance::Meter | Appearance::Range | Appearance::Spinner | Appearance::Swatch | Appearance::Calendar | Appearance::Clock) {
         return;
     }
-    let mut paint = fill(s.color);
+    let mut paint = fill(match s.accent_color {
+        Some(a) if s.checked && matches!(s.appearance, Appearance::Checkbox | Appearance::Radio) => nile_style::text_on(a),
+        _ => s.color,
+    });
     match s.appearance {
         Appearance::Checkbox => {
             let mut builder = skia_safe::PathBuilder::new();
@@ -1005,14 +1023,14 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
             // A rounded trough with a filled part.
             let bar = Rect::from_xywh(r.x, r.y + r.height * 0.15, r.width, r.height * 0.7);
             let radius = bar.height() / 2.0;
-            let mut trough = fill(CssColor::rgb(230, 230, 230));
+            let mut trough = fill(pal.trough);
             trough.set_anti_alias(true);
             canvas.draw_rrect(RRect::new_rect_xy(bar, radius, radius), &trough);
             if let Some(f) = s.control_fraction {
                 let color = if s.appearance == Appearance::Meter {
                     if s.meter_warn { CssColor::rgb(245, 158, 11) } else { CssColor::rgb(22, 163, 74) }
                 } else {
-                    CssColor::rgb(37, 99, 235)
+                    accent
                 };
                 let mut paint = fill(color);
                 paint.set_anti_alias(true);
@@ -1040,7 +1058,7 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
             paint.set_anti_alias(true);
             paint.set_style(skia_safe::PaintStyle::Stroke);
             paint.set_stroke_width(1.3);
-            paint.set_color(Color::from_argb(255, 90, 90, 90));
+            paint.set_color(Color::from_argb(255, glyph, glyph, glyph));
             if s.appearance == Appearance::Calendar {
                 let body = Rect::from_xywh(cx - 6.0, cy - 5.0, 12.0, 11.0);
                 canvas.draw_rrect(RRect::new_rect_xy(body, 1.5, 1.5), &paint);
@@ -1058,7 +1076,7 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
             let cx = r.x + r.width - 11.0;
             let mid = r.y + r.height / 2.0;
             paint.set_anti_alias(true);
-            paint.set_color(Color::from_argb(255, 90, 90, 90));
+            paint.set_color(Color::from_argb(255, glyph, glyph, glyph));
             for (dy, dir) in [(-4.0, -1.0), (4.0, 1.0)] {
                 let mut builder = skia_safe::PathBuilder::new();
                 builder.move_to((cx - 3.5, mid + dy - 1.5 * dir)).line_to((cx + 3.5, mid + dy - 1.5 * dir)).line_to((cx, mid + dy + 2.0 * dir)).close();
@@ -1071,10 +1089,10 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
             let x = r.x + radius + (r.width - 2.0 * radius) * f;
             let cy = r.y + r.height / 2.0;
             let track = Rect::from_xywh(r.x + radius, cy - 2.0, r.width - 2.0 * radius, 4.0);
-            let mut p = fill(CssColor::rgb(214, 214, 214));
+            let mut p = fill(if pal.dark { CssColor::rgb(85, 85, 85) } else { CssColor::rgb(214, 214, 214) });
             p.set_anti_alias(true);
             canvas.draw_rrect(RRect::new_rect_xy(track, 2.0, 2.0), &p);
-            let mut filled = fill(CssColor::rgb(37, 99, 235));
+            let mut filled = fill(accent);
             filled.set_anti_alias(true);
             canvas.draw_rrect(RRect::new_rect_xy(Rect::from_ltrb(track.left, track.top, x, track.bottom), 2.0, 2.0), &filled);
             let mut thumb = fill(CssColor::rgb(255, 255, 255));
@@ -1082,7 +1100,7 @@ fn paint_control_mark(canvas: &Canvas, s: &nile_style::ComputedStyle, r: LRect) 
             canvas.draw_circle((x, cy), radius - 1.0, &thumb);
             thumb.set_style(skia_safe::PaintStyle::Stroke);
             thumb.set_stroke_width(1.5);
-            thumb.set_color(Color::from_argb(255, 37, 99, 235));
+            thumb.set_color(Color::from_argb(255, accent.r, accent.g, accent.b));
             canvas.draw_circle((x, cy), radius - 1.0, &thumb);
         }
         Appearance::None => {}
@@ -1101,7 +1119,7 @@ fn paint_scrollbars(canvas: &Canvas, b: &LayoutBox, offsets: &ScrollOffsets, sty
     let (ox, oy) = offsets.get(&b.node).copied().unwrap_or_default();
     let look = styles.scrollbar_look(b.node);
     for t in sb.thumbs(ox, oy) {
-        paint_thumb(canvas, &t, &look, bar_state(overlay, Some(b.node), t.vertical));
+        paint_thumb(canvas, &t, &look, bar_state(overlay, Some(b.node), t.vertical), styles.dark);
     }
 }
 
@@ -1121,7 +1139,7 @@ fn bar_state(overlay: &Overlay, node: Option<NodeId>, vertical: bool) -> BarStat
 
 /// A scrollbar: while the pointer is over it (or it is dragged) it grows toward the content, shows its
 /// track and darkens the thumb.
-fn paint_thumb(canvas: &Canvas, t: &nile_layout::Thumb, look: &nile_style::ScrollbarLook, state: BarState) {
+fn paint_thumb(canvas: &Canvas, t: &nile_layout::Thumb, look: &nile_style::ScrollbarLook, state: BarState, dark: bool) {
     let grow = if state == BarState::Rest { 0.0 } else { nile_layout::SCROLLBAR_GROW };
     let widen = |r: nile_layout::Rect| {
         if t.vertical {
@@ -1134,7 +1152,7 @@ fn paint_thumb(canvas: &Canvas, t: &nile_layout::Thumb, look: &nile_style::Scrol
     let radius = look.thumb_radius.unwrap_or(thick / 2.0);
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    if let Some(track) = look.track.filter(|c| c.a > 0).or_else(|| (state != BarState::Rest).then_some(CssColor { r: 0, g: 0, b: 0, a: 18 })) {
+    if let Some(track) = look.track.filter(|c| c.a > 0).or_else(|| (state != BarState::Rest).then_some(if dark { CssColor { r: 255, g: 255, b: 255, a: 22 } } else { CssColor { r: 0, g: 0, b: 0, a: 18 } })) {
         paint.set_color(Color::from_argb(track.a, track.r, track.g, track.b));
         canvas.draw_round_rect(widen(t.track), thick / 2.0, thick / 2.0, &paint);
     }
@@ -1148,7 +1166,7 @@ fn paint_thumb(canvas: &Canvas, t: &nile_layout::Thumb, look: &nile_style::Scrol
             };
             ((f32::from(c.r) * k) as u8, (f32::from(c.g) * k) as u8, (f32::from(c.b) * k) as u8, c.a)
         }
-        None => (0, 0, 0, match state {
+        None => (if dark { 255 } else { 0 }, if dark { 255 } else { 0 }, if dark { 255 } else { 0 }, match state {
             BarState::Rest => 110,
             BarState::Hover => 150,
             BarState::Active => 190,

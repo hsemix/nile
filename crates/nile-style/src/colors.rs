@@ -10,6 +10,10 @@ pub fn named(name: &str) -> Option<Color> {
     if name == "transparent" {
         return Some(Color::TRANSPARENT);
     }
+    // System colours follow the OS theme; they are looked up when a style is computed.
+    if let Some(c) = crate::system::system_color(name) {
+        return Some(c);
+    }
     NAMED.iter().find(|(n, _)| *n == name).map(|(_, col)| *col)
 }
 

@@ -750,8 +750,21 @@ impl App {
             dropped: Vec::new(),
         });
         let last = self.wins.len() - 1;
+        self.refresh_theme(last);
         let actions = self.wins[last].sync_window();
         self.run(event_loop, self.wins[last].id, actions);
+    }
+
+    /// Read the OS's light/dark setting and accent colour (through window `idx`) and restyle every
+    /// page when they differ from what styles were computed against.
+    fn refresh_theme(&mut self, idx: usize) {
+        let theme = crate::system::read(&self.wins[idx].window);
+        if nile_style::set_system_theme(theme) {
+            for w in &mut self.wins {
+                w.page.system_theme_changed();
+                w.window.request_redraw();
+            }
+        }
     }
 
     /// A page for a window a script asked for, loaded relative to the window that asked.
@@ -1077,6 +1090,10 @@ impl ApplicationHandler<UserEvent> for App {
         let id = self.wins[idx].id;
         if matches!(event, WindowEvent::Focused(true)) {
             self.active = id;
+        }
+        // The system's theme changed (light/dark), or on macOS and Windows the accent colour may have.
+        if matches!(event, WindowEvent::ThemeChanged(_)) || (cfg!(any(target_os = "macos", windows)) && matches!(event, WindowEvent::Focused(true))) {
+            self.refresh_theme(idx);
         }
         {
             let win = &mut self.wins[idx];

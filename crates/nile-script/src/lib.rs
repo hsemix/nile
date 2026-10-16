@@ -155,6 +155,10 @@ pub trait Environment {
     fn computed_style(&self, node: NodeId, property: &str) -> Option<String>;
     /// Viewport size in CSS px.
     fn viewport(&self) -> (f32, f32);
+    /// The system theme is dark (`prefers-color-scheme: dark`).
+    fn system_dark(&self) -> bool {
+        false
+    }
     /// Device pixels per logical pixel (`devicePixelRatio`).
     fn scale(&self) -> f32 {
         1.0
@@ -566,6 +570,10 @@ fn install_natives(
     native!("computed", {
         let env = env.clone();
         move |id: i32, prop: String| -> Option<String> { node(id).and_then(|n| env.computed_style(n, &prop)) }
+    });
+    native!("systemDark", {
+        let env = env.clone();
+        move || -> bool { env.system_dark() }
     });
     native!("viewport", {
         let env = env.clone();

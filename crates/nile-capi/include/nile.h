@@ -456,6 +456,18 @@ void nile_view_set_clipboard(struct NileView *view, struct NileClipboard clipboa
 void nile_view_set_dialogs(struct NileView *view, struct NileDialogs dialogs);
 
 /**
+ * Tell Nile the system's colour theme: `dark` for `prefers-color-scheme: dark` (and the dark
+ * look of pages that say `color-scheme: light dark`), `accent_rgb` the system accent colour as
+ * `0xRRGGBB` (negative = the platform's stock accent). It is a per-thread setting shared by every
+ * view of the thread; call it before creating views and again when the OS changes. Restyles this
+ * view (call it on the others too) and returns true if the theme changed.
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+bool nile_view_set_system_theme(struct NileView *view, bool dark, int32_t accent_rgb);
+
+/**
  * Files were dropped on the window at the pointer's last position (tell the page where with
  * [`nile_pointer_move`] first). `paths` are UTF-8 paths separated by newlines. A file input under
  * the pointer takes them; elsewhere the target gets a `drop` event. Returns true if the page changed.
