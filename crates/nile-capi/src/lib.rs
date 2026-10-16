@@ -147,7 +147,7 @@ pub struct NileWindowConfig {
     pub translucent: bool,
     /// The system draws a drop shadow around a frameless window (`solid-with-shadow`).
     pub shadow: bool,
-    /// `window-material`: 0 none, 1 blur, 2 acrylic, 3 mica, 4 tabbed, 5 sidebar, 6 hud. Scripts can
+    /// `window-material`: 0 none (or unset), 1 blur, 2 acrylic, 3 mica, 4 tabbed, 5 sidebar, 6 hud. Scripts can
     /// change it (`Window.this.material`): read the config again after ticks and apply a new value.
     pub material: i32,
 }
@@ -848,7 +848,7 @@ pub unsafe extern "C" fn nile_view_window_config(view: *mut NileView, desktop_wi
             translucent: c.translucent(),
             shadow: c.shadow(),
             material: match c.material {
-                Material::None => 0,
+                Material::Auto | Material::None => 0,
                 Material::Blur => 1,
                 Material::Acrylic => 2,
                 Material::Mica => 3,

@@ -174,6 +174,9 @@ pub struct LayoutBox {
     pub border_gap: Option<(f32, f32)>,
     /// `backface-visibility: hidden`.
     pub backface_hidden: bool,
+    /// Collapsed table borders: the sides of this cell whose border lost to its neighbour's (the
+    /// neighbour paints the shared line, see `resolve_collapsed_borders`).
+    pub border_hidden: Edges<bool>,
 }
 
 /// What a sticky box needs to compute its shift: its insets and its parent's vertical extent.
@@ -1364,6 +1367,7 @@ pub fn layout_with(
     HOISTED.with(|h| h.borrow_mut().clear());
     ABS_HANDED.with(|a| a.borrow_mut().clear());
     STATIC_AT.with(|a| a.borrow_mut().clear());
+    COLLAPSED.with(|c| c.borrow_mut().clear());
     FLOW_SPECS.with(|s| s.borrow_mut().clear());
     PREEDIT.with(|p| *p.borrow_mut() = options.preedit.clone());
     let was = PARENT_IS_CB.replace(false);
@@ -1521,6 +1525,14 @@ pub fn layout_with(
     tree.lists = build_lists(doc, styles, text, &tree, options.offsets);
     tree.markers = build_markers(doc, styles, text, &tree);
     open_legend_gaps(doc, &mut tree.boxes);
+    COLLAPSED.with(|c| {
+        let c = c.borrow();
+        for b in tree.boxes.iter_mut().filter(|b| matches!(b.content, BoxContent::Element)) {
+            if let Some(h) = c.get(&b.node) {
+                b.border_hidden = *h;
+            }
+        }
+    });
     if let Some(req) = options.menu {
         tree.menu = build_menu(doc, styles, text, &tree, req, options.offsets, (options.scroll_y, viewport_height));
     }
@@ -1646,6 +1658,8 @@ thread_local! {
     /// belong (absolute page coordinates of the border box) once layout has run.
     static ABS_HANDED: std::cell::RefCell<Vec<taffy::NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
     static STATIC_AT: std::cell::RefCell<std::collections::HashMap<taffy::NodeId, StaticAt>> = std::cell::RefCell::default();
+    /// Collapsed-border cells' sides that lost the conflict with a neighbour (filled by `build_table`).
+    static COLLAPSED: std::cell::RefCell<std::collections::HashMap<NodeId, Edges<bool>>> = std::cell::RefCell::default();
     static HOISTED: std::cell::RefCell<std::collections::HashSet<taffy::NodeId>> = std::cell::RefCell::default();
     static FIXED_BLOCKS: std::cell::RefCell<Vec<taffy::NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Text beside floats: per text leaf, the floats its lines must avoid (see `plan_floats`).
@@ -1978,6 +1992,10 @@ fn build_table(
         }
     }
     let columns = columns.max(1);
+    if style.border_collapse {
+        let grid: Vec<(NodeId, usize, usize, usize, usize)> = cells.iter().map(|c| (c.node, c.row, c.col, c.rows, c.cols)).collect();
+        resolve_collapsed_borders(styles, &grid);
+    }
     let bottom_caption = |c: &NodeId| styles.get(*c).caption_bottom;
     let first_row = captions.iter().filter(|c| !bottom_caption(c)).count();
     let line = |n: usize, span: usize| taffy::Line {
@@ -2180,6 +2198,76 @@ fn build_table(
     let n = tree.new_with_children(ts, &items).ok()?;
     tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
     hand_off_absolute(style, n)
+}
+
+/// How strongly a border claims a shared edge in a collapsed table (CSS 2.1 17.6.2.1): wider wins,
+/// then solid over dashed over dotted; none never wins.
+fn border_strength(width: f32, style: BorderStyle) -> (u32, u8) {
+    let rank = match style {
+        BorderStyle::None => return (0, 0),
+        BorderStyle::Solid => 3,
+        BorderStyle::Dashed => 2,
+        BorderStyle::Dotted => 1,
+    };
+    if width > 0.0 { ((width * 100.0) as u32, rank) } else { (0, 0) }
+}
+
+/// Collapsed borders are shared by neighbouring cells, which each carry their own copy. On every
+/// shared edge the stronger border keeps its line and the other cell leaves its side out
+/// (`LayoutBox::border_hidden`); on a tie the left or upper cell wins. A side facing several
+/// neighbours (spans) is left out only when it loses to all of them. `grid` is
+/// `(cell, row, col, rows, cols)`.
+fn resolve_collapsed_borders(styles: &StyleMap, grid: &[(NodeId, usize, usize, usize, usize)]) {
+    let side = |n: NodeId, vertical_edge: bool, far: bool| {
+        let s = styles.get(n);
+        let (w, st) = match (vertical_edge, far) {
+            (true, true) => (s.border_width.right, s.border_style.right),
+            (true, false) => (s.border_width.left, s.border_style.left),
+            (false, true) => (s.border_width.bottom, s.border_style.bottom),
+            (false, false) => (s.border_width.top, s.border_style.top),
+        };
+        border_strength(w, st)
+    };
+    // Per cell side: (contests, losses).
+    let mut tally: std::collections::HashMap<(NodeId, u8), (u32, u32)> = std::collections::HashMap::new();
+    let overlaps = |a: usize, alen: usize, b: usize, blen: usize| a < b + blen && b < a + alen;
+    for &(a, ar, ac, arows, acols) in grid {
+        for &(b, br, bc, brows, bcols) in grid {
+            // `b` right of `a`: a's right edge against b's left edge; below: bottom against top.
+            let pairs = [
+                (bc == ac + acols && overlaps(ar, arows, br, brows), true, 1u8, 3u8),
+                (br == ar + arows && overlaps(ac, acols, bc, bcols), false, 2u8, 0u8),
+            ];
+            for (touching, vertical, a_side, b_side) in pairs {
+                if !touching {
+                    continue;
+                }
+                let (sa, sb) = (side(a, vertical, true), side(b, vertical, false));
+                let a_loses = sb > sa;
+                let b_loses = sa >= sb;
+                let ea = tally.entry((a, a_side)).or_default();
+                ea.0 += 1;
+                ea.1 += u32::from(a_loses);
+                let eb = tally.entry((b, b_side)).or_default();
+                eb.0 += 1;
+                eb.1 += u32::from(b_loses);
+            }
+        }
+    }
+    COLLAPSED.with(|c| {
+        let mut c = c.borrow_mut();
+        for ((cell, side), (total, lost)) in tally {
+            if total > 0 && lost == total {
+                let e = c.entry(cell).or_default();
+                match side {
+                    0 => e.top = true,
+                    1 => e.right = true,
+                    2 => e.bottom = true,
+                    _ => e.left = true,
+                }
+            }
+        }
+    });
 }
 
 /// A fieldset's legend sits on its top border: leave the border out behind it.
@@ -3148,13 +3236,13 @@ fn flatten(
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, border_hidden: Edges::default() })
         }
         Some(NodeCtx::Replaced { id, image, .. }) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, border_hidden: Edges::default() })
         }
         Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
@@ -3212,6 +3300,7 @@ fn flatten(
                 sticky: None,
                 border_gap: None,
                 backface_hidden: false,
+                border_hidden: Edges::default(),
             });
             for b in placed {
                 let kid = kids[b.id as usize];
@@ -4525,6 +4614,30 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
         let (a, b) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"));
         assert_eq!(a.width + b.width, 600.0);
         assert!(b.width > a.width * 5.0, "the wider content gets proportionally more: {a:?} {b:?}");
+    }
+
+    #[test]
+    fn collapsed_borders_resolve_conflicts_by_width_style_and_position() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><table style="border-collapse:collapse">
+                 <tr><td id="a" style="border:3px solid;padding:0;width:30px;height:10px">a</td><td id="b" style="border:1px solid;padding:0;width:30px">b</td><td id="c" style="border:1px dashed;padding:0;width:30px">c</td></tr>
+                 <tr><td id="d" style="border:1px solid;padding:0;height:10px">d</td><td id="e" style="border:1px solid;padding:0">e</td><td id="f" style="border:1px solid;padding:0">f</td></tr>
+               </table></body>"#,
+        );
+        let hidden = |id: &str| {
+            let node = doc.find(|n| n.attr("id") == Some(id)).expect("cell");
+            t.boxes.iter().find(|b| b.node == node && matches!(b.content, BoxContent::Element)).expect("box").border_hidden
+        };
+        // a (3px) beats b (1px) on their shared edge; b's right (solid) beats c's left (dashed).
+        assert!(!hidden("a").right && hidden("b").left);
+        assert!(!hidden("b").right && hidden("c").left);
+        // Between equal solid 1px borders the upper cell wins; a (3px) beats d below it.
+        assert!(hidden("d").top && !hidden("a").bottom);
+        assert!(hidden("e").top && !hidden("b").bottom);
+        // Equal on both sides: the left cell keeps the line.
+        assert!(!hidden("d").right && hidden("e").left);
+        // Outer edges have no neighbour to lose to.
+        assert_eq!((hidden("a").top, hidden("a").left, hidden("c").right), (false, false, false));
     }
 
     #[test]

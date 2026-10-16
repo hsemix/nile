@@ -60,6 +60,8 @@ struct Win {
     config: WindowConfig,
     /// The title last given to the window.
     title: String,
+    /// The rounded-corner clip last applied: (radius in logical px, outer size, scale).
+    corner: (f32, (u32, u32), f64),
     /// Which window edge a frameless window's pointer is over, if any.
     edge: Option<(i8, i8)>,
     /// Whether the window's input method is on, and where its candidate window was last put.
@@ -237,8 +239,14 @@ impl Win {
         let material = WindowConfig::from_document(&self.page.doc.borrow()).material;
         if material != self.config.material {
             self.config.material = material;
-            material::apply(&window, material);
+            material::apply(&window, material::effective(&self.config), self.config.translucent(), self.corner_radius());
             window.request_redraw();
+        }
+        // A frameless window follows the root's `border-radius`, so a material takes the page's shape.
+        let corner = (self.corner_radius(), window.outer_size().into(), window.scale_factor());
+        if corner != self.corner {
+            self.corner = corner;
+            material::set_corner(&window, corner.0);
         }
         let title = window::current_title(&self.page.doc.borrow(), &self.config);
         if title != self.title {
@@ -250,6 +258,23 @@ impl Win {
         let outer = window.outer_size().to_logical::<f32>(scale);
         self.page.view.borrow_mut().window_rect = Some([pos.x, pos.y, outer.width, outer.height, f32::from(window.fullscreen().is_some())]);
         actions
+    }
+
+    /// The corner radius this window is clipped to: the root's `border-radius` for a frameless one that
+    /// isn't maximized or full screen.
+    fn corner_radius(&self) -> f32 {
+        // Not `Window::is_maximized`: on macOS it flips the style mask, which sends events, which come
+        // back here. A window as big as its monitor is as good as maximized.
+        let full = self.window.fullscreen().is_some()
+            || self.window.current_monitor().is_some_and(|m| {
+                let (w, h) = (self.window.outer_size(), m.size());
+                w.width >= h.width && w.height >= h.height
+            });
+        if self.config.frameless() && !full {
+            self.page.window_corner_radius()
+        } else {
+            0.0
+        }
     }
 
     /// For a frameless, resizable window: the margin in which the edges resize it.
@@ -668,7 +693,7 @@ impl App {
             InitialState::Fullscreen => window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None))),
             _ => {}
         }
-        material::apply(&window, config.material);
+        material::apply(&window, material::effective(&config), config.translucent(), if config.frameless() { page.window_corner_radius() } else { 0.0 });
         let access = accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
         window.set_visible(config.state != InitialState::Hidden);
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
@@ -685,6 +710,7 @@ impl App {
             cursor: None,
             config,
             title,
+            corner: (0.0, (0, 0), 1.0),
             edge: None,
             ime_on: false,
             ime_area: None,

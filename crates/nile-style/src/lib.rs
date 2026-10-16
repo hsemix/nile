@@ -1377,6 +1377,11 @@ impl StyleMap {
     pub fn get(&self, id: NodeId) -> &ComputedStyle {
         &self.styles[id.0]
     }
+
+    /// Like [`StyleMap::get`], `None` while there are no styles (or none for `id`).
+    pub fn try_get(&self, id: NodeId) -> Option<&ComputedStyle> {
+        self.styles.get(id.0)
+    }
 }
 
 pub fn compute_styles(doc: &Document) -> StyleMap {

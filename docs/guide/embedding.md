@@ -56,6 +56,17 @@ content under the title bar), `solid` (no frame, no shadow), `solid-with-shadow`
 
 ### Transparent and frosted windows
 
+A frameless window (`solid`, `solid-with-shadow`, `transparent`) is clipped to the corner radius of
+the root: `html { border-radius: 18px }` rounds the window itself, and with it any material behind
+the page. On Windows the clip is a window region, so its edge isn't anti-aliased and the system
+shadow is lost; macOS rounds the layers. Per-pixel shapes beyond a rounded rectangle are what the
+page paints under `window-frame="transparent"`.
+
+On Windows 11 a window with a system frame gets the Mica material in its title bar by default
+(the tint of File Explorer's, following your wallpaper and accent colour). Set
+`window-material="none"` for the plain white/dark bar. Page pixels stay opaque unless you ask for
+a material or a transparent frame.
+
 `window-frame="transparent"` makes the window's pixels carry alpha: give `html` a transparent
 background and draw your own rounded, translucent, shadowed shapes (`examples/transparent.html`).
 `window-material="blur|acrylic|mica|tabbed|sidebar|hud"` puts the system's frosted backdrop behind

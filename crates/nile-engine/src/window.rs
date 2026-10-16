@@ -25,7 +25,11 @@ impl Size {
 /// attribute (Sciter has none); needs a page whose background is transparent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Material {
+    /// Not set (or `auto`): the platform's own look. On Windows 11 a window with a system frame gets
+    /// Mica in its title bar, as File Explorer and Sciter windows do.
     #[default]
+    Auto,
+    /// `none`: no material at all (a plain title bar).
     None,
     /// A frosted blur of what is behind the window (any platform that can).
     Blur,
@@ -46,11 +50,12 @@ impl Material {
         match s.trim().to_ascii_lowercase().as_str() {
             "blur" | "frosted" => Material::Blur,
             "acrylic" => Material::Acrylic,
+            "none" | "off" | "false" => Material::None,
             "mica" => Material::Mica,
             "tabbed" | "mica-alt" => Material::Tabbed,
             "sidebar" => Material::Sidebar,
             "hud" => Material::Hud,
-            _ => Material::None,
+            _ => Material::Auto,
         }
     }
 }
@@ -176,7 +181,7 @@ impl WindowConfig {
                 Some("transparent") => Frame::Transparent,
                 _ => Frame::Native,
             },
-            material: attr("window-material").map_or(Material::None, Material::parse),
+            material: attr("window-material").map_or(Material::Auto, Material::parse),
             icon: attr("window-icon").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         }
     }
@@ -188,7 +193,7 @@ impl WindowConfig {
 
     /// Whether the window's pixels carry alpha (a transparent frame or a material behind the page).
     pub fn translucent(&self) -> bool {
-        self.frame == Frame::Transparent || self.material != Material::None
+        self.frame == Frame::Transparent || !matches!(self.material, Material::Auto | Material::None)
     }
 
     /// Whether the system draws no frame, so the page has to provide drag and resize handling.
@@ -301,7 +306,11 @@ mod tests {
         let c = config(r#"<html window-material="Mica"><body></body></html>"#);
         assert_eq!((c.material, c.frame, c.translucent()), (Material::Mica, Frame::Native, true));
         assert!(config(r#"<html window-frame="transparent"></html>"#).translucent());
-        assert_eq!(config(r#"<html window-material="nonsense"></html>"#).material, Material::None);
+        assert_eq!(config(r#"<html window-material="nonsense"></html>"#).material, Material::Auto);
+        let none = config(r#"<html window-material="none"></html>"#);
+        assert_eq!((none.material, none.translucent()), (Material::None, false));
+        // Left unset, the title bar gets the platform's look but the page's pixels stay opaque.
+        assert!(!config("<html></html>").translucent());
     }
 
     #[test]
