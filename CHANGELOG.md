@@ -61,6 +61,7 @@ the section becomes that version's.
 - `el.attributes["name"]` is the attribute's value as a string and assigning to it sets the attribute (Sciter's shape, as in `label.attributes["for"]`); it used to be an `{ name, value }` object (numeric indexes and iteration still give those).
 
 #### Fixed
+- macOS: opening a child, tool or modal window (`new Window`, `modal`) panicked with "The AccessKit winit adapter must be created before the window is shown": attaching the window to its owner ordered it in before the adapter existed. It is attached afterwards now.
 - `<legend>` shrinks to its label, so a fieldset's top border is only cut behind the label instead of across the whole width (the user-agent sheet's `width: fit-content` was ignored). `width: fit-content` / `max-content` / `min-content` now work on block, flex and list-item boxes: the box takes its max-content width, never wider than its container.
 - The pointer is an arrow, not a text cursor, over `<input type=range>`, `<progress>`, `<meter>`, `<input type=file>` and reset buttons.
 - Windows: closing a window (or resizing a translucent one) overflowed the stack: the alpha presenter's `release()` re-dropped itself. Fixed.

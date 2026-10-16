@@ -78,6 +78,24 @@ cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --typ
 cargo test --workspace
 ```
 
+## Admin registration demo
+
+```sh
+cargo run -p nile-shell -- examples/register.html
+```
+
+Click Register to open the form in a tool window owned by the launcher. Clicking
+Register again focuses the existing form; after closing it, the button opens a
+new one.
+
+A screenshot-inspired registration window with a custom title bar, password and
+email fields, and one serial-number input enhanced through CSS `prototype:`
+([SerialNumber](examples/prototype/serial-number.js)). It formats six groups of
+four characters while preserving native text selection and clipboard support.
+Change Serial clears the key; Get Serial
+fills a sample key; Activate validates the fields locally. This example does not
+connect to a licensing service or save credentials.
+
 ## POS interface demo
 
 ```sh

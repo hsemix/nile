@@ -702,9 +702,6 @@ impl App {
             attrs = attrs.with_owner_window(hwnd);
         }
         let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
-        if let Some(o) = owner.and_then(|o| self.index(o)) {
-            attach_to_owner(&window, &self.wins[o].window);
-        }
         let pos = explicit_pos
             .or_else(|| parent_align.zip(opener_rect).map(|(a, r)| align(a, (w, h), (r[0], r[1], r[2], r[3]))))
             .or_else(|| config.position((w, h), desktop));
@@ -725,6 +722,10 @@ impl App {
         }
         let access = accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
         window.set_visible(config.state != InitialState::Hidden);
+        // After the adapter: on macOS attaching a child orders it in, which shows the window.
+        if let Some(o) = owner.and_then(|o| self.index(o)) {
+            attach_to_owner(&window, &self.wins[o].window);
+        }
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
         let surface = softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
         let title = config.title.clone();

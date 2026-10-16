@@ -1,0 +1,37 @@
+<!doctype html>
+<html window-title="Registration example" window-width="520" window-height="240"
+      window-alignment="5">
+<head>
+  <meta charset="utf-8">
+  <title>Registration example</title>
+  <style>
+    body { margin: 0; padding: 32px; background: #efefef; color: #222; font-family: Arial, sans-serif; font-size: 16px; }
+    h1 { margin: 0 0 12px; font-size: 24px; font-weight: 400; }
+    p { margin: 0 0 24px; color: #555; }
+    button { padding: 10px 30px; border: 1px solid #aaacb3; border-radius: 5px; background: linear-gradient(#f5f6f7, #e3e4e7); font-size: 18px; }
+    button:hover { background: #dce4ed; }
+  </style>
+</head>
+<body>
+  <h1>Admin Registration</h1>
+  <p>Register your administrator account and product key.</p>
+  <button id="register">Register</button>
+  <script>
+    let registration = null;
+    $('#register').on('click', () => {
+      if (registration && registration.isValid) {
+        registration.focus();
+        return;
+      }
+      registration = new Window({
+        url: 'admin-registration.html',
+        type: Window.TOOL_WINDOW,
+        caption: 'Admin Registration',
+        width: 1000,
+        height: 360,
+        alignment: -5
+      });
+    });
+  </script>
+</body>
+</html>
