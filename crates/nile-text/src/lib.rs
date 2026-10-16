@@ -235,9 +235,11 @@ impl TextEngine {
 const SYMBOL_FALLBACKS: &str =
     "Apple Symbols, Zapf Dingbats, Segoe UI Symbol, Noto Sans Symbols 2, Noto Sans Symbols, DejaVu Sans";
 
-/// The end of Miscellaneous Symbols (`⚠ ⚡ ⛔ ...`) through Dingbats (`✓ ✔ ✗ ✂ ...`).
+/// The marked and fill-pattern squares of Geometric Shapes (`▣ ▤ ▥ ▦ ▧ ▨ ▩ ▯ ...`), and the end of
+/// Miscellaneous Symbols (`⚠ ⚡ ⛔ ...`) through Dingbats (`✓ ✔ ✗ ✂ ...`). The rest of Geometric
+/// Shapes (`○ ● ▲ ▼`) is found by the system fallback.
 fn is_symbol_gap(c: char) -> bool {
-    matches!(c as u32, 0x26A0..=0x27BF)
+    matches!(c as u32, 0x25A2..=0x25AF | 0x26A0..=0x27BF)
 }
 
 fn with_symbol_fallbacks(family: &str) -> String {
@@ -332,7 +334,8 @@ mod tests {
 
     #[test]
     fn symbol_gap_covers_dingbats_not_arrows() {
-        assert!(is_symbol_gap('✓') && is_symbol_gap('⚠'));
+        assert!(is_symbol_gap('✓') && is_symbol_gap('⚠') && is_symbol_gap('▤') && is_symbol_gap('▯'));
+        assert!(!is_symbol_gap('○') && !is_symbol_gap('▲'));
         assert!(!is_symbol_gap('→') && !is_symbol_gap('a') && !is_symbol_gap('★'));
     }
 

@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Collapsed borders</title>
+<style>
+  body { font: 14px sans-serif; margin: 24px }
+  h3 { margin: 18px 0 6px; font-size: 13px; color: #555 }
+  table { border-collapse: collapse }
+  td { padding: 8px 14px }
+  /* The wider border wins on a shared edge; with equal widths solid beats dashed beats dotted, and
+     then the upper/left cell wins. */
+  .mix td { border: 1px solid #94a3b8 }
+  .mix td.thick { border: 4px solid #1e3a8a }
+  .mix td.red { border: 2px solid #b91c1c }
+  .style td:nth-child(1) { border: 2px solid #0f172a }
+  .style td:nth-child(2) { border: 2px dashed #0f766e }
+  .style td:nth-child(3) { border: 2px dotted #b45309 }
+  .span td { border: 2px solid #475569 }
+  .span td.wide { border: 4px solid #be185d }
+</style>
+<h3>Width wins (4px blue and 2px red beat 1px grey where they touch)</h3>
+<table class="mix">
+  <tr><td>a</td><td class="thick">b</td><td>c</td></tr>
+  <tr><td class="red">d</td><td>e</td><td>f</td></tr>
+  <tr><td>g</td><td>h</td><td class="red">i</td></tr>
+</table>
+<h3>Equal widths: solid over dashed over dotted</h3>
+<table class="style">
+  <tr><td>solid</td><td>dashed</td><td>dotted</td></tr>
+  <tr><td>solid</td><td>dashed</td><td>dotted</td></tr>
+</table>
+<h3>Spans: the tall cell's 2px border loses to the 4px pink one along both rows</h3>
+<table class="span">
+  <tr><td rowspan="2">tall</td><td class="wide">x</td><td>y</td></tr>
+  <tr><td class="wide">z</td><td>w</td></tr>
+</table>

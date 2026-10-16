@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Symbol fonts</title>
+<style>
+  body { font: 13px sans-serif; margin: 20px; color: #222 }
+  h3 { margin: 16px 0 4px; font-size: 13px; color: #555 }
+  table { border-collapse: collapse }
+  td, th { border: 1px solid #cbd5e1; padding: 4px 10px; text-align: left; font-weight: normal }
+  th { background: #f1f5f9; color: #475569; font-size: 12px }
+  .big { font-size: 26px; line-height: 32px }
+  .a { font-family: sans-serif }
+  .b { font-family: "Segoe UI Symbol" }
+  .c { font-family: "Segoe UI Emoji" }
+  .d { font-family: "Arial Unicode MS", "Lucida Sans Unicode" }
+  .e { font-family: "Noto Sans Symbols", "Noto Sans Symbols 2", "DejaVu Sans" }
+  .f { font-family: "Apple Symbols", "Zapf Dingbats" }
+  .g { font-family: sans-serif, "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols" }
+</style>
+<h3>Each row is one character; each column a font-family. A box, blank or wrong glyph means that setup has no glyph for it.</h3>
+<div id="out"></div>
+<script>
+  const heads = ["char", "code", "sans-serif", "Segoe UI Symbol", "Segoe UI Emoji", "Arial Unicode / Lucida", "Noto / DejaVu", "Apple Symbols / Zapf", "sans, Apple, Segoe, Noto (the ribbon's list)"];
+  const chars = Array.from("▤▣▧▦▥▯○⊕↑↓←→↕↔×≡›Ω¹“”−+✓✔✗⚠★♥…");
+  let html = "<table><tr>" + heads.map((h) => `<th>${h}</th>`).join("") + "</tr>";
+  for (const c of chars) {
+    const code = "U+" + c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
+    html += `<tr><td class="big">${c}</td><td>${code}</td>` + ["a", "b", "c", "d", "e", "f", "g"].map((k) => `<td class="big ${k}">${c}</td>`).join("") + "</tr>";
+  }
+  document.getElementById("out").innerHTML = html + "</table>";
+</script>

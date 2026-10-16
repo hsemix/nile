@@ -429,7 +429,16 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
         let radii = s.corner_radii(b.rect.width, b.rect.height);
         paint_shadows(canvas, skia_rect(b.rect), &s.box_shadow, radii);
         let photo = b.bg_image.as_ref().and_then(|data| self.background_shader(data, s, b.rect));
-        let border = Border { width: s.border_width, color: s.border_color, style: s.border_style };
+        let mut border = Border { width: s.border_width, color: s.border_color, style: s.border_style };
+        // A collapsed-table cell leaves out the sides whose border lost to its neighbour's.
+        let h = b.border_hidden;
+        if h.top || h.right || h.bottom || h.left {
+            for (hidden, style) in [(h.top, &mut border.style.top), (h.right, &mut border.style.right), (h.bottom, &mut border.style.bottom), (h.left, &mut border.style.left)] {
+                if hidden {
+                    *style = BorderStyle::None;
+                }
+            }
+        }
         if let Some((x0, x1)) = b.border_gap {
             // The legend sits on the top border: clip a notch out of the box's top edge for it.
             canvas.save();
