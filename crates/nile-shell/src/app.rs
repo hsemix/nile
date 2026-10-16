@@ -263,7 +263,14 @@ impl Win {
     /// The corner radius this window is clipped to: the root's `border-radius` for a frameless one that
     /// isn't maximized or full screen.
     fn corner_radius(&self) -> f32 {
-        if self.config.frameless() && !self.window.is_maximized() && self.window.fullscreen().is_none() {
+        // Not `Window::is_maximized`: on macOS it flips the style mask, which sends events, which come
+        // back here. A window as big as its monitor is as good as maximized.
+        let full = self.window.fullscreen().is_some()
+            || self.window.current_monitor().is_some_and(|m| {
+                let (w, h) = (self.window.outer_size(), m.size());
+                w.width >= h.width && w.height >= h.height
+            });
+        if self.config.frameless() && !full {
             self.page.window_corner_radius()
         } else {
             0.0

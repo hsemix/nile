@@ -83,7 +83,7 @@ fn macos_corner(window: &Window, radius: f32) {
             let layer: *mut AnyObject = msg_send![view, layer];
             if let Some(layer) = layer.as_ref() {
                 let _: () = msg_send![layer, setCornerRadius: f64::from(radius)];
-                let _: () = msg_send![layer, setMasksToBounds: radius > 0.0];
+                let _: () = msg_send![layer, setMasksToBounds: objc2::runtime::Bool::new(radius > 0.0)];
             }
         }
     };
