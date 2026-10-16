@@ -1140,7 +1140,7 @@ fn bar_state(overlay: &Overlay, node: Option<NodeId>, vertical: bool) -> BarStat
 /// A scrollbar: while the pointer is over it (or it is dragged) it grows toward the content, shows its
 /// track and darkens the thumb.
 fn paint_thumb(canvas: &Canvas, t: &nile_layout::Thumb, look: &nile_style::ScrollbarLook, state: BarState, dark: bool) {
-    let grow = if state == BarState::Rest { 0.0 } else { nile_layout::SCROLLBAR_GROW };
+    let grow = if state == BarState::Rest { 0.0 } else { nile_style::scrollbar_grow() };
     let widen = |r: nile_layout::Rect| {
         if t.vertical {
             Rect::from_xywh(r.x - grow, r.y, r.width + grow, r.height)

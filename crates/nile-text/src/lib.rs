@@ -128,7 +128,8 @@ impl TextEngine {
             line_height: 1.0,
             color: [0; 4],
             deco: 0,
-            spacer: false,
+            // Shaped as the padding spacers are (see `spacer_variations`).
+            spacer: true,
             shift: 0.0,
             italic: false,
             underline: false,
@@ -164,9 +165,7 @@ impl TextEngine {
         scale: f32,
     ) -> TextLayout {
         let mut b = self.layouts.ranged_builder(&mut self.fonts, text, scale, true);
-        b.push_default(StyleProperty::FontFamily(FontFamily::Source(Cow::Owned(
-            base.font_family.clone(),
-        ))));
+        b.push_default(StyleProperty::FontFamily(FontFamily::Source(Cow::Owned(system_families(&base.font_family)))));
         b.push_default(StyleProperty::FontSize(base.font_size));
         b.push_default(StyleProperty::FontWeight(FontWeight::new(base.font_weight)));
         b.push_default(StyleProperty::LineHeight(LineHeight::FontSizeRelative(base.line_height)));
@@ -175,9 +174,12 @@ impl TextEngine {
         b.push_default(StyleProperty::Underline(base.underline));
         b.push_default(StyleProperty::Strikethrough(base.line_through));
         b.push_default(StyleProperty::LetterSpacing(base.letter_spacing));
-        if !base.font_variations.is_empty() {
-            b.push_default(StyleProperty::FontVariations(parley::style::FontVariations::Source(Cow::Owned(base.font_variations.clone()))));
-        }
+        let base_variations = if base.spacer {
+            spacer_variations(&base.font_variations, &system_families(&base.font_family))
+        } else {
+            with_optical_size(&base.font_variations, base.font_size, &system_families(&base.font_family))
+        };
+        b.push_default(StyleProperty::FontVariations(parley::style::FontVariations::Source(Cow::Owned(base_variations))));
         if !base.font_features.is_empty() {
             b.push_default(StyleProperty::FontFeatures(parley::style::FontFeatures::Source(Cow::Owned(base.font_features.clone()))));
         }
@@ -185,7 +187,7 @@ impl TextEngine {
             if range.is_empty() || *s == *base {
                 continue;
             }
-            b.push(StyleProperty::FontFamily(FontFamily::Source(Cow::Owned(s.font_family.clone()))), range.clone());
+            b.push(StyleProperty::FontFamily(FontFamily::Source(Cow::Owned(system_families(&s.font_family)))), range.clone());
             b.push(StyleProperty::FontSize(s.font_size), range.clone());
             b.push(StyleProperty::FontWeight(FontWeight::new(s.font_weight)), range.clone());
             b.push(StyleProperty::LineHeight(LineHeight::FontSizeRelative(s.line_height)), range.clone());
@@ -194,8 +196,15 @@ impl TextEngine {
             b.push(StyleProperty::Underline(s.underline), range.clone());
             b.push(StyleProperty::Strikethrough(s.line_through), range.clone());
             b.push(StyleProperty::LetterSpacing(s.letter_spacing), range.clone());
-            if s.font_variations != base.font_variations {
-                b.push(StyleProperty::FontVariations(parley::style::FontVariations::Source(Cow::Owned(s.font_variations.clone()))), range.clone());
+            // Padding spacers are sized from the font's NBSP advance (`nbsp_ratio`), shaped at one fixed
+            // optical size so the two agree whatever size the spacer is.
+            if s.spacer {
+                let v = spacer_variations(&s.font_variations, &system_families(&s.font_family));
+                if v != s.font_variations {
+                    b.push(StyleProperty::FontVariations(parley::style::FontVariations::Source(Cow::Owned(v))), range.clone());
+                }
+            } else if s.font_variations != base.font_variations || s.font_size != base.font_size {
+                b.push(StyleProperty::FontVariations(parley::style::FontVariations::Source(Cow::Owned(with_optical_size(&s.font_variations, s.font_size, &system_families(&s.font_family))))), range.clone());
             }
             if s.font_features != base.font_features {
                 b.push(StyleProperty::FontFeatures(parley::style::FontFeatures::Source(Cow::Owned(s.font_features.clone()))), range.clone());
@@ -209,7 +218,7 @@ impl TextEngine {
                 .find(|(r, _)| r.contains(&i))
                 .map_or(&base.font_family, |(_, s)| &s.font_family);
             b.push(
-                StyleProperty::FontFamily(FontFamily::Source(Cow::Owned(with_symbol_fallbacks(family)))),
+                StyleProperty::FontFamily(FontFamily::Source(Cow::Owned(with_symbol_fallbacks(&system_families(family))))),
                 i..i + c.len_utf8(),
             );
         }
@@ -249,6 +258,62 @@ fn is_symbol_gap(c: char) -> bool {
         return true;
     }
     matches!(u, 0x21B0..=0x21FF | 0x2300..=0x23FF | 0x25A2..=0x25AF | 0x26A0..=0x27BF)
+}
+
+/// `font-optical-sizing: auto` for the system UI fonts: San Francisco (macOS) and Segoe UI Variable
+/// have an `opsz` axis, which is set to the text size, unless the author's `font-variation-settings` name the axis themselves.
+/// Without it such fonts come out at their display size: tight and spindly for body text.
+fn with_optical_size(variations: &str, size: f32, family: &str) -> String {
+    // Only for the system UI fonts (San Francisco, Segoe UI Variable), which have the axis and look
+    // wrong without it. Other fonts shape exactly as before.
+    let family = family.to_ascii_lowercase();
+    let has_axis = family.contains("system-ui") || family.contains("segoe ui variable") || family.contains("sf pro");
+    if !has_axis || variations.to_ascii_lowercase().contains("opsz") {
+        return variations.to_string();
+    }
+    let axis = format!("\"opsz\" {}", size.clamp(1.0, 1000.0));
+    if variations.trim().is_empty() { axis } else { format!("{variations}, {axis}") }
+}
+
+/// The optical size padding spacers are shaped at (and their NBSP measured at), whatever their size.
+fn spacer_variations(variations: &str, family: &str) -> String {
+    with_optical_size(variations, 17.0, family)
+}
+
+/// The platform's own fonts behind the CSS system font names: `system-ui` (and the aliases pages
+/// use for it, `-apple-system`, `BlinkMacSystemFont`, `ui-sans-serif`), `ui-monospace`, `ui-serif`
+/// and `ui-rounded`. Everything else in a family list is left as it is.
+pub fn system_families(list: &str) -> String {
+    let (ui, mono, serif, rounded) = if cfg!(target_os = "macos") {
+        ("system-ui", "SF Mono, Menlo, Monaco, monospace", "New York, Georgia, Times, serif", "SF Pro Rounded, system-ui")
+    } else if cfg!(windows) {
+        ("Segoe UI Variable Text, Segoe UI, sans-serif", "Cascadia Mono, Consolas, Courier New, monospace", "Cambria, Georgia, Times New Roman, serif", "Segoe UI, sans-serif")
+    } else {
+        ("system-ui, Cantarell, Noto Sans, DejaVu Sans, sans-serif", "DejaVu Sans Mono, Noto Sans Mono, Liberation Mono, monospace", "Noto Serif, DejaVu Serif, serif", "system-ui, Cantarell, Noto Sans, sans-serif")
+    };
+    if !list.split(',').any(|f| is_system_family(f.trim().trim_matches(['"', '\''])).is_some()) {
+        return list.to_string();
+    }
+    list.split(',')
+        .map(|f| match is_system_family(f.trim().trim_matches(['"', '\''])) {
+            Some("ui") => ui.to_string(),
+            Some("mono") => mono.to_string(),
+            Some("serif") => serif.to_string(),
+            Some("rounded") => rounded.to_string(),
+            _ => f.trim().to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn is_system_family(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "system-ui" | "-apple-system" | "blinkmacsystemfont" | "ui-sans-serif" | "-webkit-system-font" => Some("ui"),
+        "ui-monospace" => Some("mono"),
+        "ui-serif" => Some("serif"),
+        "ui-rounded" => Some("rounded"),
+        _ => None,
+    }
 }
 
 fn with_symbol_fallbacks(family: &str) -> String {
@@ -339,6 +404,27 @@ mod tests {
         let one_line = layout.height();
         break_lines(&mut layout, Some(80.0), Alignment::Start);
         assert!(layout.height() > one_line * 2.0, "text should wrap onto several lines");
+    }
+
+    #[test]
+    fn optical_size_follows_the_font_size_unless_the_author_sets_it() {
+        assert_eq!(with_optical_size("", 15.0, "system-ui"), "\"opsz\" 15");
+        assert_eq!(with_optical_size("\"wght\" 600", 13.5, "Segoe UI Variable Text, Segoe UI"), "\"wght\" 600, \"opsz\" 13.5");
+        assert_eq!(with_optical_size("\"OPSZ\" 20", 13.0, "system-ui"), "\"OPSZ\" 20");
+        // Fonts that don't need it are shaped as before.
+        assert_eq!(with_optical_size("", 15.0, "Helvetica, sans-serif"), "");
+    }
+
+    #[test]
+    fn system_font_names_become_the_platforms_fonts() {
+        // Other families are untouched, and a list without a system name comes back as it was.
+        assert_eq!(system_families("Arial, sans-serif"), "Arial, sans-serif");
+        let ui = system_families("-apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif");
+        assert!(ui.ends_with("\"Segoe UI\", sans-serif") || ui.ends_with("Segoe UI\", sans-serif"), "{ui}");
+        assert!(!ui.to_ascii_lowercase().contains("blinkmac") && !ui.contains("-apple-system"), "{ui}");
+        assert!(system_families("ui-monospace").contains("monospace"));
+        assert!(system_families("ui-serif").contains("serif"));
+        assert!(system_families("ui-rounded").to_ascii_lowercase().contains("system-ui") || cfg!(windows));
     }
 
     #[test]

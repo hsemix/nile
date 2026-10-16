@@ -256,8 +256,32 @@ pub struct ScrollbarLook {
 }
 
 /// Thickness of the default overlay scrollbar, and of `scrollbar-width: thin`.
-pub const SCROLLBAR_AUTO: f32 = 6.0;
-pub const SCROLLBAR_THIN: f32 = 4.0;
+/// The stock scrollbar thickness (px): `scrollbar-width: auto` and `thin`, and how much the bar
+/// grows while the pointer is over it. They follow the platform's look: macOS overlay bars are a bit
+/// thicker, Windows 11's start as a thin line that widens on hover.
+pub fn scrollbar_auto() -> f32 {
+    match theme_platform() {
+        "macos" => 7.0,
+        "windows" => 4.0,
+        _ => 6.0,
+    }
+}
+
+pub fn scrollbar_thin() -> f32 {
+    match theme_platform() {
+        "macos" => 5.0,
+        "windows" => 3.0,
+        _ => 4.0,
+    }
+}
+
+pub fn scrollbar_grow() -> f32 {
+    match theme_platform() {
+        "macos" => 3.0,
+        "windows" => 6.0,
+        _ => 4.0,
+    }
+}
 
 /// `overflow` on one axis. `Scroll` covers both `scroll` and `auto`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -1066,8 +1090,8 @@ input[type=button], input[type=submit], input[type=reset] { width: auto; backgro
 /// equal specificity, so each repeats the base selectors it changes). The `:hover`/`:active`/`:focus-visible`
 /// rules mean every page restyles on pointer moves, which the partial restyle keeps cheap (see `StateDeps`).
 const THEME_WINDOWS: &str = r#"
-html { font-family: "Segoe UI", sans-serif }
-button, input, textarea, select { font-family: "Segoe UI", sans-serif }
+html { font-family: system-ui }
+button, input, textarea, select { font-family: system-ui }
 button, input { padding: 5px 12px; border: 1px solid #d1d1d1; border-bottom-color: #b8b8b8; border-radius: 4px; background: #fdfdfd }
 input { background: #fdfdfd; border-color: #e5e5e5; border-bottom-color: #8a8a8a; padding: 5px 10px; min-height: 18px }
 textarea { padding: 5px 10px; border: 1px solid #e5e5e5; border-bottom-color: #8a8a8a; border-radius: 4px; background: #fdfdfd }
@@ -1087,6 +1111,8 @@ button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, 
 "#;
 
 const THEME_MACOS: &str = r#"
+html { font-family: system-ui }
+button, input, textarea, select { font-family: system-ui }
 button, input { padding: 3px 12px; border: 1px solid #d6d6d6; border-bottom-color: #c2c2c2; border-radius: 6px; background: #ffffff; box-shadow: 0 1px 1px rgba(0,0,0,0.08) }
 input { padding: 3px 7px; border-color: #cfcfcf; border-bottom-color: #bdbdbd; border-radius: 5px; box-shadow: none }
 textarea { padding: 3px 7px; border: 1px solid #cfcfcf; border-radius: 5px }
@@ -1105,6 +1131,8 @@ button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, 
 "#;
 
 const THEME_LINUX: &str = r#"
+html { font-family: system-ui }
+button, input, textarea, select { font-family: system-ui }
 button, input { padding: 5px 12px; border: 1px solid #cdc7c2; border-bottom-color: #bfb8b1; border-radius: 6px; background: #f6f5f4 }
 input { background: #ffffff; padding: 5px 8px; border-bottom-color: #cdc7c2 }
 textarea { padding: 5px 8px; border: 1px solid #cdc7c2; border-radius: 6px }
@@ -1447,8 +1475,8 @@ impl StyleMap {
         let s = &self.styles[node.0];
         let parts = self.scrollbars.get(&node);
         let thickness = parts.and_then(|p| p.thickness).unwrap_or(match s.scrollbar_width {
-            ScrollbarWidth::Auto => SCROLLBAR_AUTO,
-            ScrollbarWidth::Thin => SCROLLBAR_THIN,
+            ScrollbarWidth::Auto => scrollbar_auto(),
+            ScrollbarWidth::Thin => scrollbar_thin(),
             ScrollbarWidth::None => 0.0,
         });
         ScrollbarLook {
@@ -1597,7 +1625,7 @@ fn compute_with_scheme(doc: &Document, state: &InteractionState, viewport: (f32,
         keyframes,
         pages,
         font_faces,
-        page_bar: ScrollbarLook { thickness: SCROLLBAR_AUTO, thumb: None, thumb_radius: None, track: None },
+        page_bar: ScrollbarLook { thickness: scrollbar_auto(), thumb: None, thumb_radius: None, track: None },
         has_prototypes: false,
         dark,
     };
@@ -1700,6 +1728,19 @@ fn expand_font(d: Declaration) -> Vec<Declaration> {
         return vec![d];
     }
     let part = |name: &str, values: Vec<Value>| Declaration { name: name.into(), values, important: d.important, raw: String::new() };
+    // The system font keywords (`font: menu`, Sciter's `font: system`): the platform's UI font and size.
+    if let [Value::Ident(k)] = d.values.as_slice() {
+        let small = matches!(k.as_str(), "small-caption" | "status-bar");
+        if matches!(k.as_str(), "menu" | "caption" | "icon" | "message-box" | "small-caption" | "status-bar" | "system") {
+            let px = if cfg!(windows) { 12.0 } else if small { 11.0 } else { 13.0 };
+            return vec![
+                part("font-style", vec![Value::Ident("normal".into())]),
+                part("font-weight", vec![Value::Ident("normal".into())]),
+                part("font-size", vec![Value::Px(px)]),
+                part("font-family", vec![Value::Ident("system-ui".into())]),
+            ];
+        }
+    }
     let (mut style, mut weight) = (None, None);
     let mut i = 0;
     let v = &d.values;

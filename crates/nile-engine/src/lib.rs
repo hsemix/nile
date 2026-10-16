@@ -5170,11 +5170,11 @@ cd</textarea>
             let look = v.styles.scrollbar_look(node);
             (look.thickness, look.thumb.map(|c| (c.r, c.g, c.b)), look.track.map(|c| (c.r, c.g, c.b)), look.thumb_radius)
         };
-        assert_eq!(thick(&mut p, "a"), (6.0, None, None, None));
-        assert_eq!(thick(&mut p, "thin").0, 4.0);
+        assert_eq!(thick(&mut p, "a"), (nile_style::scrollbar_auto(), None, None, None));
+        assert_eq!(thick(&mut p, "thin").0, nile_style::scrollbar_thin());
         assert_eq!(thick(&mut p, "none").0, 0.0);
         assert_eq!(thick(&mut p, "wk"), (14.0, Some((255, 0, 0)), None, Some(2.0)));
-        assert_eq!(thick(&mut p, "col"), (6.0, Some((0, 255, 0)), Some((0, 0, 255)), None));
+        assert_eq!(thick(&mut p, "col"), (nile_style::scrollbar_auto(), Some((0, 255, 0)), Some((0, 0, 255)), None));
         // A `none` bar has nothing to grab, but the wheel still scrolls.
         let node = p.doc.borrow().find(|n| n.attr("id") == Some("none")).unwrap();
         let sb = p.view.borrow_mut().layout().scroll_box(node).copied().unwrap();

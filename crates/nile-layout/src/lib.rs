@@ -220,10 +220,7 @@ pub struct ScrollBox {
 }
 
 /// Overlay scrollbar metrics, shared by painting and dragging.
-pub const SCROLLBAR_THICK: f32 = nile_style::SCROLLBAR_AUTO;
 pub const SCROLLBAR_EDGE: f32 = 2.0;
-/// How much wider a bar grows while the pointer is over it.
-pub const SCROLLBAR_GROW: f32 = 4.0;
 
 /// One scrollbar: its thumb and the strip it slides in, in the same coordinates as the
 /// box it belongs to.
@@ -3890,9 +3887,10 @@ mod tests {
 
     #[test]
     fn inline_padding_and_border_take_horizontal_space() {
-        let plain = run_width(r#"<body style="margin:0"><p style="margin:0">a<span>b</span>c</p></body>"#);
+        // sans-serif, not the platform's UI font: a spacer between letters also takes away their kerning.
+        let plain = run_width(r#"<body style="margin:0;font-family:sans-serif"><p style="margin:0">a<span>b</span>c</p></body>"#);
         let padded = run_width(
-            r#"<body style="margin:0"><p style="margin:0">a<span style="padding:0 6px; border:2px solid red">b</span>c</p></body>"#,
+            r#"<body style="margin:0;font-family:sans-serif"><p style="margin:0">a<span style="padding:0 6px; border:2px solid red">b</span>c</p></body>"#,
         );
         assert_eq!(plain.1, 0);
         assert_eq!(padded.1, 1);
