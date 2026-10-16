@@ -235,11 +235,20 @@ impl TextEngine {
 const SYMBOL_FALLBACKS: &str =
     "Apple Symbols, Zapf Dingbats, Segoe UI Symbol, Noto Sans Symbols 2, Noto Sans Symbols, DejaVu Sans";
 
-/// The marked and fill-pattern squares of Geometric Shapes (`▣ ▤ ▥ ▦ ▧ ▨ ▩ ▯ ...`), and the end of
+/// The arrows from `↰` on (`↶ ↷ ⇄ ...`), Miscellaneous Technical (`⌕ ⌘ ⏎ ...`), the marked and
+/// fill-pattern squares of Geometric Shapes (`▣ ▤ ▥ ▦ ▧ ▨ ▩ ▯ ...`), and the end of
 /// Miscellaneous Symbols (`⚠ ⚡ ⛔ ...`) through Dingbats (`✓ ✔ ✗ ✂ ...`). The rest of Geometric
 /// Shapes (`○ ● ▲ ▼`) is found by the system fallback.
+///
+/// Windows has no working system fallback for the symbol blocks at all (the plain stack shows boxes
+/// where Segoe UI Symbol has the glyph), so there the whole range from Arrows through Miscellaneous
+/// Symbols and Arrows (U+2190-2BFF) goes to the named list, Segoe UI Symbol being the system's own.
 fn is_symbol_gap(c: char) -> bool {
-    matches!(c as u32, 0x25A2..=0x25AF | 0x26A0..=0x27BF)
+    let u = c as u32;
+    if cfg!(windows) && matches!(u, 0x2190..=0x2BFF) {
+        return true;
+    }
+    matches!(u, 0x21B0..=0x21FF | 0x2300..=0x23FF | 0x25A2..=0x25AF | 0x26A0..=0x27BF)
 }
 
 fn with_symbol_fallbacks(family: &str) -> String {
@@ -334,9 +343,10 @@ mod tests {
 
     #[test]
     fn symbol_gap_covers_dingbats_not_arrows() {
-        assert!(is_symbol_gap('✓') && is_symbol_gap('⚠') && is_symbol_gap('▤') && is_symbol_gap('▯'));
-        assert!(!is_symbol_gap('○') && !is_symbol_gap('▲'));
-        assert!(!is_symbol_gap('→') && !is_symbol_gap('a') && !is_symbol_gap('★'));
+        assert!(is_symbol_gap('✓') && is_symbol_gap('⚠') && is_symbol_gap('▤') && is_symbol_gap('▯') && is_symbol_gap('↶') && is_symbol_gap('⌕'));
+        // Elsewhere the rest of Geometric Shapes and the arrows keep the system's choice.
+        assert_eq!((is_symbol_gap('○'), is_symbol_gap('→'), is_symbol_gap('▲')), (cfg!(windows), cfg!(windows), cfg!(windows)));
+        assert!(!is_symbol_gap('a'));
     }
 
     #[test]

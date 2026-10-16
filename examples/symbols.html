@@ -16,11 +16,11 @@
   .f { font-family: "Apple Symbols", "Zapf Dingbats" }
   .g { font-family: sans-serif, "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols" }
 </style>
-<h3>Each row is one character; each column a font-family. A box, blank or wrong glyph means that setup has no glyph for it.</h3>
+<h3>Every non-ASCII character of examples/word-ribbon.html and its script. Each row is one character; each column a font-family. A box, blank or wrong glyph means that setup has no glyph for it.</h3>
 <div id="out"></div>
 <script>
   const heads = ["char", "code", "sans-serif", "Segoe UI Symbol", "Segoe UI Emoji", "Arial Unicode / Lucida", "Noto / DejaVu", "Apple Symbols / Zapf", "sans, Apple, Segoe, Noto (the ribbon's list)"];
-  const chars = Array.from("▤▣▧▦▥▯○⊕↑↓←→↕↔×≡›Ω¹“”−+✓✔✗⚠★♥…");
+  const chars = Array.from("¶·¹×Ω—“”•‹›←↑→↓↔↕↖↶↷⇄−≡⌕▣▤▥▦▧▯○✂");
   let html = "<table><tr>" + heads.map((h) => `<th>${h}</th>`).join("") + "</tr>";
   for (const c of chars) {
     const code = "U+" + c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
