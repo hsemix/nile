@@ -1,0 +1,28 @@
+<html window-frame="solid-with-shadow" window-width="620" window-height="300" window-alignment="5">
+  <head>
+    <title>Snap layouts</title>
+    <style>
+      html { border-radius: 8px; background: #fff }
+      body { margin: 0; font: 14px sans-serif; color: #1b1d22; background: #fff }
+      .bar { display: flex; align-items: center; height: 32px; background: #eef1f6 }
+      .bar .title { flex: 1; padding: 0 12px; font-size: 12px }
+      .bar button { width: 46px; height: 32px; border: 0; border-radius: 0; background: transparent; font-size: 12px }
+      .bar button:hover { background: #dfe4ee }
+      .bar button.close:hover { background: #c42b1c; color: #fff }
+      .content { padding: 18px }
+    </style>
+  </head>
+  <body>
+    <div class="bar" role="window-caption">
+      <div class="title">Snap layouts</div>
+      <button role="window-minimize">&#x2212;</button>
+      <button role="window-maximize">&#x25A1;</button>
+      <button role="window-close" class="close">&#x2715;</button>
+    </div>
+    <div class="content">
+      On Windows 11, rest the pointer on the maximize button: the system's Snap Layouts flyout
+      appears, because the window answers the system's hit test with "maximize button" over the
+      element marked <code>role="window-maximize"</code>. Elsewhere it simply maximizes.
+    </div>
+  </body>
+</html>

@@ -27,6 +27,10 @@ pub enum UserEvent {
     /// Windows: a command of window `hwnd`'s menu bar, as the page item's node id.
     #[allow(dead_code)]
     MenuIn(isize, u64),
+    /// Windows: the pointer entered (1) or left (0) the maximize button of window `hwnd`, which
+    /// the system is hit testing for Snap Layouts.
+    #[allow(dead_code)]
+    Snap(isize, u8),
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -97,6 +101,13 @@ pub struct App {
 
 impl App {
     pub fn new(page: Page, proxy: EventLoopProxy<UserEvent>) -> App {
+        #[cfg(windows)]
+        {
+            let proxy = proxy.clone();
+            crate::snap_win::set_notify(move |hwnd, state| {
+                let _ = proxy.send_event(UserEvent::Snap(hwnd, state));
+            });
+        }
         App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0, menu: None, active: 0, bootstrap: false, exit_code: 0 }
     }
 }
@@ -241,6 +252,18 @@ impl Win {
             self.config.material = material;
             material::apply(&window, material::effective(&self.config), self.config.translucent(), self.corner_radius());
             window.request_redraw();
+        }
+        // Windows: tell the system where the maximize button is, for the Snap Layouts flyout.
+        #[cfg(windows)]
+        if self.config.frameless() {
+            if let Some(hwnd) = owner_hwnd(&window) {
+                let s = window.scale_factor() as f32;
+                let rect = (self.config.maximizable && self.config.resizable != Resizable::No)
+                    .then(|| self.page.maximize_button_rect())
+                    .flatten()
+                    .map(|[x, y, w, h]| ((x * s).floor() as i32, (y * s).floor() as i32, ((x + w) * s).ceil() as i32, ((y + h) * s).ceil() as i32));
+                crate::snap_win::set_rect(hwnd, rect);
+            }
         }
         // A frameless window follows the root's `border-radius`, so a material takes the page's shape.
         let corner = (self.corner_radius(), window.outer_size().into(), window.scale_factor());
@@ -694,6 +717,12 @@ impl App {
             _ => {}
         }
         material::apply(&window, material::effective(&config), config.translucent(), if config.frameless() { page.window_corner_radius() } else { 0.0 });
+        #[cfg(windows)]
+        if config.frameless() {
+            if let Some(hwnd) = owner_hwnd(&window) {
+                crate::snap_win::install(hwnd);
+            }
+        }
         let access = accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
         window.set_visible(config.state != InitialState::Hidden);
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
@@ -971,6 +1000,22 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let event = match event {
             UserEvent::Access(event) => event,
+            UserEvent::Snap(hwnd, state) => {
+                let Some(idx) = self.wins.iter().position(|w| w.window.id() == WindowId::from(hwnd as u64)) else { return };
+                let win = &mut self.wins[idx];
+                // The system owns the pointer over the button, so show its hover the page's own way.
+                let changed = match (state, win.page.maximize_button_rect()) {
+                    (1, Some([x, y, w, h])) => win.page.pointer_moved(x + w / 2.0, y + h / 2.0),
+                    _ => {
+                        win.page.pointer_left();
+                        true
+                    }
+                };
+                if changed {
+                    win.window.request_redraw();
+                }
+                return;
+            }
             UserEvent::MenuIn(hwnd, node) => {
                 let Some(idx) = self.wins.iter().position(|w| w.window.id() == WindowId::from(hwnd as u64)) else { return };
                 let id = self.wins[idx].id;

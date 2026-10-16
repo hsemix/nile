@@ -3674,6 +3674,18 @@ impl Page {
         true
     }
 
+    /// The border box `[x, y, width, height]` (viewport px) of the page's maximize button, the first
+    /// element with `role="window-maximize"` that has a box, for the embedder's hit testing (Windows
+    /// Snap Layouts).
+    pub fn maximize_button_rect(&self) -> Option<[f32; 4]> {
+        let node = self.doc.borrow().find(|n| n.attr("role").map(str::trim) == Some("window-maximize"))?;
+        let mut v = self.view.borrow_mut();
+        v.sync();
+        let offsets = v.scroll_offsets.clone();
+        let r = v.layout().node_rect_scrolled(node, &offsets)?;
+        (r.width > 0.0 && r.height > 0.0).then_some([r.x, r.y, r.width, r.height])
+    }
+
     /// The corner radius (logical px) of the root `<html>` element: a frameless or translucent window
     /// is clipped to it, so the system's material and the page's own pixels share one rounded shape.
     pub fn window_corner_radius(&self) -> f32 {
@@ -4338,6 +4350,19 @@ mod tests {
         let _ = std::fs::remove_file(path);
         let (p, path) = page("<html><body></body></html>", "corner0");
         assert_eq!(p.window_corner_radius(), 0.0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_maximize_button_has_a_rect_for_hit_testing() {
+        let (p, path) = page(
+            r#"<body style="margin:0"><div style="position:absolute;left:100px;top:4px;width:46px;height:30px" role="window-maximize"></div><div style="position:absolute;left:10px;top:4px;width:30px;height:30px" role="window-close"></div></body>"#,
+            "maxbtn",
+        );
+        assert_eq!(p.maximize_button_rect(), Some([100.0, 4.0, 46.0, 30.0]));
+        let _ = std::fs::remove_file(path);
+        let (p, path) = page("<body></body>", "maxbtn0");
+        assert_eq!(p.maximize_button_rect(), None);
         let _ = std::fs::remove_file(path);
     }
 

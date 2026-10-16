@@ -22,6 +22,8 @@
 
 #[cfg(windows)]
 mod alpha_win;
+#[cfg(windows)]
+mod snap_win;
 mod access;
 mod app;
 mod bundle;
