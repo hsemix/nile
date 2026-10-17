@@ -78,6 +78,41 @@ cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --typ
 cargo test --workspace
 ```
 
+## Native extensions
+
+Separately distributed native packages can expose asynchronous operations, binary
+buffers, managed resources and ongoing events. SQLite is the first independent
+consumer; it is not linked into the engine.
+
+```sh
+python3 scripts/build-extension.py sqlite --dest examples/sqlite/extensions/sqlite
+cargo run -p nile-shell -- examples/sqlite/index.html
+```
+
+See the [extension author and JavaScript guide](docs/extensions.md) for the C ABI,
+threading/ownership contract, platform packages and standalone builds. Native
+packages are trusted process-level code. Packed native files use a private, verified
+cache; wrappers stay archived. See the guide for explicit external-library mode,
+platform signing requirements and stable writable application-data paths.
+
+## Admin registration demo
+
+```sh
+cargo run -p nile-shell -- examples/register.html
+```
+
+Click Register to open the form in a tool window owned by the launcher. Clicking
+Register again focuses the existing form; after closing it, the button opens a
+new one.
+
+A screenshot-inspired registration window with a custom title bar, password and
+email fields, and one serial-number input enhanced through CSS `prototype:`
+([SerialNumber](examples/prototype/serial-number.js)). It formats six groups of
+four characters while preserving native text selection and clipboard support.
+Change Serial clears the key; Get Serial
+fills a sample key; Activate validates the fields locally. This example does not
+connect to a licensing service or save credentials.
+
 ## POS interface demo
 
 ```sh
@@ -255,7 +290,7 @@ What changed and when is in the [changelog](CHANGELOG.md).
   innermost decorated inline is painted, and block children of an inline element don't split the run.
 - Window gaps: no `window-corners`, per-pixel alpha (`transparent`, materials) is
   only verified on macOS (Windows blits translucent windows itself through a DIB with alpha, `alpha_win.rs`; Wayland uses
-  softbuffer's ARGB buffers; X11 has no alpha path yet, so corners stay opaque there). `Window.this.material = "mica"` changes it live; a frameless window is clipped to the root's `border-radius` (Windows: unanti-aliased region), `sidebar` is Mica on Windows, Windows needs build 22523+ for `mica`/`tabbed` (and for the Mica title bar every system-framed window gets by default; `window-material="none"` turns it off); frameless windows show Windows 11's Snap Layouts flyout over the `role="window-maximize"` element (`examples/snap-layouts.html`), KDE's blur protocol serves `blur` on Linux.
+  softbuffer's ARGB buffers; X11 has no alpha path yet, so corners stay opaque there). `Window.this.material = "mica"` changes it live; a frameless window is clipped to the root's `border-radius` (Windows: unanti-aliased region), `sidebar` is Mica on Windows, Windows needs build 22523+ for `mica`/`tabbed` (and for the Mica title bar every system-framed window gets by default; `window-material="none"` turns it off); the OS's light/dark setting and accent colour drive `prefers-color-scheme`, the system colour keywords, `color-scheme`/`accent-color` and the controls (`examples/dark-mode.html`, `docs/guide/layout-and-style.md`); frameless windows show Windows 11's Snap Layouts flyout over the `role="window-maximize"` element (`examples/snap-layouts.html`), KDE's blur protocol serves `blur` on Linux.
 - Editing gaps: no spell-check, drag-and-drop of text or `contenteditable="plaintext-only"` (treated as `true`); paste takes the clipboard's HTML when it has some (bold, italic, underline, links, headings, lists, quotes, images and a short list of inline styles survive; everything else is dropped; `nile-capi` hosts only exchange text) and copy writes HTML and text; undo is a snapshot of the whole editing host, so a script that rewrites the host also rewrites its history; `Range` has `cloneContents`/`extractContents`/`compareBoundaryPoints`/`comparePoint`/`intersectsNode`, but no `Range.getClientRects` or `surroundContents` across blocks, and fragments are `<div>`s marked as `nodeType` 11; `execCommand("insertTable", false, "3x2")` inserts a table (Tab and Shift+Tab move between cells, Tab in the last cell adds a row, Enter stays in the cell, Backspace and Delete don't merge cells, deleting across cells empties them), `tableInsertRowAbove/Below`, `tableInsertColumnLeft/Right`, `tableDeleteRow/Column/Table`, `tableMergeCells` and `tableSplitCell` edit the table around the caret (spans are kept consistent; `examples/image-editing.html`) but columns can't be resized by dragging, a click selects an image (outline, eight handles; corners keep the proportions, Shift frees them; one undo step) but there is no image wrapping or alignment, and `fontSize` 1-7 maps to a fixed px table; indent uses `margin-left` rather than nested lists; Page Up/Down don't move the caret; selection inside `<input>`/`<textarea>` is separate from the document selection.
 - Selection gaps: page text selection works across runs in paint order (so `z-index` reordering can scramble the
   selection order), can't start inside a link or control, has no keyboard (Shift+arrows), and ignores `user-select: none` on a span inside a selectable block (it applies per paragraph/run); `text-selection-color` isn't painted. Rich-text `Range`/`Selection` APIs are described above. Form gaps: no drag-and-drop; no `<form>` submit or validation; list boxes have no focus ring or

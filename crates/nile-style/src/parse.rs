@@ -98,7 +98,7 @@ pub struct Rule {
 /// Properties whose value is kept as text for the cascade to hand on (scripts read `popup-*`; the
 /// others are parsed by their own modules or the text engine).
 pub(crate) fn keeps_raw(name: &str) -> bool {
-    name.starts_with("popup-") || matches!(name, "shape-outside" | "font-variation-settings" | "font-feature-settings" | "prototype")
+    name.starts_with("popup-") || matches!(name, "shape-outside" | "font-variation-settings" | "font-feature-settings" | "prototype" | "nile-password-char")
 }
 
 /// An `@keyframes` rule: the declarations at each offset (0..=1), in offset order.
@@ -429,7 +429,7 @@ fn media_feature(f: &str, vw: f32, vh: f32) -> bool {
     let Some(value) = value else { return matches!(name, "color" | "hover" | "pointer") };
     match name {
         "orientation" => (value == "landscape") == (vw >= vh) && matches!(value, "landscape" | "portrait"),
-        "prefers-color-scheme" => value == "light",
+        "prefers-color-scheme" => value == if crate::system::system_theme().dark { "dark" } else { "light" },
         "prefers-reduced-motion" => value == "no-preference",
         "hover" => value == "hover",
         "pointer" => value == "fine",

@@ -2,6 +2,26 @@
 
 [Guide index](README.md) · Next: [Scripting](scripting.md)
 
+## Dark mode, system colours and the accent colour
+
+Nile follows the OS's theme. `@media (prefers-color-scheme: dark)` and `matchMedia` are true on a
+dark system, and the system colour keywords (`Canvas`, `CanvasText`, `ButtonFace`, `ButtonText`,
+`ButtonBorder`, `Field`, `FieldText`, `GrayText`, `LinkText`, `VisitedText`, `Highlight`,
+`HighlightText`, `AccentColor`, `AccentColorText`, `Mark`) change with it. A page that says it
+supports dark gets the platform's dark look for everything it doesn't style itself:
+
+```html
+<meta name="color-scheme" content="light dark">   <!-- or  :root { color-scheme: light dark } -->
+```
+
+Without that opt-in a page stays light, as in a browser. Only the root's `color-scheme` counts.
+The system accent colours checked boxes and radios, focus rings, menu and list highlights,
+progress bars, ranges and the text selection; `accent-color` (inherited) overrides it for a control
+or a subtree. Test other themes with `NILE_COLOR_SCHEME=dark nile page.html` and
+`NILE_ACCENT=#ff5500` (also for `--png`), and other platforms' controls with
+`NILE_THEME=windows|macos|linux`. `examples/dark-mode.html` shows it. Embedders call
+`nile_style::set_system_theme` (C: `nile_view_set_system_theme`) with what the OS says.
+
 ## Style sheets in files
 
 Besides `<style>`, a page can link style sheets: `<link rel="stylesheet" href="app.css">` (with an optional

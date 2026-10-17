@@ -1,0 +1,15 @@
+[package]
+name = "nile-extensions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nile-extension-sdk = { path = "../nile-extension-sdk" }
+libloading = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+cc = "1"

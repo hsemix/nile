@@ -15,6 +15,7 @@ mod page;
 mod parse;
 mod selector;
 mod shape;
+mod system;
 pub use shape::{Dim as ShapeDim, RefBox as ShapeBox, Resolved as ResolvedShape, Shape, ShapeOutside};
 
 use nile_dom::{Document, NodeId, NodeKind};
@@ -32,6 +33,7 @@ pub use grid::{area_lines, Breadth, GridAutoFlow, GridLine, GridPlace, Track, Tr
 pub use gradient::{TransformFn, ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
 pub use parse::{color_from_hex, Declaration, FontFace, Rule, Stylesheet, Value};
 use parse::Cx;
+pub use system::{default_accent, parse_hex, set_system_theme, system_color, system_theme, text_on, ColorScheme, Palette, SystemTheme};
 pub use selector::{ElementRef, InteractionState, NileImpl, PseudoClass, PseudoElement, Query};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -254,8 +256,32 @@ pub struct ScrollbarLook {
 }
 
 /// Thickness of the default overlay scrollbar, and of `scrollbar-width: thin`.
-pub const SCROLLBAR_AUTO: f32 = 6.0;
-pub const SCROLLBAR_THIN: f32 = 4.0;
+/// The stock scrollbar thickness (px): `scrollbar-width: auto` and `thin`, and how much the bar
+/// grows while the pointer is over it. They follow the platform's look: macOS overlay bars are a bit
+/// thicker, Windows 11's start as a thin line that widens on hover.
+pub fn scrollbar_auto() -> f32 {
+    match theme_platform() {
+        "macos" => 7.0,
+        "windows" => 4.0,
+        _ => 6.0,
+    }
+}
+
+pub fn scrollbar_thin() -> f32 {
+    match theme_platform() {
+        "macos" => 5.0,
+        "windows" => 3.0,
+        _ => 4.0,
+    }
+}
+
+pub fn scrollbar_grow() -> f32 {
+    match theme_platform() {
+        "macos" => 3.0,
+        "windows" => 6.0,
+        _ => 4.0,
+    }
+}
 
 /// `overflow` on one axis. `Scroll` covers both `scroll` and `auto`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -488,6 +514,8 @@ pub struct ComputedStyle {
     /// `prototype: Class url(file.js)`: the script class made the element's controller, and the file it
     /// comes from (empty for a class the page already defines).
     pub prototype: Option<(String, String)>,
+    /// `nile-password-char: "*"`: the character a password input shows for each typed one (default `•`).
+    pub password_char: Option<char>,
     /// `font-variation-settings` / `font-feature-settings` as written (`"wght" 650`), for the text engine; inherited.
     pub font_variations: String,
     pub font_features: String,
@@ -504,8 +532,15 @@ pub struct ComputedStyle {
     pub table_fixed: bool,
     /// `vertical-align` for table cells.
     pub vertical_align: VerticalAlign,
+    /// `width: fit-content | max-content | min-content` (the box shrinks to its content, up to the
+    /// space available; `min-content` is treated like `max-content`).
+    pub width_fit: bool,
     /// `cursor`; inherited.
     pub cursor: Cursor,
+    /// `color-scheme`; inherited. Only the root's counts for the user-agent sheet.
+    pub color_scheme: ColorScheme,
+    /// `accent-color` (`None` = auto: the system accent); inherited.
+    pub accent_color: Option<Color>,
     /// `popup-position`: which numpad point (1 bottom-left … 9 top-right) of the popup meets which
     /// point of its anchor. Read by scripts (`Element.popup`), not by layout.
     pub popup_position: Option<(u8, u8)>,
@@ -638,6 +673,7 @@ impl Default for ComputedStyle {
             caption_bottom: false,
             list_style_image: None,
             prototype: None,
+            password_char: None,
             font_variations: String::new(),
             font_features: String::new(),
             backface_hidden: false,
@@ -647,6 +683,9 @@ impl Default for ComputedStyle {
             table_fixed: false,
             vertical_align: VerticalAlign::Baseline,
             cursor: Cursor::Auto,
+            width_fit: false,
+            color_scheme: ColorScheme::Light,
+            accent_color: None,
             popup_position: None,
             popup_animation: None,
             align_self: Align::Normal,
@@ -893,6 +932,8 @@ impl ComputedStyle {
             border_collapse: parent.border_collapse,
             caption_bottom: parent.caption_bottom,
             cursor: parent.cursor,
+            color_scheme: parent.color_scheme,
+            accent_color: parent.accent_color,
             selection_bg: parent.selection_bg,
             letter_spacing: parent.letter_spacing,
             vars: parent.vars.clone(),
@@ -929,7 +970,7 @@ menu.popup, menu.context { display: none }
 menu.popup, menu.context, popup > menu { list-style: none; margin: 0; padding: 4px 0; background: #fff; border: 1px solid #b4b8c0; box-shadow: 0 4px 14px rgba(0,0,0,0.25); min-width: 140px }
 popup > menu, popup > menu.popup, popup > menu.context { display: block; border: 0; box-shadow: none }
 menu.popup > li, menu.context > li, popup > menu > li { display: block; list-style: none; padding: 4px 18px; cursor: default }
-menu.popup > li.nile-hover, menu.context > li.nile-hover, popup > menu > li.nile-hover { background: #3a7bd5; color: #fff }
+menu.popup > li.nile-hover, menu.context > li.nile-hover, popup > menu > li.nile-hover { background: @ACCENT@; color: @ACCENT_TEXT@ }
 menu.popup > li[disabled], menu.context > li[disabled], popup > menu > li[disabled] { color: #999; background: transparent !important }
 .nile-picker { display: block; background: #fff; color: #222; border: 1px solid #b4b8c0; border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,0.25); padding: 8px; font: 13px sans-serif }
 .nile-picker button { font: inherit; color: inherit; background: transparent; border: 0; border-radius: 4px; padding: 0; margin: 0; box-shadow: none; min-height: 0; cursor: default }
@@ -940,8 +981,8 @@ menu.popup > li[disabled], menu.context > li[disabled], popup > menu > li[disabl
 .nile-picker .np-dow { text-align: center; color: #777; font-size: 11px; line-height: 28px }
 .nile-picker .np-day { text-align: center }
 .nile-picker .np-out { color: #aaa }
-.nile-picker .np-today { border: 1px solid #3a7bd5 }
-.nile-picker .np-sel { background: #3a7bd5; color: #fff }
+.nile-picker .np-today { border: 1px solid @ACCENT@ }
+.nile-picker .np-sel { background: @ACCENT@; color: @ACCENT_TEXT@ }
 .nile-picker button[disabled] { color: #ccc }
 .nile-picker .np-months { display: grid; grid-template-columns: repeat(3, 62px); grid-auto-rows: 34px; gap: 2px }
 .nile-picker .np-foot { display: flex; justify-content: space-between; margin-top: 6px; padding-top: 6px; border-top: 1px solid #e3e5e8 }
@@ -967,14 +1008,14 @@ frame { display: block; height: 150px; border: 0 }
 .nile-messagebox { min-width: 280px; max-width: 460px; background: #fff; color: #222; border: 1px solid #b4b8c0; border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,0.4); overflow: hidden }
 .nile-messagebox-title { padding: 8px 14px; font-weight: bold; background: #f1f3f6; border-bottom: 1px solid #dde0e6 }
 .nile-messagebox-body { display: flex; padding: 16px 14px }
-.nile-messagebox-icon { width: 30px; height: 30px; border-radius: 15px; margin-right: 12px; text-align: center; line-height: 30px; font-weight: bold; color: #fff; background: #3a7bd5; flex: none }
+.nile-messagebox-icon { width: 30px; height: 30px; border-radius: 15px; margin-right: 12px; text-align: center; line-height: 30px; font-weight: bold; color: @ACCENT_TEXT@; background: @ACCENT@; flex: none }
 .nile-messagebox.alert .nile-messagebox-icon { background: #e0a100 }
 .nile-messagebox.error .nile-messagebox-icon { background: #d33a3a }
-.nile-messagebox.question .nile-messagebox-icon { background: #3a7bd5 }
+.nile-messagebox.question .nile-messagebox-icon { background: @ACCENT@ }
 .nile-messagebox-text { flex: 1; align-self: center }
 .nile-messagebox-buttons { display: flex; justify-content: flex-end; padding: 8px 14px 12px }
 .nile-messagebox-buttons > button { margin-left: 8px; padding: 4px 16px }
-.nile-messagebox-buttons > button.default { border-color: #3a7bd5; font-weight: bold }
+.nile-messagebox-buttons > button.default { border-color: @ACCENT@; font-weight: bold }
 frameset { display: grid; height: 100%; min-height: 150px }
 frameset > * { min-width: 0; min-height: 0 }
 frameset > frame { height: auto }
@@ -1020,7 +1061,7 @@ a { color: #0000ee }
 a:visited { color: #551a8b }
 a[href] { cursor: pointer }
 input, textarea { cursor: text }
-button, select, input[type=checkbox], input[type=radio], input[type=button], input[type=submit] { cursor: default }
+button, select, input[type=checkbox], input[type=radio], input[type=button], input[type=submit], input[type=reset], input[type=range], input[type=file], progress, meter { cursor: default }
 :disabled { cursor: not-allowed }
 button { text-align: center }
 button, input { display: inline-block; font-size: 13px; color: #000000; padding: 3px 8px;
@@ -1031,7 +1072,7 @@ textarea { display: inline-block; font-size: 13px; color: #000000; padding: 3px 
 select { display: inline-block; font-size: 13px; color: #000000; padding: 3px 26px 3px 8px; border: 1px solid #767676;
   border-radius: 3px; background: #ffffff; min-height: 16px; margin: 2px; overflow: hidden; appearance: select }
 select[multiple], select[size]:not([size="1"]) { appearance: none; padding: 1px 0; min-width: 60px }
-input:focus, textarea:focus, select:focus { border-color: #1d4ed8 }
+input:focus, textarea:focus, select:focus { border-color: @ACCENT@ }
 button:disabled, input:disabled, textarea:disabled, select:disabled { color: #8a8a8a; background: #f0f0f0; border-color: #c4c4c4 }
 input[type=checkbox], input[type=radio] { width: 13px; height: 13px; min-height: 0; padding: 0;
   margin: 3px 4px; background: #ffffff; appearance: checkbox }
@@ -1044,71 +1085,191 @@ input[type=number] { padding-right: 20px; appearance: spinner }
 input[type=color] { width: 86px; padding-left: 30px; appearance: swatch }
 input[type=date], input[type=month], input[type=week], input[type=datetime-local] { padding-right: 26px; appearance: calendar }
 input[type=time] { padding-right: 26px; appearance: clock }
-input[type=checkbox]:checked, input[type=radio]:checked { background: #1d4ed8; border-color: #1d4ed8; color: #ffffff }
+input[type=checkbox]:checked, input[type=radio]:checked { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
 input[type=button], input[type=submit], input[type=reset] { width: auto; background: #efefef }
 "#;
 
 /// The look of the platform's own controls, layered over the neutral base sheet (later rules win at
-/// equal specificity, so each repeats the base selectors it changes). There are no `:hover`/`:active`
-/// rules here on purpose: they would make every page restyle on pointer moves (see `StateDeps`).
+/// equal specificity, so each repeats the base selectors it changes). The `:hover`/`:active`/`:focus-visible`
+/// rules mean every page restyles on pointer moves, which the partial restyle keeps cheap (see `StateDeps`).
 const THEME_WINDOWS: &str = r#"
-html { font-family: "Segoe UI", sans-serif }
-button, input, textarea, select { font-family: "Segoe UI", sans-serif }
+html { font-family: system-ui }
+button, input, textarea, select { font-family: system-ui }
 button, input { padding: 5px 12px; border: 1px solid #d1d1d1; border-bottom-color: #b8b8b8; border-radius: 4px; background: #fdfdfd }
 input { background: #fdfdfd; border-color: #e5e5e5; border-bottom-color: #8a8a8a; padding: 5px 10px; min-height: 18px }
 textarea { padding: 5px 10px; border: 1px solid #e5e5e5; border-bottom-color: #8a8a8a; border-radius: 4px; background: #fdfdfd }
 select { padding: 5px 28px 5px 10px; border: 1px solid #d1d1d1; border-bottom-color: #b8b8b8; border-radius: 4px; background: #fdfdfd }
-input:focus, textarea:focus, select:focus { border-color: #e5e5e5; border-bottom-color: #0067c0; box-shadow: 0 1px 0 #0067c0 }
+input:focus, textarea:focus, select:focus { border-color: #e5e5e5; border-bottom-color: @ACCENT@; box-shadow: 0 1px 0 @ACCENT@ }
 button:disabled, input:disabled, textarea:disabled, select:disabled { color: #a3a3a3; background: #f6f6f6; border-color: #e6e6e6 }
 input[type=checkbox], input[type=radio] { width: 18px; height: 18px; margin: 3px 4px; padding: 0; border: 1px solid #616161; border-radius: 4px; background: #fdfdfd }
 input[type=radio] { border-radius: 9px }
-input[type=checkbox]:checked, input[type=radio]:checked { background: #0067c0; border-color: #0067c0; color: #ffffff }
+input[type=checkbox]:checked, input[type=radio]:checked { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
 input[type=file] { background: #fdfdfd }
 input[type=button], input[type=submit], input[type=reset] { background: #fdfdfd; border-color: #d1d1d1; border-bottom-color: #b8b8b8 }
+button:hover:not(:disabled), select:hover:not(:disabled), input[type=button]:hover:not(:disabled), input[type=submit]:hover:not(:disabled), input[type=reset]:hover:not(:disabled), input[type=file]:hover:not(:disabled) { background: #f6f6f6; border-color: #d1d1d1; border-bottom-color: #b8b8b8 }
+button:active:not(:disabled), select:active:not(:disabled), input[type=button]:active:not(:disabled), input[type=submit]:active:not(:disabled), input[type=reset]:active:not(:disabled), input[type=file]:active:not(:disabled) { background: #f0f0f0; color: #5d5d5d }
+input:hover:not(:disabled):not(:focus):not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]):not([type=reset]):not([type=range]):not([type=file]), textarea:hover:not(:disabled):not(:focus) { background: #f9f9f9 }
+input[type=checkbox]:hover:not(:checked):not(:disabled), input[type=radio]:hover:not(:checked):not(:disabled) { border-color: #3d3d3d }
+button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, input[type=button]:focus-visible, input[type=submit]:focus-visible, input[type=file]:focus-visible { box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px #1a1a1a }
 "#;
 
 const THEME_MACOS: &str = r#"
+html { font-family: system-ui }
+button, input, textarea, select { font-family: system-ui }
 button, input { padding: 3px 12px; border: 1px solid #d6d6d6; border-bottom-color: #c2c2c2; border-radius: 6px; background: #ffffff; box-shadow: 0 1px 1px rgba(0,0,0,0.08) }
 input { padding: 3px 7px; border-color: #cfcfcf; border-bottom-color: #bdbdbd; border-radius: 5px; box-shadow: none }
 textarea { padding: 3px 7px; border: 1px solid #cfcfcf; border-radius: 5px }
 select { border: 1px solid #d6d6d6; border-bottom-color: #c2c2c2; border-radius: 6px; box-shadow: 0 1px 1px rgba(0,0,0,0.08) }
-input:focus, textarea:focus, select:focus { border-color: #0a84ff; box-shadow: 0 0 0 3px rgba(10,132,255,0.35) }
+input:focus, textarea:focus, select:focus { border-color: @ACCENT@; box-shadow: 0 0 0 3px @ACCENT_A@ }
 button:disabled, input:disabled, textarea:disabled, select:disabled { color: #a0a0a0; background: #f5f5f5; border-color: #e2e2e2; box-shadow: none }
 input[type=checkbox], input[type=radio] { width: 14px; height: 14px; margin: 3px 5px; padding: 0; border: 1px solid #b0b0b0; border-radius: 4px; background: #ffffff; box-shadow: none }
 input[type=radio] { border-radius: 7px }
-input[type=checkbox]:checked, input[type=radio]:checked { background: #0a84ff; border-color: #0a84ff; color: #ffffff }
+input[type=checkbox]:checked, input[type=radio]:checked { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
 input[type=file] { background: #ffffff }
 input[type=button], input[type=submit], input[type=reset] { background: #ffffff }
+button:hover:not(:disabled), select:hover:not(:disabled), input[type=button]:hover:not(:disabled), input[type=submit]:hover:not(:disabled), input[type=reset]:hover:not(:disabled), input[type=file]:hover:not(:disabled) { background: #f7f7f7 }
+button:active:not(:disabled), select:active:not(:disabled), input[type=button]:active:not(:disabled), input[type=submit]:active:not(:disabled), input[type=reset]:active:not(:disabled), input[type=file]:active:not(:disabled) { background: #e6e6e6 }
+input[type=checkbox]:hover:not(:checked):not(:disabled), input[type=radio]:hover:not(:checked):not(:disabled) { border-color: #8e8e8e }
+button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, input[type=button]:focus-visible, input[type=submit]:focus-visible, input[type=file]:focus-visible { box-shadow: 0 0 0 3px @ACCENT_A@ }
 "#;
 
 const THEME_LINUX: &str = r#"
+html { font-family: system-ui }
+button, input, textarea, select { font-family: system-ui }
 button, input { padding: 5px 12px; border: 1px solid #cdc7c2; border-bottom-color: #bfb8b1; border-radius: 6px; background: #f6f5f4 }
 input { background: #ffffff; padding: 5px 8px; border-bottom-color: #cdc7c2 }
 textarea { padding: 5px 8px; border: 1px solid #cdc7c2; border-radius: 6px }
 select { padding: 5px 28px 5px 10px; border: 1px solid #cdc7c2; border-bottom-color: #bfb8b1; border-radius: 6px; background: #f6f5f4 }
-input:focus, textarea:focus, select:focus { border-color: #3584e4; box-shadow: 0 0 0 2px rgba(53,132,228,0.45) }
+input:focus, textarea:focus, select:focus { border-color: @ACCENT@; box-shadow: 0 0 0 2px @ACCENT_A@ }
 button:disabled, input:disabled, textarea:disabled, select:disabled { color: #9a9996; background: #faf9f8; border-color: #e0dcd8 }
 input[type=checkbox], input[type=radio] { width: 16px; height: 16px; margin: 3px 4px; padding: 0; border: 1px solid #b5afa9; border-radius: 4px; background: #ffffff }
 input[type=radio] { border-radius: 8px }
-input[type=checkbox]:checked, input[type=radio]:checked { background: #3584e4; border-color: #3584e4; color: #ffffff }
+input[type=checkbox]:checked, input[type=radio]:checked { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
 input[type=file] { background: #f6f5f4 }
 input[type=button], input[type=submit], input[type=reset] { background: #f6f5f4 }
+button:hover:not(:disabled), select:hover:not(:disabled), input[type=button]:hover:not(:disabled), input[type=submit]:hover:not(:disabled), input[type=reset]:hover:not(:disabled), input[type=file]:hover:not(:disabled) { background: #fafaf9; border-color: #c4beb8 }
+button:active:not(:disabled), select:active:not(:disabled), input[type=button]:active:not(:disabled), input[type=submit]:active:not(:disabled), input[type=reset]:active:not(:disabled), input[type=file]:active:not(:disabled) { background: #e4e0dc }
+input[type=checkbox]:hover:not(:checked):not(:disabled), input[type=radio]:hover:not(:checked):not(:disabled) { border-color: #8e8984 }
+button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, input[type=button]:focus-visible, input[type=submit]:focus-visible, input[type=file]:focus-visible { box-shadow: 0 0 0 2px @ACCENT@ }
 "#;
 
-/// The controls' theme: the running platform's, or `NILE_THEME=windows|macos|linux` (to look at
-/// another platform's rendering, e.g. in headless screenshots).
-fn theme_sheet() -> &'static str {
-    static THEME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    THEME.get_or_init(|| {
-        let name = std::env::var("NILE_THEME").ok().map(|t| t.to_ascii_lowercase());
-        match name.as_deref() {
-            Some("windows") => THEME_WINDOWS,
-            Some("macos") => THEME_MACOS,
-            Some("linux") => THEME_LINUX,
-            _ if cfg!(windows) => THEME_WINDOWS,
-            _ if cfg!(target_os = "macos") => THEME_MACOS,
-            _ => THEME_LINUX,
+/// Applied over the light sheets when the system is dark and the page says it supports it
+/// (`color-scheme: dark` or `light dark` on the root, or `<meta name="color-scheme">`): the canvas,
+/// text, links, popups, pickers and message boxes.
+const DARK_BASE: &str = r#"
+html { background: #1f1f1f; color: #f0f0f0 }
+a { color: #8ab4f8 }
+a:visited { color: #c58af9 }
+popup, menu.popup, menu.context, popup > menu { background: #2b2b2b; color: #f0f0f0; border-color: #4a4a4a }
+popup[role=tooltip] { background: #3a3a3a }
+popup > menu, popup > menu.popup, popup > menu.context { border: 0 }
+menu.popup > li[disabled], menu.context > li[disabled], popup > menu > li[disabled] { color: #888 }
+.nile-picker { background: #2b2b2b; color: #f0f0f0; border-color: #4a4a4a }
+.nile-picker .np-dow { color: #aaa }
+.nile-picker .np-out { color: #777 }
+.nile-picker button[disabled] { color: #666 }
+.nile-picker .np-foot { border-top-color: #444 }
+.nile-picker .np-link { color: #8ab4f8 }
+.nile-picker .np-preview { border-color: #555 }
+.nile-messagebox { background: #2b2b2b; color: #f0f0f0; border-color: #4a4a4a }
+.nile-messagebox-title { background: #333333; border-bottom-color: #444444 }
+hr { border-top-color: #666666; border-bottom-color: #333333 }
+fieldset { border-color: #555555 }
+mark { background: #665c00; color: #ffffff }
+splitter { background: #444444 }
+"#;
+
+const DARK_WINDOWS: &str = r#"
+button, input, textarea, select { color: #ffffff }
+button, input, select { background: #2d2d2d; border-color: #3a3a3a; border-bottom-color: #4d4d4d }
+input, textarea { background: #2d2d2d; border-color: #3a3a3a; border-bottom-color: #9a9a9a }
+input:focus, textarea:focus, select:focus { border-color: #3a3a3a; border-bottom-color: @ACCENT@; box-shadow: 0 1px 0 @ACCENT@ }
+button:disabled, input:disabled, textarea:disabled, select:disabled { color: #7a7a7a; background: #262626; border-color: #303030 }
+input[type=checkbox], input[type=radio] { background: #2d2d2d; border-color: #9a9a9a }
+input[type=checkbox]:checked, input[type=radio]:checked { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
+input[type=file], input[type=button], input[type=submit], input[type=reset] { background: #2d2d2d; border-color: #3a3a3a; border-bottom-color: #4d4d4d }
+button:hover:not(:disabled), select:hover:not(:disabled), input[type=button]:hover:not(:disabled), input[type=submit]:hover:not(:disabled), input[type=reset]:hover:not(:disabled), input[type=file]:hover:not(:disabled) { background: #323232; border-color: #3a3a3a; border-bottom-color: #4d4d4d }
+button:active:not(:disabled), select:active:not(:disabled), input[type=button]:active:not(:disabled), input[type=submit]:active:not(:disabled), input[type=reset]:active:not(:disabled), input[type=file]:active:not(:disabled) { background: #272727; color: #cfcfcf }
+input:hover:not(:disabled):not(:focus):not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]):not([type=reset]):not([type=range]):not([type=file]), textarea:hover:not(:disabled):not(:focus) { background: #323232 }
+input[type=checkbox]:hover:not(:checked):not(:disabled), input[type=radio]:hover:not(:checked):not(:disabled) { border-color: #ffffff }
+button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, input[type=button]:focus-visible, input[type=submit]:focus-visible, input[type=file]:focus-visible { box-shadow: 0 0 0 2px #202020, 0 0 0 4px #ffffff }
+"#;
+
+const DARK_MACOS: &str = r#"
+button, input, textarea, select { color: #ffffff }
+button, select { background: #636366; border-color: #6e6e72; border-bottom-color: #6e6e72; box-shadow: 0 1px 1px rgba(0,0,0,0.35) }
+input, textarea { background: #1e1e1e; border-color: #4a4a4a; border-bottom-color: #4a4a4a }
+input:focus, textarea:focus, select:focus { border-color: @ACCENT@; box-shadow: 0 0 0 3px @ACCENT_A@ }
+button:disabled, input:disabled, textarea:disabled, select:disabled { color: #777777; background: #2a2a2a; border-color: #3a3a3a; box-shadow: none }
+input[type=checkbox], input[type=radio] { background: #1e1e1e; border-color: #6a6a6a }
+input[type=checkbox]:checked, input[type=radio]:checked { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
+input[type=file], input[type=button], input[type=submit], input[type=reset] { background: #636366 }
+button:hover:not(:disabled), select:hover:not(:disabled), input[type=button]:hover:not(:disabled), input[type=submit]:hover:not(:disabled), input[type=reset]:hover:not(:disabled), input[type=file]:hover:not(:disabled) { background: #6c6c70 }
+button:active:not(:disabled), select:active:not(:disabled), input[type=button]:active:not(:disabled), input[type=submit]:active:not(:disabled), input[type=reset]:active:not(:disabled), input[type=file]:active:not(:disabled) { background: #58585b }
+input[type=checkbox]:hover:not(:checked):not(:disabled), input[type=radio]:hover:not(:checked):not(:disabled) { border-color: #9a9a9a }
+button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, input[type=button]:focus-visible, input[type=submit]:focus-visible, input[type=file]:focus-visible { box-shadow: 0 0 0 3px @ACCENT_A@ }
+"#;
+
+const DARK_LINUX: &str = r#"
+button, input, textarea, select { color: #ffffff }
+button, select { background: #3d3d3d; border-color: #1b1b1b; border-bottom-color: #1b1b1b }
+input, textarea { background: #2b2b2b; border-color: #1b1b1b; border-bottom-color: #1b1b1b }
+input:focus, textarea:focus, select:focus { border-color: @ACCENT@; box-shadow: 0 0 0 2px @ACCENT_A@ }
+button:disabled, input:disabled, textarea:disabled, select:disabled { color: #8a8a8a; background: #333333; border-color: #262626 }
+input[type=checkbox], input[type=radio] { background: #2b2b2b; border-color: #5a5a5a }
+input[type=checkbox]:checked, input[type=radio]:checked { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
+input[type=file], input[type=button], input[type=submit], input[type=reset] { background: #3d3d3d }
+button:hover:not(:disabled), select:hover:not(:disabled), input[type=button]:hover:not(:disabled), input[type=submit]:hover:not(:disabled), input[type=reset]:hover:not(:disabled), input[type=file]:hover:not(:disabled) { background: #454545 }
+button:active:not(:disabled), select:active:not(:disabled), input[type=button]:active:not(:disabled), input[type=submit]:active:not(:disabled), input[type=reset]:active:not(:disabled), input[type=file]:active:not(:disabled) { background: #333333 }
+input[type=checkbox]:hover:not(:checked):not(:disabled), input[type=radio]:hover:not(:checked):not(:disabled) { border-color: #8a8a8a }
+button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, input[type=button]:focus-visible, input[type=submit]:focus-visible, input[type=file]:focus-visible { box-shadow: 0 0 0 2px @ACCENT@ }
+"#;
+
+/// Which platform's look is in use: the running platform's, or `NILE_THEME=windows|macos|linux`.
+fn theme_platform() -> &'static str {
+    static NAME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| match std::env::var("NILE_THEME").ok().map(|t| t.to_ascii_lowercase()).as_deref() {
+        Some("windows") => "windows",
+        Some("macos") => "macos",
+        Some("linux") => "linux",
+        _ if cfg!(windows) => "windows",
+        _ if cfg!(target_os = "macos") => "macos",
+        _ => "linux",
+    })
+}
+
+/// The user-agent sheet for the system theme: the base, the platform's controls, and when
+/// `dark_scheme` the dark layer over both; `@ACCENT@` tokens become the system accent.
+fn ua_sheet(dark_scheme: bool) -> Rc<Stylesheet> {
+    type Key = (bool, bool, [u8; 3], &'static str);
+    thread_local! {
+        static CACHE: std::cell::RefCell<HashMap<Key, Rc<Stylesheet>>> = std::cell::RefCell::default();
+    }
+    let theme = system_theme();
+    let platform = theme_platform();
+    let key: Key = (dark_scheme, theme.dark, [theme.accent.r, theme.accent.g, theme.accent.b], platform);
+    CACHE.with(|cache| {
+        if let Some(hit) = cache.borrow().get(&key) {
+            return hit.clone();
         }
+        let (light, dark) = match platform {
+            "windows" => (THEME_WINDOWS, DARK_WINDOWS),
+            "macos" => (THEME_MACOS, DARK_MACOS),
+            _ => (THEME_LINUX, DARK_LINUX),
+        };
+        let mut css = format!("{UA_STYLESHEET}{light}");
+        if dark_scheme {
+            css.push_str(DARK_BASE);
+            css.push_str(dark);
+        }
+        let a = theme.accent;
+        let css = css
+            .replace("@ACCENT_TEXT@", &format!("#{:02x}{:02x}{:02x}", text_on(a).r, text_on(a).g, text_on(a).b))
+            .replace("@ACCENT_A@", &format!("rgba({},{},{},0.4)", a.r, a.g, a.b))
+            .replace("@ACCENT@", &format!("#{:02x}{:02x}{:02x}", a.r, a.g, a.b));
+        let sheet = Rc::new(Stylesheet::parse(&css));
+        cache.borrow_mut().insert(key, sheet.clone());
+        sheet
     })
 }
 
@@ -1131,6 +1292,8 @@ pub struct StyleMap {
     page_bar: ScrollbarLook,
     /// Some element has a `prototype` (a script class bound from CSS).
     pub has_prototypes: bool,
+    /// The dark user-agent sheet is in use (the system is dark and the page supports it).
+    pub dark: bool,
     /// `@keyframes` by name.
     pub(crate) keyframes: HashMap<String, Vec<parse::Frame>>,
     /// `@page` rules (selector, body) in source order.
@@ -1226,6 +1389,8 @@ impl ComputedStyle {
         a.background_repeat = other.background_repeat;
         a.box_shadow = other.box_shadow.clone();
         a.selection_bg = other.selection_bg;
+        a.accent_color = other.accent_color;
+        a.color_scheme = other.color_scheme;
         a.scrollbar_color = other.scrollbar_color;
         a.prototype = other.prototype.clone();
         a.transitions = other.transitions.clone();
@@ -1288,7 +1453,7 @@ impl StyleMap {
         if self.styles.len() != doc.nodes.len() || !self.pseudo.is_empty() || !self.markers.is_empty() || !self.scrollbars.is_empty() {
             return None;
         }
-        let (ua, author) = sheets_of(doc, viewport);
+        let (ua, author) = sheets_of(doc, viewport, self.dark);
         let mut caches = SelectorCaches::default();
         let mut ctx = MatchingContext::new(MatchingMode::Normal, None, &mut caches, QuirksMode::NoQuirks, NeedsSelectorFlags::No, MatchingForInvalidation::No);
         let uses_viewport = Cell::new(self.uses_viewport);
@@ -1313,8 +1478,8 @@ impl StyleMap {
         let s = &self.styles[node.0];
         let parts = self.scrollbars.get(&node);
         let thickness = parts.and_then(|p| p.thickness).unwrap_or(match s.scrollbar_width {
-            ScrollbarWidth::Auto => SCROLLBAR_AUTO,
-            ScrollbarWidth::Thin => SCROLLBAR_THIN,
+            ScrollbarWidth::Auto => scrollbar_auto(),
+            ScrollbarWidth::Thin => scrollbar_thin(),
             ScrollbarWidth::None => 0.0,
         });
         ScrollbarLook {
@@ -1374,6 +1539,11 @@ impl StyleMap {
         &self.origins
     }
 
+    /// The colours for what no stylesheet reaches (menus, bars, scroll thumbs).
+    pub fn palette(&self) -> Palette {
+        Palette::new(self.dark, system_theme().accent)
+    }
+
     pub fn get(&self, id: NodeId) -> &ComputedStyle {
         &self.styles[id.0]
     }
@@ -1397,7 +1567,29 @@ pub fn compute_styles_with(doc: &Document, state: &InteractionState) -> StyleMap
 /// Like [`compute_styles_with`], with `@media` queries and `vw`/`vh` units resolved
 /// against a `viewport` of the given size in px.
 pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f32, f32)) -> StyleMap {
-    let (ua, author) = sheets_of(doc, viewport);
+    let map = compute_with_scheme(doc, state, viewport, false);
+    // A dark system and a page that supports dark (the root's `color-scheme`, or a `<meta>`): the
+    // dark user-agent sheet replaces the light one, so everything is computed again, only for such pages.
+    if system_theme().dark {
+        let root_dark = doc.find(|n| n.tag() == Some("html")).is_some_and(|h| map.styles[h.0].color_scheme.allows_dark());
+        if root_dark || meta_allows_dark(doc) {
+            return compute_with_scheme(doc, state, viewport, true);
+        }
+    }
+    map
+}
+
+/// `<meta name="color-scheme" content="light dark">`.
+fn meta_allows_dark(doc: &Document) -> bool {
+    doc.nodes.iter().any(|n| {
+        n.tag() == Some("meta")
+            && n.attr("name").is_some_and(|v| v.trim().eq_ignore_ascii_case("color-scheme"))
+            && n.attr("content").is_some_and(|c| ColorScheme::parse(c.split_whitespace().map(|w| w.to_ascii_lowercase()).collect::<Vec<_>>().iter().map(String::as_str)).allows_dark())
+    })
+}
+
+fn compute_with_scheme(doc: &Document, state: &InteractionState, viewport: (f32, f32), dark: bool) -> StyleMap {
+    let (ua, author) = sheets_of(doc, viewport, dark);
 
     let mut styles = vec![ComputedStyle::default(); doc.nodes.len()];
     let root_style = ComputedStyle::default();
@@ -1436,8 +1628,9 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
         keyframes,
         pages,
         font_faces,
-        page_bar: ScrollbarLook { thickness: SCROLLBAR_AUTO, thumb: None, thumb_radius: None, track: None },
+        page_bar: ScrollbarLook { thickness: scrollbar_auto(), thumb: None, thumb_radius: None, track: None },
         has_prototypes: false,
+        dark,
     };
     map.has_prototypes = map.styles.iter().any(|s| s.prototype.is_some());
     let default = map.page_bar;
@@ -1445,16 +1638,18 @@ pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f3
     map
 }
 
+/// A parsed author sheet's cache key: source text, viewport size, dark system theme.
+type SheetKey = (String, u32, u32, bool);
+
 thread_local! {
     /// Parsed sheets by source text and viewport (`@media` is evaluated while parsing): a restyle
     /// after a hover shouldn't parse the same CSS again.
-    static SHEETS: std::cell::RefCell<HashMap<(String, u32, u32), Rc<Stylesheet>>> = std::cell::RefCell::default();
-    static UA_SHEET: Rc<Stylesheet> = Rc::new(Stylesheet::parse(&format!("{UA_STYLESHEET}{}", theme_sheet())));
+    static SHEETS: std::cell::RefCell<HashMap<SheetKey, Rc<Stylesheet>>> = std::cell::RefCell::default();
 }
 
 /// The user-agent sheet and the document's `<style>` sheets, parsed (or taken from the cache).
-fn sheets_of(doc: &Document, viewport: (f32, f32)) -> (Rc<Stylesheet>, Vec<Rc<Stylesheet>>) {
-    let ua = UA_SHEET.with(Rc::clone);
+fn sheets_of(doc: &Document, viewport: (f32, f32), dark_scheme: bool) -> (Rc<Stylesheet>, Vec<Rc<Stylesheet>>) {
+    let ua = ua_sheet(dark_scheme);
     let author = doc
         .nodes
         .iter()
@@ -1468,7 +1663,8 @@ fn sheets_of(doc: &Document, viewport: (f32, f32)) -> (Rc<Stylesheet>, Vec<Rc<St
                     _ => None,
                 })
                 .collect();
-            let key = (css, viewport.0.to_bits(), viewport.1.to_bits());
+            // `@media (prefers-color-scheme)` is evaluated while parsing, so the theme is part of the key.
+            let key = (css, viewport.0.to_bits(), viewport.1.to_bits(), system_theme().dark);
             SHEETS.with(|cache| {
                 let mut cache = cache.borrow_mut();
                 if let Some(hit) = cache.get(&key) {
@@ -1535,6 +1731,19 @@ fn expand_font(d: Declaration) -> Vec<Declaration> {
         return vec![d];
     }
     let part = |name: &str, values: Vec<Value>| Declaration { name: name.into(), values, important: d.important, raw: String::new() };
+    // The system font keywords (`font: menu`, Sciter's `font: system`): the platform's UI font and size.
+    if let [Value::Ident(k)] = d.values.as_slice() {
+        let small = matches!(k.as_str(), "small-caption" | "status-bar");
+        if matches!(k.as_str(), "menu" | "caption" | "icon" | "message-box" | "small-caption" | "status-bar" | "system") {
+            let px = if cfg!(windows) { 12.0 } else if small { 11.0 } else { 13.0 };
+            return vec![
+                part("font-style", vec![Value::Ident("normal".into())]),
+                part("font-weight", vec![Value::Ident("normal".into())]),
+                part("font-size", vec![Value::Px(px)]),
+                part("font-family", vec![Value::Ident("system-ui".into())]),
+            ];
+        }
+    }
     let (mut style, mut weight) = (None, None);
     let mut i = 0;
     let v = &d.values;
@@ -2140,7 +2349,15 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 _ => return,
             }
         }
-        "width" => s.width = l(first).unwrap_or(s.width),
+        "width" => {
+            if matches!(first.and_then(Value::ident), Some("fit-content" | "max-content" | "min-content")) {
+                s.width_fit = true;
+                s.width = Length::Auto;
+            } else if let Some(v) = l(first) {
+                s.width = v;
+                s.width_fit = false;
+            }
+        }
         "height" => s.height = l(first).unwrap_or(s.height),
         "min-width" => s.min_width = l(first).unwrap_or(s.min_width),
         "min-height" => s.min_height = l(first).unwrap_or(s.min_height),
@@ -2492,6 +2709,14 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
             }
         }
         "color" => s.color = first.and_then(color).unwrap_or(s.color),
+        "color-scheme" => s.color_scheme = ColorScheme::parse(v.iter().filter_map(Value::ident)),
+        "accent-color" => {
+            s.accent_color = match first {
+                Some(x) if x.ident() == Some("auto") => None,
+                Some(x) => x.color().or(s.accent_color),
+                None => s.accent_color,
+            }
+        }
         "font-size" => s.font_size = p(first).unwrap_or(s.font_size),
         "font-weight" => {
             s.font_weight = match first {
@@ -2556,6 +2781,7 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
             let url = text.find("url(").and_then(|i| text[i + 4..].split(')').next()).map(|u| u.trim().trim_matches(|c| c == '"' || c == '\'').to_string()).unwrap_or_default();
             s.prototype = class.map(|c| (c.to_string(), url));
         }
+        "nile-password-char" => s.password_char = d.raw.trim().trim_matches(|c| c == '"' || c == '\'').chars().next().filter(|_| d.raw.trim() != "none"),
         "font-variation-settings" => s.font_variations = if d.raw.trim() == "normal" { String::new() } else { d.raw.trim().to_string() },
         "font-feature-settings" => s.font_features = if d.raw.trim() == "normal" { String::new() } else { d.raw.trim().to_string() },
         "list-style-image" => {
@@ -3296,8 +3522,8 @@ mod tests {
     #[test]
     fn state_deps_find_the_pseudo_classes_rules_mention() {
         let deps = |css: &str| compute_styles(&Document::parse(&format!("<style>{css}</style><p>x</p>"))).state_deps;
-        // The UA sheet already mentions :focus (input borders).
-        assert_eq!(deps("p { color: red }"), StateDeps { hover: false, active: false, focus: true, sibling: false });
+        // The UA sheet mentions :hover, :active and :focus (the controls' states), so every page has them.
+        assert_eq!(deps("p { color: red }"), StateDeps { hover: true, active: true, focus: true, sibling: false });
         assert!(deps("a:hover { color: red }").hover);
         assert!(deps(".x:not(:hover) b { color: red }").hover);
         assert!(deps("button:active { color: red }").active);
@@ -3327,5 +3553,64 @@ mod tests {
         assert_ne!(color("d"), Color::rgb(0, 0, 255));
         assert_eq!(color("e"), Color::rgb(0, 128, 0), ":has(+ sibling)");
         assert_eq!(color("f"), default);
+    }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+
+    fn style_of(html: &str, id: &str) -> ComputedStyle {
+        let doc = Document::parse(html);
+        let styles = compute_styles(&doc);
+        let node = doc.find(|n| n.attr("id") == Some(id)).expect("node");
+        styles.get(node).clone()
+    }
+
+    #[test]
+    fn system_colours_and_prefers_color_scheme_follow_the_theme() {
+        let page = r#"<style>
+            #a { color: CanvasText; background: Canvas }
+            #b { color: AccentColor }
+            @media (prefers-color-scheme: dark) { #c { color: #123456 } }
+            #c { background: ButtonFace }
+        </style><body><p id="a"></p><p id="b"></p><p id="c"></p></body>"#;
+        set_system_theme(SystemTheme { dark: false, accent: Color::rgb(10, 20, 30) });
+        assert_eq!(style_of(page, "a").color, Color::rgb(0, 0, 0));
+        assert_eq!(style_of(page, "a").background, Some(Color::rgb(255, 255, 255)));
+        assert_eq!(style_of(page, "b").color, Color::rgb(10, 20, 30));
+        assert_ne!(style_of(page, "c").color, Color::rgb(0x12, 0x34, 0x56));
+        set_system_theme(SystemTheme { dark: true, accent: Color::rgb(10, 20, 30) });
+        assert_eq!(style_of(page, "a").color, Color::rgb(240, 240, 240));
+        assert_eq!(style_of(page, "c").color, Color::rgb(0x12, 0x34, 0x56));
+        assert_eq!(style_of(page, "c").background, Some(Color::rgb(58, 58, 58)));
+        set_system_theme(SystemTheme::default());
+    }
+
+    #[test]
+    fn a_page_that_supports_dark_gets_the_dark_user_agent_sheet() {
+        set_system_theme(SystemTheme { dark: true, accent: Color::rgb(200, 30, 30) });
+        let plain = "<body><button id=\"b\">x</button><input id=\"i\" type=\"checkbox\" checked></body>";
+        let opted = "<style>:root { color-scheme: light dark }</style><body><button id=\"b\">x</button><input id=\"i\" type=\"checkbox\" checked></body>";
+        let meta = "<meta name=\"color-scheme\" content=\"dark\"><body><button id=\"b\">x</button></body>";
+        // Without the opt-in the page stays light, even on a dark system.
+        assert_eq!(style_of(plain, "b").color, Color::rgb(0, 0, 0));
+        // With it the controls turn dark and the checked box takes the system accent.
+        assert_eq!(style_of(opted, "b").color, Color::rgb(255, 255, 255));
+        assert_eq!(style_of(opted, "i").background, Some(Color::rgb(200, 30, 30)));
+        assert_eq!(style_of(meta, "b").color, Color::rgb(255, 255, 255));
+        // A light system ignores the opt-in.
+        set_system_theme(SystemTheme { dark: false, accent: Color::rgb(200, 30, 30) });
+        assert_eq!(style_of(opted, "b").color, Color::rgb(0, 0, 0));
+        assert_eq!(style_of(opted, "i").background, Some(Color::rgb(200, 30, 30)));
+        set_system_theme(SystemTheme::default());
+    }
+
+    #[test]
+    fn accent_color_and_color_scheme_are_inherited() {
+        let page = r#"<style>#p { accent-color: #ff0000; color-scheme: dark } #c { accent-color: auto }</style><body><div id="p"><span id="k"></span><span id="c"></span></div></body>"#;
+        assert_eq!(style_of(page, "k").accent_color, Some(Color::rgb(255, 0, 0)));
+        assert_eq!(style_of(page, "k").color_scheme, ColorScheme::Dark);
+        assert_eq!(style_of(page, "c").accent_color, None);
     }
 }

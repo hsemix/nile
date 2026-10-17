@@ -208,7 +208,7 @@
             case "width": return w === px(val);
             case "height": return h === px(val);
             case "orientation": return (h >= w ? "portrait" : "landscape") === val.trim();
-            case "prefers-color-scheme": return val.trim() === "light";
+            case "prefers-color-scheme": return val.trim() === (N.systemDark() ? "dark" : "light");
             case "prefers-reduced-motion": return val.trim() === "no-preference";
             case "hover": return val === undefined || val.trim() === "hover";
             case "pointer": return val === undefined || val.trim() === "fine";

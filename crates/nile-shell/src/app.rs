@@ -20,6 +20,7 @@ use crate::{access, dialogs, material, menu, mods_of};
 
 /// What other threads (the accessibility layer) send the event loop.
 pub enum UserEvent {
+    ExtensionWake,
     Access(accesskit_winit::Event),
     /// A menu bar item was chosen: a page item's node id, or a negative tag for a standard action.
     #[allow(dead_code)]
@@ -565,6 +566,10 @@ impl App {
 
     /// Create a window around `page`. `spec` is what a script asked for (none for the first window).
     fn create(&mut self, event_loop: &ActiveEventLoop, page: Page, id: u32, spec: Option<&WindowSpec>) {
+        if let Some(scripts) = &page.scripts {
+            let proxy = self.proxy.clone();
+            scripts.set_extension_waker(Some(std::sync::Arc::new(move || { let _ = proxy.send_event(UserEvent::ExtensionWake); })));
+        }
         let mut config = WindowConfig::from_document(&page.doc.borrow());
         let opener_rect = spec.and_then(|s| self.index(s.opener)).and_then(|i| self.wins[i].page.view.borrow().window_rect);
         let monitor = event_loop.primary_monitor();
@@ -702,9 +707,6 @@ impl App {
             attrs = attrs.with_owner_window(hwnd);
         }
         let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
-        if let Some(o) = owner.and_then(|o| self.index(o)) {
-            attach_to_owner(&window, &self.wins[o].window);
-        }
         let pos = explicit_pos
             .or_else(|| parent_align.zip(opener_rect).map(|(a, r)| align(a, (w, h), (r[0], r[1], r[2], r[3]))))
             .or_else(|| config.position((w, h), desktop));
@@ -725,6 +727,10 @@ impl App {
         }
         let access = accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
         window.set_visible(config.state != InitialState::Hidden);
+        // After the adapter: on macOS attaching a child orders it in, which shows the window.
+        if let Some(o) = owner.and_then(|o| self.index(o)) {
+            attach_to_owner(&window, &self.wins[o].window);
+        }
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
         let surface = softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
         let title = config.title.clone();
@@ -750,8 +756,21 @@ impl App {
             dropped: Vec::new(),
         });
         let last = self.wins.len() - 1;
+        self.refresh_theme(last);
         let actions = self.wins[last].sync_window();
         self.run(event_loop, self.wins[last].id, actions);
+    }
+
+    /// Read the OS's light/dark setting and accent colour (through window `idx`) and restyle every
+    /// page when they differ from what styles were computed against.
+    fn refresh_theme(&mut self, idx: usize) {
+        let theme = crate::system::read(&self.wins[idx].window);
+        if nile_style::set_system_theme(theme) {
+            for w in &mut self.wins {
+                w.page.system_theme_changed();
+                w.window.request_redraw();
+            }
+        }
     }
 
     /// A page for a window a script asked for, loaded relative to the window that asked.
@@ -999,6 +1018,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let event = match event {
+            UserEvent::ExtensionWake => return,
             UserEvent::Access(event) => event,
             UserEvent::Snap(hwnd, state) => {
                 let Some(idx) = self.wins.iter().position(|w| w.window.id() == WindowId::from(hwnd as u64)) else { return };
@@ -1077,6 +1097,10 @@ impl ApplicationHandler<UserEvent> for App {
         let id = self.wins[idx].id;
         if matches!(event, WindowEvent::Focused(true)) {
             self.active = id;
+        }
+        // The system's theme changed (light/dark), or on macOS and Windows the accent colour may have.
+        if matches!(event, WindowEvent::ThemeChanged(_)) || (cfg!(any(target_os = "macos", windows)) && matches!(event, WindowEvent::Focused(true))) {
+            self.refresh_theme(idx);
         }
         {
             let win = &mut self.wins[idx];

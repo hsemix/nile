@@ -551,6 +551,10 @@ impl Environment for Env {
         v.styles.styles.get(node.0)?.css_value(property)
     }
 
+    fn system_dark(&self) -> bool {
+        nile_style::system_theme().dark
+    }
+
     fn viewport(&self) -> (f32, f32) {
         self.0.borrow().viewport
     }
@@ -1025,7 +1029,12 @@ impl Page {
         }));
         view.borrow_mut().adopt(styles);
 
-        let scripts = match ScriptHost::new(doc.clone(), Rc::new(Env(view.clone()))) {
+        let scripts_result = ScriptHost::new(doc.clone(), Rc::new(Env(view.clone())))
+            .map_err(|e| e.to_string()).and_then(|host| {
+                host.discover_extensions(&path)?;
+                Ok(host)
+            });
+        let scripts = match scripts_result {
             Ok(host) => {
                 let sources = doc.borrow().script_sources();
                 let dir = path.parent().unwrap_or(std::path::Path::new("."));
@@ -1198,6 +1207,16 @@ impl Page {
         let mut v = self.view.borrow_mut();
         v.set_viewport(width, height);
         v.layout();
+    }
+
+    /// The system theme (dark/light, accent colour; see `nile_style::set_system_theme`) changed:
+    /// restyle this page and its frames so `prefers-color-scheme`, system colours and the accent apply.
+    pub fn system_theme_changed(&mut self) {
+        self.view.borrow_mut().restyle();
+        let frames = self.frames.clone();
+        for slot in frames.borrow_mut().slots.values_mut() {
+            slot.page.system_theme_changed();
+        }
     }
 
     /// Restyle after an interaction state change.
@@ -5156,11 +5175,11 @@ cd</textarea>
             let look = v.styles.scrollbar_look(node);
             (look.thickness, look.thumb.map(|c| (c.r, c.g, c.b)), look.track.map(|c| (c.r, c.g, c.b)), look.thumb_radius)
         };
-        assert_eq!(thick(&mut p, "a"), (6.0, None, None, None));
-        assert_eq!(thick(&mut p, "thin").0, 4.0);
+        assert_eq!(thick(&mut p, "a"), (nile_style::scrollbar_auto(), None, None, None));
+        assert_eq!(thick(&mut p, "thin").0, nile_style::scrollbar_thin());
         assert_eq!(thick(&mut p, "none").0, 0.0);
         assert_eq!(thick(&mut p, "wk"), (14.0, Some((255, 0, 0)), None, Some(2.0)));
-        assert_eq!(thick(&mut p, "col"), (6.0, Some((0, 255, 0)), Some((0, 0, 255)), None));
+        assert_eq!(thick(&mut p, "col"), (nile_style::scrollbar_auto(), Some((0, 255, 0)), Some((0, 0, 255)), None));
         // A `none` bar has nothing to grab, but the wheel still scrolls.
         let node = p.doc.borrow().find(|n| n.attr("id") == Some("none")).unwrap();
         let sb = p.view.borrow_mut().layout().scroll_box(node).copied().unwrap();
@@ -5537,6 +5556,23 @@ cd</textarea>
         assert_eq!(at(&mut p, "i"), Cursor::Text);
         assert_eq!(at(&mut p, "s"), Cursor::Grab, "inherited by children");
         assert_eq!(at(&mut p, "d"), Cursor::Auto);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn range_progress_meter_and_file_inputs_show_the_arrow() {
+        use nile_style::Cursor;
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><input id="r" type="range"><br><progress id="p" value="3" max="10"></progress><br><meter id="m" value="0.4"></meter><br><input id="f" type="file"><br><input id="t" type="text"></body>"##,
+            "cursor-controls",
+        );
+        let mut at = |id: &str| {
+            let (x, y) = center(&p, id);
+            p.pointer_moved(x, y);
+            p.cursor()
+        };
+        assert_eq!((at("r"), at("p"), at("m"), at("f")), (Cursor::Default, Cursor::Default, Cursor::Default, Cursor::Default));
+        assert_eq!(at("t"), Cursor::Text);
         let _ = std::fs::remove_file(path);
     }
 

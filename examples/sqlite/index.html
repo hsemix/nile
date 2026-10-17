@@ -1,0 +1,70 @@
+<!doctype html>
+<html
+  window-title="SQLite native extension"
+  window-width="700"
+  window-height="460"
+>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        font-family: sans-serif;
+        padding: 24px;
+        background: #f4f5f7;
+        color: #18212b;
+      }
+      h1 {
+        font-size: 24px;
+      }
+      button {
+        padding: 8px 16px;
+      }
+      pre {
+        padding: 16px;
+        background: white;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>SQLite native extension</h1>
+    <p>
+      Database operations run on the extension's worker. The UI stays
+      responsive.
+    </p>
+    <button id="run">Insert and query</button>
+    <p id="timer">UI timer: 0</p>
+    <pre id="output">Click Insert and query.</pre>
+    <script type="module">
+      import sqlite from "@sqlite";
+      let ticks = 0;
+      setInterval(() => {
+        $("#timer").textContent = "UI timer: " + ++ticks;
+      }, 100);
+      $("#run").on("click", async () => {
+        $("#run").disabled = true;
+        let db;
+        try {
+          db = await sqlite.open("customers.db");
+          await db.execute(
+            "CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY, name TEXT)",
+          );
+          await db.execute("INSERT INTO customers (name) VALUES (?)", [
+            "Hamid",
+          ]);
+          const rows = await db.query(
+            "SELECT id, name FROM customers WHERE name = ? ORDER BY id",
+            ["Hamid"],
+          );
+          $("#output").textContent = JSON.stringify(rows, null, 2);
+        } catch (error) {
+          $("#output").textContent =
+            (error.code || "ERROR") + ": " + error.message;
+        } finally {
+          if (db) await db.close();
+          $("#run").disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

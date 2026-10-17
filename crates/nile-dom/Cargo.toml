@@ -8,3 +8,5 @@ license.workspace = true
 html5ever.workspace = true
 markup5ever_rcdom.workspace = true
 miniz_oxide.workspace = true
+
+flate2 = "1"

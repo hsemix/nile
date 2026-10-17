@@ -1,0 +1,95 @@
+<!doctype html>
+<html window-framex="solid" window-width="1000" window-height="360"
+      window-min-width="1000" window-min-height="360" window-title="Admin Registration"
+      window-resizable="false" window-minimizable="false" window-maximizable="false">
+<head>
+  <meta charset="utf-8">
+  <title>Admin Registration</title>
+  <style>
+    html { background: #efefef; }
+    body { margin: 0; font-family: Arial, sans-serif; font-size: 20px; color: #000; }
+    .window { border: 2px solid #bcbcbc; border-radius: 7px; overflow: hidden; height: 100vh; box-sizing: border-box; }
+    .titlebar { display: flex; align-items: center; height: 45px; padding-left: 11px; background: #f5f1f3; }
+    .title { flex: 1; }
+    .close { width: 34px; height: 34px; margin-right: 0; padding: 0; border: 0; border-radius: 0; background: #c74e50; color: white; font-size: 16px; }
+    .close:hover { background: #b33e40; }
+    main { padding: 13px 13px 0 29px; }
+    .row { display: flex; align-items: center; margin-bottom: 17px; gap: 17px; }
+    label { flex: none; width: 220px; }
+    input { box-sizing: border-box; min-width: 0; height: 40px; padding: 4px 8px; border: 2px solid #aaacb3; border-radius: 5px; background: #fff; color: #000; font: 20px Arial, sans-serif; }
+    input:focus { border-color: #737d91; }
+    .credentials input { flex: 1; }
+    .credentials .password-label { width: 215px; }
+    .email { flex: 1; }
+    .serial { prototype: SerialNumber url(prototype/serial-number.js); flex: 1; min-width: 0; height: 34px; border: 1px solid #aaacb3; border-radius: 0; background: white; font-family: monospace; font-size: 18px; font-weight: 400; }
+    .actions { display: flex; margin-left: 237px; margin-top: 25px; gap: 1px; }
+    .actions button { flex: 1; min-width: 0; height: 61px; padding: 0; border: 2px solid #aaacb3; border-radius: 5px; background: linear-gradient(#f5f6f7, #e3e4e7); color: black; font: 20px Arial, sans-serif; }
+    .actions button:hover { background: #dce4ed; }
+    .actions button:active { background: #ced7e2; }
+    #status { margin: 13px 0 0 237px; font-size: 13px; color: #434954; }
+  </style>
+</head>
+<body>
+  <div class="window">
+    <!--header class="titlebar" role="window-caption">
+      <span class="title">Admin Registration</span>
+      <button class="close" role="window-close" aria-label="Close">×</button>
+    </header-->
+    <main>
+      <div class="row credentials">
+        <label for="username">ADMIN USERNAME</label>
+        <input id="username" autocomplete="username">
+        <label class="password-label" for="password">ADMIN PASSWORD</label>
+        <input id="password" type="password" autocomplete="new-password">
+      </div>
+      <div class="row">
+        <label for="email">REGISTERED EMAIL</label>
+        <input class="email" id="email" type="email" autocomplete="email">
+      </div>
+      <div class="row">
+        <label for="serial">PRODUCT KEY</label>
+        <input class="serial" id="serial" name="serialnumber" aria-label="Product key"
+               placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" spellcheck="false">
+      </div>
+      <div class="actions">
+        <button id="change">Change Serial</button>
+        <button id="get">Get Serial</button>
+        <button id="activate">Activate</button>
+      </div>
+      <div id="status" role="status" aria-live="polite"></div>
+    </main>
+  </div>
+  <script>
+    const serial = $('#serial');
+    const status = $('#status');
+    serial.addEventListener('input', () => { status.textContent = ''; });
+    $('#change').on('click', () => {
+      serial.value = '';
+      serial.focus();
+      status.textContent = 'Enter your replacement product key.';
+    });
+    $('#get').on('click', () => {
+      serial.value = 'DEMO-NILE-2026-AB12-CD34-EF56';
+      status.textContent = 'Demo serial generated. No licensing service is connected.';
+    });
+    $('#activate').on('click', () => {
+      const missing = [$('#username'), $('#password'), $('#email')].find(input => !input.value.trim());
+      if (missing) {
+        status.textContent = 'Enter your username, password and registered email.';
+        missing.focus();
+        return;
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test($('#email').value.trim())) {
+        status.textContent = 'Enter a valid registered email address.';
+        $('#email').focus();
+        return;
+      }
+      if (!serial.complete) {
+        status.textContent = 'Enter all six product key groups (four letters or digits each).';
+        return;
+      }
+      status.textContent = 'Demo validation passed. Real activation requires a licensing service.';
+    });
+  </script>
+</body>
+</html>

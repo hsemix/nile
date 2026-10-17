@@ -15,3 +15,12 @@ nile-dom.workspace = true
 nile-style.workspace = true
 rquickjs.workspace = true
 base64.workspace = true
+
+nile-extensions = { path = "../nile-extensions" }
+serde_json = "1"
+
+nile-extension-pack = { path = "../nile-extension-pack" }
+
+[dev-dependencies]
+tempfile = "3"
+cc = "1"

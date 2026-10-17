@@ -599,6 +599,27 @@ pub unsafe extern "C" fn nile_view_set_dialogs(view: *mut NileView, dialogs: Nil
     }
 }
 
+/// Tell Nile the system's colour theme: `dark` for `prefers-color-scheme: dark` (and the dark
+/// look of pages that say `color-scheme: light dark`), `accent_rgb` the system accent colour as
+/// `0xRRGGBB` (negative = the platform's stock accent). It is a per-thread setting shared by every
+/// view of the thread; call it before creating views and again when the OS changes. Restyles this
+/// view (call it on the others too) and returns true if the theme changed.
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_set_system_theme(view: *mut NileView, dark: bool, accent_rgb: i32) -> bool {
+    let Some(v) = view_ref(view) else { return false };
+    guard(false, || {
+        let accent = if accent_rgb < 0 { nile_style::default_accent() } else { nile_style::Color::rgb((accent_rgb >> 16) as u8, (accent_rgb >> 8) as u8, accent_rgb as u8) };
+        let changed = nile_style::set_system_theme(nile_style::SystemTheme { dark, accent });
+        if changed {
+            v.page.system_theme_changed();
+        }
+        changed
+    })
+}
+
 /// Files were dropped on the window at the pointer's last position (tell the page where with
 /// [`nile_pointer_move`] first). `paths` are UTF-8 paths separated by newlines. A file input under
 /// the pointer takes them; elsewhere the target gets a `drop` event. Returns true if the page changed.
@@ -1407,6 +1428,21 @@ mod tests {
         let mut out = ptr::null_mut();
         let code = unsafe { nile_view_eval(v, s(code).as_ptr(), &mut out) };
         code == 0 && !out.is_null() && unsafe { take(out) } == "true"
+    }
+
+    #[test]
+    fn a_c_host_can_set_the_system_theme() {
+        unsafe {
+            let html = s(r#"<html><head><style>:root { color-scheme: light dark }</style></head><body><button id="b">x</button></body></html>"#);
+            let v = nile_view_create_html(html.as_ptr(), ptr::null(), 200.0, 100.0);
+            assert!(nile_view_set_system_theme(v, true, 0x336699));
+            assert!(!nile_view_set_system_theme(v, true, 0x336699), "unchanged");
+            let mut out = ptr::null_mut();
+            assert_eq!(nile_view_eval(v, s("getComputedStyle(document.getElementById('b')).color").as_ptr(), &mut out), 0);
+            assert_eq!(take(out), "rgb(255, 255, 255)", "the dark controls");
+            assert!(nile_view_set_system_theme(v, false, -1));
+            nile_view_destroy(v);
+        }
     }
 
     #[test]
