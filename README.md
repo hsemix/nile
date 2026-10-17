@@ -78,6 +78,21 @@ cargo run -p nile-shell -- examples/forms.html --png out.png --click 60,66 --typ
 cargo test --workspace
 ```
 
+## Native extensions
+
+Separately distributed native packages can expose asynchronous operations, binary
+buffers, managed resources and ongoing events. SQLite is the first independent
+consumer; it is not linked into the engine.
+
+```sh
+python3 scripts/build-extension.py sqlite --dest examples/sqlite/extensions/sqlite
+cargo run -p nile-shell -- examples/sqlite/index.html
+```
+
+See the [extension author and JavaScript guide](docs/extensions.md) for the C ABI,
+threading/ownership contract, platform packages and standalone builds. Native
+packages are trusted process-level code; packed applications are unsupported in v1.
+
 ## Admin registration demo
 
 ```sh

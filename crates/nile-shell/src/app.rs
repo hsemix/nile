@@ -20,6 +20,7 @@ use crate::{access, dialogs, material, menu, mods_of};
 
 /// What other threads (the accessibility layer) send the event loop.
 pub enum UserEvent {
+    ExtensionWake,
     Access(accesskit_winit::Event),
     /// A menu bar item was chosen: a page item's node id, or a negative tag for a standard action.
     #[allow(dead_code)]
@@ -565,6 +566,10 @@ impl App {
 
     /// Create a window around `page`. `spec` is what a script asked for (none for the first window).
     fn create(&mut self, event_loop: &ActiveEventLoop, page: Page, id: u32, spec: Option<&WindowSpec>) {
+        if let Some(scripts) = &page.scripts {
+            let proxy = self.proxy.clone();
+            scripts.set_extension_waker(Some(std::sync::Arc::new(move || { let _ = proxy.send_event(UserEvent::ExtensionWake); })));
+        }
         let mut config = WindowConfig::from_document(&page.doc.borrow());
         let opener_rect = spec.and_then(|s| self.index(s.opener)).and_then(|i| self.wins[i].page.view.borrow().window_rect);
         let monitor = event_loop.primary_monitor();
@@ -1013,6 +1018,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let event = match event {
+            UserEvent::ExtensionWake => return,
             UserEvent::Access(event) => event,
             UserEvent::Snap(hwnd, state) => {
                 let Some(idx) = self.wins.iter().position(|w| w.window.id() == WindowId::from(hwnd as u64)) else { return };

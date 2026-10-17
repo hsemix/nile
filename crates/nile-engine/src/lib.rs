@@ -1029,7 +1029,12 @@ impl Page {
         }));
         view.borrow_mut().adopt(styles);
 
-        let scripts = match ScriptHost::new(doc.clone(), Rc::new(Env(view.clone()))) {
+        let scripts_result = ScriptHost::new(doc.clone(), Rc::new(Env(view.clone())))
+            .map_err(|e| e.to_string()).and_then(|host| {
+                host.discover_extensions(&path)?;
+                Ok(host)
+            });
+        let scripts = match scripts_result {
             Ok(host) => {
                 let sources = doc.borrow().script_sources();
                 let dir = path.parent().unwrap_or(std::path::Path::new("."));

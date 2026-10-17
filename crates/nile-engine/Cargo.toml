@@ -20,3 +20,9 @@ nile-script.workspace = true
 skia-safe.workspace = true
 arboard = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
+
+[dev-dependencies]
+nile-extensions = { path = "../nile-extensions" }
+tempfile = "3"
+serde_json = "1"
+cc = "1"

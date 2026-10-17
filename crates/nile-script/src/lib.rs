@@ -26,6 +26,7 @@ use rquickjs::{
     CatchResultExt, Context, Ctx, Exception, Function, Module, Object, Runtime,
 };
 
+mod extensions;
 mod envmod;
 mod jsx;
 mod net;
@@ -222,7 +223,8 @@ pub trait Environment {
 }
 
 /// Resolves `./` and `../` imports against the importing module's file.
-struct FileResolver;
+#[derive(Default)]
+struct FileResolver { packages: Vec<nile_extensions::Package> }
 
 impl Resolver for FileResolver {
     fn resolve<'js>(
@@ -232,6 +234,16 @@ impl Resolver for FileResolver {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<String> {
+        if let Some(package) = self.packages.iter().find(|p| p.import == name) {
+            return Ok(package.entry.to_string_lossy().into_owned());
+        }
+        if name == "@native" {
+            let base = std::path::Path::new(base.split('#').next().unwrap_or(base));
+            if let Some(package) = self.packages.iter().find(|p| base.starts_with(&p.root)) {
+                return Ok(format!("@native:{}", package.host));
+            }
+            return Err(rquickjs::Error::new_resolving(base.to_string_lossy(), name));
+        }
         let path = std::path::Path::new(name);
         if matches!(name, "@nile" | "@sciter" | "@env" | "@sys" | "@debug" | "@storage") {
             // `@sciter` is the same module under the name Sciter apps use.
@@ -275,7 +287,8 @@ fn normalize(path: &std::path::Path) -> String {
 }
 
 /// Loads module files from disk, transforming JSX.
-struct FileLoader;
+#[derive(Default)]
+struct FileLoader { packages: Vec<nile_extensions::Package> }
 
 impl Loader for FileLoader {
     fn load<'js>(
@@ -284,6 +297,12 @@ impl Loader for FileLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<Module<'js, Declared>> {
+        if let Some(host) = name.strip_prefix("@native:") {
+            if self.packages.iter().any(|p| p.host.to_string() == host) {
+                return Module::declare(ctx.clone(), name, format!("export default globalThis.__nileExtensionScope({host:?});"));
+            }
+            return Err(rquickjs::Error::new_loading(name));
+        }
         // Built-in modules are thin wrappers over objects the prelude defines.
         let builtin = match name {
             "@sys" => Some("const m = globalThis.__sysModule;\nexport const fs = m.fs;\nexport const TCP = m.TCP;\nexport const UDP = m.UDP;\nexport const Pipe = m.Pipe;\nexport const TTY = m.TTY;\nexport const Process = m.Process;\nexport const spawn = m.spawn;\nexport const hrtime = m.hrtime;\nexport const gettimeofday = m.gettimeofday;\nexport const uname = m.uname;\nexport const isatty = m.isatty;\nexport const environ = m.environ;\nexport const getenv = m.getenv;\nexport const setenv = m.setenv;\nexport const unsetenv = m.unsetenv;\nexport const cwd = m.cwd;\nexport const chdir = m.chdir;\nexport const homedir = m.homedir;\nexport const tmpdir = m.tmpdir;\nexport const exepath = m.exepath;\nexport const random = m.random;\nexport default m;"),
@@ -334,6 +353,7 @@ pub enum UiEvent {
 }
 
 pub struct ScriptHost {
+    extensions: Rc<RefCell<nile_extensions::Extensions>>,
     runtime: Runtime,
     context: Context,
     log: Arc<Mutex<Vec<String>>>,
@@ -811,6 +831,10 @@ fn install_natives(
 
 impl Drop for ScriptHost {
     fn drop(&mut self) {
+        self.extensions.borrow().stop_accepting();
+        self.call_global("__nativeExtDispose", |_, f| f.call::<_, ()>(()));
+        // Stop/join native code before releasing QuickJS or unloading libraries.
+        *self.extensions.borrow_mut() = nile_extensions::Extensions::default();
         // A change still waiting for its save timer.
         self.call_global("__storageFlush", |_, f| f.call::<_, ()>(()));
     }
@@ -821,7 +845,7 @@ impl ScriptHost {
     /// owner compares `doc.version` after each call to see if anything changed.
     pub fn new(doc: Rc<RefCell<Document>>, env: Rc<dyn Environment>) -> rquickjs::Result<Self> {
         let runtime = Runtime::new()?;
-        runtime.set_loader(FileResolver, FileLoader);
+        runtime.set_loader(FileResolver::default(), FileLoader::default());
         let context = Context::full(&runtime)?;
         let log = Arc::new(Mutex::new(Vec::new()));
         let start = Instant::now();
@@ -838,7 +862,9 @@ impl ScriptHost {
                 rquickjs::Error::Unknown
             })
         })?;
-        Ok(ScriptHost { runtime, context, log, start, host_fns, net, sys, observing, storage })
+        let host = ScriptHost { extensions: Rc::default(), runtime, context, log, start, host_fns, net, sys, observing, storage };
+        host.install_extensions()?;
+        Ok(host)
     }
 
     /// The loader behind `fetch` and `XMLHttpRequest` (by default: files next to the page and
@@ -877,7 +903,7 @@ impl ScriptHost {
 
     /// Requests still in flight; the embedder should keep ticking while there are any.
     pub fn fetches_pending(&self) -> bool {
-        self.net.pending.get() > 0 || self.sys.pending()
+        self.net.pending.get() > 0 || self.sys.pending() || self.extensions.borrow().pending()
     }
 
     /// Run promise jobs queued by the last call.
@@ -989,6 +1015,7 @@ impl ScriptHost {
 
     /// Run timers that are due. Returns how long until the next one, if any.
     pub fn tick(&self) -> Option<Duration> {
+        self.tick_extensions();
         let now = self.start.elapsed().as_secs_f64() * 1000.0;
         let mut next = -1.0f64;
         self.call_global("__tick", |_, f| {
@@ -1021,7 +1048,7 @@ impl ScriptHost {
         // WebSocket always has a read pending), so those are looked at less often.
         let poll = if self.net.pending.get() > 0 {
             Some(Duration::from_millis(16))
-        } else if self.sys.pending() {
+        } else if self.sys.pending() || self.extensions.borrow().pending() {
             Some(Duration::from_millis(30))
         } else {
             None

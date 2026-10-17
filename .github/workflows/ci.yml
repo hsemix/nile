@@ -27,6 +27,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev
+      - name: Fetch extension dependencies
+        run: cargo fetch --locked
+      - name: Build SQLite independently against the public SDK
+        run: python3 scripts/check-extension-standalone.py
       - name: Clippy
         shell: bash
         run: |
