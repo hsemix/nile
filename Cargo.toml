@@ -13,6 +13,7 @@ nile-style = { path = "crates/nile-style" }
 nile-text = { path = "crates/nile-text" }
 nile-layout = { path = "crates/nile-layout" }
 nile-render = { path = "crates/nile-render" }
+nile-canvas = { path = "crates/nile-canvas" }
 nile-script = { path = "crates/nile-script" }
 nile-engine = { path = "crates/nile-engine" }
 nile-capi = { path = "crates/nile-capi" }

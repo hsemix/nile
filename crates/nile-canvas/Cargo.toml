@@ -1,0 +1,10 @@
+[package]
+name = "nile-canvas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nile-style.workspace = true
+skia-safe.workspace = true
+base64.workspace = true

@@ -1,0 +1,40 @@
+<!doctype html>
+<html window-title="Files — Tabbed example" window-frame="solid" window-width="1080" window-height="720" window-min-width="700" window-min-height="480" window-resizable="6px">
+<head>
+  <meta charset="utf-8">
+  <title>Files — Tabbed example</title>
+  <link rel="stylesheet" href="tabs.css">
+</head>
+<body>
+  <header>
+    <div class="brand">▣</div>
+    <div id="tabs" role="tablist" aria-label="Open folders"></div>
+    <button id="new-tab" title="New tab (Ctrl/Cmd+T)" aria-label="New tab">+</button>
+    <div class="caption" role="window-caption"></div>
+    <button class="window-button" role="window-minimize" aria-label="Minimize">−</button>
+    <button class="window-button" role="window-maximize" aria-label="Maximize">□</button>
+    <button class="window-button window-close" role="window-close" aria-label="Close window">×</button>
+  </header>
+  <div class="toolbar">
+    <button id="back" title="Back" aria-label="Back">←</button>
+    <button id="forward" title="Forward" aria-label="Forward">→</button>
+    <div class="address">▣ <span id="address"></span></div>
+    <input id="search" placeholder="Search this folder" aria-label="Search this folder">
+  </div>
+  <div class="workspace">
+    <nav aria-label="Folders">
+      <div class="nav-heading">QUICK ACCESS</div>
+      <div id="folders"></div>
+      <div class="sidebar-note">A place for every project.<br>Open a folder in its own tab.</div>
+    </nav>
+    <main id="panel" role="tabpanel">
+      <div class="page-heading"><div><div class="eyebrow">YOUR WORKSPACE</div><h1 id="folder-name"></h1></div><button id="open-tab">Open in new tab ↗</button></div>
+      <div class="list-heading"><span>Name</span><span>Type</span><span>Size</span></div>
+      <div id="files"></div>
+      <div id="preview"></div>
+    </main>
+  </div>
+  <footer><span id="status"></span><span>Ctrl/Cmd+T new tab · Ctrl+Tab switch · Ctrl/Cmd+W close</span></footer>
+  <script src="tabs.js"></script>
+</body>
+</html>

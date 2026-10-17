@@ -17,6 +17,7 @@ nile-text.workspace = true
 nile-layout.workspace = true
 nile-render.workspace = true
 nile-script.workspace = true
+nile-canvas.workspace = true
 skia-safe.workspace = true
 arboard = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }

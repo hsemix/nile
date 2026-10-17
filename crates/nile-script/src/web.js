@@ -2764,4 +2764,6 @@
   const fsRead = (p) => b64ToBytes(fsRun("read", String(p)));
   const fsWrite = (p, text) => { fsRun("write", String(p), bytesToB64(new TextEncoder().encode(text))); };
   Object.defineProperty(g, "__storageModule", { value: { open: storageOpen } });
+  
+  /*@CANVAS@*/
   }

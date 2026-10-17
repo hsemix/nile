@@ -555,6 +555,10 @@ impl Environment for Env {
         nile_style::system_theme().dark
     }
 
+    fn image_bytes(&self, src: &str) -> Option<Vec<u8>> {
+        nile_layout::ImageLoader::bytes(&self.0.borrow().images, src)
+    }
+
     fn viewport(&self) -> (f32, f32) {
         self.0.borrow().viewport
     }
@@ -1256,7 +1260,8 @@ impl Page {
             self.emit(node, UiEvent::Plain("scroll"));
         }
         let delivered = self.deliver_frame_messages();
-        changed | moved | delivered
+        // A canvas drawn on needs a repaint, not a new layout.
+        changed | moved | delivered | nile_canvas::take_dirty()
     }
 
     /// Focus moved from `old` to `new`: end the old input's edit (firing
@@ -7071,6 +7076,57 @@ cd</textarea>
         p.system_theme_changed();
         assert_eq!(js(&mut p, "log.filter((l) => l.includes(':false')).length"), "3");
         set_system_theme(SystemTheme::default());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_canvas_paints_what_scripts_draw_and_repaints_without_a_new_layout() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><canvas id="c" width="40" height="20"></canvas><script>
+                 window.ctx = document.getElementById('c').getContext('2d');
+                 ctx.fillStyle = '#ff0000'; ctx.fillRect(0, 0, 40, 20);
+               </script></body>"#,
+            "canvas",
+        );
+        assert_eq!(js(&mut p, "document.getElementById('c').width + 'x' + document.getElementById('c').height"), "40x20");
+        let rect = p.view.borrow_mut().layout().node_rect(p.doc.borrow().find(|n| n.attr("id") == Some("c")).unwrap()).unwrap();
+        assert_eq!((rect.width, rect.height), (40.0, 20.0));
+        let (reds, blues) = count_colored(&mut p);
+        assert_eq!((reds, blues), (40 * 20, 0), "the canvas shows its red fill");
+        // Drawing again changes the picture and asks for a repaint, but not a new document version.
+        p.sync();
+        let version = p.doc.borrow().version;
+        let (_, repaint) = p.eval("ctx.fillStyle = '#0000ff'; ctx.fillRect(0, 0, 20, 20);");
+        assert_eq!(p.doc.borrow().version, version, "drawing doesn't touch the document");
+        assert!(repaint, "a canvas drawn on makes the page repaint");
+        assert!(!p.sync(), "and only once");
+        let (reds, blues) = count_colored(&mut p);
+        assert_eq!((reds, blues), (20 * 20, 20 * 20));
+        // Resizing clears the canvas and re-lays-out the box.
+        js(&mut p, "document.getElementById('c').width = 10;");
+        assert_eq!(count_colored(&mut p), (0, 0));
+        let rect = p.view.borrow_mut().layout().node_rect(p.doc.borrow().find(|n| n.attr("id") == Some("c")).unwrap()).unwrap();
+        assert_eq!(rect.width, 10.0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn canvas_draws_an_img_by_its_src() {
+        // A 1x1 red PNG as a data URL.
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+        let (mut p, path) = page(
+            &format!(
+                r#"<body style="margin:0"><img id="i" src="data:image/png;base64,{png}" style="display:none"><canvas id="c" width="10" height="10"></canvas><script>
+                     const c = document.getElementById('c').getContext('2d');
+                     c.drawImage(document.getElementById('i'), 0, 0, 10, 10);
+                     window.info = document.getElementById('i').naturalWidth + 'x' + document.getElementById('i').naturalHeight;
+                   </script></body>"#
+            ),
+            "canvas-img",
+        );
+        assert_eq!(js(&mut p, "info"), "1x1");
+        let (reds, _) = count_colored(&mut p);
+        assert!(reds >= 90, "the image fills the canvas: {reds}");
         let _ = std::fs::remove_file(path);
     }
 

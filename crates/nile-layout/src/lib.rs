@@ -1807,7 +1807,15 @@ fn image_for(src: &str) -> Option<Rc<ImageData>> {
 fn build_image(doc: &Document, styles: &StyleMap, tree: &mut TaffyTree<NodeCtx>, id: NodeId) -> Option<taffy::NodeId> {
     let node = doc.node(id);
     let style = styles.get(id);
-    let image = node.attr("src").and_then(image_for);
+    let canvas = node.tag() == Some("canvas");
+    // A canvas is a picture that changes: its box is sized by `width`/`height` (300x150 by default)
+    // and the renderer reads its pixels from the drawing surface.
+    let image = if canvas {
+        let side = |name: &str, default: u32| node.attr(name).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(default);
+        Some(Rc::new(ImageData { id: 0, bytes: Vec::new(), width: side("width", 300), height: side("height", 150), canvas: node.attr("nile-canvas").and_then(|v| v.parse().ok()) }))
+    } else {
+        node.attr("src").and_then(image_for)
+    };
     let mut ts = taffy_style(style);
     let attr = |name: &str| node.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
     let (mut wide, mut high) = (style.width != Length::Auto, style.height != Length::Auto);
@@ -1844,7 +1852,7 @@ fn build(
     }
     let node = doc.node(id);
     let style = styles.get(id);
-    if node.tag() == Some("img") && style.display != Display::None {
+    if matches!(node.tag(), Some("img" | "canvas")) && style.display != Display::None {
         return build_image(doc, styles, tree, id);
     }
 

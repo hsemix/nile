@@ -1662,6 +1662,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nile-canvas"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "nile-style",
+ "skia-safe",
+]
+
+[[package]]
 name = "nile-capi"
 version = "0.1.0"
 dependencies = [
@@ -1688,6 +1697,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "cc",
+ "nile-canvas",
  "nile-dom",
  "nile-extensions",
  "nile-layout",
@@ -1767,6 +1777,7 @@ dependencies = [
 name = "nile-render"
 version = "0.1.0"
 dependencies = [
+ "nile-canvas",
  "nile-layout",
  "nile-style",
  "nile-text",
@@ -1779,6 +1790,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "cc",
+ "nile-canvas",
  "nile-dom",
  "nile-extension-pack",
  "nile-extensions",

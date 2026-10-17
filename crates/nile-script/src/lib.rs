@@ -36,9 +36,10 @@ pub use net::{file_url, path_of_url, FetchRequest, FetchResponse, Fetcher, Local
 
 const EDIT: &str = include_str!("edit.js");
 const WEB: &str = include_str!("web.js");
+const CANVAS: &str = include_str!("canvas.js");
 
 fn prelude() -> String {
-    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", WEB)
+    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", &WEB.replace("/*@CANVAS@*/", CANVAS))
 }
 
 /// Window ids are unique within the process (the main window, then each `new Window()`).
@@ -159,6 +160,10 @@ pub trait Environment {
     /// The system theme is dark (`prefers-color-scheme: dark`).
     fn system_dark(&self) -> bool {
         false
+    }
+    /// The encoded bytes of an image the page names (`<img src>`), for `drawImage` and patterns.
+    fn image_bytes(&self, _src: &str) -> Option<Vec<u8>> {
+        None
     }
     /// Device pixels per logical pixel (`devicePixelRatio`).
     fn scale(&self) -> f32 {
@@ -594,6 +599,27 @@ fn install_natives(
     native!("systemDark", {
         let env = env.clone();
         move || -> bool { env.system_dark() }
+    });
+    // <canvas>: the surfaces and the 2D operations live in nile-canvas; the page's images come
+    // from the embedder through `Environment::image_bytes`.
+    native!("canvasCreate", |w: f64, h: f64| -> i32 { nile_canvas::create(w as u32, h as u32).map_or(0, |id| id as i32) });
+    native!("canvasResize", |id: i32, w: f64, h: f64| nile_canvas::resize(id as u32, w as u32, h as u32));
+    native!("canvasRemove", |id: i32| nile_canvas::remove(id as u32));
+    native!("canvasCall", {
+        let env = env.clone();
+        move |id: i32, op: String, args: Vec<f64>, text: String| -> String {
+            struct EnvImages<'a>(&'a dyn Environment);
+            impl nile_canvas::Images for EnvImages<'_> {
+                fn bytes(&self, src: &str) -> Option<Vec<u8>> {
+                    self.0.image_bytes(src)
+                }
+            }
+            // An error comes back as "\u{1}Name: message" for the wrapper to throw.
+            match nile_canvas::call(id as u32, &op, &args, &text, &EnvImages(&*env)) {
+                Ok(s) => s,
+                Err(e) => format!("\u{1}{e}"),
+            }
+        }
     });
     native!("viewport", {
         let env = env.clone();

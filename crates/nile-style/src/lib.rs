@@ -32,6 +32,14 @@ pub use page::{resolve as resolve_page, MarginBox, MarginPlace, PageStyle, Piece
 pub use grid::{area_lines, Breadth, GridAutoFlow, GridLine, GridPlace, Track, TrackItem, TrackRepeat};
 pub use gradient::{TransformFn, ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
 pub use parse::{color_from_hex, Declaration, FontFace, Rule, Stylesheet, Value};
+
+/// A CSS colour written as text (`#f80`, `rgb(...)`, `tomato`, a system colour...), for embedders
+/// and scripts that take colours as strings (the canvas's `fillStyle`).
+pub fn parse_color(css: &str) -> Option<Color> {
+    let used = Cell::new(false);
+    let cx = parse::Cx { viewport: (0.0, 0.0), uses_viewport: &used };
+    parse::parse_values(css.trim(), &cx).first().and_then(Value::color)
+}
 use parse::Cx;
 pub use system::{default_accent, parse_hex, set_system_theme, system_color, system_theme, text_on, used_dark, ColorScheme, Palette, SystemTheme};
 pub use selector::{ElementRef, InteractionState, NileImpl, PseudoClass, PseudoElement, Query};
@@ -946,7 +954,7 @@ pub(crate) const ROOT_FONT_SIZE: f32 = 16.0;
 
 const UA_STYLESHEET: &str = r#"
 head, script, style, title, meta, link, option, optgroup { display: none }
-img { display: inline-block }
+img, canvas { display: inline-block }
 [selectable] { user-select: text }
 [contenteditable]:not([contenteditable=false]) { user-select: text; cursor: text }
 html, body, div, p, h1, h2, h3, section, header, footer, main, nav, ul { display: block }

@@ -237,6 +237,7 @@ What changed and when is in the [changelog](CHANGELOG.md).
   from interaction; `checked`, `disabled`, `readonly`, `expanded`, `collapsed`, `current`, `selected`, `invalid`,
   `busy` are runtime flags matched by the same-named `:pseudo-classes`), `elementIndex`, `nodeIndex`,
   `insertAfter`.
+- **`<canvas>`:** the Canvas 2D context over a Skia surface (paths, `Path2D`, gradients, patterns, shadows, text, `drawImage`, `getImageData`/`putImageData`, `toDataURL`, compositing, `OffscreenCanvas`), `new Image()` and `<img>` `onload`; no WebGL or `ImageBitmap` ([guide](docs/guide/canvas.md), `examples/canvas.html`).
 - **Form controls:** `<input>` (text, password, placeholder, `value`), `<textarea>` (wrapping, newlines, Up/Down
   by line), checkboxes and radio groups (including `<label>` clicks), `<button>`, disabled states, a blinking
   caret with click-to-place that scrolls into view, typing, Backspace/Delete/arrows/Home/End, Tab and Shift+Tab

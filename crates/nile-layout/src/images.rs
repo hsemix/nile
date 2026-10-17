@@ -19,6 +19,9 @@ pub struct ImageData {
     pub bytes: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// A `<canvas>`: the id of its drawing surface (nile-canvas); `bytes` is empty and the renderer
+    /// takes the current pixels from the surface instead.
+    pub canvas: Option<u32>,
 }
 
 /// Finds the image a page refers to as `src`.
@@ -90,7 +93,7 @@ impl ImageLoader for FileImages {
             let size = imagesize::blob_size(&bytes).ok()?;
             let mut id = self.next_id.borrow_mut();
             *id += 1;
-            Some(Rc::new(ImageData { id: *id, bytes, width: size.width as u32, height: size.height as u32 }))
+            Some(Rc::new(ImageData { id: *id, bytes, width: size.width as u32, height: size.height as u32, canvas: None }))
         });
         self.cache.borrow_mut().insert(src.to_string(), loaded.clone());
         loaded

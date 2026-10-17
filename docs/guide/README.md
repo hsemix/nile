@@ -27,6 +27,7 @@ web APIs, built-in modules, windows, rich text and every exported C function.
 11. [Ship an app as one file](packaging.md).
 12. [Render and simulate input with the CLI](cli.md).
 13. [Troubleshoot common problems](troubleshooting.md).
+14. [Draw with `<canvas>`](canvas.md).
 
 All shell commands in this guide assume your current directory is the repository
 root. Examples are source files you can edit and reload. No npm build is needed

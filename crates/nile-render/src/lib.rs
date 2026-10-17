@@ -470,6 +470,10 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
     }
 
     fn picture(&mut self, data: &ImageData) -> Option<skia_safe::Image> {
+        // A canvas is drawn from its surface as it is now, never from the cache.
+        if let Some(canvas) = data.canvas {
+            return nile_canvas::snapshot(canvas);
+        }
         self.pictures
             .entry(data.id)
             .or_insert_with(|| skia_safe::Image::from_encoded(skia_safe::Data::new_copy(&data.bytes)))
