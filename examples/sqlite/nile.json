@@ -1,5 +1,9 @@
 {
   "extensions": {
     "@sqlite": "./extensions/sqlite"
+  },
+  "application": {
+    "id": "org.nile.sqlite-example",
+    "version": "0.1.0"
   }
 }

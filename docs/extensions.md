@@ -76,13 +76,206 @@ this automatically; an initialization error is reported to stderr and prevents
 that page's scripts from starting, without terminating the host process. Existing
 synchronous `host.*` APIs are unchanged.
 
-**Packed applications are unsupported for native extensions in v1.** If the
-configuration is in Nile's embedded filesystem, startup returns an explicit
-unsupported error. An OS loader cannot load a library from Nile's archive. There
-is no implicit extraction or external search fallback. Use an ordinary filesystem
-application (a normal macOS app bundle with real package files is fine), or have a
-custom host explicitly supply an external filesystem configuration. In particular,
-`--pack` is not a supported distribution route for the SQLite example.
+## Packed applications
+
+The same wrapper imports work in filesystem and packed applications. Native
+capabilities still use ABI v1; no extension-specific engine integration is needed.
+`nile-extension-pack` plans packages and materializes native files; `nile-dom::vfs`
+streams archive entries; the existing `nile-extensions` host initializes verified
+absolute library paths. Every package finishes validation/materialization before
+any extension initializes or application startup script runs.
+
+Declare a stable identity in the application's **root** `nile.json`:
+
+```json
+{
+  "application": { "id": "org.example.customers", "version": "1.0.0" },
+  "extensions": { "@sqlite": "./extensions/sqlite" }
+}
+```
+
+IDs are portable lowercase ASCII alphanumeric/dot/hyphen/underscore identifiers (not dot
+paths or Windows reserved names). Uppercase IDs are rejected to prevent aliases
+on case-insensitive filesystems. Versions are nonempty strings. Relative package
+paths must stay inside the packed application. Packed native declarations in
+nested `nile.json` files are rejected at build time; child pages discover the root
+configuration normally. Filesystem applications keep ancestor discovery and
+configuration-relative package/data paths. Root configurations without extensions
+continue to work without an inventory or application identity.
+
+Build, pack and run the included example:
+
+```sh
+python3 scripts/build-extension.py sqlite --dest examples/sqlite/extensions/sqlite
+cargo run -p nile-shell -- --pack examples/sqlite -o SqliteExample
+./SqliteExample
+# Headless execution: click Insert and query, then let completions settle:
+./SqliteExample --png /tmp/sqlite-example.png --click 110,149 --settle 500
+# Windows: pass -o SqliteExample.exe and run .\SqliteExample.exe.
+# On macOS a bundle is also supported:
+cargo run -p nile-shell -- --pack examples/sqlite -o SqliteExample.app
+```
+
+The packer defaults to the current native platform. Select a canonical platform
+explicitly with `--extension-target linux-x86_64-gnu` (or another name below).
+A selected target with missing binaries fails **before output is written**. This
+selects native assets, not a cross-compiler: the runtime used for packing must
+itself match the deployment target. Build/package on the target OS/architecture.
+Do not put the output executable inside its own input directory.
+
+### Native companion files
+
+Existing string target declarations still work. For companion libraries or native
+assets, use the object form; every file is package-relative and preserves its path:
+
+```json
+{
+  "id": "printer",
+  "version": "1.0.0",
+  "abi": 1,
+  "entry": "index.js",
+  "native": {
+    "linux-x86_64-gnu": {
+      "library": "native/linux-x86_64-gnu/libprinter.so",
+      "files": [
+        "native/linux-x86_64-gnu/libtransport.so",
+        "native/linux-x86_64-gnu/assets/device-profile.bin"
+      ]
+    }
+  }
+}
+```
+
+`library` is included automatically; `files` lists additional **regular files**,
+not directories or globs. Duplicate paths, case aliases, file/directory conflicts,
+absolute/drive paths, traversal and symlinks/reparse points are rejected. Native
+files cannot replace the manifest or wrapper entry. Paths must follow the ordinary
+packer's portable naming/exclusion policy: no hidden components, `target` or
+`node_modules`. Duplicate JSON object keys and unknown manifest/target fields are
+rejected rather than interpreted ambiguously. All required selected files are
+validated at packing time. Other target binaries and undeclared files under a
+package's `native/` directory are omitted. Keep all native build output under that
+directory; other ordinary application assets remain archived.
+
+The generated `__nile_extensions.json` records the selected target, application
+identity/version, package identities/versions, the complete selected native file
+inventory, decoded lengths and SHA-256 hashes, and a hash of the package record.
+Manifests, wrapper modules and ordinary assets stay inside the archive; **only**
+these native files are materialized. Inventory and manifests are cross-checked at
+startup. Never hand-edit the generated inventory. Integrity hashes detect damage;
+they do not authenticate a publisher or defend against malicious same-user code
+that can change the executable, inventory, environment or filesystem.
+
+### Cache and lifecycle
+
+Default cache roots are `$XDG_CACHE_HOME` (or `~/.cache`) on Linux,
+`~/Library/Caches` on macOS, and `%LOCALAPPDATA%` on Windows. Nile uses
+`nile-native/<application-id>/<package-content-hash>/object-<random-generation>`
+under that root. Application/package versions and the target participate in the
+hash. `NILE_NATIVE_CACHE_HOME` explicitly overrides the OS root for custom hosts/CI;
+it must be absolute and the resulting Nile root must be private.
+
+Nile creates Unix directories with mode 0700 and checks ownership/permissions.
+On macOS it conservatively rejects nonempty extended ACLs rather than accepting
+access grants beyond those mode bits.
+On Windows it installs protected owner/SYSTEM DACLs on new cache directories and
+rejects broader/unknown DACLs on reuse. Existing symlink/reparse ancestors and
+linked native files are refused. A per-hash OS file lock serializes simultaneous
+launches. Extraction uses unpredictable private staging directories, create-new
+files, bounded streaming decompression, length/hash verification and atomic directory
+rename. Verified warm-cache reuse hashes every inventoried file again, rejects
+extra files, and never rewrites a loaded library. Corruption produces a **new**
+generation; corrupt and old-version generations remain untouched because another
+process may still have mapped them. A process that has verified a file still trusts
+its own user account not to replace it afterward; this is not same-user isolation.
+
+Limits: 128 native files per package, 256 MiB decoded per native file, 512 MiB per
+native package, 2 MiB configuration/manifest/inventory/entry-module reads, and a
+16 MiB archive index. Ordinary virtual `read()` has a 512 MiB per-file read limit;
+native extraction uses its tighter explicit limits. Overflow, malformed archives,
+truncated data and decompression beyond the declared bound fail startup. Failed
+owned staging work is removed; stages left by a killed process are ignored. There
+is no automatic old/corrupt/orphan cache cleanup in this version. Operators may
+remove unused caches only after all relevant applications have stopped.
+
+Materialized files are immutable for the entire instance lifetime and remain after
+shutdown. Existing worker cancellation, completion/context ownership, resource
+cleanup and shutdown hooks are reused. Errors expose `package`, `target`,
+`operation` and `message` (the scripting/CLI boundary prints this structured error).
+Library code returns errors; it does not exit the hosting process.
+
+### Data paths
+
+`this://app/...` URLs identify archived assets. Cache paths identify native code,
+not writable user data. In packed native applications `application.dataPath` is:
+
+- Linux: `$XDG_DATA_HOME/nile/apps/<id>` or `~/.local/share/nile/apps/<id>`.
+- macOS: `~/Library/Application Support/nile/apps/<id>`.
+- Windows: `%LOCALAPPDATA%/nile/apps/<id>`.
+
+`NILE_APP_DATA_HOME` explicitly overrides the platform root for custom hosts/CI.
+The directory is private, absolute and stable across package/application versions
+with the same application ID. Distinct IDs have distinct data directories. The
+SDK request `base_path` uses this directory for packed applications, so
+`sqlite.open('app.db')` creates `<application.dataPath>/app.db`, never a database
+in the extraction cache or current working directory. Absolute SQLite paths and
+`:memory:` keep their existing behavior. Existing filesystem apps continue to
+resolve relative database paths against the configuration directory, and expose
+that directory as `application.dataPath`. Changing the JS property does not change
+the SDK's configured base path. Data backup/migration remains application work;
+no database or settings migration is performed by extraction.
+
+### Explicit native files beside an executable or in a bundle
+
+Wrappers/manifests can remain archived while native files live in a distributor's
+real directory. Opt in explicitly per configured extension:
+
+```json
+{
+  "application": {"id":"org.example.customers", "version":"1.0.0"},
+  "extensions": {
+    "@sqlite": {
+      "package":"extensions/sqlite",
+      "native_root": {"base":"executable", "path":"extensions/sqlite"}
+    }
+  }
+}
+```
+
+The package is still validated and hashed at build time from the input application
+folder. Its native files are omitted from the archive. Copy those exact signed
+native files to `<executable-directory>/extensions/sqlite/<manifest-native-path>`.
+Runtime verifies every declared external file's length/hash before loading.
+`base:"bundle-resources"` resolves under `Contents/Resources` and requires an
+executable in `Contents/MacOS`. Paths never resolve against process CWD; there is
+no discovery of undeclared external plugins or fallback entry-library search.
+The same explicit configuration mode works for ordinary filesystem applications.
+Only native files need be external; JS wrappers stay in the configured asset package.
+
+### Dependencies, signing and platform boundaries
+
+Linux companions should carry appropriate `$ORIGIN`-relative RPATH/RUNPATH entries
+(including transitive dependencies); Nile does not rewrite ELF files or set process
+search paths. macOS companions must use valid `@loader_path`/`@rpath` arrangements.
+Native bytes, embedded signatures and directory layout are preserved without
+re-signing or rewriting libraries. Windows uses per-load
+`LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`, so direct DLL
+companions should live beside the entry DLL. It does not call SetDllDirectory or
+mutate PATH. Native-only assets in subdirectories retain their declared paths;
+extensions can find them relative to their own loaded module, not SDK `base_path`
+(which identifies writable application data).
+
+Sign/strip native binaries **before** inventory generation; changes to native bytes
+after packing invalidate their hashes. Extraction does not bypass Gatekeeper,
+notarization, library validation or hardened-runtime entitlements. Production
+macOS distribution must sign compatible native code and seal/notarize the completed
+application appropriately. Explicit bundle-resources mode is useful when libraries
+must remain in a signed bundle. The CLI's development ad-hoc signing is not a
+production signing/notarization workflow. Post-pack Windows Authenticode signing
+that appends a certificate after the archive trailer is not implemented; distribution
+must preserve the archive's EOF trailer. GNU libc compatibility and static-musl
+dlopen limitations described below still apply.
+
 
 ## Platforms and builds
 

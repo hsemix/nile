@@ -216,6 +216,7 @@ fn paged_output(page: &mut Page, pdf: Option<String>, png: Option<String>, page_
 /// `nile --pack folder [-o out]`: this program with the folder's files appended, as one executable.
 fn pack_command(args: &[String]) -> ! {
     let mut folder = None;
+    let mut extension_target = None;
     let mut out = None;
     let mut icon: Option<PathBuf> = None;
     let mut info = bundle::AppInfo::default();
@@ -224,6 +225,10 @@ fn pack_command(args: &[String]) -> ! {
     while let Some(a) = it.next() {
         match a.as_str() {
             "-o" | "--out" => out = it.next().cloned(),
+            "--extension-target" => {
+                let Some(target) = it.next() else { eprintln!("--extension-target requires a canonical target name"); std::process::exit(2); };
+                extension_target = Some(target.clone());
+            },
             "--icon" => icon = it.next().map(PathBuf::from),
             "--name" => info.name = it.next().cloned().unwrap_or_default(),
             "--version" => info.version = it.next().cloned().unwrap_or_default(),
@@ -245,6 +250,11 @@ fn pack_command(args: &[String]) -> ! {
     if nile_dom::vfs::start_file(&folder).is_none() {
         eprintln!("warning: {} has no main.html / index.html to start from", folder.display());
     }
+    let target = extension_target.unwrap_or_else(|| nile_extension_pack::host_target().unwrap_or_default());
+    let plan = match nile_extension_pack::plan(&folder, &target) {
+        Ok(plan) => plan,
+        Err(error) => { eprintln!("could not pack native extensions: {error}"); std::process::exit(1); }
+    };
     let name = std::fs::canonicalize(&folder).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "app".into());
     let out = PathBuf::from(out.unwrap_or_else(|| if cfg!(windows) { format!("{name}.exe") } else { name.clone() }));
     if info.name.is_empty() {
@@ -254,10 +264,15 @@ fn pack_command(args: &[String]) -> ! {
     let has_info = !(info.version.is_empty() && info.description.is_empty() && info.company.is_empty() && info.copyright.is_empty());
     // The program's own window icon (Linux and Windows title bars; Wayland needs the .desktop entry too):
     // a `.png` goes into the archive and `App::create` reads it back.
-    let embedded: Vec<(&str, Vec<u8>)> = match icon.as_deref().filter(|i| i.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"))) {
+    let mut embedded: Vec<(&str, Vec<u8>)> = match icon.as_deref().filter(|i| i.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"))) {
         Some(png) => std::fs::read(png).map(|b| vec![(nile_dom::vfs::ICON_FILE, b)]).unwrap_or_default(),
         None => Vec::new(),
     };
+    match plan.metadata() {
+        Ok(Some(bytes)) => embedded.push((nile_extension_pack::INVENTORY, bytes)),
+        Ok(None) => (),
+        Err(error) => { eprintln!("could not serialize extension inventory: {error}"); std::process::exit(1); }
+    }
     // No `--icon`: Nile's own icon, where the system shows one for the file (a Windows executable, a macOS bundle).
     let bundle_wanted = icon.is_some();
     let default_icon = std::env::temp_dir().join(format!("nile-default-icon-{}.png", std::process::id()));
@@ -271,12 +286,12 @@ fn pack_command(args: &[String]) -> ! {
     let result = nile_dom::vfs::runtime_bytes().and_then(|runtime| {
         if bundle_mode {
             std::fs::write(&out, &runtime)?;
-            return nile_dom::vfs::pack_with(&folder, &embedded, &[], &archive);
+            return nile_dom::vfs::pack_selected(&folder, &embedded, &[], &archive, |p| plan.include(p));
         }
         // On Windows the icon goes into the executable before the archive is appended.
         #[cfg(target_os = "windows")]
         let runtime = if icon.is_some() || has_info { bundle::with_resources(runtime, icon.as_deref(), &info)? } else { runtime };
-        nile_dom::vfs::pack_with(&folder, &embedded, &runtime, &out)
+        nile_dom::vfs::pack_selected(&folder, &embedded, &runtime, &out, |p| plan.include(p))
     });
     match result {
         Ok((files, stored)) => {

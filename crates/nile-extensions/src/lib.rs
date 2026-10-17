@@ -295,12 +295,41 @@ struct Config {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Manifest {
-    id: String,
-    version: String,
-    abi: u32,
-    entry: String,
-    native: BTreeMap<String, String>,
+pub struct Manifest {
+    pub id: String,
+    pub version: String,
+    pub abi: u32,
+    pub entry: String,
+    pub native: BTreeMap<String, NativeTarget>,
+}
+#[derive(Deserialize, Clone)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum NativeTarget {
+    Library(String),
+    Files { library: String, files: Vec<String> },
+}
+impl NativeTarget {
+    pub fn library(&self) -> &str {
+        match self {
+            Self::Library(p) => p,
+            Self::Files { library, .. } => library,
+        }
+    }
+    pub fn files(&self) -> Vec<&str> {
+        let mut paths = vec![self.library()];
+        if let Self::Files { files, .. } = self {
+            paths.extend(files.iter().map(String::as_str));
+        }
+        paths
+    }
+}
+/// Asset paths can be virtual; only library_path is passed to the OS loader.
+pub struct PreparedPackage {
+    pub import: String,
+    pub namespace: String,
+    pub root: PathBuf,
+    pub entry: PathBuf,
+    pub library_path: PathBuf,
 }
 pub fn platform() -> Result<String, String> {
     let os = match std::env::consts::OS {
@@ -353,6 +382,20 @@ fn package_file(root: &Path, rel: &str) -> Result<PathBuf, String> {
         return Err(format!("invalid package file: {rel}"));
     }
     Ok(path)
+}
+fn load_library(path: &Path) -> Result<libloading::Library, libloading::Error> {
+    #[cfg(windows)]
+    {
+        // Per-load search scope: entry DLL directory and System32 only. No cwd,
+        // PATH or process-wide SetDllDirectory/AddDllDirectory mutation.
+        unsafe {
+            libloading::os::windows::Library::load_with_flags(path, 0x100 | 0x800).map(Into::into)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        unsafe { libloading::Library::new(path) }
+    }
 }
 struct Loaded {
     shared: Arc<Shared>,
@@ -441,11 +484,7 @@ impl Extensions {
             .map_err(|e| format!("{}: {e}", config.display()))?;
         let base = config.parent().unwrap().to_path_buf();
         let declared: Config = read_json(&config)?;
-        let mut this = Self {
-            context: identity(),
-            base,
-            ..Self::default()
-        };
+        let mut prepared = Vec::new();
         let target = platform()?;
         let mut ids = HashSet::new();
         for (import, path) in declared.extensions {
@@ -458,8 +497,7 @@ impl Extensions {
             {
                 return Err(format!("invalid or reserved extension import: {import}"));
             }
-            let root = this
-                .base
+            let root = base
                 .join(path)
                 .canonicalize()
                 .map_err(|e| format!("extension {import}: {e}"))?;
@@ -488,23 +526,65 @@ impl Extensions {
                 .native
                 .get(&target)
                 .ok_or_else(|| format!("extension {import}: no native library for {target}"))?;
-            let library_path = package_file(&root, native)?;
-            let library = unsafe { libloading::Library::new(&library_path) }
-                .map_err(|e| format!("{}: {e}", library_path.display()))?;
+            let library_path = package_file(&root, native.library())?;
+            for path in native.files() {
+                package_file(&root, path)?;
+            }
+            prepared.push(PreparedPackage {
+                import,
+                namespace: manifest.id,
+                root,
+                entry,
+                library_path,
+            });
+        }
+        Self::load_prepared(base, prepared)
+    }
+    /// Initialize only after all packages have been validated/materialized by the caller.
+    pub fn load_prepared(base: PathBuf, packages: Vec<PreparedPackage>) -> Result<Self, String> {
+        let mut this = Self {
+            context: identity(),
+            base,
+            ..Self::default()
+        };
+        for PreparedPackage {
+            import,
+            namespace,
+            root,
+            entry,
+            library_path,
+        } in packages
+        {
+            let package_error = |operation: &str, message: String| {
+                serde_json::json!({
+                "package": import, "target": platform().unwrap_or_default(), "operation": operation, "message": message
+            }).to_string()
+            };
+            if !library_path.is_absolute() {
+                return Err(package_error(
+                    "load",
+                    "native library path must be absolute".into(),
+                ));
+            }
+            let library = load_library(&library_path)
+                .map_err(|e| package_error("load", format!("{}: {e}", library_path.display())))?;
             let init: NileExtensionInit = unsafe {
                 *library
                     .get::<NileExtensionInit>(b"nile_extension_init\0")
                     .map_err(|e| {
-                        format!(
-                            "{}: missing nile_extension_init: {e}",
-                            library_path.display()
+                        package_error(
+                            "entry-symbol",
+                            format!(
+                                "{}: missing nile_extension_init: {e}",
+                                library_path.display()
+                            ),
                         )
                     })?
             };
             let host = identity();
             let shared = Arc::new(Shared {
                 context: this.context,
-                namespace: manifest.id,
+                namespace,
                 state: Mutex::new(State {
                     accepting: true,
                     registering: true,
@@ -542,28 +622,32 @@ impl Extensions {
             let status = unsafe { init(&*loaded.api, &mut loaded.extension) };
             loaded.shared.state.lock().unwrap().registering = false;
             if status != NILE_OK {
-                return Err(format!(
-                    "extension {import}: initialization failed ({status})"
+                return Err(package_error(
+                    "initialize",
+                    format!("extension {import}: initialization failed ({status})"),
                 ));
             }
             if loaded.extension.abi_version != NILE_ABI_VERSION
                 || loaded.extension.struct_size < std::mem::size_of::<NileExtension>() as u32
                 || loaded.extension.required_capabilities & !NILE_CAP_ALL != 0
             {
-                return Err(format!(
-                    "extension {import}: incompatible ABI table/capabilities"
+                return Err(package_error(
+                    "initialize",
+                    format!("extension {import}: incompatible ABI table/capabilities"),
                 ));
             }
             if loaded.extension.context_dispose.is_none() || loaded.extension.shutdown.is_none() {
-                return Err(format!(
-                    "extension {import}: disposal and shutdown hooks required"
+                return Err(package_error(
+                    "initialize",
+                    format!("extension {import}: disposal and shutdown hooks required"),
                 ));
             }
             if let Some(init) = loaded.extension.context_init {
                 let status = unsafe { init(loaded.extension.user, this.context) };
                 if status != NILE_OK {
-                    return Err(format!(
-                        "extension {import}: context initialization failed ({status})"
+                    return Err(package_error(
+                        "initialize",
+                        format!("extension {import}: context initialization failed ({status})"),
                     ));
                 }
             }

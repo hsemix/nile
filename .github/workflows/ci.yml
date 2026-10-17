@@ -45,7 +45,7 @@ jobs:
             echo "::error title=Clippy on ${{ matrix.os }}::${summary}"
           fi
           exit $status
-      - name: Tests
+      - name: Workspace tests including packed native executable execution
         shell: bash
         run: |
           set +e

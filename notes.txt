@@ -290,3 +290,117 @@ Validate generality with two independent consumers:
 2. A small non-database fixture demonstrating an event subscription, background notifications, unsubscribe and cleanup.
 
 Do not build speculative universal APIs. Rendering integration, hard real-time callbacks and other capabilities that need additional contracts may require future versioned SDK additions. Clearly document those boundaries rather than claiming the initial ABI supports every possible extension.
+
+
+Implement native-extension support for packed Nile applications.
+
+Inspect the current packer, virtual filesystem, extension loader, configuration discovery and tests first. Preserve concurrent changes and keep this work separate from unrelated HTML/CSS/JS compatibility improvements.
+
+Goal
+
+The same application and extension package must work unpacked and packed:
+
+import sqlite from "@sqlite";
+
+Do not change the public extension ABI or require extension-specific engine code. SQLite and notifications are validation examples; the solution must support any compatible extension.
+
+Architecture
+
+Separate:
+1. Reading package manifests and JavaScript from filesystem or packed assets.
+2. Materializing native files onto the real filesystem.
+3. Loading verified native paths through the existing extension host.
+
+Keep JavaScript wrappers and ordinary assets inside the archive. Extract only native binaries and explicitly declared native dependencies.
+
+Packing
+
+- Discover the application’s declared extensions.
+- Validate manifests, package containment and required files.
+- Include wrappers, manifests and selected platform-native files.
+- Support explicit target selection; reject missing target binaries.
+- Record content hashes and the complete native file inventory.
+- Support companion libraries/assets through a generic manifest declaration; do not hard-code SQLite.
+- Reject malformed or ambiguous declarations before producing an executable.
+- Retain existing filesystem-extension behavior.
+
+Extraction cache
+
+Use an OS-appropriate, user-private cache directory with a layout based on application identity and native package content hashes.
+
+Requirements:
+- Stream files from the archive with explicit extraction-size limits.
+- Reject absolute paths, traversal, duplicate/conflicting destinations and escaping symlinks.
+- Create staging directories securely.
+- Verify file lengths and hashes before publishing.
+- Handle simultaneous launches through locking and atomic publication.
+- Reuse only verified cache entries; detect corruption and safely rebuild them.
+- Avoid following pre-existing symlinks in cache paths.
+- Load libraries by absolute path.
+- Never overwrite or delete libraries belonging to a running application.
+- Keep old-version cleanup conservative; omitting automatic cleanup initially is acceptable if documented.
+- Do not fall back to arbitrary working-directory or system-library searches for the extension entry library.
+- Treat hashes as integrity checks, not a substitute for signed distribution or protection against malicious same-user processes.
+
+Dependencies and platforms
+
+Preserve each package’s native directory layout and support declared companion dependencies.
+
+Use appropriate platform mechanisms:
+- Linux: extension dependencies should use suitable $ORIGIN-relative loader paths.
+- macOS: preserve signed binaries and @loader_path/@rpath dependency arrangements.
+- Windows: use a scoped dependency-search strategy that avoids unsafe process-wide search-path changes where practical.
+
+Document build-time requirements and platform limitations. Do not claim extraction bypasses macOS signing, notarization or hardened-runtime requirements.
+
+Also support real native files inside an application bundle or beside a packed executable through an explicit configuration mode. Do not silently discover arbitrary external plugins.
+
+Paths and persistent data
+
+Keep these concepts distinct:
+- Packed asset URLs.
+- Extracted native package paths.
+- Stable writable application-data paths.
+
+Never make the extraction cache the default location for SQLite databases or user settings.
+
+Define packed-app relative database-path behavior explicitly. Preserve existing unpacked semantics. If a stable application-data path API/configuration is needed, add the smallest general-purpose facility and document it.
+
+Lifecycle and errors
+
+- Complete validation/materialization before extension initialization and startup scripts.
+- Reuse the current extension initialization, async dispatch, resources and shutdown mechanisms.
+- Keep materialized files available throughout the extension instance’s lifetime.
+- Return structured startup errors identifying the package, target and failed operation.
+- Never terminate the hosting process from library code.
+- Clean up failed staging work without damaging valid cache entries.
+- Loading must not depend on incidental process working-directory changes.
+
+Tests
+
+Add meaningful tests for:
+- Packing and running an app that imports a native extension.
+- Exact SQLite results and notifications through the real packed module loader.
+- Persistent data going to the documented writable location.
+- Cold extraction and verified warm-cache reuse.
+- Concurrent launches/materialization.
+- Corrupted cached files and interrupted extraction recovery.
+- Traversal, symlink and conflicting-path rejection.
+- Missing platform binaries and companion dependencies.
+- Different application/package versions coexisting.
+- Shutdown with pending extension work.
+- Continued unpacked-app compatibility.
+
+Use actual shared libraries and the real packing/loading path, not mocked extraction alone. Exercise the produced executable in a subprocess, preferably headless for CI.
+
+Run relevant tests, standalone-extension checks and Clippy. Add Linux/macOS/Windows CI coverage where practical. Clearly distinguish passing native execution tests from build-only coverage.
+
+Deliverables
+
+- Implementation.
+- Updated manifest/configuration documentation.
+- Reproducible commands to build extensions, pack the example and run it.
+- Cache, dependency, signing and persistent-data documentation.
+- A concise report of checks run and remaining limitations.
+
+Briefly explain the implementation approach, then proceed through coding and validation. Do not stop at a proposal. Do not publish releases or push unless already authorized.

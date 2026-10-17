@@ -13,10 +13,15 @@ impl ScriptHost {
                 "native packages already configured; create a fresh runtime to reload".into(),
             );
         }
-        if nile_dom::vfs::is_virtual(config) {
-            return Err("native extensions in packed applications are unsupported; use an ordinary filesystem application".into());
-        }
-        let loaded = Extensions::load(config)?;
+        let prepared = nile_extension_pack::prepare(config).map_err(|e| e.to_string())?;
+        let data_path = prepared.data_path.to_string_lossy().into_owned();
+        let loaded = Extensions::load_prepared(prepared.data_path, prepared.packages)?;
+        self.context
+            .with(|ctx| -> rquickjs::Result<()> {
+                let application: Object = ctx.globals().get("application")?;
+                application.set("dataPath", data_path)
+            })
+            .map_err(|e| e.to_string())?;
         let packages = loaded.packages.clone();
         *self.extensions.borrow_mut() = loaded;
         self.runtime.set_loader(

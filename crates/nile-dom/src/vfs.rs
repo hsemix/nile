@@ -11,7 +11,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -28,13 +28,13 @@ struct Entry {
     len: u64,
 }
 
-struct Pack {
+pub struct Archive {
     file: Mutex<File>,
     base: u64,
     entries: HashMap<String, Entry>,
 }
 
-static PACK: OnceLock<Pack> = OnceLock::new();
+static PACK: OnceLock<Archive> = OnceLock::new();
 
 /// The program's window icon inside a packed archive (`nile --pack ... --icon x.png` adds it).
 pub const ICON_FILE: &str = "__nile_icon.png";
@@ -68,7 +68,7 @@ pub fn mount_self() -> bool {
     mounted()
 }
 
-fn open(exe: &Path) -> io::Result<Option<Pack>> {
+fn open(exe: &Path) -> io::Result<Option<Archive>> {
     let mut file = File::open(exe)?;
     let size = file.metadata()?.len();
     if size < 24 {
@@ -82,22 +82,33 @@ fn open(exe: &Path) -> io::Result<Option<Pack>> {
     }
     let index_len = u64::from_le_bytes(tail[..8].try_into().unwrap_or_default());
     let base = u64::from_le_bytes(tail[8..16].try_into().unwrap_or_default());
-    if index_len > size || base > size {
-        return Ok(None);
-    }
+    let index_start = size.checked_sub(24).and_then(|n| n.checked_sub(index_len))
+        .filter(|&n| n >= base && index_len <= 16 * 1024 * 1024)
+        .ok_or_else(|| io::Error::other("invalid archive index bounds"))?;
     let mut index = vec![0u8; index_len as usize];
-    file.seek(SeekFrom::Start(size - 24 - index_len))?;
+    file.seek(SeekFrom::Start(index_start))?;
     file.read_exact(&mut index)?;
+    let index = std::str::from_utf8(&index).map_err(io::Error::other)?;
     let mut entries = HashMap::new();
-    for line in String::from_utf8_lossy(&index).lines() {
+    let mut names = std::collections::BTreeSet::new();
+    for line in index.lines() {
         let f: Vec<&str> = line.split('\t').collect();
-        if let [path, deflated, offset, stored, len] = f[..] {
-            if let (Ok(offset), Ok(stored), Ok(len)) = (offset.parse(), stored.parse(), len.parse()) {
-                entries.insert(path.to_string(), Entry { deflated: deflated == "1", offset, stored, len });
-            }
+        let [path, deflated, offset, stored, len] = f.as_slice() else { return Err(io::Error::other("invalid archive entry")); };
+        validate_path(path)?;
+        let folded = path.to_lowercase();
+        if !names.insert(folded) { return Err(io::Error::other("duplicate archive path")); }
+        let parse = |s: &str| s.parse::<u64>().map_err(io::Error::other);
+        let (offset, stored, len) = (parse(offset)?, parse(stored)?, parse(len)?);
+        if !matches!(*deflated, "0" | "1") || base.checked_add(offset).and_then(|n| n.checked_add(stored)).is_none_or(|end| end > index_start)
+            || (*deflated == "0" && stored != len) { return Err(io::Error::other("invalid archive file bounds")); }
+        entries.insert(path.to_string(), Entry { deflated: *deflated == "1", offset, stored, len });
+    }
+    for name in &names {
+        for (at, _) in name.match_indices('/') {
+            if names.contains(&name[..at]) { return Err(io::Error::other("conflicting archive paths")); }
         }
     }
-    Ok(Some(Pack { file: Mutex::new(file), base, entries }))
+    Ok(Some(Archive { file: Mutex::new(file), base, entries }))
 }
 
 /// The archive key of a path inside the mount: `a/b.html`, with `.` and `..` resolved.
@@ -121,22 +132,49 @@ pub fn read(path: &Path) -> io::Result<Vec<u8>> {
     if !is_virtual(path) {
         return std::fs::read(path);
     }
-    let not_found = || io::Error::new(io::ErrorKind::NotFound, format!("{} is not in the packaged app", path.display()));
-    let pack = PACK.get().ok_or_else(not_found)?;
-    let entry = pack.entries.get(&key_of(path).ok_or_else(not_found)?).ok_or_else(not_found)?;
-    let mut stored = vec![0u8; entry.stored as usize];
-    {
-        let mut file = pack.file.lock().map_err(|_| io::Error::other("archive lock"))?;
-        file.seek(SeekFrom::Start(pack.base + entry.offset))?;
-        file.read_exact(&mut stored)?;
+    read_limited(path, 512 * 1024 * 1024)
+}
+
+/// Strict portable archive destinations: no traversal, Windows prefixes or aliases.
+pub fn validate_path(path: &str) -> io::Result<()> {
+    if path.is_empty() || path.len() > 1024 || path.contains(['\\', ':', '\0', '\t', '\r', '\n', '<', '>', '"', '|', '?', '*'])
+        || path.split('/').any(|p| p.is_empty() || p == "." || p == ".." || p.ends_with(['.', ' '])
+            || matches!(p.split('.').next().unwrap_or("").to_ascii_uppercase().as_str(), "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9")) {
+        return Err(io::Error::other(format!("invalid archive path: {path:?}")));
     }
-    if !entry.deflated {
-        return Ok(stored);
+    Ok(())
+}
+impl Archive {
+    pub fn open(path: &Path) -> io::Result<Self> { open(path)?.ok_or_else(|| io::Error::other("no Nile archive")) }
+    /// Stream with an explicit decoded-size bound; no native file is inflated into a Vec.
+    pub fn copy_to(&self, key: &str, output: &mut dyn Write, max: u64) -> io::Result<u64> {
+        validate_path(key)?;
+        let entry = self.entries.get(key).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, key))?;
+        if entry.len > max { return Err(io::Error::other("archive extraction limit exceeded")); }
+        let mut file = self.file.lock().map_err(|_| io::Error::other("archive lock"))?;
+        file.seek(SeekFrom::Start(self.base + entry.offset))?;
+        let stored = (&mut *file).take(entry.stored);
+        let mut decoded: Box<dyn Read + '_> = if entry.deflated { Box::new(flate2::read::DeflateDecoder::new(stored)) } else { Box::new(stored) };
+        let copied = io::copy(&mut (&mut decoded).take(max.saturating_add(1)), output)?;
+        if copied != entry.len || copied > max { return Err(io::Error::other("archive length mismatch/extraction limit")); }
+        Ok(copied)
     }
-    let bytes = miniz_oxide::inflate::decompress_to_vec(&stored).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
-    if bytes.len() as u64 != entry.len {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "packaged file is damaged"));
+}
+pub fn copy_to(path: &Path, output: &mut dyn Write, max: u64) -> io::Result<u64> {
+    if is_virtual(path) {
+        let pack = PACK.get().ok_or_else(|| io::Error::other("archive not mounted"))?;
+        pack.copy_to(&key_of(path).ok_or_else(|| io::Error::other("invalid virtual path"))?, output, max)
+    } else {
+        let file = File::open(path)?;
+        if file.metadata()?.len() > max { return Err(io::Error::other("file size limit exceeded")); }
+        let copied = io::copy(&mut file.take(max.saturating_add(1)), output)?;
+        if copied > max { return Err(io::Error::other("file size limit exceeded")); }
+        Ok(copied)
     }
+}
+pub fn read_limited(path: &Path, max: u64) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    copy_to(path, &mut bytes, max)?;
     Ok(bytes)
 }
 
@@ -208,6 +246,11 @@ pub fn pack(folder: &Path, runtime: &[u8], out: &Path) -> io::Result<(usize, u64
 
 /// [`pack`] with extra files that aren't in the folder: `(name in the archive, bytes)`.
 pub fn pack_with(folder: &Path, extras: &[(&str, Vec<u8>)], runtime: &[u8], out: &Path) -> io::Result<(usize, u64)> {
+    pack_selected(folder, extras, runtime, out, |_| true)
+}
+
+/// Pack a validated selection of files, keeping the public ordinary pack API unchanged.
+pub fn pack_selected(folder: &Path, extras: &[(&str, Vec<u8>)], runtime: &[u8], out: &Path, include: impl Fn(&str) -> bool) -> io::Result<(usize, u64)> {
     fn walk(dir: &Path, root: &Path, files: &mut Vec<(String, PathBuf)>) -> io::Result<()> {
         let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
         entries.sort_by_key(|e| e.file_name());
@@ -218,6 +261,7 @@ pub fn pack_with(folder: &Path, extras: &[(&str, Vec<u8>)], runtime: &[u8], out:
             if name.starts_with('.') || name == "node_modules" || name == "target" {
                 continue;
             }
+            if e.file_type()?.is_symlink() { return Err(io::Error::other(format!("symlink in packed source: {}", path.display()))); }
             if path.is_dir() {
                 walk(&path, root, files)?;
             } else if let Ok(rel) = path.strip_prefix(root) {
@@ -232,9 +276,18 @@ pub fn pack_with(folder: &Path, extras: &[(&str, Vec<u8>)], runtime: &[u8], out:
     let mut index = String::new();
     let mut entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(files.len() + extras.len());
     for (rel, path) in &files {
+        if !include(rel) { continue; }
         entries.push((rel.clone(), std::fs::read(path)?));
     }
     entries.extend(extras.iter().map(|(n, b)| (n.to_string(), b.clone())));
+    let mut names = std::collections::BTreeSet::new();
+    for (rel, _) in &entries {
+        validate_path(rel)?;
+        if !names.insert(rel.to_lowercase()) { return Err(io::Error::other("duplicate packed destination")); }
+    }
+    for name in &names {
+        for (at, _) in name.match_indices('/') { if names.contains(&name[..at]) { return Err(io::Error::other("conflicting packed destinations")); } }
+    }
     for (rel, bytes) in entries.iter().map(|(r, b)| (r, b)) {
         let packed = miniz_oxide::deflate::compress_to_vec(bytes, 9);
         let (stored, deflated) = if packed.len() < bytes.len() { (&packed, true) } else { (bytes, false) };
@@ -266,6 +319,40 @@ pub fn runtime_bytes() -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_archive(path: &Path, data: &[u8], index: &str) {
+        let mut bytes = b"RUNTIME".to_vec(); bytes.extend_from_slice(data);
+        bytes.extend_from_slice(index.as_bytes()); bytes.extend_from_slice(&(index.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&7u64.to_le_bytes()); bytes.extend_from_slice(MAGIC);
+        std::fs::write(path, bytes).unwrap();
+    }
+    #[test]
+    fn archive_rejects_traversal_aliases_conflicts_and_invalid_bounds() {
+        let dir = std::env::temp_dir().join(format!("nile-vfs-invalid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap(); let file = dir.join("invalid.pack");
+        for index in [
+            "../escape\t0\t0\t1\t1\n", "/absolute\t0\t0\t1\t1\n", "C:/absolute\t0\t0\t1\t1\n",
+            "native/A.dll\t0\t0\t1\t1\nnative/a.dll\t0\t0\t1\t1\n",
+            "native/a\t0\t0\t1\t1\nnative/a/file\t0\t0\t1\t1\n",
+            "native/a\t0\t18446744073709551615\t1\t1\n", "native/a\t0\t0\t1\t2\n",
+        ] {
+            test_archive(&file, b"x", index); assert!(Archive::open(&file).is_err(), "accepted {index:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn archive_stream_limits_hold_for_incorrect_decoded_length() {
+        let dir = std::env::temp_dir().join(format!("nile-vfs-stream-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap(); let file = dir.join("stream.pack");
+        let data = miniz_oxide::deflate::compress_to_vec(&vec![42; 10000], 9);
+        test_archive(&file, &data, &format!("native/a\t1\t0\t{}\t10000\n", data.len()));
+        let archive = Archive::open(&file).unwrap(); let mut output = Vec::new();
+        assert!(archive.copy_to("native/a", &mut output, 1000).is_err()); assert!(output.is_empty());
+        test_archive(&file, &data, &format!("native/a\t1\t0\t{}\t100\n", data.len()));
+        let archive = Archive::open(&file).unwrap();
+        assert!(archive.copy_to("native/a", &mut output, 1000).is_err()); assert!(output.len() <= 1001);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn packs_and_reads_back_with_virtual_paths() {

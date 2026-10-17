@@ -91,7 +91,9 @@ cargo run -p nile-shell -- examples/sqlite/index.html
 
 See the [extension author and JavaScript guide](docs/extensions.md) for the C ABI,
 threading/ownership contract, platform packages and standalone builds. Native
-packages are trusted process-level code; packed applications are unsupported in v1.
+packages are trusted process-level code. Packed native files use a private, verified
+cache; wrappers stay archived. See the guide for explicit external-library mode,
+platform signing requirements and stable writable application-data paths.
 
 ## Admin registration demo
 
