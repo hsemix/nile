@@ -61,7 +61,8 @@ The application opts in through `nile.json`:
 {"extensions":{"@sqlite":"./extensions/sqlite"}}
 ```
 
-The nearest `nile.json` in the page directory or its ancestors is used. Configured
+The nearest `nile.json` in the page directory or its ancestors is used; the search stops
+before the filesystem root, the user's home folder and any folder above it. Configured
 package directories resolve relative to that configuration, never a later CWD.
 Only declared packages load, before classic or module startup scripts. All
 packages initialize even if not imported. Import names must start with `@`, have
@@ -179,8 +180,10 @@ Nile creates Unix directories with mode 0700 and checks ownership/permissions.
 On macOS it conservatively rejects nonempty extended ACLs rather than accepting
 access grants beyond those mode bits.
 On Windows it installs protected owner/SYSTEM DACLs on new cache directories and
-rejects broader/unknown DACLs on reuse. Existing symlink/reparse ancestors and
-linked native files are refused. A per-hash OS file lock serializes simultaneous
+rejects broader/unknown DACLs on reuse. Links in the OS-provided root itself (a symlinked `/home`, a dotfile-managed
+`~/.cache`, an `XDG_*` override) are resolved first; any symlink/reparse point *below* it,
+and any linked native file, is refused (Windows does not resolve the root: a linked
+`%LOCALAPPDATA%` is refused). A per-hash OS file lock serializes simultaneous
 launches. Extraction uses unpredictable private staging directories, create-new
 files, bounded streaming decompression, length/hash verification and atomic directory
 rename. Verified warm-cache reuse hashes every inventoried file again, rejects
@@ -424,7 +427,9 @@ opaque `user` value, and lifecycle hooks. Publish teardown hooks before starting
 workers or registering operations, so partial initialization can be cleaned up.
 The host provides a zero/default-initialized full-size output table. Disposal and
 shutdown hooks are mandatory for successful initialization, even if they are no-ops.
-A failed context initialization still receives disposal and shutdown.
+A failed `nile_extension_init` receives **no** hooks (clean up before returning the
+failure; a nonzero `user` makes the host keep the library mapped rather than unload it).
+A failed context initialization receives `shutdown` but not `context_dispose`.
 
 Register namespaced operations with `api->register_operation(api->host, name,
 dispatch, user)`. Names start with the manifest identity followed by `.`; duplicates
@@ -451,8 +456,11 @@ and no native dispatch status; operation failures never gain this flag from thei
 status/code/message. An already accepted completion takes precedence over a later
 dispatch error. Return `NILE_OK` after successfully scheduling
 asynchronous work; every ordinary call requires one eventual terminal completion.
-If completion returns `NILE_INVALID`/`NILE_OVERLOADED`, fix/reduce the reply and retry
-with a bounded error. Closed or duplicate calls must not be retried.
+If completion returns `NILE_INVALID`, fix the reply and retry. A reply over the size
+limit (1 MiB of JSON, strings and buffers together) returns `NILE_OVERLOADED` *and* the
+host rejects the call itself with `RESULT_LIMIT`, so an extension that ignores the status
+cannot leave the Promise pending; a retry then returns `NILE_DUPLICATE`. Closed or
+duplicate calls must not be retried. An overloaded *event* is dropped.
 
 Wrapper modules import the scoped bridge with `import native from '@native'`.
 Only modules under a declared package root can resolve this import. The bridge

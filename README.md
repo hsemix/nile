@@ -33,6 +33,7 @@ HTML ──html5ever──▶ DOM ──cascade──▶ computed styles ──T
 | `nile-engine` | The page without a window: input, forms, scrolling, painting into a buffer | |
 | `nile-shell` | The `nile` binary: native window around the engine, headless PNG | `winit`, `softbuffer` |
 | `nile-capi` | C library (`libnile`) and `nile.h` for embedding | `cbindgen` |
+| `nile-extension-sdk` / `nile-extensions` / `nile-extension-pack` | Native extension C ABI, the host that loads and dispatches to extension libraries, and the packed-app cache | `libloading` |
 
 ## Embedding (C API)
 
@@ -93,7 +94,9 @@ See the [extension author and JavaScript guide](docs/extensions.md) for the C AB
 threading/ownership contract, platform packages and standalone builds. Native
 packages are trusted process-level code. Packed native files use a private, verified
 cache; wrappers stay archived. See the guide for explicit external-library mode,
-platform signing requirements and stable writable application-data paths.
+platform signing requirements and stable writable application-data paths. An
+application opts in with a `nile.json` next to its pages (the nearest one above a page
+is used, never one at the filesystem root or in or above the home folder).
 
 ## Admin registration demo
 

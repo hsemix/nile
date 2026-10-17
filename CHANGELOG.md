@@ -8,6 +8,19 @@ the section becomes that version's.
 
 ## Unreleased
 
+### 2026-10-17
+
+#### Added
+- Native extensions: a small C ABI (`nile-extension-sdk`, header `nile_extension.h`) lets a separately distributed shared library add namespaced operations (immediate or asynchronous, JSON plus binary buffers), managed resources, event subscriptions and cancellation requests to a page. `import sqlite from "@sqlite"` loads a package (`extension.json` + `index.js` + `native/<platform>/<library>`) declared in the application's `nile.json`; completions wake the event loop and settle Promises on the UI thread. SQLite (`extensions/sqlite`, bundled `rusqlite`, one ordered worker per context) and a notifications event source are the two independent consumers; neither is linked into the engine. Packed apps (`nile --pack`) extract only the native files to a private, hash-verified cache and keep wrappers in the archive; stable writable data lives under `application.dataPath`. Guide: `docs/extensions.md`, example `examples/sqlite/`. Release builds now use `panic = "unwind"` so a panic in an extension callback is caught at the ABI boundary instead of aborting.
+- `examples/register.html`, `examples/admin-registration.html` and `examples/prototype/serial-number.js`: a `prototype:` class that formats a product key while keeping native selection and clipboard.
+
+#### Fixed
+- An extension reply over the 1 MiB limit now rejects the call with `RESULT_LIMIT` instead of leaving its Promise pending when the extension ignores the `NILE_OVERLOADED` it gets back.
+- Packed extensions failed at startup when the user's cache or data root sat behind a symlink (a symlinked `/home` on Fedora Atomic, a dotfile-managed `~/.cache`). Links in the OS-provided root are followed now; links below it are still refused.
+- The search for `nile.json` no longer climbs to the filesystem root or into the user's home folder (or above it), so a stray file there cannot load native code into every page below.
+- A native extension whose `nile_extension_init` failed no longer gets its `context_dispose`/`shutdown` hooks called; one whose `context_init` failed gets `shutdown` only.
+- SQLite's `dispatch` answers `NILE_INVALID` (not `NILE_CLOSED`) to a subscribe request, which it doesn't support.
+
 ### 2026-10-15
 
 #### Added

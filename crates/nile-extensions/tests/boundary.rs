@@ -422,3 +422,29 @@ fn sqlite_oversized_results_reject_and_leave_connection_usable() {
         NILE_OK
     );
 }
+
+#[test]
+fn an_oversized_reply_rejects_the_call_even_if_the_extension_ignores_the_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = support::fixture(temp.path(), None);
+    let config = support::package(temp.path(), "fixture", "@fixture", &library, "");
+    let host = Extensions::load(&config).unwrap();
+    let d = call(&host, "fixture.big", json!({}));
+    assert_eq!(d.status, NILE_FAILED);
+    assert_eq!(d.code, "RESULT_LIMIT");
+    assert!(!host.pending(), "the call is settled, not left pending");
+}
+
+#[test]
+fn a_failed_extension_init_calls_no_hooks() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = support::fixture(temp.path(), Some("FAIL_INIT"));
+    let config = support::package(temp.path(), "fixture", "@fixture", &library, "");
+    let path = temp.path().join("fixture").join(format!("native{}", std::env::consts::DLL_SUFFIX));
+    let native = unsafe { libloading::Library::new(path).unwrap() };
+    assert!(Extensions::load(&config).err().unwrap().contains("initialization failed"));
+    unsafe {
+        let shutdowns = native.get::<unsafe extern "C" fn() -> u32>(b"fixture_shutdown_count\0").unwrap()();
+        assert_eq!(shutdowns, 0, "shutdown must not run for an extension whose init failed");
+    }
+}
