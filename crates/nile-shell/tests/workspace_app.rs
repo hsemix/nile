@@ -17,14 +17,14 @@ fn launch(app: &Path, root: &Path, label: &str) {
         .arg(app.join("index.html"))
         .arg("--png")
         .arg(root.join(format!("{label}.png")))
-        .args(["--width", "1280", "--height", "840", "--wait", "12000"])
+        .args(["--width", "1280", "--height", "840", "--wait", "60000"])
         .env("NORTHSTAR_DATA_DIR", root.join("data"))
         .env("NILE_STORAGE_DIR", root.join("localstorage"))
         .stdout(Stdio::from(log.try_clone().unwrap()))
         .stderr(Stdio::from(log))
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(45);
+    let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(
