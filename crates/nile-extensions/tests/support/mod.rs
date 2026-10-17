@@ -2,10 +2,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 pub fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap()
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    // Windows canonicalizes to `\\?\C:\...`, which cl.exe cannot open source files through.
+    match path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(plain) if !plain.starts_with("UNC\\") => PathBuf::from(plain),
+        _ => path,
+    }
 }
 pub fn libraries() -> &'static PathBuf {
     static LIBS: OnceLock<PathBuf> = OnceLock::new();
