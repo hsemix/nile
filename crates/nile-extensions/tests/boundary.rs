@@ -186,15 +186,22 @@ fn notifications_wake_unsubscribe_overflow_and_shutdown() {
         .start(token, "notifications.watch", "{}", &[], true)
         .unwrap();
     assert_eq!(wait(&host, id).status, NILE_OK);
-    std::thread::sleep(Duration::from_millis(50));
-    assert!(host
-        .drain()
-        .iter()
-        .any(|d| d.event && d.call == id && d.json.contains("sequence")));
+    // Poll rather than sleep a fixed time: a loaded CI host can starve the 10 ms producer.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut seen = false;
+    while !seen {
+        seen = host.drain().iter().any(|d| d.event && d.call == id && d.json.contains("sequence"));
+        assert!(seen || Instant::now() < deadline, "no notification arrived");
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert!(wakes.load(Ordering::Relaxed) >= 2);
-    std::thread::sleep(Duration::from_millis(40));
-    let events = host.drain();
-    assert!(!events.is_empty() && events.len() <= 128);
+    let mut events = host.drain();
+    while events.is_empty() {
+        assert!(Instant::now() < deadline, "no further notification arrived");
+        std::thread::sleep(Duration::from_millis(5));
+        events = host.drain();
+    }
+    assert!(events.len() <= 128);
     host.cancel(token, id);
     std::thread::sleep(Duration::from_millis(30));
     assert!(host.drain().is_empty());

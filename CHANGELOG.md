@@ -19,6 +19,7 @@ the section becomes that version's.
 - Packed extensions failed at startup when the user's cache or data root sat behind a symlink (a symlinked `/home` on Fedora Atomic, a dotfile-managed `~/.cache`). Links in the OS-provided root are followed now; links below it are still refused.
 - The search for `nile.json` no longer climbs to the filesystem root or into the user's home folder (or above it), so a stray file there cannot load native code into every page below.
 - A native extension whose `nile_extension_init` failed no longer gets its `context_dispose`/`shutdown` hooks called; one whose `context_init` failed gets `shutdown` only.
+- `nile_extension.h` declares `nile_extension_init` with a `NILE_EXTENSION_EXPORT` macro (`__declspec(dllexport)` on Windows, default visibility elsewhere), so a C extension that defines it with `dllexport` no longer fails to compile under MSVC (C2375).
 - SQLite's `dispatch` answers `NILE_INVALID` (not `NILE_CLOSED`) to a subscribe request, which it doesn't support.
 
 ### 2026-10-15

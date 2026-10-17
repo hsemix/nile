@@ -205,6 +205,7 @@ impl Client {
 
 extern "C" {
     /// The only symbol a native package must export. Tables are size/version checked.
+    /// On Windows the prototype and the definition must both be `dllexport`.
     pub fn nile_extension_init(
         api: *const NileExtensionApi,
         extension: *mut NileExtension,
