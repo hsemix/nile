@@ -22,6 +22,18 @@ pub struct ImageData {
     /// A `<canvas>`: the id of its drawing surface (nile-canvas); `bytes` is empty and the renderer
     /// takes the current pixels from the surface instead.
     pub canvas: Option<u32>,
+    /// An SVG (a file, a `data:` URL or an inline `<svg>`): `bytes` is the document and the renderer
+    /// rasterises it at the size it is drawn.
+    pub svg: Option<SvgInfo>,
+}
+
+/// What an SVG picture needs besides its source.
+#[derive(Debug, Clone, Default)]
+pub struct SvgInfo {
+    /// The page's style sheets, which can reach the SVG's elements.
+    pub css: Option<String>,
+    /// `preserveAspectRatio="none"` on the root: stretch instead of fitting.
+    pub stretch: bool,
 }
 
 /// Finds the image a page refers to as `src`.
@@ -90,10 +102,16 @@ impl ImageLoader for FileImages {
             return hit.clone();
         }
         let loaded = self.read(src).and_then(|bytes| {
-            let size = imagesize::blob_size(&bytes).ok()?;
+            let (width, height, svg) = if nile_svg::looks_like_svg(&bytes) {
+                let (w, h) = nile_svg::size(&bytes)?;
+                (w.ceil() as u32, h.ceil() as u32, Some(SvgInfo::default()))
+            } else {
+                let size = imagesize::blob_size(&bytes).ok()?;
+                (size.width as u32, size.height as u32, None)
+            };
             let mut id = self.next_id.borrow_mut();
             *id += 1;
-            Some(Rc::new(ImageData { id: *id, bytes, width: size.width as u32, height: size.height as u32, canvas: None }))
+            Some(Rc::new(ImageData { id: *id, bytes, width, height, canvas: None, svg }))
         });
         self.cache.borrow_mut().insert(src.to_string(), loaded.clone());
         loaded

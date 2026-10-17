@@ -185,10 +185,39 @@ pub fn with_resources(runtime: Vec<u8>, icon: Option<&Path>, info: &AppInfo) -> 
     out
 }
 
+/// Encode modern ICNS PNG representations directly, without sips/iconutil.
+#[cfg(any(target_os = "macos", test))]
+fn png_to_icns(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    use skia_safe::{Data, EncodedImageFormat, Image, Paint, Rect};
+    let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidData, "could not decode application icon");
+    let image = Image::from_encoded(Data::new_copy(bytes)).ok_or_else(invalid)?;
+    let mut result = b"icns\0\0\0\0".to_vec();
+    // Standard sizes and their Retina representations. Each element includes
+    // its four-byte type and big-endian length before the PNG payload.
+    for (kind, size) in [
+        (b"icp4", 16), (b"icp5", 32), (b"ic07", 128), (b"ic08", 256),
+        (b"ic09", 512), (b"ic10", 1024), (b"ic11", 32), (b"ic12", 64),
+        (b"ic13", 256), (b"ic14", 512),
+    ] {
+        let mut surface = skia_safe::surfaces::raster_n32_premul((size, size))
+            .ok_or_else(|| std::io::Error::other("could not allocate application icon"))?;
+        surface.canvas().clear(skia_safe::Color::TRANSPARENT);
+        surface.canvas().draw_image_rect(&image, None, Rect::from_wh(size as f32, size as f32), &Paint::default());
+        let png = surface.image_snapshot().encode(None, EncodedImageFormat::PNG, None)
+            .ok_or_else(|| std::io::Error::other("could not encode application icon"))?;
+        result.extend_from_slice(kind);
+        result.extend_from_slice(&((png.size() + 8) as u32).to_be_bytes());
+        result.extend_from_slice(png.as_bytes());
+    }
+    let length = result.len() as u32;
+    result[4..8].copy_from_slice(&length.to_be_bytes());
+    Ok(result)
+}
+
 /// macOS: turn the plain program at `exe` into `<name>.app` (`Contents/MacOS/<name>`, an `Info.plist`,
 /// the icon as `.icns` and the archive at `Contents/Resources/app.nilepack`: a signed executable can't
 /// have an archive appended) and return the bundle's path. `icon` is a `.png` (turned into an
-/// `.icns` with `sips` and `iconutil`) or an `.icns`.
+/// `.icns` with the built-in image renderer) or an `.icns`.
 #[cfg(target_os = "macos")]
 pub fn app_bundle(exe: &Path, archive: &Path, name: &str, icon: Option<&Path>, info: &AppInfo) -> std::io::Result<PathBuf> {
     use std::process::Command;
@@ -213,17 +242,7 @@ pub fn app_bundle(exe: &Path, archive: &Path, name: &str, icon: Option<&Path>, i
         if icon.extension().is_some_and(|e| e == "icns") {
             std::fs::copy(icon, &target)?;
         } else {
-            let set = std::env::temp_dir().join(format!("nile-iconset-{}.iconset", std::process::id()));
-            let _ = std::fs::remove_dir_all(&set);
-            std::fs::create_dir_all(&set)?;
-            for (size, file) in [(16, "icon_16x16"), (32, "icon_16x16@2x"), (32, "icon_32x32"), (64, "icon_32x32@2x"), (128, "icon_128x128"), (256, "icon_128x128@2x"), (256, "icon_256x256"), (512, "icon_256x256@2x"), (512, "icon_512x512"), (1024, "icon_512x512@2x")] {
-                Command::new("sips").args(["-z", &size.to_string(), &size.to_string()]).arg(icon).arg("--out").arg(set.join(format!("{file}.png"))).output()?;
-            }
-            let made = Command::new("iconutil").args(["-c", "icns"]).arg(&set).arg("-o").arg(&target).output()?;
-            let _ = std::fs::remove_dir_all(&set);
-            if !made.status.success() {
-                return Err(std::io::Error::other(String::from_utf8_lossy(&made.stderr).into_owned()));
-            }
+            std::fs::write(&target, png_to_icns(&std::fs::read(icon)?)?)?;
         }
         icon_key = "  <key>CFBundleIconFile</key><string>AppIcon</string>\n".to_string();
     }
@@ -237,7 +256,10 @@ pub fn app_bundle(exe: &Path, archive: &Path, name: &str, icon: Option<&Path>, i
         ),
     )?;
     // The executable was changed after it was built: sign the whole bundle again (ad hoc).
-    let _ = Command::new("codesign").args(["--force", "--deep", "--sign", "-"]).arg(&app).output();
+    let signed = Command::new("codesign").args(["--force", "--deep", "--sign", "-"]).arg(&app).output()?;
+    if !signed.status.success() {
+        return Err(std::io::Error::other(format!("could not sign {}: {}", app.display(), String::from_utf8_lossy(&signed.stderr))));
+    }
     Ok(app)
 }
 
@@ -260,6 +282,23 @@ mod tests {
     fn version_numbers_fill_four_parts() {
         assert_eq!(info().numbers(), [1, 2, 3, 0]);
         assert_eq!(AppInfo { version: "2.0.1-beta".into(), ..info() }.numbers(), [2, 0, 1, 0]);
+    }
+
+    #[test]
+    fn generated_icns_contains_decodable_standard_and_retina_images() {
+        let bytes = png_to_icns(DEFAULT_ICON).unwrap();
+        assert_eq!(&bytes[..4], b"icns");
+        assert_eq!(u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize, bytes.len());
+        let mut offset = 8;
+        for (kind, size) in [(b"icp4", 16), (b"icp5", 32), (b"ic07", 128), (b"ic08", 256), (b"ic09", 512), (b"ic10", 1024), (b"ic11", 32), (b"ic12", 64), (b"ic13", 256), (b"ic14", 512)] {
+            assert_eq!(&bytes[offset..offset + 4], kind);
+            let length = u32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            let image = skia_safe::Image::from_encoded(skia_safe::Data::new_copy(&bytes[offset + 8..offset + length])).unwrap();
+            assert_eq!((image.width(), image.height()), (size, size));
+            offset += length;
+        }
+        assert_eq!(offset, bytes.len());
+        assert!(png_to_icns(b"invalid image").is_err());
     }
 
     #[test]

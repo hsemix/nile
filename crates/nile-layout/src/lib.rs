@@ -19,11 +19,12 @@ use std::rc::Rc;
 mod affine;
 pub use affine::Affine;
 mod images;
+mod svg;
 mod pagination;
 mod paged;
 pub use paged::{PagedBox, SHEET_GAP};
 pub use pagination::{paginate, paginate_boxes, paginate_tree, paginate_with, Fragments, Repeat};
-pub use images::{FileImages, ImageData, ImageLoader};
+pub use images::{FileImages, ImageData, ImageLoader, SvgInfo};
 
 pub use nile_dom::NodeId;
 use nile_dom::{Document, NodeKind};
@@ -1803,6 +1804,32 @@ fn image_for(src: &str) -> Option<Rc<ImageData>> {
     IMAGES.with(|m| m.borrow().get(src).cloned())
 }
 
+/// An inline `<svg>` as a picture: its subtree written out as a document, sized by its
+/// `width`/`height`, else its `viewBox`, else the 300 x 150 browsers use.
+fn inline_svg(doc: &Document, id: NodeId, style: &ComputedStyle) -> ImageData {
+    use std::hash::{Hash, Hasher};
+    let node = doc.node(id);
+    let source = svg::serialize(doc, id, Some(style.color));
+    let css = svg::page_rules(doc, id);
+    let length = |name: &str| node.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok()).filter(|v| *v > 0.0);
+    let view_box: Option<(f32, f32)> = node.attr("viewBox").and_then(|v| {
+        let n: Vec<f32> = v.split([' ', ',']).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect();
+        (n.len() == 4 && n[2] > 0.0 && n[3] > 0.0).then(|| (n[2], n[3]))
+    });
+    let (w, h) = match (length("width"), length("height"), view_box) {
+        (Some(w), Some(h), _) => (w, h),
+        (Some(w), None, Some((vw, vh))) => (w, w * vh / vw),
+        (None, Some(h), Some((vw, vh))) => (h * vw / vh, h),
+        (None, None, Some(vb)) => vb,
+        (w, h, _) => (w.unwrap_or(300.0), h.unwrap_or(150.0)),
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    css.hash(&mut hasher);
+    let stretch = node.attr("preserveAspectRatio").is_some_and(|v| v.trim().starts_with("none"));
+    ImageData { id: hasher.finish() | (1 << 63), bytes: source.into_bytes(), width: w.ceil() as u32, height: h.ceil() as u32, canvas: None, svg: Some(SvgInfo { css, stretch }) }
+}
+
 /// An `<img>`: sized by CSS, else its `width`/`height` attributes, else its picture.
 fn build_image(doc: &Document, styles: &StyleMap, tree: &mut TaffyTree<NodeCtx>, id: NodeId) -> Option<taffy::NodeId> {
     let node = doc.node(id);
@@ -1810,9 +1837,11 @@ fn build_image(doc: &Document, styles: &StyleMap, tree: &mut TaffyTree<NodeCtx>,
     let canvas = node.tag() == Some("canvas");
     // A canvas is a picture that changes: its box is sized by `width`/`height` (300x150 by default)
     // and the renderer reads its pixels from the drawing surface.
-    let image = if canvas {
+    let image = if node.tag() == Some("svg") {
+        Some(Rc::new(inline_svg(doc, id, style)))
+    } else if canvas {
         let side = |name: &str, default: u32| node.attr(name).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(default);
-        Some(Rc::new(ImageData { id: 0, bytes: Vec::new(), width: side("width", 300), height: side("height", 150), canvas: node.attr("nile-canvas").and_then(|v| v.parse().ok()) }))
+        Some(Rc::new(ImageData { id: 0, bytes: Vec::new(), width: side("width", 300), height: side("height", 150), canvas: node.attr("nile-canvas").and_then(|v| v.parse().ok()), svg: None }))
     } else {
         node.attr("src").and_then(image_for)
     };
@@ -1852,7 +1881,7 @@ fn build(
     }
     let node = doc.node(id);
     let style = styles.get(id);
-    if matches!(node.tag(), Some("img" | "canvas")) && style.display != Display::None {
+    if matches!(node.tag(), Some("img" | "canvas" | "svg")) && style.display != Display::None {
         return build_image(doc, styles, tree, id);
     }
 

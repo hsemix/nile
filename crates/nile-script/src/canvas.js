@@ -390,3 +390,12 @@
   // `canvas instanceof HTMLCanvasElement` (there is one Element class; the tag decides).
   g.HTMLCanvasElement = class HTMLCanvasElement { static [Symbol.hasInstance](o) { return !!o && o.tagName === "CANVAS"; } };
   g.HTMLImageElement = class HTMLImageElement { static [Symbol.hasInstance](o) { return !!o && o.tagName === "IMG"; } };
+
+  // Namespaced creation for SVG: the DOM has no namespaces, so the element is made by name (the
+  // SVG serializer puts the camel-case names back) and `setAttributeNS` is `setAttribute`.
+  g.document.createElementNS = function (ns, name) { return this.createElement(String(name)); };
+  Object.defineProperties(Element.prototype, {
+    setAttributeNS: { value(ns, name, value) { this.setAttribute(String(name).replace(/^[^:]*:/, ""), value); } },
+    getAttributeNS: { value(ns, name) { return this.getAttribute(String(name).replace(/^[^:]*:/, "")); } },
+    namespaceURI: { get() { return this.tagName && /^(SVG|CIRCLE|RECT|PATH|G|LINE|POLYLINE|POLYGON|ELLIPSE|TEXT|TSPAN|DEFS|USE|SYMBOL|LINEARGRADIENT|RADIALGRADIENT|STOP|CLIPPATH|MASK|PATTERN|FILTER)$/i.test(this.tagName) ? "http://www.w3.org/2000/svg" : "http://www.w3.org/1999/xhtml"; }, configurable: true },
+  });

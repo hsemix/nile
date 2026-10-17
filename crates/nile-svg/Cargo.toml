@@ -1,0 +1,13 @@
+[package]
+name = "nile-svg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# `<text>` in SVG (system fonts, shaping): about 0.7 MB of the binary. Off keeps shapes and paths only.
+default = ["text"]
+text = ["resvg/text", "resvg/system-fonts"]
+
+[dependencies]
+resvg = { version = "0.45", default-features = false }

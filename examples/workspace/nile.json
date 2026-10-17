@@ -1,0 +1,4 @@
+{
+  "application": { "id": "org.nile.northstar-workspace", "version": "1.0.0" },
+  "extensions": { "@sqlite": "./extensions/sqlite" }
+}

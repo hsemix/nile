@@ -954,7 +954,7 @@ pub(crate) const ROOT_FONT_SIZE: f32 = 16.0;
 
 const UA_STYLESHEET: &str = r#"
 head, script, style, title, meta, link, option, optgroup { display: none }
-img, canvas { display: inline-block }
+img, canvas, svg { display: inline-block }
 [selectable] { user-select: text }
 [contenteditable]:not([contenteditable=false]) { user-select: text; cursor: text }
 html, body, div, p, h1, h2, h3, section, header, footer, main, nav, ul { display: block }

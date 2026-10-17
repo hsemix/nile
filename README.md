@@ -86,7 +86,7 @@ buffers, managed resources and ongoing events. SQLite is the first independent
 consumer; it is not linked into the engine.
 
 ```sh
-python3 scripts/build-extension.py sqlite --dest examples/sqlite/extensions/sqlite
+cargo run -p nile-extensions --example build-extension -- sqlite --dest examples/sqlite/extensions/sqlite
 cargo run -p nile-shell -- examples/sqlite/index.html
 ```
 
@@ -238,6 +238,7 @@ What changed and when is in the [changelog](CHANGELOG.md).
   `busy` are runtime flags matched by the same-named `:pseudo-classes`), `elementIndex`, `nodeIndex`,
   `insertAfter`.
 - **`<canvas>`:** the Canvas 2D context over a Skia surface (paths, `Path2D`, gradients, patterns, shadows, text, `drawImage`, `getImageData`/`putImageData`, `toDataURL`, compositing, `OffscreenCanvas`), `new Image()` and `<img>` `onload`; no WebGL or `ImageBitmap` ([guide](docs/guide/canvas.md), `examples/canvas.html`).
+- **SVG:** inline `<svg>` (sized by attributes or `viewBox`, `currentColor`, page CSS reaching its elements, script-built with `createElementNS`), `<img src=*.svg>` and `background-image: url(*.svg)`, rasterised by resvg at the drawn size ([guide](docs/guide/svg.md), `examples/svg.html`); no raster `<image>` inside, SMIL or `foreignObject`.
 - **Form controls:** `<input>` (text, password, placeholder, `value`), `<textarea>` (wrapping, newlines, Up/Down
   by line), checkboxes and radio groups (including `<label>` clicks), `<button>`, disabled states, a blinking
   caret with click-to-place that scrolls into view, typing, Backspace/Delete/arrows/Home/End, Tab and Shift+Tab

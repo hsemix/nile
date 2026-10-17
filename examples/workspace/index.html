@@ -1,0 +1,14 @@
+<!doctype html>
+<html window-title="Northstar Workspace" window-width="1280" window-height="840" window-min-width="900" window-min-height="600" window-frame="solid" window-resizable="6px">
+<head><meta charset="utf-8"><title>Northstar Workspace</title><link rel="stylesheet" href="styles.css"></head>
+<body>
+<header><div class="logo">n<span>✦</span></div><div id="tabs" role="tablist" aria-label="Workspace tabs"></div><button data-action="new-project" title="Create project">+</button><div class="caption" role="window-caption"></div><button class="window" role="window-minimize" aria-label="Minimize">−</button><button class="window" role="window-maximize" aria-label="Maximize">□</button><button class="window close-window" role="window-close" aria-label="Close window">×</button></header>
+<div class="app">
+<aside id="sidebar"><div class="wordmark">northstar<span class="accent">.</span></div><div class="eyebrow">YOUR LOCAL WORKSPACE</div><button class="nav-button" data-action="dashboard">▦ &nbsp; Overview</button><button class="nav-button" data-action="search">⌕ &nbsp; Search everything <small>⌘K</small></button><div class="section-label">PROJECTS <button data-action="new-project" aria-label="New project">+</button></div><div id="projects"></div><button class="nav-button subtle" data-action="archives">▤ &nbsp; Archived projects</button><div class="sidebar-bottom"><button class="nav-button" data-action="settings">⚙ &nbsp; Workspace settings</button><div class="local-label"><span class="dot"></span> Private · stored on this device</div></div></aside>
+<div id="resize" role="separator" aria-label="Resize project sidebar" tabindex="0"></div>
+<div class="main"><div class="topbar"><span id="breadcrumb">Workspace / Overview</span><div class="row"><span class="badge">OFFLINE READY</span><button data-action="palette">Commands <small>⌘K</small></button></div></div><div id="content"><h1>Opening your workspace…</h1></div></div>
+</div>
+<footer><span id="notice" role="status" aria-live="polite">Connecting to local database…</span><span id="save-status">Northstar Workspace</span></footer>
+<div id="overlay"></div><div id="menu"></div>
+<script type="module" src="app.js"></script>
+</body></html>

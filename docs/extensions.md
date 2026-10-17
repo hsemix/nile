@@ -15,7 +15,7 @@ The engine depends on this generic adapter, **not** on the SQLite package.
 From the repository root, with Rust and a C compiler available:
 
 ```sh
-python3 scripts/build-extension.py sqlite --dest examples/sqlite/extensions/sqlite
+cargo run -p nile-extensions --example build-extension -- sqlite --dest examples/sqlite/extensions/sqlite
 cargo run -p nile-shell -- examples/sqlite/index.html
 ```
 
@@ -24,7 +24,7 @@ actual database rows. The UI timer continues while requests run. `customers.db`
 is relative to `examples/sqlite/nile.json`, independent of subsequent changes to
 process working directory. Repeated clicks persist additional rows.
 
-The build script assembles an ordinary directory:
+The Rust build tool assembles an ordinary directory:
 
 ```text
 sqlite/
@@ -107,7 +107,7 @@ continue to work without an inventory or application identity.
 Build, pack and run the included example:
 
 ```sh
-python3 scripts/build-extension.py sqlite --dest examples/sqlite/extensions/sqlite
+cargo run -p nile-extensions --example build-extension -- sqlite --dest examples/sqlite/extensions/sqlite
 cargo run -p nile-shell -- --pack examples/sqlite -o SqliteExample
 ./SqliteExample
 # Headless execution: click Insert and query, then let completions settle:
@@ -285,17 +285,17 @@ dlopen limitations described below still apply.
 Canonical names are `macos-{aarch64,x86_64}`, `windows-{aarch64,x86_64}-msvc`, and
 `linux-{aarch64,x86_64}-{gnu,musl}`. There is no fallback between architectures,
 C runtimes, operating systems or ABI versions. Other targets fail explicitly.
-The package script uses an explicit Rust-target map and never relabels a library
+The package builder uses an explicit Rust-target map and never relabels a library
 for another platform. Standard suffixes are `.dylib`, `.dll`, `.so` respectively.
 
 ```sh
-python3 scripts/build-extension.py sqlite --release --dest dist/sqlite
-python3 scripts/build-extension.py notifications --release --dest dist/notifications
+cargo run -p nile-extensions --example build-extension -- sqlite --release --dest dist/sqlite
+cargo run -p nile-extensions --example build-extension -- notifications --release --dest dist/notifications
 # Cross build only when the Rust target and native C toolchain are installed:
-python3 scripts/build-extension.py sqlite --target x86_64-pc-windows-msvc --release --dest dist/sqlite
+cargo run -p nile-extensions --example build-extension -- sqlite --target x86_64-pc-windows-msvc --release --dest dist/sqlite
 ```
 
-The script preserves manifest entries for previously assembled targets. A native
+The builder preserves manifest entries for previously assembled targets. A native
 SQLite build bundles SQLite through `rusqlite`/`libsqlite3-sys`; it needs a C compiler.
 Windows uses MSVC, macOS Xcode command line tools, and Linux a matching GNU/musl
 compiler. In practice build each binary on its target CI runner. GNU Linux packages
@@ -318,7 +318,7 @@ cp -R extensions/sqlite /tmp/nile-native/extensions/
 cargo build --manifest-path /tmp/nile-native/extensions/sqlite/Cargo.toml --release
 ```
 
-The reproducible automated check is `python3 scripts/check-extension-standalone.py`.
+The reproducible automated check is `cargo run -p nile-extensions --example check-extension-standalone`.
 It builds release mode outside the workspace and checks the complete dependency
 graph for engine/QuickJS dependencies.
 
@@ -591,7 +591,7 @@ A v1 extension must report failure rather than claim successful teardown with li
 Rust exports and **every callback** must catch panics, using SDK `guard` (including
 void cancellation/resource callbacks). An extension **must be built with `panic="unwind"`**
 so a recoverable panic becomes `NILE_PANIC`/a structured error: the workspace's `dev` and
-`extension` profiles do (`scripts/build-extension.py --release` uses `--profile extension`,
+`extension` profiles do (the `build-extension` Rust example's `--release` uses `--profile extension`,
 an optimized build that unwinds), an independent Rust build gets it by default, and a plain
 `release` build of an extension in this workspace does **not**. The engine itself builds with
 `panic="abort"` (unwinding would add ~1.2 MB to every binary); a panic inside its own callbacks

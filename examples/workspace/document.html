@@ -1,0 +1,9 @@
+<!doctype html>
+<html window-width="780" window-height="700"><head><meta charset="utf-8"><title>Document</title><link rel="stylesheet" href="styles.css"></head><body style="overflow:auto;height:auto"><main style="padding:35px"><div class="eyebrow">NORTHSTAR / DOCUMENT SNAPSHOT</div><h1 id="title"></h1><p class="help">Read-only snapshot. Edit the original in the main workspace.</p><div class="editor" id="document"></div></main><script type="module">
+import { cleanHtml } from './documents.js';
+const note = Window.this.parameters || {};
+document.documentElement.setAttribute('data-theme', note.theme || 'light');
+document.getElementById('title').textContent = note.title || 'Document';
+document.getElementById('document').innerHTML = cleanHtml(note.html || '');
+document.title = note.title || 'Document';
+</script></body></html>

@@ -1,0 +1,52 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>svg</title>
+<style>
+  body { font: 14px system-ui; margin: 0; padding: 16px; background: #f4f5f7; color: #2c3e50; }
+  h3 { margin: 0 0 10px; font-weight: 600; }
+  .grid { display: flex; flex-wrap: wrap; gap: 14px; }
+  figure { margin: 0; background: #fff; border: 1px solid #d5d8de; border-radius: 8px; padding: 10px; width: 170px; }
+  figcaption { font-size: 12px; color: #555; margin-top: 8px; }
+  .icon { width: 48px; height: 48px; }
+  .icon:hover { color: #e74c3c; }
+  .themed .hot { fill: #e67e22; }
+  .bg { width: 140px; height: 60px; border: 1px solid #ccd; background: #fafafa url("svg/badge.svg") no-repeat center / contain; }
+</style></head>
+<body>
+  <h3>SVG: inline, &lt;img&gt;, background</h3>
+  <div class="grid">
+    <figure>
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+      </svg>
+      <figcaption>inline, stroke: currentColor (hover turns it red)</figcaption>
+    </figure>
+    <figure>
+      <svg width="140" height="70" viewBox="0 0 140 70">
+        <defs><radialGradient id="r"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#3498db"/></radialGradient></defs>
+        <rect width="140" height="70" rx="10" fill="url(#r)"/>
+        <text x="70" y="42" text-anchor="middle" font-family="sans-serif" font-size="20" font-weight="bold" fill="#1b2631">SVG text</text>
+      </svg>
+      <figcaption>gradient and text</figcaption>
+    </figure>
+    <figure class="themed">
+      <svg width="120" height="60" viewBox="0 0 120 60"><rect class="hot" x="4" y="4" width="50" height="50" rx="6" fill="#999"/><circle class="hot" cx="90" cy="30" r="24" fill="#999"/></svg>
+      <figcaption>fill from the page's CSS (.themed .hot)</figcaption>
+    </figure>
+    <figure>
+      <img src="svg/badge.svg" width="100" height="100" alt="badge">
+      <figcaption>&lt;img src="badge.svg"&gt;</figcaption>
+    </figure>
+    <figure>
+      <div class="bg"></div>
+      <figcaption>background-image: url(badge.svg), contain</figcaption>
+    </figure>
+    <figure>
+      <svg id="live" width="140" height="70" viewBox="0 0 140 70"><rect id="bar" x="10" y="25" width="20" height="20" fill="#8e44ad"/></svg>
+      <figcaption>changed by script</figcaption>
+    </figure>
+  </div>
+  <script>
+    let w = 20, dir = 4;
+    setInterval(() => { w += dir; if (w > 110 || w < 20) dir = -dir; document.getElementById('bar').setAttribute('width', w); }, 40);
+  </script>
+</body></html>

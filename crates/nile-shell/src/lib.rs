@@ -282,10 +282,13 @@ fn pack_command(args: &[String]) -> ! {
     // macOS: an `.app` bundle (what Finder and the Dock show an icon for) when asked for with an icon or an
     // output name ending in `.app`. The archive then goes in its own file inside it.
     let bundle_mode = cfg!(target_os = "macos") && (bundle_wanted || out.extension().is_some_and(|e| e == "app"));
+    // Keep the runtime beside the destination until the bundle is assembled;
+    // `out` may already be an application directory from an earlier build.
+    let program = if bundle_mode { out.with_extension("nile-program.tmp") } else { out.clone() };
     let archive = out.with_extension("nilepack.tmp");
     let result = nile_dom::vfs::runtime_bytes().and_then(|runtime| {
         if bundle_mode {
-            std::fs::write(&out, &runtime)?;
+            std::fs::write(&program, &runtime)?;
             return nile_dom::vfs::pack_selected(&folder, &embedded, &[], &archive, |p| plan.include(p));
         }
         // On Windows the icon goes into the executable before the archive is appended.
@@ -298,15 +301,15 @@ fn pack_command(args: &[String]) -> ! {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755));
+                let _ = std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755));
             }
             // A modified Mach-O has to be signed again to start on Apple silicon.
             #[cfg(target_os = "macos")]
-            let _ = std::process::Command::new("codesign").args(["--force", "--sign", "-"]).arg(&out).output();
+            let _ = std::process::Command::new("codesign").args(["--force", "--sign", "-"]).arg(&program).output();
             #[cfg(target_os = "macos")]
             let out = if bundle_mode {
                 let name = out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "App".into());
-                match bundle::app_bundle(&out, &archive, &name, icon.as_deref(), &info) {
+                match bundle::app_bundle(&program, &archive, &name, icon.as_deref(), &info) {
                     Ok(app) => app,
                     Err(e) => {
                         eprintln!("could not make the app bundle: {e}");

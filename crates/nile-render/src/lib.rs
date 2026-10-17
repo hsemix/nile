@@ -62,6 +62,8 @@ pub struct Renderer {
     varied: HashMap<(u64, u32, Vec<i16>), Option<Typeface>>,
     /// Decoded pictures by `ImageData::id`; `None` where decoding failed.
     pictures: HashMap<u64, Option<skia_safe::Image>>,
+    /// SVG pictures rasterised at the pixel size they were drawn at: `(ImageData::id, width, height)`.
+    svg_pictures: HashMap<(u64, u32, u32), Option<skia_safe::Image>>,
     /// The system theme's colours for what no stylesheet reaches (set at the start of each paint).
     pal: nile_style::Palette,
 }
@@ -74,7 +76,7 @@ impl Default for Renderer {
 
 impl Renderer {
     pub fn new() -> Self {
-        Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new(), varied: HashMap::new(), pictures: HashMap::new(), pal: nile_style::Palette::new(false, nile_style::default_accent()) }
+        Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new(), varied: HashMap::new(), pictures: HashMap::new(), svg_pictures: HashMap::new(), pal: nile_style::Palette::new(false, nile_style::default_accent()) }
     }
 
     /// Paint the whole tree.
@@ -349,7 +351,7 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
                 canvas.draw_rect(Rect::from_xywh(r.x, r.y, r.width, r.height), &paint);
             }
             MarkerKind::Image(data) => {
-                if let Some(img) = self.picture(data) {
+                if let Some(img) = self.picture(data, (r.width, r.height), device_scale(canvas)) {
                     canvas.draw_image_rect(&img, None, Rect::from_xywh(r.x, r.y, r.width, r.height), &Paint::default());
                 }
             }
@@ -432,7 +434,7 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
         let s = styles.get(b.node);
         let radii = s.corner_radii(b.rect.width, b.rect.height);
         paint_shadows(canvas, skia_rect(b.rect), &s.box_shadow, radii);
-        let photo = b.bg_image.as_ref().and_then(|data| self.background_shader(data, s, b.rect));
+        let photo = b.bg_image.as_ref().and_then(|data| self.background_shader(data, s, b.rect, device_scale(canvas)));
         let mut border = Border { width: s.border_width, color: s.border_color, style: s.border_style };
         // A checked box takes the author's `accent-color` (the user-agent sheet paints the system accent).
         let accent_box = s.checked && matches!(s.appearance, Appearance::Checkbox | Appearance::Radio);
@@ -469,10 +471,28 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
         paint_control_mark(canvas, s, b.rect, &styles.palette());
     }
 
-    fn picture(&mut self, data: &ImageData) -> Option<skia_safe::Image> {
+    /// The picture for `data` drawn `want` logical pixels big on a surface scaled by `scale`. Bitmaps
+    /// are decoded once; an SVG is rasterised at the size it is drawn, so it stays sharp.
+    fn picture(&mut self, data: &ImageData, want: (f32, f32), scale: f32) -> Option<skia_safe::Image> {
         // A canvas is drawn from its surface as it is now, never from the cache.
         if let Some(canvas) = data.canvas {
             return nile_canvas::snapshot(canvas);
+        }
+        if let Some(svg) = &data.svg {
+            let (w, h) = ((want.0 * scale).ceil().max(1.0) as u32, (want.1 * scale).ceil().max(1.0) as u32);
+            if self.svg_pictures.len() > 64 {
+                self.svg_pictures.clear();
+            }
+            return self
+                .svg_pictures
+                .entry((data.id, w, h))
+                .or_insert_with(|| {
+                    let style = nile_svg::Style { css: svg.css.clone() };
+                    let raster = nile_svg::rasterize(&data.bytes, &style, w, h, svg.stretch)?;
+                    let info = skia_safe::ImageInfo::new((raster.width as i32, raster.height as i32), skia_safe::ColorType::RGBA8888, skia_safe::AlphaType::Premul, None);
+                    skia_safe::images::raster_from_data(&info, skia_safe::Data::new_copy(&raster.pixels), raster.width as usize * 4)
+                })
+                .clone();
         }
         self.pictures
             .entry(data.id)
@@ -482,12 +502,12 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
 
     /// An `<img>`'s picture, stretched over its content box.
     fn paint_picture(&mut self, canvas: &Canvas, data: &ImageData, s: &nile_style::ComputedStyle, r: LRect) {
-        let Some(img) = self.picture(data) else { return };
         let (b, p) = (s.border_width, s.padding);
         let dest = Rect::from_ltrb(r.x + b.left + p.left, r.y + b.top + p.top, r.x + r.width - b.right - p.right, r.y + r.height - b.bottom - p.bottom);
         if dest.width() <= 0.0 || dest.height() <= 0.0 {
             return;
         }
+        let Some(img) = self.picture(data, (dest.width(), dest.height()), device_scale(canvas)) else { return };
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         canvas.save();
@@ -504,8 +524,7 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
     }
 
     /// A shader that paints `data` as `background-image: url()` over the box `r`.
-    fn background_shader(&mut self, data: &ImageData, s: &nile_style::ComputedStyle, r: LRect) -> Option<skia_safe::Shader> {
-        let img = self.picture(data)?;
+    fn background_shader(&mut self, data: &ImageData, s: &nile_style::ComputedStyle, r: LRect, scale: f32) -> Option<skia_safe::Shader> {
         let b = s.border_width;
         // The image is placed in the padding box.
         let (ax, ay) = (r.x + b.left, r.y + b.top);
@@ -538,6 +557,9 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
         if tw <= 0.0 || th <= 0.0 {
             return None;
         }
+        let img = self.picture(data, (tw, th), scale)?;
+        // An SVG was rasterised at the tile's size, so the shader scales by the bitmap's own size.
+        let (iw, ih) = if data.svg.is_some() { (img.width() as f32, img.height() as f32) } else { (iw, ih) };
         let (px, py) = s.background_position;
         let ox = ax + match px {
             StopPos::Px(v) => v,
@@ -740,6 +762,12 @@ fn extract_collection_face(bytes: &[u8], index: usize) -> Option<Vec<u8>> {
 }
 
 /// The Skia shader for `g` painted over `r`.
+/// How many device pixels a logical pixel is on `canvas` now (its transform's scale).
+fn device_scale(canvas: &Canvas) -> f32 {
+    let m = canvas.local_to_device_as_3x3();
+    m.scale_x().hypot(m.skew_y()).max(0.01)
+}
+
 fn gradient_shader(g: &Gradient, r: Rect) -> Option<skia_safe::Shader> {
     use skia_safe::gradient::{interpolation::InPremul, Colors, Gradient as SkGradient, Interpolation};
     let (w, h) = (r.width(), r.height());

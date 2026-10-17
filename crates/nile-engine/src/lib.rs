@@ -7111,6 +7111,51 @@ cd</textarea>
     }
 
     #[test]
+    fn inline_svg_paints_follows_color_and_changes_with_scripts() {
+        let (mut p, path) = page(
+            r##"<style>.t { fill: #ff0000 } #cur { color: #0000ff }</style><body style="margin:0">
+                 <svg id="a" width="20" height="10" viewBox="0 0 20 10"><rect class="t" width="20" height="10" fill="#00ff00"/></svg>
+                 <svg id="cur" width="10" height="10"><rect id="c" width="10" height="10" fill="currentColor"/></svg>
+               </body>"##,
+            "svg-inline",
+        );
+        let rect = p.view.borrow_mut().layout().node_rect(p.doc.borrow().find(|n| n.attr("id") == Some("a")).unwrap()).unwrap();
+        assert_eq!((rect.width, rect.height), (20.0, 10.0), "sized by its width and height");
+        let (reds, blues) = count_colored(&mut p);
+        // The page rule beats the fill attribute (20x10 red) and currentColor takes the CSS colour (10x10 blue).
+        assert_eq!((reds, blues), (200, 100));
+        // A script changes the SVG: it repaints with the new picture.
+        js(&mut p, "document.getElementById('c').setAttribute('fill', '#ff0000');");
+        let (reds, blues) = count_colored(&mut p);
+        assert_eq!((reds, blues), (300, 0));
+        // An SVG made by script (createElementNS keeps the camel-case names the format needs).
+        js(
+            &mut p,
+            r##"const ns = 'http://www.w3.org/2000/svg';
+               const s = document.createElementNS(ns, 'svg'); s.setAttribute('width', 30); s.setAttribute('height', 10); s.setAttribute('viewBox', '0 0 3 1');
+               const r = document.createElementNS(ns, 'rect'); r.setAttribute('width', 3); r.setAttribute('height', 1); r.setAttribute('fill', '#0000ff');
+               s.appendChild(r); document.body.appendChild(s);"##,
+        );
+        let (_, blues) = count_colored(&mut p);
+        // 30x10 blue (the viewBox is scaled up), give or take the antialiased edges of a fractional position.
+        assert!((280..=300).contains(&blues), "the new svg is painted blue: {blues}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn img_and_backgrounds_take_svg_files() {
+        let svg = "data:image/svg+xml;utf8,<svg%20xmlns=%22http://www.w3.org/2000/svg%22%20width=%2210%22%20height=%2210%22><rect%20width=%2210%22%20height=%2210%22%20fill=%22%23ff0000%22/></svg>";
+        let (mut p, path) = page(
+            &format!(r#"<body style="margin:0"><img id="i" src="{svg}"><div style="width:10px;height:10px;background:url({svg})"></div></body>"#),
+            "svg-img",
+        );
+        let rect = p.view.borrow_mut().layout().node_rect(p.doc.borrow().find(|n| n.attr("id") == Some("i")).unwrap()).unwrap();
+        assert_eq!((rect.width, rect.height), (10.0, 10.0), "an svg image has its own size");
+        assert_eq!(count_colored(&mut p).0, 200, "both the <img> and the background show it");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn canvas_draws_an_img_by_its_src() {
         // A 1x1 red PNG as a data URL.
         let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
