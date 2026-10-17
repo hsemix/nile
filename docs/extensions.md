@@ -589,12 +589,16 @@ leak, not recovery or a claim of successful cleanup. Normal paths fully clean up
 A v1 extension must report failure rather than claim successful teardown with live workers.
 
 Rust exports and **every callback** must catch panics, using SDK `guard` (including
-void cancellation/resource callbacks). Both workspace profiles use `panic="unwind"`
-so recoverable panics can become `NILE_PANIC`/structured errors. Independent Rust
-builds must also use unwind. Abort-mode binaries, allocator/OOM aborts, UB and foreign
-exceptions cannot be recovered by `catch_unwind`; no process isolation is promised.
-SDK/loader errors return status/Result instead of calling exit/abort. A release build
-must not silently weaken these guarantees by switching back to `panic="abort"`.
+void cancellation/resource callbacks). An extension **must be built with `panic="unwind"`**
+so a recoverable panic becomes `NILE_PANIC`/a structured error: the workspace's `dev` and
+`extension` profiles do (`scripts/build-extension.py --release` uses `--profile extension`,
+an optimized build that unwinds), an independent Rust build gets it by default, and a plain
+`release` build of an extension in this workspace does **not**. The engine itself builds with
+`panic="abort"` (unwinding would add ~1.2 MB to every binary); a panic inside its own callbacks
+is a bug that aborts the process, which is why extensions never see engine panics. Abort-mode
+extension builds, allocator/OOM aborts, UB and foreign exceptions cannot be recovered by
+`catch_unwind`; no process isolation is promised. SDK/loader errors return status/Result
+instead of calling exit/abort.
 
 This ABI supports request/response and ongoing event services, not rendering integration,
 real-time audio callbacks or zero-copy shared memory. Those require future explicit,

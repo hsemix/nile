@@ -61,4 +61,10 @@ opt-level = "s"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+panic = "abort"
+
+# Native extensions must unwind so their `guard` can turn a panic into a status code; the engine
+# itself doesn't (unwinding costs ~1.2 MB of binary). Build extensions with `--profile extension`.
+[profile.extension]
+inherits = "release"
 panic = "unwind"

@@ -23,7 +23,7 @@ def main():
     parser.add_argument("name", choices=("sqlite", "notifications"))
     parser.add_argument("--dest", type=Path, required=True, help="output package directory")
     parser.add_argument("--target", help="Rust target triple (must match the Nile application)")
-    parser.add_argument("--release", action="store_true")
+    parser.add_argument("--release", action="store_true", help="optimized build (the workspace's `extension` profile: release with panic=unwind)")
     args = parser.parse_args()
     host = next(line[6:] for line in subprocess.check_output(["rustc", "-vV"], text=True, encoding="utf-8").splitlines() if line.startswith("host: "))
     target = args.target or host
@@ -34,12 +34,12 @@ def main():
     if args.target:
         command += ["--target", target]
     if args.release:
-        command += ["--release"]
+        command += ["--profile", "extension"]
     subprocess.run(command, cwd=ROOT, check=True)
     binary_dir = ROOT / "target"
     if args.target:
         binary_dir /= target
-    binary_dir /= "release" if args.release else "debug"
+    binary_dir /= "extension" if args.release else "debug"
     binary_name = f"{prefix}nile_ext_{args.name}{suffix}"
     native = Path("native") / platform / binary_name
     (args.dest / native).parent.mkdir(parents=True, exist_ok=True)

@@ -155,7 +155,7 @@ impl Default for NileExtension {
 pub type NileExtensionInit =
     unsafe extern "C" fn(*const NileExtensionApi, *mut NileExtension) -> NileStatus;
 
-/// Catch Rust panics at each exported callback. Consumers MUST build with panic=unwind.
+/// Catch Rust panics at each exported callback. Consumers MUST build with panic=unwind (the workspace's `extension` profile does; its `release` profile aborts).
 /// This cannot catch aborts, UB, OOM aborts or foreign exceptions.
 pub fn guard(f: impl FnOnce() -> NileStatus) -> NileStatus {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(NILE_PANIC)
