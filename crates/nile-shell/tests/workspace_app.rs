@@ -54,6 +54,16 @@ fn report(root: &Path, name: &str) -> Value {
         )
     });
     let report: Value = serde_json::from_slice(&bytes).unwrap();
+    if report["ok"] != true {
+        // `error:` lines reach CI's failure annotations; the panic message does not.
+        let text = format!(
+            "{name}: {report:#}\n{}",
+            fs::read_to_string(root.join("checks.log")).unwrap_or_default()
+        );
+        for line in text.lines() {
+            eprintln!("error: {line}");
+        }
+    }
     assert_eq!(report["ok"], true, "{report:#}");
     report
 }
