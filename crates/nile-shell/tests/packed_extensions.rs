@@ -4,6 +4,12 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 fn success(output: Output) -> Output {
+    if !output.status.success() {
+        // One `error:` line per output line, so CI's failure annotation shows the cause.
+        for line in String::from_utf8_lossy(&output.stdout).lines().chain(String::from_utf8_lossy(&output.stderr).lines()) {
+            eprintln!("error: packed test command: {line}");
+        }
+    }
     assert!(
         output.status.success(),
         "stdout={} stderr={}",
