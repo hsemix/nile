@@ -131,7 +131,7 @@ fn objects(root: &Path) -> Vec<PathBuf> {
 #[test]
 fn produced_executable_runs_packed_modules_persists_data_and_rebuilds_cache_safely() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = support::canonical(temp.path());
     let source = root.join("source");
     app(&source, "org.nile.packed-test", "1", false);
     std::fs::create_dir(root.join("other-cwd")).unwrap();
@@ -193,7 +193,7 @@ fn produced_executable_runs_packed_modules_persists_data_and_rebuilds_cache_safe
 #[test]
 fn explicit_external_mode_loads_verified_native_files_beside_packed_executable() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = support::canonical(temp.path());
     let source = root.join("source");
     app(&source, "org.nile.external-test", "1", true);
     std::fs::create_dir(root.join("other-cwd")).unwrap();
@@ -341,7 +341,7 @@ EXPORT NileStatus nile_extension_init(const NileExtensionApi *host,NileExtension
 #[test]
 fn packed_companion_dependency_is_loaded_from_preserved_native_layout() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = support::canonical(temp.path());
     let source = root.join("source");
     companion_package(&source.join("extension"));
     std::fs::write(source.join("nile.json"), json!({"application":{"id":"org.nile.companion-test","version":"1"},"extensions":{"@companion":"extension"}}).to_string()).unwrap();
@@ -379,7 +379,7 @@ fn packed_companion_dependency_is_loaded_from_preserved_native_layout() {
 #[test]
 fn missing_native_dependency_fails_before_writing_executable() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = support::canonical(temp.path());
     let source = root.join("source");
     companion_package(&source.join("extension"));
     std::fs::write(source.join("nile.json"), json!({"application":{"id":"org.nile.missing-test","version":"1"},"extensions":{"@companion":"extension"}}).to_string()).unwrap();
@@ -411,7 +411,7 @@ fn missing_native_dependency_fails_before_writing_executable() {
 #[test]
 fn explicit_bundle_resources_mode_keeps_native_files_in_application_bundle() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = support::canonical(temp.path());
     let source = root.join("source");
     app(&source, "org.nile.bundle-test", "1", true);
     let config = source.join("nile.json");

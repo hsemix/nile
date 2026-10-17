@@ -1,13 +1,17 @@
 #![allow(dead_code)]
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-pub fn root() -> PathBuf {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
-    // Windows canonicalizes to `\\?\C:\...`, which cl.exe cannot open source files through.
+/// `path.canonicalize()` without the `\\?\` prefix Windows adds, which cl.exe cannot open source
+/// files through.
+pub fn canonical(path: &Path) -> PathBuf {
+    let path = path.canonicalize().unwrap();
     match path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
         Some(plain) if !plain.starts_with("UNC\\") => PathBuf::from(plain),
         _ => path,
     }
+}
+pub fn root() -> PathBuf {
+    canonical(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
 }
 pub fn libraries() -> &'static PathBuf {
     static LIBS: OnceLock<PathBuf> = OnceLock::new();
