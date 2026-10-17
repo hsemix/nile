@@ -47,6 +47,8 @@ pub struct Delivery {
     pub call: u64,
     pub event: bool,
     pub status: i32,
+    /// Present only for a host-generated rejection of the dispatch callback.
+    pub dispatch_status: Option<NileStatus>,
     pub code: String,
     pub message: String,
     pub json: String,
@@ -148,6 +150,7 @@ unsafe fn copy_reply(
         call,
         event,
         status: reply.status,
+        dispatch_status: None,
         code,
         message,
         json,
@@ -160,6 +163,7 @@ unsafe fn accept(
     call: u64,
     reply: *const NileReply,
     event: bool,
+    dispatch_status: Option<NileStatus>,
 ) -> NileStatus {
     guard(|| {
         let shared = match lookup(host, context) {
@@ -184,10 +188,11 @@ unsafe fn accept(
                 None => return NILE_CLOSED,
             }
         }
-        let delivery = match copy_reply(host, call, event, reply) {
+        let mut delivery = match copy_reply(host, call, event, reply) {
             Ok(d) => d,
             Err(e) => return e,
         };
+        delivery.dispatch_status = dispatch_status;
         // Acceptance is atomic under this lock, after copying/validation. Exactly one terminal response.
         if event {
             state.events.push_back(delivery);
@@ -209,7 +214,7 @@ unsafe extern "C" fn complete(
     call: u64,
     reply: *const NileReply,
 ) -> NileStatus {
-    accept(host, context, call, reply, false)
+    accept(host, context, call, reply, false, None)
 }
 unsafe extern "C" fn emit(
     host: u64,
@@ -217,7 +222,7 @@ unsafe extern "C" fn emit(
     call: u64,
     reply: *const NileReply,
 ) -> NileStatus {
-    accept(host, context, call, reply, true)
+    accept(host, context, call, reply, true, None)
 }
 unsafe extern "C" fn resource_create(
     host: u64,
@@ -658,7 +663,7 @@ impl Extensions {
                 buffers: NileBuffers::empty(),
             };
             unsafe {
-                complete(host, self.context, call, &reply);
+                accept(host, self.context, call, &reply, false, Some(status));
             }
         }
         Ok(call)

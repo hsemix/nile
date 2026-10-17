@@ -99,6 +99,9 @@ pub struct NileReply {
     pub buffers: NileBuffers,
 }
 
+/// Returning NILE_OVERLOADED guarantees no work was accepted or executed. Other
+/// failures do not guarantee that effects have not occurred. An accepted completion
+/// takes precedence over a subsequent nonzero dispatch return.
 pub type NileDispatch = unsafe extern "C" fn(user: u64, request: *const NileRequest) -> NileStatus;
 pub type NileDispose = unsafe extern "C" fn(user: u64, context: u64) -> NileStatus;
 pub type NileCancel = unsafe extern "C" fn(user: u64, context: u64, call: u64);

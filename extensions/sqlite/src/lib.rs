@@ -1,6 +1,7 @@
 //! Independently buildable SQLite consumer of the public SDK; no engine dependencies.
 use nile_extension_sdk::*;
 use rusqlite::{
+    limits::Limit,
     types::{Value as SqlValue, ValueRef},
     Connection, OpenFlags,
 };
@@ -14,6 +15,10 @@ use std::sync::{
 };
 use std::thread::JoinHandle;
 
+// Response storage (JSON including escaping/structure plus binary buffers).
+const RESULT_BYTES: usize = 900_000;
+// SQLite's own per-value/encoded-row ceiling, independent of response storage.
+const SQLITE_VALUE_BYTES: i32 = 4 * 1024 * 1024;
 const SAFE: i64 = 9_007_199_254_740_991;
 const REQUIRED: u64 = NILE_CAP_ASYNC | NILE_CAP_BUFFERS | NILE_CAP_RESOURCES | NILE_CAP_CANCEL;
 type Error = (String, String);
@@ -23,11 +28,65 @@ fn error(code: &str, message: impl ToString) -> Error {
 }
 fn sql_error(e: rusqlite::Error) -> Error {
     let code = match &e {
+        rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::TooBig => {
+            return error("SQLITE_RESULT_LIMIT", format!("SQLite value/row exceeds connection length limit ({SQLITE_VALUE_BYTES} bytes): {e}"));
+        }
         rusqlite::Error::SqliteFailure(e, _) => format!("SQLITE_{}", e.extended_code),
         rusqlite::Error::MultipleStatement => "SQLITE_MULTIPLE_STATEMENTS".into(),
         _ => "SQLITE_STATEMENT".into(),
     };
     (code, e.to_string())
+}
+fn result_limit() -> Error {
+    error(
+        "SQLITE_RESULT_LIMIT",
+        "query result exceeds bounded packet size; use LIMIT/pagination",
+    )
+}
+#[derive(Default)]
+struct ResultBudget {
+    bytes: usize,
+}
+impl ResultBudget {
+    fn checked_size(&self, additional: usize) -> Result<usize> {
+        self.bytes
+            .checked_add(additional)
+            .filter(|&size| size <= RESULT_BYTES)
+            .ok_or_else(result_limit)
+    }
+    fn reserve(&mut self, additional: usize) -> Result<()> {
+        self.bytes = self.checked_size(additional)?;
+        Ok(())
+    }
+    fn string(&mut self, value: &str) -> Result<()> {
+        // serde_json writes borrowed chunks and escape sequences into the counter,
+        // so even heavily escaped input needs no temporary encoded String.
+        serde_json::to_writer(self, value).map_err(|_| result_limit())
+    }
+    fn value(&mut self, value: &Value) -> Result<()> {
+        serde_json::to_writer(self, value).map_err(|_| result_limit())
+    }
+}
+impl std::io::Write for ResultBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.reserve(bytes.len())
+            .map_err(|_| std::io::Error::other("SQLite result limit"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+fn encode_result(value: &Value, buffers: &[Vec<u8>]) -> Result<String> {
+    let json = serde_json::to_string(value).map_err(|_| result_limit())?;
+    // Final serialized packet validation includes all JSON structure/escaping.
+    // Query construction already enforced this budget before allocating cells.
+    let mut budget = ResultBudget::default();
+    budget.reserve(json.len())?;
+    for buffer in buffers {
+        budget.reserve(buffer.len())?;
+    }
+    Ok(json)
 }
 struct Work {
     context: u64,
@@ -151,6 +210,8 @@ fn run(
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
         };
         let conn = Connection::open_with_flags(resolved, flags).map_err(sql_error)?;
+        conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, SQLITE_VALUE_BYTES)
+            .map_err(sql_error)?;
         let timeout = work.args["options"]["busyTimeoutMs"]
             .as_u64()
             .unwrap_or(1000);
@@ -230,11 +291,15 @@ fn run(
             vec![],
         ));
     }
-    let names: Vec<String> = statement
-        .column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    // Check borrowed column names too before owning them. Count one row's keys;
+    // each actual row is accounted separately below.
+    let mut key_budget = ResultBudget::default();
+    let mut names = Vec::new();
+    for name in statement.column_names() {
+        key_budget.string(name)?;
+        key_budget.reserve(2)?; // colon/comma
+        names.push(name.to_string());
+    }
     let unique: HashSet<_> = names.iter().collect();
     if unique.len() != names.len() {
         return Err(error(
@@ -247,7 +312,8 @@ fn run(
         .map_err(sql_error)?;
     let mut rows = Vec::new();
     let mut buffers = Vec::new();
-    let mut bytes = 0;
+    let mut budget = ResultBudget::default();
+    budget.reserve(2)?; // outer array brackets
     while let Some(row) = cursor.next().map_err(sql_error)? {
         if rows.len() >= 10_000 {
             return Err(error(
@@ -255,8 +321,11 @@ fn run(
                 "query exceeds 10000 rows; use LIMIT/pagination",
             ));
         }
+        budget.reserve(2 + usize::from(!rows.is_empty()))?; // braces and row separator
         let mut object = serde_json::Map::new();
         for (i, name) in names.iter().enumerate() {
+            budget.string(name)?;
+            budget.reserve(1 + usize::from(i != 0))?; // colon and column separator
             let value = match row.get_ref(i).map_err(sql_error)? {
                 ValueRef::Null => Value::Null,
                 ValueRef::Integer(i) => integer(i),
@@ -269,11 +338,14 @@ fn run(
                     }
                     json!(f)
                 }
-                ValueRef::Text(t) => Value::String(
-                    std::str::from_utf8(t)
-                        .map_err(|_| error("SQLITE_UTF8", "SQLite text is not UTF-8"))?
-                        .to_string(),
-                ),
+                ValueRef::Text(t) => {
+                    budget.checked_size(t.len())?; // borrowed length before UTF-8 validation/copy
+                    let text = std::str::from_utf8(t)
+                        .map_err(|_| error("SQLITE_UTF8", "SQLite text is not UTF-8"))?;
+                    budget.string(text)?; // exact escaped bytes before owning a copy
+                    object.insert(name.clone(), Value::String(text.to_owned()));
+                    continue;
+                }
                 ValueRef::Blob(b) => {
                     if buffers.len() >= 16 {
                         return Err(error(
@@ -282,18 +354,15 @@ fn run(
                         ));
                     }
                     let index = buffers.len();
-                    bytes += b.len();
+                    budget.reserve(b.len())?; // borrowed length before copying
+                    let tag = json!({"$blob": index});
+                    budget.value(&tag)?;
                     buffers.push(b.to_vec());
-                    json!({"$blob": index})
+                    object.insert(name.clone(), tag);
+                    continue;
                 }
             };
-            bytes += name.len() + value.to_string().len();
-            if bytes > 900_000 {
-                return Err(error(
-                    "SQLITE_RESULT_LIMIT",
-                    "query result exceeds bounded packet size; use LIMIT/pagination",
-                ));
-            }
+            budget.value(&value)?;
             object.insert(name.clone(), value);
         }
         rows.push(Value::Object(object));
@@ -422,18 +491,15 @@ pub unsafe extern "C" fn nile_extension_init(
                 let mut dbs = HashMap::new();
                 while let Ok(work) = receiver.recv() {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run(&work, client, &mut dbs, &worker_stopping)
+                        let (value, buffers) = run(&work, client, &mut dbs, &worker_stopping)?;
+                        let json = encode_result(&value, &buffers)?;
+                        Ok((json, buffers))
                     }))
                     .unwrap_or_else(|_| Err(error("SQLITE_PANIC", "SQLite worker panicked")));
                     match result {
-                        Ok((value, buffers)) => {
-                            let status = client.reply(
-                                work.context,
-                                work.call,
-                                Ok(&value.to_string()),
-                                &buffers,
-                                false,
-                            );
+                        Ok((json, buffers)) => {
+                            let status =
+                                client.reply(work.context, work.call, Ok(&json), &buffers, false);
                             if status == NILE_OVERLOADED {
                                 client.reply(
                                     work.context,
@@ -483,4 +549,37 @@ pub unsafe extern "C" fn nile_extension_init(
         }
         NILE_OK
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn result_budget_counts_escaping_and_rejects_overflow_without_allocating() {
+        for text in ["", "plain", "\"\\\n\r\t\0\u{1f}🦀"] {
+            let mut budget = ResultBudget::default();
+            budget.string(text).unwrap();
+            assert_eq!(budget.bytes, serde_json::to_string(text).unwrap().len());
+        }
+        let mut budget = ResultBudget::default();
+        budget.reserve(RESULT_BYTES - 1).unwrap();
+        assert!(budget.reserve(2).is_err());
+        assert!(budget.reserve(usize::MAX).is_err());
+        assert_eq!(budget.bytes, RESULT_BYTES - 1);
+        budget.reserve(1).unwrap();
+        assert_eq!(budget.bytes, RESULT_BYTES);
+        assert!(budget.string("").is_err());
+    }
+    #[test]
+    fn final_packet_validation_includes_json_structure_and_binary_bytes() {
+        let value = json!([{"text":"\u{1}"}]);
+        let bytes = serde_json::to_string(&value).unwrap().len();
+        assert!(encode_result(&value, &[vec![0; RESULT_BYTES - bytes]]).is_ok());
+        assert_eq!(
+            encode_result(&value, &[vec![0; RESULT_BYTES - bytes + 1]])
+                .unwrap_err()
+                .0,
+            "SQLITE_RESULT_LIMIT"
+        );
+    }
 }

@@ -38,9 +38,10 @@ function decode(packet) {
 export async function open(path, options = {}) {
   const packet = await native.call('sqlite.open', { path, options });
   const handle = packet.value.handle;
+  let state = 'open';
   let closing = null;
   const statement = (operation, sql, params = []) => {
-    if (closing) return Promise.reject(Object.assign(new Error('Connection is closed'), { code: 'SQLITE_CLOSED' }));
+    if (state !== 'open') return Promise.reject(Object.assign(new Error('Connection is closed'), { code: 'SQLITE_CLOSED' }));
     try {
       const { values, buffers } = encode(params);
       const request = native.call(operation, { handle, sql, params: values }, buffers);
@@ -53,7 +54,20 @@ export async function open(path, options = {}) {
     execute(sql, params) { return statement('sqlite.execute', sql, params); },
     query(sql, params) { return statement('sqlite.query', sql, params); },
     close() {
-      if (!closing) closing = native.call('sqlite.close', { handle }).then(decode);
+      if (state !== 'open') return closing;
+      state = 'closing';
+      closing = native.call('sqlite.close', { handle }).then(packet => {
+        state = 'closed';
+        return decode(packet);
+      }, error => {
+        // Retry only a confirmed rejection before execution. Keep ambiguous
+        // failures blocked: the native connection may already have closed.
+        if (error.preExecution === true) {
+          state = 'open';
+          closing = null;
+        }
+        throw error;
+      });
       return closing;
     }
   });

@@ -159,7 +159,16 @@ All four operations return Promises. `execute` returns `{changes, lastInsertRowI
 `query` returns an array of objects. Use SQL `AS` aliases for duplicate column names:
 duplicates are rejected with `SQLITE_DUPLICATE_COLUMN`, avoiding silent data loss.
 Column names such as `__proto__` are ordinary own properties. A query is limited
-to 10,000 rows, 16 returned blob buffers and the host packet limit; use pagination.
+to 10,000 rows, 16 returned blob buffers and 900,000 combined response bytes
+(serialized JSON including escaping/structure plus raw binary bytes); use pagination.
+Borrowed text/blob lengths and exact JSON costs are checked before copying cells,
+then the serialized packet is validated again. Every connection also sets
+[`SQLITE_LIMIT_LENGTH`](https://www.sqlite.org/limits.html) to 4 MiB to constrain
+individual SQLite values and encoded rows, including computed values. SQLite
+`SQLITE_TOOBIG` failures map to `SQLITE_RESULT_LIMIT`. This execution limit is
+separate from the smaller response-buffer budget: it is not a total SQLite memory
+cap, and queries, temporary data, multiple values and SQLite's internal work can
+consume more memory.
 
 Parameters are positional arrays and are always bound to prepared statements.
 Exactly one SQL statement is accepted per operation. Nonempty statement tails
@@ -185,8 +194,12 @@ such as `SQLITE_CLOSED`, `SQLITE_HANDLE`, `SQLITE_INTEGER`, `SQLITE_PARAMETER`,
 
 One extension worker owns all that context's SQLite connections. Requests run in
 submission order, including open/queries/close. Already queued statements finish
-before an explicit close. `db.close()` is idempotent and returns its original
-Promise; subsequent statement calls reject with `SQLITE_CLOSED`. Raw repeated
+before an explicit close. Concurrent `db.close()` calls share the closing Promise;
+a successful close stays idempotent. Statements reject with `SQLITE_CLOSED` while
+closing or closed. A confirmed pre-execution dispatch rejection restores the open
+state and permits retry. Ambiguous/native operation failures retain the failed
+closing Promise and keep statements blocked, since the close may already have
+executed. Raw repeated
 native close/stale handle operations reject rather than finding another connection.
 Explicit close plus context disposal manage resources; GC is not the cleanup API.
 Closing a connection rolls back an unfinished transaction.
@@ -237,7 +250,13 @@ work in dispatch or lifecycle initialization.
 `complete(host, context, call, reply)` may run inline or from a worker. It copies
 JSON, error strings and bytes before returning. It never enters QuickJS. A nonzero
 dispatch status produces a structured `DISPATCH_<status>` Promise rejection unless
-a completion has already been accepted. Return `NILE_OK` after successfully scheduling
+a completion has already been accepted. A dispatch return of `NILE_OVERLOADED`
+guarantees that no work was accepted or executed; other nonzero dispatch statuses
+make no such guarantee. The bridge preserves `.dispatchStatus` and `.preExecution`
+on errors. Host-side rejections before calling a dispatcher have `preExecution=true`
+and no native dispatch status; operation failures never gain this flag from their
+status/code/message. An already accepted completion takes precedence over a later
+dispatch error. Return `NILE_OK` after successfully scheduling
 asynchronous work; every ordinary call requires one eventual terminal completion.
 If completion returns `NILE_INVALID`/`NILE_OVERLOADED`, fix/reduce the reply and retry
 with a bounded error. Closed or duplicate calls must not be retried.

@@ -10,12 +10,12 @@
     return btoa(text);
   };
   const decode = text => Uint8Array.from(atob(text), c => c.charCodeAt(0));
-  const failure = (code, message) => Object.assign(new Error(message), { code });
+  const failure = (code, message, details = {}) => Object.assign(new Error(message), { code }, details);
   globalThis.__nileExtensionScope = host => {
     const start = (operation, args, buffers, listener) => {
       if (disposed) throw failure('CONTEXT_CLOSED', 'Extension context closed');
       const result = JSON.parse(__nativeExtStart(host, operation, JSON.stringify(args), buffers.map(encode), !!listener));
-      if (result.error) throw failure('DISPATCH', result.error);
+      if (result.error) throw failure('DISPATCH', result.error, { preExecution: true, dispatchStatus: null });
       const id = result.id;
       const token = key(host, id);
       const promise = new Promise((resolve, reject) => pending.set(token, { resolve, reject }));
@@ -58,7 +58,13 @@
     if (packet.status === 0) request.resolve(value);
     else {
       subscriptions.delete(token);
-      request.reject(failure(packet.code, packet.message));
+      // NILE_OVERLOADED (4) from dispatch guarantees that no work was accepted.
+      // Other dispatch failures can be ambiguous; ordinary operation errors never
+      // acquire this flag merely by returning the same status or error code.
+      request.reject(failure(packet.code, packet.message, {
+        dispatchStatus: packet.dispatchStatus,
+        preExecution: packet.dispatchStatus === 4
+      }));
     }
   };
   globalThis.__nativeExtDispose = () => {

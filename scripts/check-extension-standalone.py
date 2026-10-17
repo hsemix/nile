@@ -16,7 +16,7 @@ with tempfile.TemporaryDirectory(prefix="nile-standalone-") as temporary:
     manifest = str(base / "extensions/sqlite/Cargo.toml")
     metadata = json.loads(subprocess.check_output([
         "cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", manifest
-    ], text=True))
+    ], text=True, encoding="utf-8"))
     names = {package["name"] for package in metadata["packages"]}
     forbidden = {"nile-script", "nile-engine", "nile-dom", "nile-style", "nile-layout", "nile-render", "nile-shell", "rquickjs"}
     assert not names & forbidden, f"SDK consumer acquired engine dependencies: {names & forbidden}"

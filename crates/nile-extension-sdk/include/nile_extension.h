@@ -49,6 +49,11 @@ typedef struct NileRequest {
   struct NileSlice base_path;
 } NileRequest;
 
+/**
+ * Returning NILE_OVERLOADED guarantees no work was accepted or executed. Other
+ * failures do not guarantee that effects have not occurred. An accepted completion
+ * takes precedence over a subsequent nonzero dispatch return.
+ */
 typedef NileStatus (*NileDispatch)(uint64_t user, const struct NileRequest *request);
 
 typedef struct NileReply {

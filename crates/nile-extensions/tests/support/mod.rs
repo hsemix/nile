@@ -40,6 +40,9 @@ pub fn library(name: &str) -> PathBuf {
     ))
 }
 pub fn fixture(dir: &Path, define: Option<&str>) -> PathBuf {
+    fixture_source(dir, define, "fixture.c")
+}
+pub fn fixture_source(dir: &Path, define: Option<&str>, filename: &str) -> PathBuf {
     let out = dir.join(format!("fixture{}", std::env::consts::DLL_SUFFIX));
     let compiler = cc::Build::new()
         .target(&target())
@@ -48,7 +51,9 @@ pub fn fixture(dir: &Path, define: Option<&str>) -> PathBuf {
         .get_compiler();
     let mut command = compiler.to_command();
     let header = root().join("crates/nile-extension-sdk/include");
-    let source = root().join("crates/nile-extensions/tests/support/fixture.c");
+    let source = root()
+        .join("crates/nile-extensions/tests/support")
+        .join(filename);
     if compiler.is_like_msvc() {
         command
             .arg("/LD")

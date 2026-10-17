@@ -197,3 +197,99 @@ fn ui_timer_remains_live_during_long_sql_and_cancellation() {
     drop(host);
     assert!(start.elapsed() < Duration::from_secs(3));
 }
+
+#[test]
+fn sqlite_close_retries_only_confirmed_pre_execution_rejections() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = support::fixture_source(temp.path(), None, "sqlite-close.c");
+    let mut source =
+        std::fs::read_to_string(support::root().join("extensions/sqlite/package/index.js"))
+            .unwrap();
+    source.push_str("\nexport { native as probe };\n");
+    let config = support::package(temp.path(), "sqlite", "@sqlite", &library, &source);
+    let host = host();
+    host.configure_extensions(&config).unwrap();
+    host.run_module(&temp.path().join("app.js").to_string_lossy(), r#"
+      import sqlite, { probe } from '@sqlite';
+      (async () => {
+        const check = (ok, message) => { if (!ok) throw Error(message); };
+        const stats = async () => (await probe.call('sqlite.stats')).value;
+        const rejectsQuery = async db => {
+          try { await db.query('SELECT 42'); throw Error('query was allowed'); }
+          catch (e) { check(e.code === 'SQLITE_CLOSED', 'query must be blocked'); }
+        };
+        const db = await sqlite.open('overload');
+        const first = db.close();
+        check(first === db.close(), 'concurrent close must share promise');
+        await rejectsQuery(db);
+        try { await first; throw Error('expected overload'); }
+        catch (e) { check(e.preExecution === true && e.dispatchStatus === 4, 'missing dispatch metadata'); }
+        let s = await stats();
+        check(s.open === 1 && s.closeDispatches === 1 && s.closeExecutions === 0 && s.queryDispatches === 0, 'overloaded close executed or query dispatched');
+        check((await db.query('SELECT 42'))[0].answer === 42, 'retryable close must restore open');
+        const retry = db.close();
+        check(retry !== first && retry === db.close(), 'retry must be a new shared promise');
+        await rejectsQuery(db);
+        await retry;
+        check(db.close() === retry, 'successful close must be idempotent');
+        await rejectsQuery(db);
+        s = await stats();
+        check(s.open === 0 && s.closeDispatches === 2 && s.closeExecutions === 1 && s.queryDispatches === 1, 'incorrect native dispatch or close counts');
+        for (const mode of ['ambiguous', 'operation']) {
+          const blocked = await sqlite.open(mode);
+          const close = blocked.close();
+          try { await close; throw Error('expected failure'); }
+          catch (e) {
+            check(e.preExecution === false, 'ambiguous/operation failure labeled retryable');
+            check(mode === 'ambiguous' ? e.dispatchStatus === 5 : e.dispatchStatus == null, 'incorrect dispatch origin');
+          }
+          check(blocked.close() === close, 'ambiguous failure must remain blocked');
+          await rejectsQuery(blocked);
+          s = await stats();
+          check(s.open === 0 && s.closeDispatches === 1 && s.closeExecutions === 1 && s.queryDispatches === 0, 'ambiguous close retried');
+        }
+        const accepted = await sqlite.open('accepted');
+        const close = accepted.close();
+        await close;
+        check(accepted.close() === close, 'accepted completion must win over dispatch status');
+        s = await stats();
+        check(s.open === 0 && s.closeDispatches === 1, 'accepted completion caused retry');
+        globalThis.done = true;
+      })().catch(e => { globalThis.failure = String(e.stack || e); });
+    "#).unwrap();
+    until(&host, "globalThis.done === true");
+}
+
+#[test]
+fn sqlite_close_recovers_after_real_host_queue_overload() {
+    let temp = tempfile::tempdir().unwrap();
+    let source =
+        std::fs::read_to_string(support::root().join("extensions/sqlite/package/index.js"))
+            .unwrap();
+    let config = support::package(
+        temp.path(),
+        "sqlite",
+        "@sqlite",
+        &support::library("sqlite"),
+        &source,
+    );
+    let host = host();
+    host.configure_extensions(&config).unwrap();
+    host.run_module(&temp.path().join("app.js").to_string_lossy(), r#"
+      import sqlite from '@sqlite';
+      (async () => {
+        const db = await sqlite.open(':memory:');
+        const requests = Array.from({length:128}, () => db.query('SELECT 42 AS answer'));
+        try { await db.close(); throw Error('expected host overload'); }
+        catch (e) { if (e.preExecution !== true || e.dispatchStatus !== null) throw e; }
+        const rows = await Promise.all(requests);
+        if (rows.some(r => r[0].answer !== 42)) throw Error('native query results mismatch');
+        if ((await db.query('SELECT 17 AS answer'))[0].answer !== 17) throw Error('connection not restored');
+        await db.close(); await db.close();
+        try { await db.query('SELECT 1'); throw Error('closed connection reopened'); }
+        catch (e) { if (e.code !== 'SQLITE_CLOSED') throw e; }
+        globalThis.done = true;
+      })().catch(e => { globalThis.failure = String(e.stack || e); });
+    "#).unwrap();
+    until(&host, "globalThis.done === true");
+}

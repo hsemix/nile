@@ -25,7 +25,7 @@ def main():
     parser.add_argument("--target", help="Rust target triple (must match the Nile application)")
     parser.add_argument("--release", action="store_true")
     args = parser.parse_args()
-    host = next(line[6:] for line in subprocess.check_output(["rustc", "-vV"], text=True).splitlines() if line.startswith("host: "))
+    host = next(line[6:] for line in subprocess.check_output(["rustc", "-vV"], text=True, encoding="utf-8").splitlines() if line.startswith("host: "))
     target = args.target or host
     if target not in TARGETS:
         parser.error(f"unsupported native package target: {target}")
@@ -47,11 +47,11 @@ def main():
     shutil.copy2(ROOT / "extensions" / args.name / "package/index.js", args.dest / "index.js")
     # Preserve already assembled targets, allowing a distributor to combine platform builds.
     manifest_path = args.dest / "extension.json"
-    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {
         "id": args.name, "version": "0.1.0", "abi": 1, "entry": "index.js", "native": {}
     }
     manifest["native"][platform] = native.as_posix()
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"Assembled {args.dest} ({platform})")
 
 if __name__ == "__main__":

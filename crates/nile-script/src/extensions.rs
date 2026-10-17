@@ -97,6 +97,7 @@ impl ScriptHost {
                 packet.set("call", delivery.call.to_string())?;
                 packet.set("event", delivery.event)?;
                 packet.set("status", delivery.status)?;
+                packet.set("dispatchStatus", delivery.dispatch_status)?;
                 packet.set("code", delivery.code)?;
                 packet.set("message", delivery.message)?;
                 packet.set("json", delivery.json)?;

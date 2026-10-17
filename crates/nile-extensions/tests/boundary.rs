@@ -340,3 +340,85 @@ fn partial_context_initialization_releases_resources_and_instance() {
         );
     }
 }
+
+#[test]
+fn sqlite_oversized_results_reject_and_leave_connection_usable() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = support::package(
+        temp.path(),
+        "sqlite",
+        "@sqlite",
+        &support::library("sqlite"),
+        "",
+    );
+    let host = Extensions::load(&config).unwrap();
+    let opened = call(&host, "sqlite.open", json!({"path":":memory:"}));
+    assert_eq!(opened.status, NILE_OK);
+    let handle = serde_json::from_str::<serde_json::Value>(&opened.json).unwrap()["handle"].clone();
+    let query = |sql: &str| {
+        call(
+            &host,
+            "sqlite.query",
+            json!({"handle":handle,"sql":sql,"params":[]}),
+        )
+    };
+    let execute = |sql: &str| {
+        call(
+            &host,
+            "sqlite.execute",
+            json!({"handle":handle,"sql":sql,"params":[]}),
+        )
+    };
+    assert_eq!(
+        execute("CREATE TABLE large_values (text_value, blob_value)").status,
+        NILE_OK
+    );
+    assert_eq!(
+        execute("INSERT INTO large_values VALUES (printf('%.*c', 950000, 'x'), zeroblob(950000))")
+            .status,
+        NILE_OK
+    );
+    // Existing large values, insufficient remaining budget, and serialized escaping.
+    for sql in [
+        "SELECT text_value FROM large_values",
+        "SELECT blob_value FROM large_values",
+        "SELECT hex(zeroblob(225000)) AS a, hex(zeroblob(225000)) AS b",
+        "SELECT replace(hex(zeroblob(100000)), '0', char(1)) AS escaped",
+        "SELECT printf('%.*c', 899991, 'x') AS t",
+        "SELECT zeroblob(899982) AS t",
+        // SQLite's execution value-length limit, not just the response budget.
+        "SELECT zeroblob(4194305) AS computed",
+        "SELECT hex(zeroblob(3000000)) AS computed",
+    ] {
+        let reply = query(sql);
+        assert_eq!(reply.status, NILE_FAILED, "query should reject: {sql}");
+        assert_eq!(
+            reply.code, "SQLITE_RESULT_LIMIT",
+            "{sql}: {}",
+            reply.message
+        );
+        assert!(
+            reply.buffers.is_empty(),
+            "failed result must not return partial buffers"
+        );
+        let usable = query("SELECT 42 AS answer");
+        assert_eq!(usable.status, NILE_OK, "connection unusable after: {sql}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&usable.json).unwrap(),
+            json!([{"answer":42}])
+        );
+    }
+    // Exact serialized boundary: account for quotes, array/object punctuation,
+    // column names and binary tags as well as the bytes in the buffer itself.
+    let text = query("SELECT printf('%.*c', 899990, 'x') AS t");
+    assert_eq!(text.status, NILE_OK, "{}", text.message);
+    assert_eq!(text.json.len(), 900_000);
+    let tag_bytes = json!([{"t":{"$blob":0}}]).to_string().len();
+    let blob = query(&format!("SELECT zeroblob({}) AS t", 900_000 - tag_bytes));
+    assert_eq!(blob.status, NILE_OK, "{}", blob.message);
+    assert_eq!(blob.json.len() + blob.buffers[0].len(), 900_000);
+    assert_eq!(
+        call(&host, "sqlite.close", json!({"handle":handle})).status,
+        NILE_OK
+    );
+}
