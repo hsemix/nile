@@ -82,10 +82,14 @@ pub fn fixture_source(dir: &Path, define: Option<&str>, filename: &str) -> PathB
         }
         command.arg(source).arg("-o").arg(&out);
     }
-    assert!(
-        command.current_dir(dir).status().unwrap().success(),
-        "compile external C extension against generated header"
-    );
+    let output = command.current_dir(dir).output().unwrap();
+    if !output.status.success() {
+        // One `error:` line per compiler line, so CI's failure annotation shows the cause.
+        for line in String::from_utf8_lossy(&output.stdout).lines().chain(String::from_utf8_lossy(&output.stderr).lines()) {
+            eprintln!("error: C fixture compiler: {line}");
+        }
+        panic!("compile external C extension against generated header: {command:?}");
+    }
     out
 }
 fn target() -> String {
