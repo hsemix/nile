@@ -223,11 +223,39 @@
       media: { value: String(query) },
       matches: { get: evaluate },
     });
-    mql.onchange = null;
+    const watch = () => { if (!watched.has(mql)) watched.set(mql, evaluate()); };
+    // A list that someone listens to (a listener, `onchange` or the old `addListener`) is
+    // re-evaluated when the window resizes or the system theme changes (`__mediaCheck`) and fires
+    // `change` when its answer differs.
+    let handler = null;
+    Object.defineProperty(mql, "onchange", {
+      get: () => handler,
+      set: (f) => { handler = typeof f === "function" ? f : null; if (handler) watch(); },
+      enumerable: true,
+    });
+    const listen = mql.addEventListener.bind(mql);
+    mql.addEventListener = (type, f, o) => { if (type === "change") watch(); return listen(type, f, o); };
     mql.addListener = (f) => mql.addEventListener("change", f);
     mql.removeListener = (f) => mql.removeEventListener("change", f);
+    Object.defineProperty(mql, "_eval", { value: evaluate });
     return mql;
   };
+  class MediaQueryListEvent extends Event {
+    constructor(type, init = {}) { super(type, init); this.media = init.media ?? ""; this.matches = !!init.matches; }
+  }
+  g.MediaQueryListEvent = MediaQueryListEvent;
+  const watched = new Map(); // MediaQueryList -> last answer
+  Object.defineProperty(g, "__mediaCheck", {
+    value() {
+      for (const [mql, was] of [...watched]) {
+        const now = mql._eval();
+        if (now === was) continue;
+        watched.set(mql, now);
+        mql.dispatchEvent(new MediaQueryListEvent("change", { media: mql.media, matches: now }));
+      }
+    },
+  });
+  g.addEventListener("resize", () => g.__mediaCheck());
 
   // Web Storage. In memory for the life of the page; `sessionStorage` and `localStorage` are alike.
   class Storage {

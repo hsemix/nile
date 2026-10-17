@@ -14,7 +14,14 @@ supports dark gets the platform's dark look for everything it doesn't style itse
 <meta name="color-scheme" content="light dark">   <!-- or  :root { color-scheme: light dark } -->
 ```
 
-Without that opt-in a page stays light, as in a browser. Only the root's `color-scheme` counts.
+Without that opt-in a page stays light, as in a browser; `color-scheme: dark` makes it dark even on a
+light system. `color-scheme` also works on any element (it is inherited): inside it the user-agent
+look of controls and the system colour keywords follow that element's scheme, so a dark sidebar in a
+light app gets dark inputs and buttons (`examples/color-scheme.html`). Plain properties such as
+`background` aren't changed by it, as in a browser; menus, scroll thumbs and the other things Nile
+draws itself follow the page's (root) scheme. `matchMedia('(prefers-color-scheme: dark)')` lists fire
+`change` (a `MediaQueryListEvent`) when the system flips, and `(min-width: ...)` lists when the window
+is resized.
 The system accent colours checked boxes and radios, focus rings, menu and list highlights,
 progress bars, ranges and the text selection; `accent-color` (inherited) overrides it for a control
 or a subtree. Test other themes with `NILE_COLOR_SCHEME=dark nile page.html` and

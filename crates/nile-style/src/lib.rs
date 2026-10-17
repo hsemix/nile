@@ -33,7 +33,7 @@ pub use grid::{area_lines, Breadth, GridAutoFlow, GridLine, GridPlace, Track, Tr
 pub use gradient::{TransformFn, ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
 pub use parse::{color_from_hex, Declaration, FontFace, Rule, Stylesheet, Value};
 use parse::Cx;
-pub use system::{default_accent, parse_hex, set_system_theme, system_color, system_theme, text_on, ColorScheme, Palette, SystemTheme};
+pub use system::{default_accent, parse_hex, set_system_theme, system_color, system_theme, text_on, used_dark, ColorScheme, Palette, SystemTheme};
 pub use selector::{ElementRef, InteractionState, NileImpl, PseudoClass, PseudoElement, Query};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1292,8 +1292,11 @@ pub struct StyleMap {
     page_bar: ScrollbarLook,
     /// Some element has a `prototype` (a script class bound from CSS).
     pub has_prototypes: bool,
-    /// The dark user-agent sheet is in use (the system is dark and the page supports it).
+    /// The page (its root element) is dark: its `color-scheme` allows it and the system agrees, or
+    /// it asks for dark only. Elements with their own `color-scheme` can differ.
     pub dark: bool,
+    /// The scheme a `<meta name="color-scheme">` asks for, the root element's default.
+    meta_scheme: ColorScheme,
     /// `@keyframes` by name.
     pub(crate) keyframes: HashMap<String, Vec<parse::Frame>>,
     /// `@page` rules (selector, body) in source order.
@@ -1453,20 +1456,22 @@ impl StyleMap {
         if self.styles.len() != doc.nodes.len() || !self.pseudo.is_empty() || !self.markers.is_empty() || !self.scrollbars.is_empty() {
             return None;
         }
-        let (ua, author) = sheets_of(doc, viewport, self.dark);
+        let (ua_light, ua_dark) = (ua_sheet(false), ua_sheet(true));
+        let author = sheets_of(doc, viewport);
         let mut caches = SelectorCaches::default();
         let mut ctx = MatchingContext::new(MatchingMode::Normal, None, &mut caches, QuirksMode::NoQuirks, NeedsSelectorFlags::No, MatchingForInvalidation::No);
         let uses_viewport = Cell::new(self.uses_viewport);
-        let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo: false };
+        let cx = CascadeInput { doc, state, ua_light: &ua_light, ua_dark: &ua_dark, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo: false };
         let mut before = Vec::new();
         let mut generated = Generated::default();
         for &root in roots {
             before.extend(doc.descendants(root).into_iter().chain(std::iter::once(root)).map(|n| (n, self.styles[n.0].clone())));
             let inherited = match doc.node(root).parent {
                 Some(p) => self.styles[p.0].clone(),
-                None => ComputedStyle::default(),
+                None => ComputedStyle { color_scheme: self.meta_scheme, ..ComputedStyle::default() },
             };
-            cascade(&cx, &mut ctx, root, &inherited, &mut self.styles, &mut generated);
+            let dark = used_dark(inherited.color_scheme);
+            cascade(&cx, &mut ctx, root, &inherited, dark, &mut self.styles, &mut generated);
         }
         Some(before)
     }
@@ -1567,32 +1572,26 @@ pub fn compute_styles_with(doc: &Document, state: &InteractionState) -> StyleMap
 /// Like [`compute_styles_with`], with `@media` queries and `vw`/`vh` units resolved
 /// against a `viewport` of the given size in px.
 pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f32, f32)) -> StyleMap {
-    let map = compute_with_scheme(doc, state, viewport, false);
-    // A dark system and a page that supports dark (the root's `color-scheme`, or a `<meta>`): the
-    // dark user-agent sheet replaces the light one, so everything is computed again, only for such pages.
-    if system_theme().dark {
-        let root_dark = doc.find(|n| n.tag() == Some("html")).is_some_and(|h| map.styles[h.0].color_scheme.allows_dark());
-        if root_dark || meta_allows_dark(doc) {
-            return compute_with_scheme(doc, state, viewport, true);
-        }
-    }
-    map
+    compute_with_scheme(doc, state, viewport)
 }
 
-/// `<meta name="color-scheme" content="light dark">`.
-fn meta_allows_dark(doc: &Document) -> bool {
-    doc.nodes.iter().any(|n| {
-        n.tag() == Some("meta")
-            && n.attr("name").is_some_and(|v| v.trim().eq_ignore_ascii_case("color-scheme"))
-            && n.attr("content").is_some_and(|c| ColorScheme::parse(c.split_whitespace().map(|w| w.to_ascii_lowercase()).collect::<Vec<_>>().iter().map(String::as_str)).allows_dark())
-    })
+/// What `<meta name="color-scheme" content="light dark">` asks for (the root element's default).
+fn meta_scheme(doc: &Document) -> ColorScheme {
+    doc.nodes
+        .iter()
+        .find(|n| n.tag() == Some("meta") && n.attr("name").is_some_and(|v| v.trim().eq_ignore_ascii_case("color-scheme")))
+        .and_then(|n| n.attr("content"))
+        .map(|c| ColorScheme::parse(c.split_whitespace().map(|w| w.to_ascii_lowercase()).collect::<Vec<_>>().iter().map(String::as_str)))
+        .unwrap_or_default()
 }
 
-fn compute_with_scheme(doc: &Document, state: &InteractionState, viewport: (f32, f32), dark: bool) -> StyleMap {
-    let (ua, author) = sheets_of(doc, viewport, dark);
+fn compute_with_scheme(doc: &Document, state: &InteractionState, viewport: (f32, f32)) -> StyleMap {
+    let (ua_light, ua_dark) = (ua_sheet(false), ua_sheet(true));
+    let author = sheets_of(doc, viewport);
 
     let mut styles = vec![ComputedStyle::default(); doc.nodes.len()];
-    let root_style = ComputedStyle::default();
+    let meta_scheme = meta_scheme(doc);
+    let root_style = ComputedStyle { color_scheme: meta_scheme, ..ComputedStyle::default() };
     let mut caches = SelectorCaches::default();
     let mut ctx = MatchingContext::new(
         MatchingMode::Normal,
@@ -1612,10 +1611,11 @@ fn compute_with_scheme(doc: &Document, state: &InteractionState, viewport: (f32,
     let pages: Vec<(String, String)> = author.iter().flat_map(|s| s.pages.iter().cloned()).collect();
     let font_faces: Vec<FontFace> = author.iter().flat_map(|s| s.font_faces.iter().cloned()).collect();
     let has_pseudo = author.iter().any(|s| s.rules.iter().any(|r| r.selectors.slice().iter().any(|sel| sel.has_pseudo_element())));
-    let state_deps = StateDeps::of(author.iter().map(|s| &**s).chain(std::iter::once(&*ua)));
-    let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo };
+    let state_deps = StateDeps::of(author.iter().map(|s| &**s).chain([&*ua_light, &*ua_dark]));
+    let cx = CascadeInput { doc, state, ua_light: &ua_light, ua_dark: &ua_dark, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo };
     let mut generated = Generated::default();
-    cascade(&cx, &mut ctx, Document::ROOT, &root_style, &mut styles, &mut generated);
+    cascade(&cx, &mut ctx, Document::ROOT, &root_style, used_dark(root_style.color_scheme), &mut styles, &mut generated);
+    let dark = doc.find(|n| n.tag() == Some("html")).map_or_else(|| used_dark(meta_scheme), |h| used_dark(styles[h.0].color_scheme));
     let mut map = StyleMap {
         styles,
         uses_viewport: uses_viewport.get(),
@@ -1631,6 +1631,7 @@ fn compute_with_scheme(doc: &Document, state: &InteractionState, viewport: (f32,
         page_bar: ScrollbarLook { thickness: scrollbar_auto(), thumb: None, thumb_radius: None, track: None },
         has_prototypes: false,
         dark,
+        meta_scheme,
     };
     map.has_prototypes = map.styles.iter().any(|s| s.prototype.is_some());
     let default = map.page_bar;
@@ -1648,9 +1649,8 @@ thread_local! {
 }
 
 /// The user-agent sheet and the document's `<style>` sheets, parsed (or taken from the cache).
-fn sheets_of(doc: &Document, viewport: (f32, f32), dark_scheme: bool) -> (Rc<Stylesheet>, Vec<Rc<Stylesheet>>) {
-    let ua = ua_sheet(dark_scheme);
-    let author = doc
+fn sheets_of(doc: &Document, viewport: (f32, f32)) -> Vec<Rc<Stylesheet>> {
+    doc
         .nodes
         .iter()
         .filter(|n| n.tag() == Some("style"))
@@ -1678,14 +1678,15 @@ fn sheets_of(doc: &Document, viewport: (f32, f32), dark_scheme: bool) -> (Rc<Sty
                 sheet
             })
         })
-        .collect();
-    (ua, author)
+        .collect()
 }
 
 struct CascadeInput<'a> {
     doc: &'a Document,
     state: &'a InteractionState,
-    ua: &'a Stylesheet,
+    ua_light: &'a Stylesheet,
+    /// The user-agent sheet with the dark layer, for elements whose used `color-scheme` is dark.
+    ua_dark: &'a Stylesheet,
     author: &'a [Rc<Stylesheet>],
     viewport: (f32, f32),
     uses_viewport: &'a Cell<bool>,
@@ -1701,9 +1702,11 @@ fn matching_decls<'a>(
     el: &ElementRef,
     ctx: &mut MatchingContext<NileImpl>,
     pseudo: bool,
+    dark: bool,
 ) -> Vec<&'a Declaration> {
     let mut decls = Vec::new();
-    for sheet in std::iter::once(cx.ua).chain(cx.author.iter().map(|s| &**s)) {
+    let ua = if dark { cx.ua_dark } else { cx.ua_light };
+    for sheet in std::iter::once(ua).chain(cx.author.iter().map(|s| &**s)) {
         let mut matched: Vec<(u32, usize, &Rule)> = sheet
             .rules
             .iter()
@@ -1900,7 +1903,7 @@ fn marker_style(cx: &CascadeInput, id: NodeId, element: &ComputedStyle, extra: &
     );
     let wanted = |p: &PseudoElement| *p == PseudoElement::Marker;
     ctx.pseudo_element_matching_fn = Some(&wanted);
-    let decls = matching_decls(cx, &el, &mut ctx, true);
+    let decls = matching_decls(cx, &el, &mut ctx, true, used_dark(element.color_scheme));
     if decls.is_empty() {
         return;
     }
@@ -1925,7 +1928,7 @@ fn scrollbar_parts(cx: &CascadeInput, id: NodeId, element: &ComputedStyle, extra
         let mut ctx = MatchingContext::new(MatchingMode::ForStatelessPseudoElement, None, &mut caches, QuirksMode::NoQuirks, NeedsSelectorFlags::No, MatchingForInvalidation::No);
         let wanted = |p: &PseudoElement| *p == kind;
         ctx.pseudo_element_matching_fn = Some(&wanted);
-        let decls = matching_decls(cx, &el, &mut ctx, true);
+        let decls = matching_decls(cx, &el, &mut ctx, true, used_dark(element.color_scheme));
         if decls.is_empty() {
             continue;
         }
@@ -1972,7 +1975,7 @@ fn pseudo_style(
     );
     let wanted = move |p: &PseudoElement| *p == kind;
     ctx.pseudo_element_matching_fn = Some(&wanted);
-    let decls = matching_decls(cx, &el, &mut ctx, true);
+    let decls = matching_decls(cx, &el, &mut ctx, true, used_dark(element.color_scheme));
     if decls.is_empty() {
         return;
     }
@@ -2029,23 +2032,37 @@ fn cascade(
     ctx: &mut MatchingContext<NileImpl>,
     id: NodeId,
     parent: &ComputedStyle,
+    parent_dark: bool,
     out: &mut Vec<ComputedStyle>,
     extra: &mut Generated,
 ) {
     let doc = cx.doc;
     let node = doc.node(id);
     let mut style = ComputedStyle::inherit(parent);
+    let mut dark = parent_dark;
 
     if let NodeKind::Element { .. } = &node.kind {
         let el = ElementRef::new(doc, id, cx.state);
-        let mut decls = matching_decls(cx, &el, ctx, false);
         let pcx = Cx { viewport: cx.viewport, uses_viewport: cx.uses_viewport };
         let inline = node.attr("style").map(|css| parse::parse_declarations(css, &pcx)).unwrap_or_default();
-        decls.extend(inline.iter());
-        style.checked = doc.has_state(id, "checked");
-        (style.control_fraction, style.meter_warn) = control_fraction(doc, id);
-        style.swatch = swatch_color(doc, id);
-        apply_declarations(&mut style, decls, parent.font_size, &pcx);
+        // The element's own `color-scheme` (author or inherited) decides which user-agent sheet and
+        // which system colours apply to it. It is only known once the cascade has run, so start from
+        // the parent's scheme and go again if the element turns out to differ (rare).
+        for attempt in 0..2 {
+            style = ComputedStyle::inherit(parent);
+            let mut decls = matching_decls(cx, &el, ctx, false, dark);
+            decls.extend(inline.iter());
+            style.checked = doc.has_state(id, "checked");
+            (style.control_fraction, style.meter_warn) = control_fraction(doc, id);
+            style.swatch = swatch_color(doc, id);
+            system::with_scheme(dark, || apply_declarations(&mut style, decls, parent.font_size, &pcx));
+            let used = used_dark(style.color_scheme);
+            if used == dark || attempt == 1 {
+                dark = used;
+                break;
+            }
+            dark = used;
+        }
     }
 
     out[id.0] = style.clone();
@@ -2060,7 +2077,7 @@ fn cascade(
         pseudo_style(cx, id, &style, PseudoElement::After, out, extra);
     }
     for child in &node.children {
-        cascade(cx, ctx, *child, &style, out, extra);
+        cascade(cx, ctx, *child, &style, dark, out, extra);
     }
 }
 
@@ -3570,6 +3587,7 @@ mod theme_tests {
     #[test]
     fn system_colours_and_prefers_color_scheme_follow_the_theme() {
         let page = r#"<style>
+            :root { color-scheme: light dark }
             #a { color: CanvasText; background: Canvas }
             #b { color: AccentColor }
             @media (prefers-color-scheme: dark) { #c { color: #123456 } }
@@ -3603,6 +3621,42 @@ mod theme_tests {
         set_system_theme(SystemTheme { dark: false, accent: Color::rgb(200, 30, 30) });
         assert_eq!(style_of(opted, "b").color, Color::rgb(0, 0, 0));
         assert_eq!(style_of(opted, "i").background, Some(Color::rgb(200, 30, 30)));
+        set_system_theme(SystemTheme::default());
+    }
+
+    #[test]
+    fn an_element_with_its_own_color_scheme_gets_that_schemes_look() {
+        // A dark island in a light page: its controls and system colours are dark, the rest isn't.
+        set_system_theme(SystemTheme { dark: false, accent: Color::rgb(200, 30, 30) });
+        let island = r#"<style>#d { color-scheme: dark; color: CanvasText }</style><body>
+            <button id="out">x</button><div id="d"><button id="in">x</button><span id="deep"></span></div></body>"#;
+        assert_eq!(style_of(island, "out").color, Color::rgb(0, 0, 0));
+        assert_eq!(style_of(island, "in").color, Color::rgb(255, 255, 255));
+        assert_eq!(style_of(island, "d").color, Color::rgb(240, 240, 240));
+        assert_eq!(style_of(island, "deep").color_scheme, ColorScheme::Dark);
+        // A light island in a dark page.
+        set_system_theme(SystemTheme { dark: true, accent: Color::rgb(200, 30, 30) });
+        let light = r#"<style>:root { color-scheme: light dark } #l { color-scheme: light; color: CanvasText }</style><body>
+            <button id="out">x</button><div id="l"><button id="in">x</button></div></body>"#;
+        assert_eq!(style_of(light, "out").color, Color::rgb(255, 255, 255));
+        assert_eq!(style_of(light, "in").color, Color::rgb(0, 0, 0));
+        assert_eq!(style_of(light, "l").color, Color::rgb(0, 0, 0));
+        // `light dark` inside a forced-light element follows the system again.
+        let nested = r#"<style>#a { color-scheme: light } #b { color-scheme: light dark }</style><body><div id="a"><div id="b"><button id="in">x</button></div></div></body>"#;
+        assert_eq!(style_of(nested, "in").color, Color::rgb(255, 255, 255));
+        set_system_theme(SystemTheme::default());
+    }
+
+    #[test]
+    fn a_page_asking_for_dark_only_is_dark_even_on_a_light_system() {
+        set_system_theme(SystemTheme { dark: false, accent: Color::rgb(200, 30, 30) });
+        let page = "<style>:root { color-scheme: dark }</style><body><button id=\"b\">x</button></body>";
+        let doc = Document::parse(page);
+        let styles = compute_styles(&doc);
+        assert!(styles.dark);
+        assert_eq!(style_of(page, "b").color, Color::rgb(255, 255, 255));
+        let meta = "<meta name=\"color-scheme\" content=\"light dark\"><body><button id=\"b\">x</button></body>";
+        assert!(!compute_styles(&Document::parse(meta)).dark, "`light dark` follows a light system");
         set_system_theme(SystemTheme::default());
     }
 

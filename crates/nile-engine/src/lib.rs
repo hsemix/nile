@@ -1213,6 +1213,10 @@ impl Page {
     /// restyle this page and its frames so `prefers-color-scheme`, system colours and the accent apply.
     pub fn system_theme_changed(&mut self) {
         self.view.borrow_mut().restyle();
+        // `matchMedia('(prefers-color-scheme: dark)')` lists fire `change` when their answer flipped.
+        if let Some(host) = &self.scripts {
+            let _ = host.call("__mediaCheck", "[]");
+        }
         let frames = self.frames.clone();
         for slot in frames.borrow_mut().slots.values_mut() {
             slot.page.system_theme_changed();
@@ -7032,6 +7036,58 @@ cd</textarea>
         assert!(p.selected_image().is_some());
         press_key(&mut p, "Backspace", none);
         assert_eq!(js(&mut p, "document.querySelectorAll('#h img').length + ':' + document.getElementById('a').textContent"), "0:before  after");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn media_query_lists_fire_change_when_the_system_theme_flips() {
+        use nile_style::{set_system_theme, Color, SystemTheme};
+        set_system_theme(SystemTheme { dark: false, accent: Color::rgb(10, 20, 30) });
+        let (mut p, path) = page(
+            r#"<body><script>
+                 window.log = [];
+                 const m = matchMedia('(prefers-color-scheme: dark)');
+                 m.addEventListener('change', (e) => log.push('listener:' + e.matches + ':' + e.media + ':' + (e instanceof MediaQueryListEvent)));
+                 m.onchange = (e) => log.push('onchange:' + e.matches);
+                 window.unwatched = matchMedia('(prefers-color-scheme: dark)');
+                 window.old = matchMedia('(prefers-color-scheme: dark)');
+                 old.addListener((e) => log.push('old:' + e.matches));
+               </script></body>"#,
+            "mql-change",
+        );
+        assert_eq!(js(&mut p, "log.length"), "0");
+        p.system_theme_changed();
+        assert_eq!(js(&mut p, "log.length"), "0", "nothing flipped, nothing fires");
+        set_system_theme(SystemTheme { dark: true, accent: Color::rgb(10, 20, 30) });
+        p.system_theme_changed();
+        assert_eq!(
+            js(&mut p, "log.slice().sort().join('|')"),
+            "listener:true:(prefers-color-scheme: dark):true|old:true|onchange:true"
+        );
+        assert_eq!(js(&mut p, "unwatched.matches"), "true");
+        p.system_theme_changed();
+        assert_eq!(js(&mut p, "log.length"), "3", "an unchanged answer doesn't fire again");
+        set_system_theme(SystemTheme { dark: false, accent: Color::rgb(10, 20, 30) });
+        p.system_theme_changed();
+        assert_eq!(js(&mut p, "log.filter((l) => l.includes(':false')).length"), "3");
+        set_system_theme(SystemTheme::default());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn media_query_lists_fire_change_when_the_window_resizes() {
+        let (mut p, path) = page(
+            r#"<body><script>
+                 window.log = [];
+                 matchMedia('(min-width: 700px)').addEventListener('change', (e) => log.push(e.matches));
+               </script></body>"#,
+            "mql-resize",
+        );
+        p.layout(800.0, 300.0);
+        p.run_timers();
+        p.layout(500.0, 300.0);
+        p.run_timers();
+        assert_eq!(js(&mut p, "log.join(',')"), "true,false");
         let _ = std::fs::remove_file(path);
     }
 

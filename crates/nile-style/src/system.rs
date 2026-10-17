@@ -41,6 +41,26 @@ pub fn text_on(c: Color) -> Color {
 
 thread_local! {
     static THEME: Cell<Option<SystemTheme>> = const { Cell::new(None) };
+    /// The scheme the element being styled uses, when it differs from the system's (see `with_scheme`).
+    static SCHEME: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Run `f` with system colours resolved in the dark (`true`) or light scheme.
+pub(crate) fn with_scheme<R>(dark: bool, f: impl FnOnce() -> R) -> R {
+    let before = SCHEME.with(|c| c.replace(Some(dark)));
+    let out = f();
+    SCHEME.with(|c| c.set(before));
+    out
+}
+
+/// Whether an element whose `color-scheme` is `scheme` is dark: `dark` always is, `light dark`
+/// follows the system, `normal`/`light` never are.
+pub fn used_dark(scheme: ColorScheme) -> bool {
+    match scheme {
+        ColorScheme::Dark => true,
+        ColorScheme::Both => system_theme().dark,
+        ColorScheme::Light => false,
+    }
 }
 
 fn env_override(mut t: SystemTheme) -> SystemTheme {
@@ -77,6 +97,8 @@ pub fn set_system_theme(t: SystemTheme) -> bool {
 /// lower case.
 pub fn system_color(name: &str) -> Option<Color> {
     let SystemTheme { dark, accent } = system_theme();
+    // An element with its own `color-scheme` resolves system colours in that scheme.
+    let dark = SCHEME.with(Cell::get).unwrap_or(dark);
     let pick = |light: (u8, u8, u8), dk: (u8, u8, u8)| {
         let (r, g, b) = if dark { dk } else { light };
         Some(Color::rgb(r, g, b))
