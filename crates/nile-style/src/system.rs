@@ -45,6 +45,11 @@ thread_local! {
     static SCHEME: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
+/// Whether colours are being resolved for a dark scheme (`light-dark()` reads this).
+pub(crate) fn current_dark() -> bool {
+    SCHEME.with(Cell::get).unwrap_or_else(|| system_theme().dark)
+}
+
 /// Run `f` with system colours resolved in the dark (`true`) or light scheme.
 pub(crate) fn with_scheme<R>(dark: bool, f: impl FnOnce() -> R) -> R {
     let before = SCHEME.with(|c| c.replace(Some(dark)));

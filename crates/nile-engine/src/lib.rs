@@ -142,6 +142,14 @@ const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 /// Half the caret's blink period.
 pub const CARET_BLINK: Duration = Duration::from_millis(530);
 
+/// A scroll-snap container that was just scrolled (see `Page::snap_due`).
+#[derive(Debug, Clone, Copy)]
+pub struct SnapPending {
+    pub node: NodeId,
+    pub from: (f32, f32),
+    pub due: Instant,
+}
+
 /// A popup element that the shell shows in an OS window of its own. `rect` is its border box in
 /// this window's viewport coordinates (it may lie outside the viewport).
 #[derive(Debug, Clone, PartialEq)]
@@ -445,6 +453,83 @@ impl View {
             self.restyle();
         }
         changed
+    }
+
+    /// Where a scroll container with `scroll-snap-type` can come to rest on each axis (offsets).
+    pub fn snap_points(&mut self, node: NodeId) -> (Vec<f32>, Vec<f32>) {
+        use nile_style::SnapAlign;
+        let style = self.styles.get(node).clone();
+        let Some(sb) = self.layout().scroll_box(node).copied() else { return (Vec::new(), Vec::new()) };
+        let (mx, my) = sb.max_offset();
+        let pad = style.scroll_padding;
+        let port = sb.clip;
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        let doc_rc = self.doc.clone();
+        let doc = doc_rc.borrow();
+        let inside = |mut n: NodeId| {
+            while let Some(parent) = doc.node(n).parent {
+                if parent == node {
+                    return true;
+                }
+                n = parent;
+            }
+            false
+        };
+        let tree = self.layout().boxes.iter().filter(|b| matches!(b.content, nile_layout::BoxContent::Element)).map(|b| (b.node, b.rect)).collect::<Vec<_>>();
+        for (n, r) in tree {
+            let a = self.styles.get(n).scroll_snap_align;
+            if (a.0 == SnapAlign::None && a.1 == SnapAlign::None) || n == node || !inside(n) {
+                continue;
+            }
+            let at = |align: SnapAlign, start: f32, size: f32, port_start: f32, port_size: f32, pad_start: f32, pad_end: f32| match align {
+                SnapAlign::None => None,
+                SnapAlign::Start => Some(start - port_start - pad_start),
+                SnapAlign::Center => Some(start + size / 2.0 - (port_start + (pad_start + port_size - pad_end) / 2.0)),
+                SnapAlign::End => Some(start + size - (port_start + port_size) + pad_end),
+            };
+            if style.scroll_snap_type.x {
+                if let Some(v) = at(a.0, r.x, r.width, port.x, port.width, pad.left, pad.right) {
+                    xs.push(v.clamp(0.0, mx));
+                }
+            }
+            if style.scroll_snap_type.y {
+                if let Some(v) = at(a.1, r.y, r.height, port.y, port.height, pad.top, pad.bottom) {
+                    ys.push(v.clamp(0.0, my));
+                }
+            }
+        }
+        for list in [&mut xs, &mut ys] {
+            list.sort_by(f32::total_cmp);
+            list.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        }
+        (xs, ys)
+    }
+
+    /// Settle a snap container: on each snapping axis, the nearest snap point beyond where the
+    /// gesture began in the direction it went (or the nearest one, if it came back).
+    pub fn snap_settle(&mut self, pending: SnapPending) -> bool {
+        let style = self.styles.get(pending.node).clone();
+        let (xs, ys) = self.snap_points(pending.node);
+        let (ox, oy) = self.scroll_offsets.get(&pending.node).copied().unwrap_or_default();
+        let pick = |points: &[f32], origin: f32, now: f32, extent: f32| -> f32 {
+            if points.is_empty() {
+                return now;
+            }
+            let dir = (now - origin).signum();
+            let nearest = |it: &mut dyn Iterator<Item = f32>| it.min_by(|a, b| (a - now).abs().total_cmp(&(b - now).abs()));
+            let beyond = if (now - origin).abs() < 0.5 { None } else { nearest(&mut points.iter().copied().filter(|p| dir * (p - origin) > 0.5)) };
+            let target = beyond.or_else(|| nearest(&mut points.iter().copied())).unwrap_or(now);
+            // `proximity` only pulls when a point is near; `mandatory` always does.
+            if style.scroll_snap_type.mandatory || (target - now).abs() <= extent * 0.3 {
+                target
+            } else {
+                now
+            }
+        };
+        let extent = self.layout().scroll_box(pending.node).map_or((300.0, 300.0), |sb| (sb.clip.width, sb.clip.height));
+        let (nx, ny) = (pick(&xs, pending.from.0, ox, extent.0), pick(&ys, pending.from.1, oy, extent.1));
+        self.set_element_scroll(pending.node, nx, ny)
     }
 
     /// Scroll an `overflow` element, clamped to its range. True if it moved.
@@ -789,6 +874,9 @@ pub struct Page {
     pub ime_host: bool,
     /// When the hover target is next recomputed after scrolling.
     pub hover_due: Option<Instant>,
+    /// A scroll container with `scroll-snap-type` that was scrolled: when it settles, the offset it
+    /// started the gesture at, and when to snap.
+    pub snap_due: Option<SnapPending>,
     /// List box row the shift-range started from, and the row keys moved to last.
     pub list_anchor: Option<(NodeId, usize)>,
     /// A list box being dragged over (the button went down on a row).
@@ -1125,6 +1213,7 @@ impl Page {
             ime_cursor: None,
             ime_host: false,
             hover_due: None,
+            snap_due: None,
             list_anchor: None,
             list_drag: None,
             list_press: None,
@@ -1419,6 +1508,18 @@ impl Page {
             if moved {
                 self.sync();
                 self.hover_after_scroll();
+                let snaps = self.view.borrow().styles.get(n).scroll_snap_type;
+                if snaps.x || snaps.y {
+                    // Keep where the gesture began; snap once the wheel has been quiet for a moment.
+                    let from = self.snap_due.filter(|p| p.node == n).map_or_else(
+                        || {
+                            let (ox, oy) = self.view.borrow().scroll_offsets.get(&n).copied().unwrap_or_default();
+                            (ox + dx, oy + dy)
+                        },
+                        |p| p.from,
+                    );
+                    self.snap_due = Some(SnapPending { node: n, from, due: Instant::now() + Duration::from_millis(140) });
+                }
                 return;
             }
             cur = self.doc.borrow().node(n).parent;
@@ -2525,6 +2626,15 @@ impl Page {
                 c0 = self.refresh_hover();
             } else {
                 n0 = Some(due - now);
+            }
+        }
+        if let Some(p) = self.snap_due {
+            let now = Instant::now();
+            if now >= p.due {
+                self.snap_due = None;
+                c0 |= self.view.borrow_mut().snap_settle(p);
+            } else {
+                n0 = Some(n0.map_or(p.due - now, |d| d.min(p.due - now)));
             }
         }
         let (c1, n1) = self.run_timers();
@@ -4929,6 +5039,29 @@ cd</textarea>
     fn offset(p: &Page, id: &str) -> (f32, f32) {
         let n = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
         p.view.borrow().scroll_offsets.get(&n).copied().unwrap_or_default()
+    }
+
+    #[test]
+    fn scroll_snap_settles_on_the_next_snap_point_after_the_wheel_pauses() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="box" style="width:200px; height:60px; overflow-x:auto; overflow-y:hidden; display:flex; scroll-snap-type:x mandatory">
+                 <div style="flex:none; width:200px; scroll-snap-align:start">a</div><div style="flex:none; width:200px; scroll-snap-align:start">b</div>
+                 <div style="flex:none; width:200px; scroll-snap-align:start">c</div></div></body>"#,
+            "snap",
+        );
+        let (x, y) = center(&p, "box");
+        p.pointer_moved(x, y);
+        p.wheel(-30.0, 0.0);
+        assert_eq!(offset(&p, "box"), (30.0, 0.0), "the wheel moves freely while it is running");
+        std::thread::sleep(Duration::from_millis(200));
+        p.tick();
+        assert_eq!(offset(&p, "box"), (200.0, 0.0), "then it settles on the next item");
+        // A small nudge back goes back to the item it came from.
+        p.wheel(10.0, 0.0);
+        std::thread::sleep(Duration::from_millis(200));
+        p.tick();
+        assert_eq!(offset(&p, "box"), (0.0, 0.0));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

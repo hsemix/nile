@@ -1,0 +1,11 @@
+<!doctype html><meta charset="utf-8"><title>scroll-snap</title>
+<style>
+body{margin:16px;font:14px sans-serif}
+.rail{display:flex;gap:12px;width:420px;overflow-x:auto;scroll-snap-type:x mandatory;scroll-padding:0 12px;padding:8px 12px 12px;background:#eee;border-radius:10px}
+.rail > div{flex:none;width:200px;height:120px;border-radius:8px;color:#fff;font-size:22px;display:flex;align-items:center;justify-content:center;scroll-snap-align:start}
+.col{width:240px;height:150px;overflow-y:auto;scroll-snap-type:y proximity;margin-top:16px;background:#eef;border-radius:10px}
+.col section{height:90px;scroll-snap-align:center;display:flex;align-items:center;justify-content:center;font-size:18px;border-bottom:1px solid #99c}
+</style>
+<p>Scroll the cards sideways (wheel or trackpad): they settle on a card, with a 12px scroll-padding.</p>
+<div class="rail"><div style="background:#e94">1</div><div style="background:#4a8">2</div><div style="background:#36c">3</div><div style="background:#a4c">4</div><div style="background:#c44">5</div></div>
+<div class="col"><section>A</section><section>B</section><section>C</section><section>D</section><section>E</section></div>

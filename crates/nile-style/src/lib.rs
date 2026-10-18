@@ -8,6 +8,7 @@
 //! - inheritance of text properties
 
 mod anim;
+mod color;
 mod colors;
 mod gradient;
 mod grid;
@@ -126,6 +127,24 @@ pub enum BorderStyle {
     Solid,
     Dashed,
     Dotted,
+}
+
+/// `scroll-snap-type`: which axes snap and whether it is `mandatory` (else `proximity`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScrollSnap {
+    pub x: bool,
+    pub y: bool,
+    pub mandatory: bool,
+}
+
+/// `scroll-snap-align` on one axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SnapAlign {
+    #[default]
+    None,
+    Start,
+    Center,
+    End,
 }
 
 /// `word-break`.
@@ -629,6 +648,11 @@ pub struct ComputedStyle {
     pub counter_reset: Vec<(String, i32)>,
     pub counter_increment: Vec<(String, i32)>,
     pub counter_set: Vec<(String, i32)>,
+    pub scroll_snap_type: ScrollSnap,
+    /// `scroll-snap-align` as (horizontal, vertical).
+    pub scroll_snap_align: (SnapAlign, SnapAlign),
+    /// `scroll-padding`: the part of a scroll container's edges snapping ignores.
+    pub scroll_padding: Edges<f32>,
     /// `word-spacing` in px (inherited).
     pub word_spacing: f32,
     pub word_break: WordBreak,
@@ -809,6 +833,9 @@ impl Default for ComputedStyle {
             mask_image: None,
             object_fit: ObjectFit::Fill,
             object_position: (StopPos::Fraction(0.5), StopPos::Fraction(0.5)),
+            scroll_snap_type: ScrollSnap::default(),
+            scroll_snap_align: (SnapAlign::None, SnapAlign::None),
+            scroll_padding: Edges::default(),
             word_spacing: 0.0,
             word_break: WordBreak::Normal,
             overflow_wrap: OverflowWrap::Normal,
@@ -1637,6 +1664,9 @@ impl ComputedStyle {
         a.pointer_events = other.pointer_events;
         a.outline = other.outline;
         a.text_shadow = other.text_shadow.clone();
+        a.scroll_snap_type = other.scroll_snap_type;
+        a.scroll_snap_align = other.scroll_snap_align;
+        a.scroll_padding = other.scroll_padding;
         a.backdrop_filter = other.backdrop_filter.clone();
         a.object_fit = other.object_fit;
         a.object_position = other.object_position;
@@ -1970,7 +2000,9 @@ fn matching_decls<'a>(
                     .map(|spec| (spec, i, rule))
             })
             .collect();
-        matched.sort_by_key(|(spec, i, _)| (*spec, *i));
+        // Unlayered rules beat layered ones; among layers the later one wins; then specificity and order.
+        let rank = |r: &Rule| if r.layer == 0 { u32::MAX } else { r.layer };
+        matched.sort_by_key(|(spec, i, r)| (rank(r), *spec, *i));
         decls.extend(matched.iter().flat_map(|(_, _, r)| r.declarations.iter()));
     }
     decls
@@ -3414,6 +3446,44 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 _ => s.counter_set = list,
             }
         }
+        // `scroll-snap-type: none | [x | y | block | inline | both] [mandatory | proximity]`
+        "scroll-snap-type" => {
+            let mut snap = ScrollSnap::default();
+            for x in v {
+                match x.ident() {
+                    Some("x" | "inline") => snap.x = true,
+                    Some("y" | "block") => snap.y = true,
+                    Some("both") => (snap.x, snap.y) = (true, true),
+                    Some("mandatory") => snap.mandatory = true,
+                    _ => {}
+                }
+            }
+            s.scroll_snap_type = snap;
+        }
+        // `scroll-snap-align: <block> [<inline>]`
+        "scroll-snap-align" => {
+            let align = |x: &Value| match x.ident() {
+                Some("start") => Some(SnapAlign::Start),
+                Some("center") => Some(SnapAlign::Center),
+                Some("end") => Some(SnapAlign::End),
+                Some("none") => Some(SnapAlign::None),
+                _ => None,
+            };
+            if let Some(block) = first.and_then(align) {
+                let inline = v.get(1).and_then(align).unwrap_or(block);
+                s.scroll_snap_align = (inline, block);
+            }
+        }
+        "scroll-padding" => {
+            let vals: Option<Vec<f32>> = v.iter().map(|x| px(x, fs)).collect();
+            if let Some(e) = vals.as_deref().and_then(edges) {
+                s.scroll_padding = e;
+            }
+        }
+        "scroll-padding-top" => s.scroll_padding.top = p(first).unwrap_or(s.scroll_padding.top),
+        "scroll-padding-right" => s.scroll_padding.right = p(first).unwrap_or(s.scroll_padding.right),
+        "scroll-padding-bottom" => s.scroll_padding.bottom = p(first).unwrap_or(s.scroll_padding.bottom),
+        "scroll-padding-left" => s.scroll_padding.left = p(first).unwrap_or(s.scroll_padding.left),
         "filter" => s.filter = parse_filter(&d.raw, s.color),
         "backdrop-filter" | "-webkit-backdrop-filter" => s.backdrop_filter = parse_filter(&d.raw, s.color),
         "clip-path" => {
@@ -4216,6 +4286,70 @@ mod tests {
         assert_eq!(before("l2"), "1.1 ");
         assert_eq!(before("l3"), "1.2 ");
         assert_eq!(before("l4"), "2 ");
+    }
+
+    #[test]
+    fn css_nesting_builds_rules_from_the_parent_selector() {
+        let doc = Document::parse(
+            r#"<style>
+                 .card { color: rgb(255, 0, 0); padding: 1px;
+                   &.on { color: rgb(0, 128, 0) }
+                   .title { font-size: 20px }
+                   > p { margin-top: 7px }
+                   @media (min-width: 1px) { padding: 3px }
+                   & + & { margin-bottom: 5px }
+                 }
+                 .a, .b { & .x { width: 11px } }
+               </style>
+               <div class="card on" id="c"><span class="title" id="t">x</span><p id="p">y</p></div>
+               <div class="card" id="d"></div><div class="card" id="e"></div>
+               <div class="a"><i class="x" id="xa"></i></div><div class="b"><i class="x" id="xb"></i></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let st = |id: &str| styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        assert_eq!(st("c").color, Color::rgb(0, 128, 0), "&.on");
+        assert_eq!(st("d").color, Color::rgb(255, 0, 0));
+        assert_eq!(st("c").padding.top, 3.0, "nested @media");
+        assert_eq!(st("t").font_size, 20.0, "a descendant");
+        assert_eq!(st("p").margin.top, Length::Px(7.0), "a child through a leading combinator");
+        assert_eq!(st("e").margin.bottom, Length::Px(5.0), "& + & is a sibling of the same class");
+        assert_eq!((st("xa").width, st("xb").width), (Length::Px(11.0), Length::Px(11.0)), "a selector list parent");
+    }
+
+    #[test]
+    fn layers_order_the_cascade_before_specificity() {
+        let doc = Document::parse(
+            r#"<style>
+                 @layer base, theme;
+                 @layer theme { p { color: rgb(0, 0, 255) } }
+                 @layer base { #x { color: rgb(0, 255, 0) } p { margin-top: 2px } }
+                 .u { margin-top: 9px }
+               </style><p id="x" class="u">a</p><p id="y">b</p>"#,
+        );
+        let styles = compute_styles(&doc);
+        let st = |id: &str| styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        assert_eq!(st("x").color, Color::rgb(0, 0, 255), "the later layer wins over a more specific rule in an earlier one");
+        assert_eq!(st("x").margin.top, Length::Px(9.0), "unlayered beats layered");
+        assert_eq!(st("y").margin.top, Length::Px(2.0));
+    }
+
+    #[test]
+    fn modern_colours_and_math_functions_resolve() {
+        let doc = Document::parse(
+            r#"<div id="a" style="color: color-mix(in srgb, rgb(255, 0, 0), rgb(0, 0, 255)); width: round(52px, 10px); height: calc(pow(2, 3) * 10px); margin-left: mod(130px, 100px); padding-left: 5ch; background: oklch(1 0 0)"></div>
+               <div id="b" style="color: light-dark(rgb(1, 2, 3), rgb(9, 8, 7)); color-scheme: dark; width: 50dvw; margin-top: env(safe-area-inset-top, 4px)"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let st = |id: &str| styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        let a = st("a");
+        assert!(a.color.r.abs_diff(128) <= 1 && a.color.b.abs_diff(128) <= 1);
+        assert_eq!((a.width, a.height, a.margin.left), (Length::Px(50.0), Length::Px(80.0), Length::Px(30.0)));
+        assert_eq!(a.padding.left, 5.0 * 0.5 * 16.0, "ch is half an em");
+        assert_eq!(a.background, Some(Color::rgb(255, 255, 255)));
+        let b = st("b");
+        assert_eq!(b.color, Color::rgb(9, 8, 7), "light-dark follows the element's own color-scheme");
+        assert_eq!(b.margin.top, Length::Px(0.0));
+        assert!(matches!(b.width, Length::Px(w) if w > 0.0));
     }
 
     #[test]
