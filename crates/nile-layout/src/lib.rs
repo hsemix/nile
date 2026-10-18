@@ -3506,13 +3506,13 @@ fn is_flex_or_grid(s: &ComputedStyle) -> bool {
 /// Whether a box is a stacking context: positioned with a `z-index` (or a flex/grid item with
 /// one), faded, transformed or `fixed`. Its descendants are painted as a unit.
 fn forms_context(s: &ComputedStyle, flex_item: bool) -> bool {
-    (s.z_index.is_some() && (s.position != Position::Static || flex_item)) || s.opacity < 1.0 || !s.transform.is_empty() || s.position == Position::Fixed
+    (s.z_index.is_some() && (s.position != Position::Static || flex_item)) || s.opacity < 1.0 || !s.transform.is_empty() || s.layered() || s.position == Position::Fixed
 }
 
 /// Boxes that clip, fade, transform or stick their contents: a positioned descendant inside
 /// one can't be painted outside it, so it isn't hoisted past it.
 fn confines(s: &ComputedStyle) -> bool {
-    s.clips() || s.opacity < 1.0 || !s.transform.is_empty() || s.position == Position::Sticky
+    s.clips() || s.opacity < 1.0 || !s.transform.is_empty() || s.layered() || s.position == Position::Sticky
 }
 
 /// The descendants of `n` that belong in the paint order of the stacking context `n` is (or
@@ -3582,7 +3582,7 @@ fn paint_layer(s: &ComputedStyle, flex_item: bool) -> (u8, i32) {
         Some(z) if (positioned || flex_item) && z < 0 => (0, z),
         Some(z) if (positioned || flex_item) && z > 0 => (3, z),
         Some(_) if flex_item => (2, 0),
-        _ if positioned || s.opacity < 1.0 || !s.transform.is_empty() => (2, 0),
+        _ if positioned || s.opacity < 1.0 || !s.transform.is_empty() || s.layered() => (2, 0),
         _ => (1, 0),
     }
 }

@@ -7156,6 +7156,36 @@ cd</textarea>
     }
 
     #[test]
+    fn filters_clip_paths_masks_and_blend_modes_change_the_pixels() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0;background:#ffffff">
+               <div style="position:absolute;left:0;top:0;width:40px;height:40px;background:#ff0000;filter:grayscale(1)"></div>
+               <div style="position:absolute;left:50px;top:0;width:40px;height:40px;background:#ff0000;clip-path:circle(50%)"></div>
+               <div style="position:absolute;left:100px;top:0;width:40px;height:40px;background:#000000;mask-image:linear-gradient(90deg,#000,transparent)"></div>
+               <div style="position:absolute;left:150px;top:0;width:40px;height:40px;background:#ffff00"></div>
+               <div style="position:absolute;left:150px;top:0;width:40px;height:40px;background:#00ffff;mix-blend-mode:multiply"></div>
+               <div style="position:absolute;left:200px;top:0;width:40px;height:40px;background:#ff0000;visibility:hidden"></div>
+               </body>"#,
+            "effects",
+        );
+        let mut buf = vec![0u8; 300 * 60 * 4];
+        p.paint(&mut buf, 300, 60, 1.0);
+        let px = |x: u32, y: u32| {
+            let at = ((y * 300 + x) * 4) as usize;
+            [buf[at + 2], buf[at + 1], buf[at]]
+        };
+        let gray = px(20, 20);
+        assert!(gray[0].abs_diff(gray[1]) < 3 && gray[1].abs_diff(gray[2]) < 3 && gray[0] > 30 && gray[0] < 120, "grayscale: {gray:?}");
+        assert_eq!(px(70, 20), [255, 0, 0], "inside the circle");
+        assert_eq!(px(51, 1), [255, 255, 255], "the circle's corner is clipped");
+        let (left, right) = (px(101, 20), px(138, 20));
+        assert!(left[0] < 40 && right[0] > 215, "the mask fades the black box out to the right: {left:?} {right:?}");
+        assert_eq!(px(170, 20), [0, 255, 0], "yellow multiplied by cyan is green");
+        assert_eq!(px(220, 20), [255, 255, 255], "visibility: hidden draws nothing");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn canvas_draws_an_img_by_its_src() {
         // A 1x1 red PNG as a data URL.
         let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";

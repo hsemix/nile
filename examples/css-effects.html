@@ -1,0 +1,161 @@
+<!doctype html><meta charset="utf-8" /><title>
+  filters, blending, clipping, masks, object-fit
+</title>
+<style>
+  body {
+    margin: 12px;
+    font: 13px sans-serif;
+    width: 640px;
+    background: #f3f1ea;
+  }
+  h4 {
+    margin: 10px 0 4px;
+    color: #555;
+  }
+  .row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .tile {
+    width: 100px;
+    height: 70px;
+    background: linear-gradient(135deg, #e94, #36c);
+    color: #fff;
+    font-weight: bold;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+  }
+  .cap {
+    font-size: 11px;
+    color: #555;
+    text-align: center;
+  }
+  img.i {
+    width: 120px;
+    height: 70px;
+    border: 1px solid #999;
+    background: #ddd;
+  }
+  .glass {
+    position: relative;
+    width: 260px;
+    height: 90px;
+    background: linear-gradient(90deg, #e33 0 33%, #3a3 33% 66%, #33e 66%);
+    border-radius: 8px;
+  }
+  .glass div {
+    position: absolute;
+    left: 30px;
+    top: 20px;
+    width: 200px;
+    height: 50px;
+    border-radius: 10px;
+    backdrop-filter: blur(6px) brightness(1.2);
+    background: rgba(255, 255, 255, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    color: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .blend {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+  }
+</style>
+<h4>filter</h4>
+<div class="row">
+  <div><div class="tile">none</div></div>
+  <div><div class="tile" style="filter: blur(2px)">blur</div></div>
+  <div><div class="tile" style="filter: grayscale(1)">gray</div></div>
+  <div><div class="tile" style="filter: sepia(1)">sepia</div></div>
+  <div><div class="tile" style="filter: hue-rotate(90deg)">hue</div></div>
+  <div><div class="tile" style="filter: invert(1)">invert</div></div>
+  <div>
+    <div class="tile" style="filter: saturate(3) contrast(1.2)">sat</div>
+  </div>
+  <div><div class="tile" style="filter: brightness(1.5)">bright</div></div>
+  <div>
+    <div
+      class="tile"
+      style="filter: drop-shadow(4px 6px 4px rgba(0, 0, 0, 0.6))"
+    >
+      shadow
+    </div>
+  </div>
+</div>
+<h4>backdrop-filter</h4>
+<div class="glass"><div>frosted glass</div></div>
+<h4>mix-blend-mode</h4>
+<div
+  class="row"
+  style="background: #fc6; padding: 8px; width: 300px; isolation: isolate"
+>
+  <div class="blend" style="background: #e33; mix-blend-mode: multiply"></div>
+  <div
+    class="blend"
+    style="background: #3a3; mix-blend-mode: multiply; margin-left: -40px"
+  ></div>
+  <div
+    class="blend"
+    style="background: #33e; mix-blend-mode: screen; margin-left: -40px"
+  ></div>
+</div>
+<h4>clip-path / mask-image</h4>
+<div class="row">
+  <div class="tile" style="clip-path: circle(40%)">circle</div>
+  <div class="tile" style="clip-path: polygon(50% 0, 100% 100%, 0 100%)">
+    triangle
+  </div>
+  <div class="tile" style="clip-path: inset(10px 20px)">inset</div>
+  <div class="tile" style="clip-path: ellipse(50% 30% at 50% 50%)">ellipse</div>
+  <div
+    class="tile"
+    style="mask-image: linear-gradient(90deg, #000, transparent)"
+  >
+    mask
+  </div>
+  <div
+    class="tile"
+    style="
+      -webkit-mask-image: radial-gradient(circle, #000 40%, transparent 70%);
+    "
+  >
+    radial
+  </div>
+</div>
+<h4>object-fit</h4>
+<div class="row">
+  <div>
+    <img class="i" src="images/photo.png" style="object-fit: fill" />
+    <div class="cap">fill</div>
+  </div>
+  <div>
+    <img class="i" src="images/photo.png" style="object-fit: contain" />
+    <div class="cap">contain</div>
+  </div>
+  <div>
+    <img class="i" src="images/photo.png" style="object-fit: cover" />
+    <div class="cap">cover</div>
+  </div>
+  <div>
+    <img
+      class="i"
+      src="images/photo.png"
+      style="object-fit: none; object-position: left top"
+    />
+    <div class="cap">none, left top</div>
+  </div>
+  <div>
+    <img
+      class="i"
+      src="images/photo.png"
+      style="object-fit: cover; object-position: 0% 100%"
+    />
+    <div class="cap">cover, bottom</div>
+  </div>
+</div>

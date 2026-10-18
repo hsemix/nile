@@ -107,16 +107,16 @@ impl Renderer {
         let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection, dom_caret, preedit, skip, .. } = *overlay;
         // Boxes that wrap their subtree (an `overflow` clip, or an `opacity` layer) end
         // where the subtree does. `None` is an opacity layer.
-        let mut open: Vec<(usize, Option<&LayoutBox>)> = Vec::new();
+        let mut open: Vec<Close> = Vec::new();
         let mut jump = 0;
         for (i, b) in tree.boxes.iter().enumerate().skip(from).take(to.saturating_sub(from)) {
             if i < jump {
                 continue;
             }
-            while open.last().is_some_and(|(end, _)| i >= *end) {
-                let (_, container) = open.pop().expect("checked above");
-                canvas.restore();
-                if let Some(container) = container {
+            while open.last().is_some_and(|c| i >= c.end) {
+                let close = open.pop().expect("checked above");
+                close.finish(canvas);
+                if let Some(container) = close.container {
                     paint_scrollbars(canvas, container, offsets, styles, overlay);
                 }
             }
@@ -134,23 +134,40 @@ impl Renderer {
                         // Pinned to the viewport: drop the page scroll and any ancestor transform.
                         canvas.save();
                         canvas.set_matrix(&skia_safe::M44::from(base));
-                        open.push((b.subtree_end.max(i + 1), None));
+                        open.push(Close::restore(b.subtree_end.max(i + 1)));
                     }
                     let dy = b.sticky_shift(scroll_y, viewport.1);
                     if dy != 0.0 {
                         canvas.save();
                         canvas.translate((0.0, dy));
-                        open.push((b.subtree_end.max(i + 1), None));
+                        open.push(Close::restore(b.subtree_end.max(i + 1)));
                     }
-                    let opacity = styles.get(b.node).opacity;
-                    if opacity < 1.0 {
-                        canvas.save_layer_alpha_f(None, opacity);
-                        open.push((b.subtree_end.max(i + 1), None));
+                    let st = styles.get(b.node);
+                    let end = b.subtree_end.max(i + 1);
+                    // Opacity, filters, blend modes, isolation and masks paint the subtree as a unit.
+                    if st.opacity < 1.0 || !st.filter.is_empty() || st.blend != nile_style::Blend::Normal || st.isolate || st.mask_image.is_some() {
+                        let mut paint = Paint::default();
+                        paint.set_alpha_f(st.opacity);
+                        if let Some(f) = filter_chain(&st.filter) {
+                            paint.set_image_filter(f);
+                        }
+                        paint.set_blend_mode(blend_mode(st.blend));
+                        canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().paint(&paint));
+                        open.push(Close::restore(end));
                     }
                     if let Some(t) = &b.transform {
                         canvas.save();
                         canvas.concat(&skia_safe::Matrix::new_all(t.a, t.c, t.e, t.b, t.d, t.f, t.g, t.h, t.i));
-                        open.push((b.subtree_end.max(i + 1), None));
+                        open.push(Close::restore(b.subtree_end.max(i + 1)));
+                    }
+                    if let Some(path) = st.clip_path.as_ref().and_then(|c| clip_path_of(c, st, b.rect)) {
+                        canvas.save();
+                        canvas.clip_path(&path, skia_safe::ClipOp::Intersect, true);
+                        open.push(Close::restore(end));
+                    }
+                    if let Some(shader) = st.mask_image.as_ref().and_then(|g| gradient_shader(g, skia_rect(b.rect))) {
+                        // Drawn when the subtree is done: keeps the layer's pixels where the mask is opaque.
+                        open.push(Close { end, container: None, restore: false, mask: Some((skia_rect(b.rect), shader)) });
                     }
                     if b.backface_hidden && canvas_faces_away(canvas) {
                         // Turned away (a flipped card's other side): neither it nor its content shows.
@@ -159,6 +176,14 @@ impl Renderer {
                     }
                     let shown = styles.get(b.node).visible;
                     if shown {
+                        if let Some(f) = filter_chain(&st.backdrop_filter) {
+                            // What is behind the box, filtered, inside its (rounded) border box.
+                            canvas.save();
+                            canvas.clip_rrect(round_rect(skia_rect(b.rect), st.corner_radii(b.rect.width, b.rect.height)), skia_safe::ClipOp::Intersect, true);
+                            canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().backdrop(&f));
+                            canvas.restore();
+                            canvas.restore();
+                        }
                         self.paint_box(canvas, b, styles);
                     }
                     if let Some(m) = tree.marker(b.node).filter(|_| shown) {
@@ -191,7 +216,7 @@ impl Renderer {
                             canvas.clip_rect(skia_rect(sb.clip), None, true);
                         }
                         canvas.translate((-ox, -oy));
-                        open.push((b.subtree_end, Some(b)));
+                        open.push(Close { end: b.subtree_end, container: Some(b), restore: true, mask: None });
                     }
                 }
                 BoxContent::Text(content) => {
@@ -220,9 +245,9 @@ impl Renderer {
                 }
             }
         }
-        while let Some((_, container)) = open.pop() {
-            canvas.restore();
-            if let Some(container) = container {
+        while let Some(close) = open.pop() {
+            close.finish(canvas);
+            if let Some(container) = close.container {
                 paint_scrollbars(canvas, container, offsets, styles, overlay);
             }
         }
@@ -513,10 +538,36 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
         if dest.width() <= 0.0 || dest.height() <= 0.0 {
             return;
         }
-        let Some(img) = self.picture(data, (dest.width(), dest.height()), device_scale(canvas)) else { return };
+        // `object-fit` / `object-position`: where the picture sits inside the content box.
+        let (iw, ih) = (data.width as f32, data.height as f32);
+        let (dw, dh) = (dest.width(), dest.height());
+        let contain = if iw > 0.0 && ih > 0.0 { (dw / iw).min(dh / ih) } else { 1.0 };
+        let (w, h) = match s.object_fit {
+            _ if iw <= 0.0 || ih <= 0.0 => (dw, dh),
+            nile_style::ObjectFit::Fill => (dw, dh),
+            nile_style::ObjectFit::Contain => (iw * contain, ih * contain),
+            nile_style::ObjectFit::Cover => {
+                let k = (dw / iw).max(dh / ih);
+                (iw * k, ih * k)
+            }
+            nile_style::ObjectFit::None => (iw, ih),
+            nile_style::ObjectFit::ScaleDown => {
+                let k = contain.min(1.0);
+                (iw * k, ih * k)
+            }
+        };
+        let at = |p: StopPos, free: f32| match p {
+            StopPos::Px(px) => px,
+            StopPos::Fraction(f) => f * free,
+        };
+        let target = Rect::from_xywh(dest.left + at(s.object_position.0, dw - w), dest.top + at(s.object_position.1, dh - h), w, h);
+        let Some(img) = self.picture(data, (w, h), device_scale(canvas)) else { return };
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         canvas.save();
+        if s.object_fit != nile_style::ObjectFit::Fill {
+            canvas.clip_rect(dest, None, true);
+        }
         if s.has_rounding() {
             // The picture follows the padding edge: each corner's radius less the border and padding there.
             let radii = s.corner_radii(r.width, r.height);
@@ -525,7 +576,7 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
             canvas.clip_rrect(RRect::new_rect_radii(dest, &[shrunk[0], shrunk[1], shrunk[2], shrunk[3]]), skia_safe::ClipOp::Intersect, true);
         }
         let sampling = skia_safe::SamplingOptions::new(skia_safe::FilterMode::Linear, skia_safe::MipmapMode::Linear);
-        canvas.draw_image_rect_with_sampling_options(&img, None, dest, sampling, &paint);
+        canvas.draw_image_rect_with_sampling_options(&img, None, target, sampling, &paint);
         canvas.restore();
     }
 
@@ -1051,6 +1102,156 @@ fn paint_decorated(
         }
     }
     canvas.restore();
+}
+
+/// An entry of the stack of boxes whose subtree is being painted: what to undo when the subtree ends.
+struct Close<'a> {
+    /// Paint-list index where the subtree ends.
+    end: usize,
+    /// A scroll container whose bars are drawn after its content.
+    container: Option<&'a LayoutBox>,
+    restore: bool,
+    /// `mask-image`: the rectangle and gradient to multiply the layer by.
+    mask: Option<(Rect, skia_safe::Shader)>,
+}
+
+impl Close<'_> {
+    fn restore(end: usize) -> Self {
+        Close { end, container: None, restore: true, mask: None }
+    }
+
+    fn finish(&self, canvas: &Canvas) {
+        if let Some((rect, shader)) = &self.mask {
+            let mut paint = Paint::default();
+            paint.set_shader(shader.clone());
+            paint.set_blend_mode(skia_safe::BlendMode::DstIn);
+            canvas.draw_rect(*rect, &paint);
+        }
+        if self.restore {
+            canvas.restore();
+        }
+    }
+}
+
+fn blend_mode(b: nile_style::Blend) -> skia_safe::BlendMode {
+    use nile_style::Blend as B;
+    use skia_safe::BlendMode as M;
+    match b {
+        B::Normal => M::SrcOver,
+        B::Multiply => M::Multiply,
+        B::Screen => M::Screen,
+        B::Overlay => M::Overlay,
+        B::Darken => M::Darken,
+        B::Lighten => M::Lighten,
+        B::ColorDodge => M::ColorDodge,
+        B::ColorBurn => M::ColorBurn,
+        B::HardLight => M::HardLight,
+        B::SoftLight => M::SoftLight,
+        B::Difference => M::Difference,
+        B::Exclusion => M::Exclusion,
+        B::Hue => M::Hue,
+        B::Saturation => M::Saturation,
+        B::Color => M::Color,
+        B::Luminosity => M::Luminosity,
+    }
+}
+
+/// The 4x5 colour matrix (row-major, offsets in 0..1) for a CSS colour filter function.
+fn filter_matrix(f: &nile_style::FilterFn) -> Option<[f32; 20]> {
+    use nile_style::FilterFn as F;
+    let rgb = |m: [[f32; 3]; 3], off: [f32; 3]| {
+        [m[0][0], m[0][1], m[0][2], 0.0, off[0], m[1][0], m[1][1], m[1][2], 0.0, off[1], m[2][0], m[2][1], m[2][2], 0.0, off[2], 0.0, 0.0, 0.0, 1.0, 0.0]
+    };
+    Some(match *f {
+        F::Brightness(a) => rgb([[a, 0.0, 0.0], [0.0, a, 0.0], [0.0, 0.0, a]], [0.0; 3]),
+        F::Contrast(a) => {
+            let o = 0.5 - 0.5 * a;
+            rgb([[a, 0.0, 0.0], [0.0, a, 0.0], [0.0, 0.0, a]], [o; 3])
+        }
+        F::Invert(a) => {
+            let k = 1.0 - 2.0 * a;
+            rgb([[k, 0.0, 0.0], [0.0, k, 0.0], [0.0, 0.0, k]], [a; 3])
+        }
+        F::Grayscale(a) => {
+            let s = 1.0 - a;
+            rgb(
+                [[0.2126 + 0.7874 * s, 0.7152 - 0.7152 * s, 0.0722 - 0.0722 * s], [0.2126 - 0.2126 * s, 0.7152 + 0.2848 * s, 0.0722 - 0.0722 * s], [0.2126 - 0.2126 * s, 0.7152 - 0.7152 * s, 0.0722 + 0.9278 * s]],
+                [0.0; 3],
+            )
+        }
+        F::Sepia(a) => {
+            let s = 1.0 - a;
+            rgb(
+                [[0.393 + 0.607 * s, 0.769 - 0.769 * s, 0.189 - 0.189 * s], [0.349 - 0.349 * s, 0.686 + 0.314 * s, 0.168 - 0.168 * s], [0.272 - 0.272 * s, 0.534 - 0.534 * s, 0.131 + 0.869 * s]],
+                [0.0; 3],
+            )
+        }
+        F::Saturate(s) => rgb([[0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s], [0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s], [0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s]], [0.0; 3]),
+        F::HueRotate(deg) => {
+            let (sin, cos) = deg.to_radians().sin_cos();
+            rgb(
+                [
+                    [0.213 + cos * 0.787 - sin * 0.213, 0.715 - cos * 0.715 - sin * 0.715, 0.072 - cos * 0.072 + sin * 0.928],
+                    [0.213 - cos * 0.213 + sin * 0.143, 0.715 + cos * 0.285 + sin * 0.140, 0.072 - cos * 0.072 - sin * 0.283],
+                    [0.213 - cos * 0.213 - sin * 0.787, 0.715 - cos * 0.715 + sin * 0.715, 0.072 + cos * 0.928 + sin * 0.072],
+                ],
+                [0.0; 3],
+            )
+        }
+        F::Opacity(a) => [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, a, 0.0],
+        F::Blur(_) | F::DropShadow { .. } => return None,
+    })
+}
+
+/// A Skia image filter running the CSS `filter` functions in order; `None` for an empty list.
+fn filter_chain(list: &[nile_style::FilterFn]) -> Option<skia_safe::ImageFilter> {
+    use nile_style::FilterFn as F;
+    use skia_safe::image_filters;
+    let mut chain: Option<skia_safe::ImageFilter> = None;
+    for f in list {
+        let next = match *f {
+            F::Blur(sigma) if sigma > 0.0 => image_filters::blur((sigma, sigma), None, chain.clone(), None),
+            F::DropShadow { dx, dy, blur, color } => {
+                let c = skia_safe::Color4f::new(f32::from(color.r) / 255.0, f32::from(color.g) / 255.0, f32::from(color.b) / 255.0, f32::from(color.a) / 255.0);
+                image_filters::drop_shadow((dx, dy), (blur / 2.0, blur / 2.0), c, None, chain.clone(), None)
+            }
+            ref other => filter_matrix(other).and_then(|m| image_filters::color_filter(skia_safe::color_filters::matrix_row_major(&m, None), chain.clone(), None)),
+        };
+        chain = next.or(chain);
+    }
+    chain
+}
+
+/// A `clip-path` basic shape as a path in layout coordinates, for the box `r`.
+fn clip_path_of(c: &nile_style::ShapeOutside, s: &nile_style::ComputedStyle, r: LRect) -> Option<skia_safe::Path> {
+    use nile_style::{ResolvedShape, ShapeBox};
+    let (b, p) = (s.border_width, s.padding);
+    let (x, y, w, h) = match c.reference {
+        ShapeBox::ContentBox => (r.x + b.left + p.left, r.y + b.top + p.top, r.width - b.left - b.right - p.left - p.right, r.height - b.top - b.bottom - p.top - p.bottom),
+        ShapeBox::PaddingBox => (r.x + b.left, r.y + b.top, r.width - b.left - b.right, r.height - b.top - b.bottom),
+        _ => (r.x, r.y, r.width, r.height),
+    };
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let mut path = skia_safe::PathBuilder::new();
+    match c.shape.resolve(w, h, 0.0) {
+        ResolvedShape::Ellipse { cx, cy, rx, ry } => {
+            path.add_oval(Rect::from_ltrb(x + cx - rx, y + cy - ry, x + cx + rx, y + cy + ry), None, None);
+        }
+        ResolvedShape::Rect { x0, y0, x1, y1 } => {
+            path.add_rect(Rect::from_ltrb(x + x0, y + y0, x + x1, y + y1), None, None);
+        }
+        ResolvedShape::Polygon(points) => {
+            let mut it = points.into_iter().map(|(px, py)| Point::new(x + px, y + py));
+            path.move_to(it.next()?);
+            for pt in it {
+                path.line_to(pt);
+            }
+            path.close();
+        }
+    }
+    Some(path.detach())
 }
 
 /// `caret-color`, else the text color.

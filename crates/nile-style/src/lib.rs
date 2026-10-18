@@ -14,8 +14,10 @@ mod grid;
 mod page;
 mod parse;
 mod selector;
+mod effects;
 mod shape;
 mod system;
+pub use effects::{parse_filter, Blend, FilterFn, ObjectFit};
 pub use shape::{Dim as ShapeDim, RefBox as ShapeBox, Resolved as ResolvedShape, Shape, ShapeOutside};
 
 use nile_dom::{Document, NodeId, NodeKind};
@@ -610,6 +612,19 @@ pub struct ComputedStyle {
     /// `order` of a flex or grid item.
     pub order: i32,
     pub outline: Outline,
+    /// `filter` functions, applied to the element and its subtree.
+    pub filter: Vec<FilterFn>,
+    /// `backdrop-filter`: applied to what is behind the element, inside its border box.
+    pub backdrop_filter: Vec<FilterFn>,
+    /// `clip-path` basic shape (its reference box defaults to the border box).
+    pub clip_path: Option<ShapeOutside>,
+    pub blend: Blend,
+    /// `isolation: isolate`.
+    pub isolate: bool,
+    /// `mask-image` / `-webkit-mask-image` gradient, over the border box.
+    pub mask_image: Option<Gradient>,
+    pub object_fit: ObjectFit,
+    pub object_position: (StopPos, StopPos),
     /// `word-spacing` in px (inherited).
     pub word_spacing: f32,
     pub word_break: WordBreak,
@@ -779,6 +794,14 @@ impl Default for ComputedStyle {
             pointer_events: true,
             order: 0,
             outline: Outline::default(),
+            filter: Vec::new(),
+            backdrop_filter: Vec::new(),
+            clip_path: None,
+            blend: Blend::Normal,
+            isolate: false,
+            mask_image: None,
+            object_fit: ObjectFit::Fill,
+            object_position: (StopPos::Fraction(0.5), StopPos::Fraction(0.5)),
             word_spacing: 0.0,
             word_break: WordBreak::Normal,
             overflow_wrap: OverflowWrap::Normal,
@@ -1484,6 +1507,12 @@ impl ComputedStyle {
     /// Whether `other` differs from `self` only in properties that change how a box is painted,
     /// not where it goes or how it is shaped: colors, shadows, radius, backgrounds, transforms
     /// and opacity. Laid-out boxes stay valid across such a change (see `LayoutTree::refresh_paint`).
+    /// The box is painted as a unit through a layer or clip: a filter, blend mode, mask,
+    /// `clip-path` or isolation. Like `opacity < 1` it confines its descendants.
+    pub fn layered(&self) -> bool {
+        !self.filter.is_empty() || self.blend != Blend::Normal || self.isolate || self.mask_image.is_some() || self.clip_path.is_some()
+    }
+
     pub fn same_layout(&self, other: &ComputedStyle) -> bool {
         self.same_layout_with(other, false)
     }
@@ -1522,6 +1551,17 @@ impl ComputedStyle {
         a.pointer_events = other.pointer_events;
         a.outline = other.outline;
         a.text_shadow = other.text_shadow.clone();
+        a.backdrop_filter = other.backdrop_filter.clone();
+        a.object_fit = other.object_fit;
+        a.object_position = other.object_position;
+        // Whether a box is layered (filter, blend, mask, clip) decides its paint order; which one doesn't.
+        if a.layered() == other.layered() {
+            a.filter = other.filter.clone();
+            a.clip_path = other.clip_path.clone();
+            a.blend = other.blend;
+            a.isolate = other.isolate;
+            a.mask_image = other.mask_image.clone();
+        }
         a.caret_color = other.caret_color;
         a.popup_position = other.popup_position;
         a.break_before = other.break_before;
@@ -3189,6 +3229,48 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 _ => s.aspect_ratio,
             };
         }
+        "filter" => s.filter = parse_filter(&d.raw, s.color),
+        "backdrop-filter" | "-webkit-backdrop-filter" => s.backdrop_filter = parse_filter(&d.raw, s.color),
+        "clip-path" => {
+            // A shape alone (`circle(40%)`) refers to the border box; `none` and url()s clear it.
+            s.clip_path = ShapeOutside::parse(&d.raw).map(|mut c| {
+                if c.reference == ShapeBox::MarginBox {
+                    c.reference = ShapeBox::BorderBox;
+                }
+                c
+            });
+        }
+        "mix-blend-mode" => {
+            if let Some(b) = first.and_then(Value::ident).and_then(Blend::parse) {
+                s.blend = b;
+            }
+        }
+        "isolation" => match first.and_then(Value::ident) {
+            Some("isolate") => s.isolate = true,
+            Some("auto") => s.isolate = false,
+            _ => {}
+        },
+        "mask-image" | "-webkit-mask-image" | "mask" | "-webkit-mask" => {
+            s.mask_image = v.iter().find_map(|x| match x {
+                Value::Gradient(g) => Some((**g).clone()),
+                _ => None,
+            });
+        }
+        "object-fit" => {
+            s.object_fit = match first.and_then(Value::ident) {
+                Some("fill") => ObjectFit::Fill,
+                Some("contain") => ObjectFit::Contain,
+                Some("cover") => ObjectFit::Cover,
+                Some("none") => ObjectFit::None,
+                Some("scale-down") => ObjectFit::ScaleDown,
+                _ => s.object_fit,
+            }
+        }
+        "object-position" => {
+            if let Some(pos) = bg_position(v, fs) {
+                s.object_position = pos;
+            }
+        }
         "outline" => {
             let mut o = Outline { width: 3.0, style: BorderStyle::None, color: None, offset: s.outline.offset };
             for x in v {
@@ -3888,6 +3970,21 @@ mod tests {
         assert!(p.font_variant.contains("tnum") && p.font_variant.contains("smcp"), "the longhand adds to the shorthand: {}", p.font_variant);
         let c = st("c");
         assert_eq!((c.word_spacing, c.text_indent, c.text_shadow.len(), c.line_clamp), (3.0, 20.0, 2, None), "inherited except line-clamp");
+    }
+
+    #[test]
+    fn effect_properties_parse_and_do_not_inherit() {
+        let doc = Document::parse(r#"<div id="p" style="filter:blur(3px) sepia(50%);backdrop-filter:blur(8px);clip-path:circle(40%);mix-blend-mode:multiply;isolation:isolate;mask-image:linear-gradient(#000,transparent);object-fit:cover;object-position:left top"><i id="c"></i></div>"#);
+        let styles = compute_styles(&doc);
+        let st = |id: &str| styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        let p = st("p");
+        assert_eq!(p.filter, vec![FilterFn::Blur(3.0), FilterFn::Sepia(0.5)]);
+        assert_eq!(p.backdrop_filter, vec![FilterFn::Blur(8.0)]);
+        assert!(p.clip_path.is_some() && p.mask_image.is_some() && p.layered());
+        assert_eq!((p.blend, p.isolate, p.object_fit), (Blend::Multiply, true, ObjectFit::Cover));
+        assert_eq!(p.object_position, (StopPos::Fraction(0.0), StopPos::Fraction(0.0)));
+        let c = st("c");
+        assert!(c.filter.is_empty() && c.clip_path.is_none() && c.blend == Blend::Normal && !c.layered());
     }
 
     #[test]

@@ -98,7 +98,7 @@ pub struct Rule {
 /// Properties whose value is kept as text for the cascade to hand on (scripts read `popup-*`; the
 /// others are parsed by their own modules or the text engine).
 pub(crate) fn keeps_raw(name: &str) -> bool {
-    name.starts_with("popup-") || matches!(name, "shape-outside" | "font-variation-settings" | "font-feature-settings" | "prototype" | "nile-password-char")
+    name.starts_with("popup-") || matches!(name, "filter" | "backdrop-filter" | "-webkit-backdrop-filter" | "clip-path" | "shape-outside" | "font-variation-settings" | "font-feature-settings" | "prototype" | "nile-password-char")
 }
 
 /// An `@keyframes` rule: the declarations at each offset (0..=1), in offset order.
