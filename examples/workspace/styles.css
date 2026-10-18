@@ -25,3 +25,110 @@ header { height: 47px; flex: none; display: flex; align-items: center; gap: 5px;
 footer { height: 31px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; font-size: 10px; color: var(--muted); background: var(--surface); border-top: 1px solid var(--line); }#notice.error { color: #cc6565; }.scrim { position: fixed; inset: 0; background: #18243d66; display: flex; align-items: center; justify-content: center; z-index: 100; }.dialog { background: var(--surface); border-radius: 12px; padding: 28px; width: 520px; max-height: 90vh; overflow: auto; box-shadow: 0 20px 70px #0003; }.dialog h2 { font-size: 22px; }.field { display: block; margin-bottom: 16px; }.field span { display: block; margin-bottom: 7px; color: var(--muted); font-size: 12px; }.field input, .field textarea, .field select { width: 100%; }.dialog-actions { justify-content: end; margin-top: 22px; }.validation { color: #c65d62; margin-top: 12px; font-size: 12px; }.palette button { display: block; width: 100%; text-align: left; margin-bottom: 5px; }.context-menu { position: fixed; background: var(--surface); padding: 6px; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 30px #0002; z-index: 150; width: 190px; }.context-menu button { display: block; width: 100%; text-align: left; }canvas { width: 100%; height: 145px; }.help { font-size: 12px; line-height: 1.7; color: var(--muted); }.recovery { padding: 16px; background: var(--soft); border-radius: 8px; margin-bottom: 20px; }
 @page { size: A4; margin: 20mm; @bottom-center { content: "Northstar · Page " counter(page) " of " counter(pages); font-size: 9pt; } }
 @media (max-width: 1050px) { #content { padding: 22px; }.two-columns { grid-template-columns: minmax(0,1fr); }.badge { display: none; }.task-row, .table-head { grid-template-columns: 22px minmax(100px,1fr) 110px 65px 90px 45px; gap: 5px; padding: 10px 4px; } }
+
+/* Desktop workbench chrome; all panes remain ordinary page elements. */
+header { height: 34px; padding-left: 12px; gap: 6px; }
+.logo { font-size: 22px; width: 27px; }
+.caption { display: flex; align-items: center; gap: 18px; font-size: 12px; }
+.window-edition { color: var(--muted); font-size: 9px; letter-spacing: 1.4px; }
+.window { width: 42px; }
+#menubar { display: flex; align-items: center; flex: none; height: 29px; padding: 0 10px; background: var(--surface); border-bottom: 1px solid var(--line); }
+#menubar button { border-radius: 3px; font-size: 12px; padding: 5px 11px; }
+#menubar button.open { background: var(--soft); color: var(--accent); }
+#workbench-toolbar { display: flex; align-items: center; gap: 4px; height: 43px; flex: none; padding: 5px 12px; background: var(--surface); border-bottom: 1px solid var(--line); overflow-x: auto; }
+#workbench-toolbar button { padding: 6px 9px; border-radius: 4px; font-size: 12px; white-space: nowrap; flex: none; }
+#workbench-toolbar button[aria-pressed="true"] { background: var(--soft); color: var(--accent); }
+.command-group { display: flex; align-items: center; padding-right: 8px; margin-right: 5px; border-right: 1px solid var(--line); gap: 2px; flex: none; }
+.command-spacer { flex: 1; min-width: 8px; }
+#sidebar { padding: 0 8px 12px; background: var(--surface); }
+.pane-heading { display: flex; align-items: center; justify-content: space-between; min-height: 35px; height: 35px; padding: 0 9px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10px; letter-spacing: .7px; flex: none; }
+.pane-heading button { padding: 4px 7px; font-size: 12px; border-radius: 3px; letter-spacing: 0; }
+#sidebar > .pane-heading { margin: 0 -8px 12px; }
+#sidebar .section-label { padding: 14px 2px 5px 8px; }
+#sidebar .nav-button { font-size: 12px; padding: 9px 8px; }
+#sidebar .sidebar-bottom { padding-top: 18px; }
+#sidebar .local-label { padding: 8px; font-size: 9px; }
+.project-tree-row { display: flex; align-items: center; min-width: 0; }
+.tree-toggle { width: 22px; flex: none; padding: 6px 0; font-size: 11px; border-radius: 3px; }
+#sidebar .project-nav { flex: 1; min-width: 0; margin-bottom: 0; padding: 8px 4px; font-size: 12px; border-radius: 4px; }
+.tree-children { margin: 2px 0 8px 15px; border-left: 1px solid var(--line); padding-left: 7px; }
+.tree-children button { display: block; text-align: left; width: 100%; font-size: 11px; padding: 7px 5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tree-children button.tree-document { padding-left: 18px; color: var(--muted); }
+.tree-children button.active { background: var(--soft); color: var(--accent); }
+.main { overflow: hidden; }
+.topbar { min-height: 33px; height: 33px; padding: 6px 17px; font-size: 11px; background: var(--bg); }
+.topbar .badge { font-size: 8px; border: 0; padding: 0; }
+.document-tabs { display: flex; align-items: center; height: 37px; flex: none; background: var(--sidebar); border-bottom: 1px solid var(--line); }
+.document-tabs > button { height: 30px; padding: 3px 10px; flex: none; }
+#tabs { flex: 0 1 auto; max-width: calc(100% - 36px); align-items: stretch; height: 36px; gap: 0; }
+.tab { width: 170px; min-width: 170px; flex: 0 0 170px; height: 36px; border-radius: 0; background: transparent; border-right: 1px solid var(--line); }
+.tab.active { background: var(--bg); border-top: 2px solid var(--accent); }
+.tab-label { width: 137px; padding: 0 12px; font-size: 12px; border-radius: 0; }
+.tab-close { font-size: 14px; }
+#content { padding: 24px; min-width: 0; }
+#content h1 { font-size: 25px; }
+#content .page-heading { margin-bottom: 23px; }
+#content .page-heading > .row { flex-wrap: wrap; justify-content: end; gap: 5px; }
+#content .page-heading > .row button { font-size: 11px; padding: 7px 9px; }
+.with-inspector .two-columns { grid-template-columns: minmax(0, 1fr); }
+#content .card { padding: 18px; border-radius: 7px; }
+#content .view-tabs button { font-size: 12px; }
+#content .toolbar { flex-wrap: wrap; }
+#content .toolbar input { min-width: 130px; }
+#content .toolbar button { font-size: 12px; }
+#content .editor { padding: 25px; min-height: 330px; }
+#content .note-card { flex-wrap: wrap; }
+#content .note-card button { font-size: 12px; }
+#content .note-card .note-summary { min-width: 180px; }
+.pane-splitter, #resize { width: 5px; background: var(--line); cursor: col-resize; flex: none; }
+.pane-splitter:hover, #resize:hover, .pane-splitter:focus { background: var(--accent); }
+.pane-splitter.horizontal { height: 5px; width: auto; cursor: row-resize; }
+.resizing-pane { user-select: none; }
+#inspector { display: flex; flex-direction: column; width: 230px; min-width: 210px; max-width: 340px; flex: none; background: var(--surface); overflow: hidden; }
+#inspector-content { overflow: auto; flex: 1; min-height: 0; padding: 17px 14px; }
+.inspector-type { color: var(--accent); font-size: 9px; letter-spacing: 1.4px; margin-bottom: 9px; }
+#inspector h2 { font-size: 17px; line-height: 1.4; margin-bottom: 20px; }
+#inspector-content > button { display: block; width: 100%; text-align: left; font-size: 11px; margin: 6px 0; }
+#inspector-content > button.primary { text-align: center; }
+.property { margin-bottom: 15px; font-size: 12px; }
+.property > span, .property-field > span { display: block; font-size: 10px; color: var(--muted); margin-bottom: 7px; }
+.property > div { line-height: 1.6; user-select: text; }
+.property-field { display: block; margin-bottom: 15px; }
+.property-field input, .property-field select, .property-field textarea { display: block; width: 100%; min-width: 100%; font-size: 12px; padding: 8px; border-radius: 4px; }
+.property-field textarea { height: 95px; }
+.inspector-rule { height: 1px; background: var(--line); margin: 20px 0; }
+#inspector .help { font-size: 11px; }
+#activity { display: flex; flex-direction: column; height: 145px; min-height: 90px; flex: none; background: var(--surface); overflow: hidden; }
+#activity .pane-heading { height: 31px; min-height: 31px; padding: 0 10px; }
+#activity .pane-heading .row { gap: 8px; }
+#activity .pane-heading button.active { color: var(--accent); background: var(--soft); }
+#activity-count { font-size: 9px; letter-spacing: 0; }
+#activity-log { flex: 1; min-height: 0; overflow: auto; padding: 6px 14px; font-size: 10px; }
+.activity-row { display: grid; grid-template-columns: 85px 40px minmax(0, 1fr); gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); line-height: 1.5; }
+.activity-row time, .activity-row > span { color: var(--muted); }
+.activity-error, .activity-error > span { color: #ca6464; }
+.activity-empty { padding: 15px 0; color: var(--muted); }
+footer { height: 29px; padding: 0 12px; }
+footer > #notice { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; }
+footer .row { gap: 4px; flex: none; }
+footer button { font-size: 9px; padding: 4px 7px; border-radius: 3px; }
+footer button[aria-pressed="true"] { color: var(--accent); }
+#save-status { font-size: 9px; margin-left: 12px; }
+.workbench-menu { position: fixed; z-index: 180; width: 290px; padding: 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); box-shadow: 0 12px 32px #0003; }
+.workbench-menu button { display: flex; align-items: center; gap: 8px; width: 100%; height: 31px; padding: 5px 7px; font-size: 12px; text-align: left; border-radius: 3px; }
+.workbench-menu button > span { flex: 1; }
+.workbench-menu button .menu-check { width: 14px; flex: none; color: var(--accent); }
+.workbench-menu small { font-size: 9px; flex: none; }
+.menu-rule { height: 1px; background: var(--line); margin: 5px 7px; }
+@media (max-width: 1100px) { .window-edition { display: none; }#content { padding: 18px; }#workbench-toolbar > button[data-wb-command="commands"] { display: none; }.cards { gap: 8px; }#content .card { padding: 13px; }.metric { font-size: 27px; }.card-caption { font-size: 10px; } }
+.workbench-menu-row { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 5px; align-items: center; padding: 0 5px; border-radius: 3px; }
+.workbench-menu-row.active { background: var(--soft); }
+.workbench-menu-row.disabled { opacity: .5; }
+.workbench-menu-row .menu-check { color: var(--accent); font-size: 12px; }
+.workbench-menu .workbench-menu-row button { display: block; padding: 5px 0; height: 31px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.workbench-menu-row small { padding-left: 6px; white-space: nowrap; }
+.task-row.inspected { background: var(--soft); }
+.task-row.inspected .task-title { color: var(--accent); }
+.workbench-menu-row button:focus-visible { outline: none; }
+.workbench-menu-row button:hover { background: transparent; }
+#menubar.menu-mode button:focus-visible { outline: 1px solid var(--accent); }

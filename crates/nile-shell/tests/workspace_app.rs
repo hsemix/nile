@@ -81,6 +81,7 @@ fn workspace_workflows_and_restart_persist_using_real_sqlite() {
         "model.js",
         "store.js",
         "documents.js",
+        "workbench.js",
         "document.html",
     ] {
         fs::copy(source.join(name), app.join(name)).unwrap();
@@ -108,7 +109,7 @@ fn workspace_workflows_and_restart_persist_using_real_sqlite() {
         .unwrap();
     launch(&app, root, "checks");
     let checks = report(root, "checks.json");
-    assert!(checks["results"].as_array().unwrap().len() >= 29);
+    assert!(checks["results"].as_array().unwrap().len() >= 65);
     for result in checks["results"].as_array().unwrap() {
         println!("PASS: {}", result.as_str().unwrap());
     }
@@ -125,6 +126,9 @@ const restartTimer = setInterval(async () => {
     if (Object.values(integrity[0])[0] !== 'ok') throw new Error('Database integrity check failed');
     if (state.projects[0].title !== 'Field guide' || state.notes[0].title !== 'Discovery notes') throw new Error('Records did not persist');
     if (state.preferences.theme !== 'dark' || current().kind !== 'note' || store.drafts().length !== 1 || recoveries.length !== 1) throw new Error('Preferences, tabs or recovery draft did not persist');
+    const layout = workbench.snapshot();
+    if (layout.explorer || !layout.inspector || layout.activity || layout.toolbar || layout.inspectorWidth !== 240 || layout.explorerWidth !== 230 || layout.activityHeight !== 165 || !layout.expanded.includes(state.projects[0].id)) throw new Error('Workbench layout did not persist');
+    if (document.getElementById('sidebar').style.display !== 'none' || document.getElementById('workbench-toolbar').style.display !== 'none') throw new Error('Restored pane visibility was not applied');
     fs.writeFileSync(store.dataDir + '/restart.json', JSON.stringify({ok:true}));
   } catch (error) { fs.writeFileSync(store.dataDir + '/restart.json', JSON.stringify({ok:false,error:String(error)})); }
   clearInterval(restartTimer);

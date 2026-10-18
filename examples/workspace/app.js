@@ -2,6 +2,7 @@ import * as store from './store.js';
 import { fs } from '@sys';
 import { escape as esc, uid, plain, today, statuses, priorities } from './model.js';
 import { cleanHtml, reportHtml, exportPdf } from './documents.js';
+import { createWorkbench } from './workbench.js';
 
 const $ = id => document.getElementById(id);
 const btn = (label, action, value = '', cls = '') => `<button class="${cls}" data-action="${action}" data-value="${esc(value)}">${esc(label)}</button>`;
@@ -31,8 +32,22 @@ let closing = false;
 const current = () => tabs.find(tab => tab.key === active) || tabs[0];
 const projectFor = tab => state.projects.find(project => project.id === (tab || current()).projectId);
 const noteFor = tab => state.notes.find(note => note.id === (tab || current()).noteId);
-function notice(text, error = false) { $('notice').textContent = text; $('notice').className = error ? 'error' : ''; if (error) console.error('northstar:', text); }
-function saveStatus() { $('save-status').textContent = dirty ? 'Unsaved changes · recovery draft on this device' : pending ? 'Saving…' : 'All changes saved'; }
+let workbench;
+workbench = createWorkbench({
+  context: () => ({ state, tab: current(), tabs, project: projectFor(), note: noteFor(), blocked: !ready || busy || !!modal }),
+  dispatch: runWorkbenchAction,
+  persist: value => store.preference('layout', value),
+  failed: error => notice(error.message || String(error), true),
+  treeChanged: renderSidebar,
+});
+function notice(text, error = false) { $('notice').textContent = text; $('notice').className = error ? 'error' : ''; workbench?.log(text, error); if (error) console.error('northstar:', text); }
+function saveStatus() { $('save-status').textContent = dirty ? 'Unsaved changes · recovery draft on this device' : pending ? 'Saving…' : 'All changes saved'; workbench?.refreshCommands(); }
+async function runWorkbenchAction(name, value = '') {
+  if (!ready || busy || modal) return;
+  busy = true;
+  try { await action(name, value); }
+  finally { busy = false; workbench.refreshCommands(); }
+}
 async function perform(action) {
   pending++; saveStatus();
   try { return await action(); }
@@ -61,6 +76,7 @@ async function flush() {
   }
   saveStatus();
   renderTabs();
+  workbench.updateDocumentStats(dirty?.html ?? saved.html, saved.updated);
 }
 function captureNote() {
   const note = noteFor();
@@ -72,6 +88,7 @@ function captureNote() {
   draftTimer = setTimeout(() => flush().catch(() => {}), 700);
   saveStatus();
   if ($('words')) $('words').textContent = plain(dirty.html).split(/\s+/).filter(Boolean).length + ' words';
+  workbench.updateDocumentStats(dirty.html);
 }
 async function open(tab) {
   await flush();
@@ -98,7 +115,10 @@ function renderTabs() {
   document.querySelectorAll('.tab-close').forEach(button => button.setAttribute('aria-label', 'Close tab'));
 }
 function renderSidebar() {
-  $('projects').innerHTML = state.projects.filter(project => !project.archived).map(project => btn('▣   ' + project.title, 'project', project.id, 'project-nav' + (project.id === current().projectId ? ' active' : ''))).join('');
+  $('projects').innerHTML = state.projects.filter(project => !project.archived).map(project => {
+    const expanded = workbench.isExpanded(project.id);
+    return `<div class="project-tree-row"><button class="tree-toggle" data-action="tree-toggle" data-value="${esc(project.id)}" aria-label="${expanded ? 'Collapse' : 'Expand'} ${esc(project.title)}" aria-expanded="${expanded}">${expanded ? '▾' : '▸'}</button>` + btn('▣  ' + project.title, 'project', project.id, 'project-nav' + (project.id === current().projectId ? ' active' : '')) + '</div>' + (expanded ? `<div class="tree-children">${btn('✓ Tasks', 'tree-view', project.id + ':tasks')}${btn('▤ Documents', 'tree-view', project.id + ':notes')}` + state.notes.filter(note => note.project_id === project.id).map(note => btn(note.title, 'note', note.id, 'tree-document' + (current().noteId === note.id ? ' active' : ''))).join('') + btn('▧ Attachments', 'tree-view', project.id + ':files') + '</div>' : '');
+  }).join('');
 }
 function heading(title, subtitle, actions = '') { return `<div class="page-heading"><div><h1>${esc(title)}</h1><div class="muted">${esc(subtitle)}</div></div><div class="row">${actions}</div></div>`; }
 function render() {
@@ -125,6 +145,7 @@ function render() {
     }, 0));
   }
   saveStatus();
+  workbench.refresh();
 }
 function dashboard() {
   const projects = state.projects.filter(project => !project.archived);
@@ -171,7 +192,7 @@ function projectView() {
   return head + navigation + `<div class="toolbar"><input id="task-search" placeholder="Filter tasks…" aria-label="Filter tasks" value="${esc(taskQuery)}"><select id="task-filter" aria-label="Filter by status">${['All', ...statuses].map(value => `<option${value === taskFilter ? ' selected' : ''}>${value}</option>`).join('')}</select>${btn('+ Add task', 'new-task', project.id, 'primary')}</div><div class="toolbar">${btn('Mark selected done', 'bulk-done')}${btn('Clear selection', 'clear-selection')}<small id="selected-count">${selectedTasks.size} selected</small></div><div class="table-head"><span></span><span>Task</span><span>Status</span><span>Priority</span><span>Deadline</span><span></span></div><div id="task-list">` + taskRows(tasks) + '</div>';
 }
 function taskRows(tasks) {
-  return tasks.map(task => `<div class="task-row" data-task="${esc(task.id)}"><input type="checkbox" data-check-task="${esc(task.id)}" aria-label="Select ${esc(task.title)}"${selectedTasks.has(task.id) ? ' checked' : ''}>${btn(task.title, 'edit-task', task.id, 'task-title')}<select data-task-status="${esc(task.id)}" aria-label="Status of ${esc(task.title)}">${statuses.map(status => `<option${status === task.status ? ' selected' : ''}>${status}</option>`).join('')}</select><span class="${task.priority === 'High' ? 'overdue' : 'muted'}">${esc(task.priority)}</span><span class="${task.due && task.due < today() && task.status !== 'Done' ? 'overdue' : 'muted'}">${esc(task.due || '—')}</span>${btn('×', 'delete-task', task.id, 'danger')}</div>`).join('') || empty('No tasks here. Add one, or change your filters.');
+  return tasks.map(task => `<div class="task-row" data-task="${esc(task.id)}"><input type="checkbox" data-check-task="${esc(task.id)}" aria-label="Select ${esc(task.title)}"${selectedTasks.has(task.id) ? ' checked' : ''}>${btn(task.title, 'inspect-task', task.id, 'task-title')}<select data-task-status="${esc(task.id)}" aria-label="Status of ${esc(task.title)}">${statuses.map(status => `<option${status === task.status ? ' selected' : ''}>${status}</option>`).join('')}</select><span class="${task.priority === 'High' ? 'overdue' : 'muted'}">${esc(task.priority)}</span><span class="${task.due && task.due < today() && task.status !== 'Done' ? 'overdue' : 'muted'}">${esc(task.due || '—')}</span>${btn('×', 'delete-task', task.id, 'danger')}</div>`).join('') || empty('No tasks here. Add one, or change your filters.');
 }
 function noteView() {
   const note = noteFor(); if (!note) return empty('This note no longer exists.');
@@ -229,7 +250,7 @@ function nativePath(url) {
 }
 async function previewAttachment(id) {
   const file = state.attachments.find(row => row.id === id); if (!file) return;
-  preview = id; render();
+  preview = id; render(); workbench.inspect('attachment', id);
   const target = $('file-preview'); if (!target) return;
   if (/\.(png|jpe?g|webp|gif)$/i.test(file.title)) {
     const bytes = new Uint8Array(await fs.readFile(file.path));
@@ -252,6 +273,24 @@ function palette() {
   showModal('Go somewhere. Make something.', `<div class="palette">${btn('Search everything', 'search')}${btn('Overview', 'dashboard')}${btn('Create project', 'new-project')}${btn('Workspace settings', 'settings')}${btn('Create backup', 'backup')}</div>`, null);
 }
 async function action(name, value, target) {
+  if (name === 'tree-toggle') { await workbench.toggleTree(value); return; }
+  if (name === 'tree-view') { const split = value.lastIndexOf(':'); await open(projectTab(value.slice(0, split), value.slice(split + 1))); return; }
+  if (name === 'workbench-pane') { await workbench.togglePane(value); return; }
+  if (name === 'workbench-reset') { await workbench.reset(); notice('Workspace layout reset.'); return; }
+  if (name === 'workbench-activity') { workbench.filterActivity(value); return; }
+  if (name === 'workbench-clear') { workbench.clearActivity(); return; }
+  if (name === 'workbench-tab') { const index = tabs.findIndex(tab => tab.key === active); await open(tabs[(index + (value === 'next' ? 1 : tabs.length - 1)) % tabs.length]); return; }
+  if (name === 'workbench-close-others') { await flush(); tabs = [current()]; render(); await session(); return; }
+  if (name === 'workbench-help') { showModal('Workbench shortcuts', '<p class="help">Alt+F/E/V/W/H opens an application menu. F10 focuses the menu bar. Use arrows to navigate menus, Enter to activate, and Escape to dismiss.<br><br>Ctrl/Cmd+Shift+E toggles Explorer. Ctrl/Cmd+J toggles Activity. Ctrl/Cmd+K opens commands. Ctrl+Tab switches documents.<br><br>Focus a pane divider and use arrow keys to resize it. View → Reset workspace layout restores all panes.</p>', null); return; }
+  if (name === 'workbench-about') { showModal('Northstar Workbench', '<p class="muted">A cross-platform project and document workspace built with Nile HTML, CSS, and JavaScript.</p><p class="help">Fixed resizable panes, shared commands, local SQLite storage, and a workspace that remembers its layout.</p>', null); return; }
+  if (name === 'format-command') { if ($('editor') && document.execCommand(value) && !['copy', 'selectAll'].includes(value)) captureNote(); return; }
+  if (name === 'inspect-task') { workbench.inspect('task', value); if (!workbench.snapshot().inspector) await workbench.togglePane('inspector'); return; }
+  if (name === 'apply-properties') {
+    const inspected = workbench.selected();
+    if (inspected.kind === 'task') await mutate(() => store.saveTask({ ...inspected.record, title: $('property-title').value, status: $('property-status').value, priority: $('property-priority').value, due: $('property-due').value }), 'Task properties saved.');
+    else if (inspected.kind === 'project') await mutate(() => store.saveProject({ ...inspected.record, title: $('property-title').value, description: $('property-description').value }), 'Project properties saved.');
+    return;
+  }
   if (name === 'dismiss') { dismiss(); return; }
   if (name === 'palette') { palette(); return; }
   if (name === 'confirm') { const work = confirmAction; dismiss(); await work(); return; }
@@ -330,7 +369,7 @@ async function action(name, value, target) {
       const safety = store.dataDir + '/before-restore-' + Date.now() + '.json';
       await perform(async () => { await store.backup(safety); await store.restore(backup); });
       for (const draft of store.drafts()) store.discardDraft(draft.id);
-      dirty = null; recoveries = []; await reload(); tabs = [{ key: 'dashboard', kind: 'dashboard' }]; active = 'dashboard'; searchQuery = ''; searchResults = []; document.documentElement.setAttribute('data-theme', 'light'); render(); await session(); notice('Workspace restored. Safety backup: ' + safety);
+      dirty = null; recoveries = []; await reload(); tabs = [{ key: 'dashboard', kind: 'dashboard' }]; active = 'dashboard'; searchQuery = ''; searchResults = []; document.documentElement.setAttribute('data-theme', 'light'); workbench.restore(); render(); await session(); notice('Workspace restored. Safety backup: ' + safety);
     }, 'Restore workspace'); return;
   }
   if (name === 'report') {
@@ -405,7 +444,7 @@ document.addEventListener('contextmenu', event => {
   $('menu').innerHTML = `<div class="context-menu" role="menu" style="left:${Math.max(0, Math.min(event.clientX, innerWidth - 200))}px;top:${Math.max(0, Math.min(event.clientY, innerHeight - 130))}px">${task ? btn('Edit task', 'edit-task', id) + btn('Delete task', 'delete-task', id, 'danger') : btn('Open project', 'project', id) + btn('Edit project', 'edit-project', id) + btn('Archive / unarchive', 'archive', id)}</div>`;
 });
 document.addEventListener('keydown', event => {
-  if (!ready) return;
+  if (!ready || event.defaultPrevented) return;
   const key = event.key.toLowerCase(); const command = event.ctrlKey || event.metaKey;
   if (key === 'escape') { dismiss(); $('menu').innerHTML = ''; return; }
   // Keep keyboard focus within an open dialog.
@@ -420,37 +459,30 @@ document.addEventListener('keydown', event => {
   if (modal || busy) return;
   let work;
   if (command && key === 'k') work = () => palette();
+  else if (command && event.shiftKey && key === 'e') work = () => action('workbench-pane', 'explorer');
+  else if (command && key === 'j') work = () => action('workbench-pane', 'activity');
   else if (command && key === 'n') work = () => action('new-project', '');
   else if (command && key === 's') work = () => flush();
   else if (command && key === 'w') work = () => closeTab(active);
   else if (event.ctrlKey && key === 'tab') {
     const index = tabs.findIndex(tab => tab.key === active); work = () => open(tabs[(index + (event.shiftKey ? tabs.length - 1 : 1)) % tabs.length]);
-  } else if (event.target.getAttribute('role') === 'tab' && ['arrowleft', 'arrowright', 'home', 'end'].includes(key)) {
+  } else if (event.target.getAttribute?.('role') === 'tab' && ['arrowleft', 'arrowright', 'home', 'end'].includes(key)) {
     const index = tabs.findIndex(tab => tab.key === active);
     const next = key === 'home' ? 0 : key === 'end' ? tabs.length - 1 : (index + (key === 'arrowleft' ? tabs.length - 1 : 1)) % tabs.length;
     work = async () => { await open(tabs[next]); $('tab-' + active).focus(); };
   }
   if (work) { event.preventDefault(); busy = true; Promise.resolve().then(work).catch(error => notice(error.message, true)).finally(() => { busy = false; }); }
 });
-let resizing = false;
-$('resize').addEventListener('mousedown', event => { resizing = true; event.preventDefault(); });
-document.addEventListener('mousemove', event => { if (resizing) $('sidebar').style.width = Math.max(180, Math.min(340, event.clientX)) + 'px'; });
-document.addEventListener('mouseup', () => { if (resizing) { resizing = false; store.preference('sidebarWidth', parseInt($('sidebar').style.width)).catch(error => notice(error.message, true)); } });
-$('resize').addEventListener('keydown', event => {
-  if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-  event.preventDefault(); const width = Math.max(180, Math.min(340, $('sidebar').getBoundingClientRect().width + (event.key === 'ArrowRight' ? 10 : -10)));
-  $('sidebar').style.width = width + 'px'; store.preference('sidebarWidth', width).catch(error => notice(error.message, true));
-});
 Window.this.on('closerequest', event => {
-  if (closing || (!dirty && !pending && !busy)) return;
+  if (closing || (!dirty && !pending && !busy && !workbench.pending())) return;
   event.preventDefault();
-  if (pending || busy) { notice('Finish the current operation before closing.'); return; }
+  if (pending || busy || workbench.pending()) { notice('Finish the current operation before closing.'); return; }
   flush().then(() => { closing = true; window.close(); }).catch(() => notice('Your document has not been saved. Fix the error and try Save now before closing.', true));
 });
 async function start() {
   state = await store.init();
   document.documentElement.setAttribute('data-theme', state.preferences.theme === 'dark' ? 'dark' : 'light');
-  if (state.preferences.sidebarWidth) $('sidebar').style.width = Math.max(180, Math.min(340, state.preferences.sidebarWidth)) + 'px';
+  workbench.restore(state.preferences.layout || { explorerWidth: state.preferences.sidebarWidth });
   const saved = state.preferences.session;
   if (saved && Array.isArray(saved.tabs)) {
     const keys = new Set();

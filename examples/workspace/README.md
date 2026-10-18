@@ -1,7 +1,9 @@
 # Northstar Workspace
 
-A local desktop application for projects, tasks, rich notes, and managed file
-attachments. Records live in SQLite, with recovery drafts and portable backups.
+A cross-platform desktop workbench for projects, tasks, rich notes, and managed
+file attachments. Menus, command toolbars, document tabs, a project explorer,
+editable properties, and an activity panel use the existing Nile page APIs.
+Records live in SQLite, with recovery drafts and portable backups.
 It starts empty and works offline; it does not require an account or a server.
 
 ## Run
@@ -19,8 +21,40 @@ ignored by Git; assemble them again after a fresh checkout.
 
 Create a project, add tasks, and use its **Notes & documents** and **Attachments**
 tabs. Each project/document opens in a workspace tab. Right-click a task or a
-project in the sidebar for its context menu. Drag the sidebar divider to resize
-it, or focus it and use Left/Right. The empty title-bar area moves the window.
+project in the sidebar for its context menu. The title-bar area moves the window.
+
+## Workbench
+
+- **File / Edit / View / Window / Help** expose working application commands.
+  Document-only commands are disabled outside the editor. The toolbar provides
+  the same save, undo/redo, attachment, and export commands.
+- Expand a project using its disclosure arrow to open its tasks, documents,
+  and attachments. Select a task title to inspect it; change its title, status,
+  priority, or deadline and choose **Apply changes**. The project inspector can
+  edit the project name and description. Document properties show word count
+  and the last saved timestamp.
+- Drag the left, right, or bottom pane divider to resize it. A focused divider
+  also responds to arrow keys. **View** and the status-bar buttons hide or show
+  Explorer, Properties, and Activity. The command toolbar can be hidden through
+  View. **View → Reset workspace layout** restores all panes.
+- Pane sizes, visibility, and expanded projects persist in SQLite preferences.
+  Existing sidebar-width preferences migrate on first open. Layout changes
+  preserve the current editor DOM, selection, and unsaved document contents.
+- Activity records the latest 80 status/error messages in this session. Choose
+  **Errors** to filter it, or **Clear** to clear the log. It is an application
+  activity panel, not a terminal or an executable command prompt.
+- Press a menu heading to open it, then move across headings to switch menus.
+  Press-drag-release can select a command in one gesture. An outside click or
+  a second click on the heading dismisses it without activating another control.
+- **Alt+F/E/V/W/H** opens a menu. Alt alone or F10 enters/leaves menu-bar mode;
+  Left/Right moves between headings, Down/Up opens the first/last enabled command,
+  and Enter/Space activates a command. Escape closes the dropdown first, then
+  leaves menu-bar mode and restores the original editing focus. Menu commands
+  also support first-letter navigation. **Ctrl/Cmd+Shift+E** toggles Explorer;
+  **Ctrl/Cmd+J** toggles Activity. Existing document shortcuts still work.
+
+Panes occupy fixed left/right/bottom positions. Drag-to-dock, floating panes,
+and docking previews are not implemented. No engine changes are required.
 
 ## Working features
 
@@ -49,7 +83,7 @@ it, or focus it and use Left/Right. The empty title-bar area moves the window.
   and references, writes a safety backup, stages blobs, and replaces records in
   one SQLite transaction. A SQL failure rolls the replacement back. Restore
   clears settings, tabs, and old recovery drafts.
-- Light/dark appearance, restored tabs and sidebar width, command palette,
+- Light/dark appearance, restored tabs and pane layouts, command palette,
   keyboard navigation, dialog focus wrapping, and labelled controls.
 
 ## Storage
@@ -121,9 +155,13 @@ assembles SQLite there, and uses a separate database. It exercises UI handlers
 and real SQLite: project/task validation,
 bulk updates, autosave/recovery, large-note pagination and limits, search,
 managed attachments, previews, backup/restore (including forced SQL rollback),
-archive/unarchive, themes, PDF rendering, command-palette events, and restart
-persistence. File chooser responses are substituted during checks. An expected
-validation error is printed while checking a blank task title.
+archive/unarchive, themes, PDF rendering, command-palette events, menu keyboard
+navigation, menu hover switching, press-drag-release, disabled items, outside-click
+dismissal, focus restoration, inspector edits, project-tree navigation, mouse/keyboard resizing,
+pane visibility, and restart persistence. File chooser responses are substituted
+during checks. Expected validation/error messages are printed while checking
+invalid edits and activity filtering. Screenshots have also been reviewed at
+1000, 1280, and 1440 pixel window widths.
 
 Native file dialogs, caption dragging/window controls, read-only child windows,
 and screen-reader behavior need a GUI check on each target OS. macOS bundle

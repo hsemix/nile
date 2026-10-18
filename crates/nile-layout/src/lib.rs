@@ -4836,11 +4836,11 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
 
     #[test]
     fn inline_horizontal_margins_take_space_without_stretching_the_line() {
-        let (doc, t) = rects(r#"<body style="margin:0;font-size:16px"><p style="margin:0"><span id="a" style="margin-right:40px">aa</span><span id="b">bb</span></p><p id="q" style="margin:0">aabb</p></body>"#);
-        let (a, q) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "q"));
-        assert!(a.height <= q.height + 0.5, "the spacer does not enlarge the line: {a:?} vs {q:?}");
+        let (doc, t) = rects(r#"<body style="margin:0;font-size:16px"><p id="pa" style="margin:0"><span id="a" style="margin-right:40px">aa</span><span id="b">bb</span></p><p id="q" style="margin:0">aabb</p></body>"#);
+        let (a, q, pa) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "q"), rect_of(&doc, &t, "pa"));
+        assert!((pa.height - q.height).abs() < 0.5, "the spacer does not enlarge the line: {pa:?} vs {q:?}");
         let b = rect_of(&doc, &t, "b");
-        assert!(b.x >= a.x + a.width + 39.0, "b starts after a's margin: {a:?} {b:?}");
+        assert!(b.x >= a.x + 40.0 + 8.0, "b starts after a's text and its 40px margin: {a:?} {b:?}");
     }
 
     #[test]
