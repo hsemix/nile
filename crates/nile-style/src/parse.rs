@@ -53,6 +53,8 @@ pub enum Value {
     Minmax(Box<(Value, Value)>),
     /// `repeat(count, tracks...)`.
     Repeat(Box<(RepeatKind, Vec<Value>)>),
+    /// `counter(name, style)` (separator `None`) or `counters(name, separator, style)`.
+    Counter(Box<(String, Option<String>, String)>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -649,6 +651,23 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
                         }
                         _ => return Ok(None),
                     }
+                }
+                "counter" | "counters" => {
+                    let plural = name == "counters";
+                    let args = p.parse_nested_block(|p| gradient_items(p, cx))?;
+                    let at = |i: usize| args.get(i).and_then(|a| a.first());
+                    let Some(Value::Ident(counter)) = at(0) else { return Ok(None) };
+                    let (sep, style_at) = if plural {
+                        let Some(Value::Str(sep)) = at(1) else { return Ok(None) };
+                        (Some(sep.clone()), 2)
+                    } else {
+                        (None, 1)
+                    };
+                    let style = match at(style_at) {
+                        Some(Value::Ident(i)) => i.clone(),
+                        _ => "decimal".to_string(),
+                    };
+                    Value::Counter(Box::new((counter.clone(), sep, style)))
                 }
                 "attr" => {
                     let name = p.parse_nested_block(|p| Ok::<_, ParseError<()>>(p.expect_ident()?.to_string()))?;

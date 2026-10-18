@@ -1,0 +1,14 @@
+<!doctype html><meta charset="utf-8"><title>CSS counters</title>
+<style>
+body{font:15px sans-serif;margin:16px;counter-reset:chapter}
+h2{counter-reset:section;counter-increment:chapter;font-size:20px;margin:14px 0 4px}
+h2::before{content:"Chapter " counter(chapter, upper-roman) " \2014 ";color:#36c}
+h3{counter-increment:section;font-size:15px;margin:4px 0 4px 16px}
+h3::before{content:counter(chapter) "." counter(section, decimal-leading-zero) "  ";color:#888}
+ol{counter-reset:item;list-style:none;padding-left:18px}
+li{counter-increment:item}
+li::before{content:counters(item, ".") "  ";color:#c63;font-weight:bold}
+</style>
+<h2>Introduction</h2><h3>Scope</h3><h3>Goals</h3>
+<h2>Method</h2><h3>Setup</h3>
+<ol><li>First<ol><li>Nested one</li><li>Nested two<ol><li>Deep</li></ol></li></ol></li><li>Second</li></ol>

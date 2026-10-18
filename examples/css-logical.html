@@ -1,0 +1,9 @@
+<!doctype html><meta charset="utf-8"><title>logical properties</title>
+<style>
+body{margin:12px;font:14px sans-serif}
+.card{inline-size:260px;min-block-size:60px;margin-inline:auto 0;padding-block:10px;padding-inline:16px 4px;border-inline-start:6px solid #36c;border-block-end:2px dashed #c63;background:#eef}
+.abs{position:relative;block-size:50px;background:#efe;margin-block-start:12px}
+.abs i{position:absolute;inset-block:6px;inset-inline:20px 60px;background:#9c9;display:block}
+</style>
+<div class="card">inline-size 260px, margin-inline: auto 0 (pushed right), padding-inline 16/4, a border on the inline-start side and the block-end side.</div>
+<div class="abs"><i>inset-inline 20 / 60, inset-block 6</i></div>

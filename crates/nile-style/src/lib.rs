@@ -625,6 +625,10 @@ pub struct ComputedStyle {
     pub mask_image: Option<Gradient>,
     pub object_fit: ObjectFit,
     pub object_position: (StopPos, StopPos),
+    /// `counter-reset`, `counter-increment`, `counter-set`: (name, value) in declaration order.
+    pub counter_reset: Vec<(String, i32)>,
+    pub counter_increment: Vec<(String, i32)>,
+    pub counter_set: Vec<(String, i32)>,
     /// `word-spacing` in px (inherited).
     pub word_spacing: f32,
     pub word_break: WordBreak,
@@ -794,6 +798,9 @@ impl Default for ComputedStyle {
             pointer_events: true,
             order: 0,
             outline: Outline::default(),
+            counter_reset: Vec::new(),
+            counter_increment: Vec::new(),
+            counter_set: Vec::new(),
             filter: Vec::new(),
             backdrop_filter: Vec::new(),
             clip_path: None,
@@ -1490,6 +1497,85 @@ struct Generated {
     contents: HashMap<NodeId, String>,
     markers: HashMap<NodeId, MarkerStyle>,
     scrollbars: HashMap<NodeId, ScrollbarParts>,
+    /// The CSS counters in scope while the cascade walks the tree (see `Counter`).
+    counters: Vec<Counter>,
+    /// Depth of the element being cascaded, the scope level new counters belong to.
+    depth: usize,
+}
+
+/// One instance of a CSS counter; it lives until its parent's subtree ends.
+struct Counter {
+    name: String,
+    value: i32,
+    depth: usize,
+}
+
+impl Generated {
+    /// `counter-reset`, `counter-set` and `counter-increment` of an element, in that order.
+    fn count(&mut self, s: &ComputedStyle) {
+        for (name, v) in &s.counter_reset {
+            // A reset replaces an instance made by an earlier sibling.
+            let depth = self.depth;
+            self.counters.retain(|c| !(c.name == *name && c.depth == depth));
+            self.counters.push(Counter { name: name.clone(), value: *v, depth });
+        }
+        for (name, v) in &s.counter_set {
+            match self.counters.iter_mut().rev().find(|c| c.name == *name) {
+                Some(c) => c.value = *v,
+                None => self.counters.push(Counter { name: name.clone(), value: *v, depth: self.depth }),
+            }
+        }
+        for (name, by) in &s.counter_increment {
+            match self.counters.iter_mut().rev().find(|c| c.name == *name) {
+                Some(c) => c.value = c.value.saturating_add(*by),
+                None => self.counters.push(Counter { name: name.clone(), value: *by, depth: self.depth }),
+            }
+        }
+    }
+}
+
+/// A counter value in a `counter-style` (`decimal`, `decimal-leading-zero`, `lower-alpha`, `upper-roman`...).
+fn format_counter(n: i32, style: &str) -> String {
+    let alpha = |mut n: i32, upper: bool| {
+        if n <= 0 {
+            return n.to_string();
+        }
+        let base = if upper { b'A' } else { b'a' };
+        let mut out = Vec::new();
+        while n > 0 {
+            n -= 1;
+            out.push(base + (n % 26) as u8);
+            n /= 26;
+        }
+        out.reverse();
+        String::from_utf8(out).unwrap_or_default()
+    };
+    let roman = |n: i32, upper: bool| {
+        if !(1..4000).contains(&n) {
+            return n.to_string();
+        }
+        let table = [(1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"), (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")];
+        let (mut n, mut out) = (n, String::new());
+        for (v, r) in table {
+            while n >= v {
+                out.push_str(r);
+                n -= v;
+            }
+        }
+        if upper { out.to_uppercase() } else { out }
+    };
+    match style {
+        "decimal-leading-zero" if (0..10).contains(&n) => format!("0{n}"),
+        "lower-alpha" | "lower-latin" => alpha(n, false),
+        "upper-alpha" | "upper-latin" => alpha(n, true),
+        "lower-roman" => roman(n, false),
+        "upper-roman" => roman(n, true),
+        "disc" => "\u{2022}".into(),
+        "circle" => "\u{25e6}".into(),
+        "square" => "\u{25aa}".into(),
+        "none" => String::new(),
+        _ => n.to_string(),
+    }
 }
 
 /// What a `::marker` rule sets for a list item's marker.
@@ -2019,7 +2105,7 @@ fn apply_declarations(
 }
 
 /// The text a `content` value generates; `None` for `none`/`normal` or nothing usable.
-fn content_text(decls: &[Declaration], doc: &Document, id: NodeId) -> Option<String> {
+fn content_text(decls: &[Declaration], doc: &Document, id: NodeId, counters: &[Counter]) -> Option<String> {
     let values = &decls.iter().rev().find(|d| d.name == "content")?.values;
     if values.is_empty() || matches!(values.first().and_then(Value::ident), Some("none" | "normal")) {
         return None;
@@ -2034,6 +2120,18 @@ fn content_text(decls: &[Declaration], doc: &Document, id: NodeId) -> Option<Str
             }
             Value::Attr(name) => {
                 out.push_str(doc.node(id).attr(name).unwrap_or(""));
+                any = true;
+            }
+            Value::Counter(c) => {
+                let (name, sep, style) = (&c.0, &c.1, &c.2);
+                let mut chain = counters.iter().filter(|k| k.name == *name);
+                match sep {
+                    None => out.push_str(&format_counter(chain.next_back().map_or(0, |k| k.value), style)),
+                    Some(sep) => {
+                        let parts: Vec<String> = chain.map(|k| format_counter(k.value, style)).collect();
+                        out.push_str(&if parts.is_empty() { format_counter(0, style) } else { parts.join(sep) });
+                    }
+                }
                 any = true;
             }
             Value::Ident(i) if i == "open-quote" => {
@@ -2076,7 +2174,7 @@ fn marker_style(cx: &CascadeInput, id: NodeId, element: &ComputedStyle, extra: &
     let color_set = decls.iter().any(|d| d.name == "color");
     let applied = apply_declarations(&mut style, decls, element.font_size, &pcx);
     let declared = applied.iter().rev().find(|d| d.name == "content");
-    let content = declared.map(|_| content_text(&applied, cx.doc, id).unwrap_or_default());
+    let content = declared.map(|_| content_text(&applied, cx.doc, id, &extra.counters).unwrap_or_default());
     let color = color_set.then_some(style.color);
     extra.markers.insert(id, MarkerStyle { style, color, content });
 }
@@ -2146,7 +2244,9 @@ fn pseudo_style(
     style.display = Display::Inline;
     let pcx = Cx { viewport: cx.viewport, uses_viewport: cx.uses_viewport };
     let applied = apply_declarations(&mut style, decls, element.font_size, &pcx);
-    let Some(content) = content_text(&applied, cx.doc, id) else { return };
+    // TODO: `::after` is styled before the element's children, so it can't see their increments.
+    extra.count(&style);
+    let Some(content) = content_text(&applied, cx.doc, id, &extra.counters) else { return };
     let new = NodeId(out.len());
     out.push(style);
     extra.pseudo.insert((id, kind), new);
@@ -2229,6 +2329,9 @@ fn cascade(
     }
 
     out[id.0] = style.clone();
+    if matches!(node.kind, NodeKind::Element { .. }) {
+        extra.count(&style);
+    }
     if cx.has_pseudo && matches!(node.kind, NodeKind::Element { .. }) {
         if style.display == Display::ListItem {
             marker_style(cx, id, &style, extra);
@@ -2239,9 +2342,14 @@ fn cascade(
         pseudo_style(cx, id, &style, PseudoElement::Before, out, extra);
         pseudo_style(cx, id, &style, PseudoElement::After, out, extra);
     }
+    // Counters made inside this element's subtree end with it; the ones it made itself stay for its siblings.
+    let scope = extra.counters.len();
+    extra.depth += 1;
     for child in &node.children {
         cascade(cx, ctx, *child, &style, dark, out, extra);
     }
+    extra.depth -= 1;
+    extra.counters.truncate(scope);
 }
 
 /// Replaces every `var(--name[, fallback])` in `text`. `None` if a variable is
@@ -2463,7 +2571,63 @@ pub(crate) fn supports_declaration(name: &str, value: &str, viewport: (f32, f32)
     !UNRECOGNISED.with(Cell::get)
 }
 
+/// Logical properties (`margin-inline`, `padding-block-start`, `inset-inline`, `border-block-end-color`,
+/// `inline-size`...) as the physical declarations they mean in a left-to-right, horizontal page.
+/// TODO: follow `direction` and `writing-mode` once they exist.
+fn logical(d: &Declaration) -> Option<Vec<Declaration>> {
+    let n = d.name.as_str();
+    let make = |name: String, values: Vec<Value>| Declaration { name, values, important: d.important, raw: d.raw.clone() };
+    let size = match n {
+        "inline-size" => Some("width"),
+        "block-size" => Some("height"),
+        "min-inline-size" => Some("min-width"),
+        "max-inline-size" => Some("max-width"),
+        "min-block-size" => Some("min-height"),
+        "max-block-size" => Some("max-height"),
+        _ => None,
+    };
+    if let Some(size) = size {
+        return Some(vec![make(size.into(), d.values.clone())]);
+    }
+    let (p, rest) = ["margin", "padding", "inset", "border"].iter().find_map(|p| n.strip_prefix(p).map(|r| (*p, r)))?;
+    let (inline, rest) = match rest.strip_prefix("-inline") {
+        Some(r) => (true, r),
+        None => (false, rest.strip_prefix("-block")?),
+    };
+    let (start, end) = if inline { ("left", "right") } else { ("top", "bottom") };
+    let (sides, suffix): (Vec<&str>, &str) = if let Some(r) = rest.strip_prefix("-start") {
+        (vec![start], r)
+    } else if let Some(r) = rest.strip_prefix("-end") {
+        (vec![end], r)
+    } else {
+        (vec![start, end], rest)
+    };
+    let valid = if p == "border" { matches!(suffix, "" | "-width" | "-style" | "-color") } else { suffix.is_empty() };
+    if !valid {
+        return None;
+    }
+    // `margin-inline: a b` is start then end; the border shorthand takes the same tokens for both.
+    let split = sides.len() == 2 && d.values.len() == 2 && !(p == "border" && suffix.is_empty());
+    Some(
+        sides
+            .iter()
+            .enumerate()
+            .map(|(i, side)| {
+                let name = if p == "inset" { (*side).to_string() } else { format!("{p}-{side}{suffix}") };
+                let values = if split { vec![d.values[i].clone()] } else { d.values.clone() };
+                make(name, values)
+            })
+            .collect(),
+    )
+}
+
 fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
+    if let Some(list) = logical(d) {
+        for physical in &list {
+            apply(s, physical, parent_font_size);
+        }
+        return;
+    }
     let fs = if d.name == "font-size" { parent_font_size } else { s.font_size };
     let v = &d.values;
     let first = v.first();
@@ -3229,6 +3393,27 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 _ => s.aspect_ratio,
             };
         }
+        "counter-reset" | "counter-increment" | "counter-set" => {
+            // `name [integer]` pairs; `none` clears. Resets default to 0, increments to 1.
+            let default = if d.name == "counter-increment" { 1 } else { 0 };
+            let mut list: Vec<(String, i32)> = Vec::new();
+            for x in v {
+                match x {
+                    Value::Number(n) => {
+                        if let Some(last) = list.last_mut() {
+                            last.1 = *n as i32;
+                        }
+                    }
+                    Value::Ident(i) if i != "none" => list.push((i.clone(), default)),
+                    _ => {}
+                }
+            }
+            match d.name.as_str() {
+                "counter-reset" => s.counter_reset = list,
+                "counter-increment" => s.counter_increment = list,
+                _ => s.counter_set = list,
+            }
+        }
         "filter" => s.filter = parse_filter(&d.raw, s.color),
         "backdrop-filter" | "-webkit-backdrop-filter" => s.backdrop_filter = parse_filter(&d.raw, s.color),
         "clip-path" => {
@@ -3985,6 +4170,52 @@ mod tests {
         assert_eq!(p.object_position, (StopPos::Fraction(0.0), StopPos::Fraction(0.0)));
         let c = st("c");
         assert!(c.filter.is_empty() && c.clip_path.is_none() && c.blend == Blend::Normal && !c.layered());
+    }
+
+    #[test]
+    fn logical_properties_map_to_the_physical_ones() {
+        let doc = Document::parse(r#"<div id="a" style="margin-inline:4px 8px;padding-block:2px;inset-inline-start:5px;inline-size:100px;min-block-size:10px;border-inline-start:3px solid red;border-block-end-color:blue;margin-block-start:7px"></div>"#);
+        let styles = compute_styles(&doc);
+        let a = styles.get(doc.find(|n| n.attr("id") == Some("a")).unwrap()).clone();
+        assert_eq!((a.margin.left, a.margin.right), (Length::Px(4.0), Length::Px(8.0)));
+        assert_eq!((a.padding.top, a.padding.bottom), (2.0, 2.0));
+        assert_eq!(a.inset.left, Length::Px(5.0));
+        assert_eq!((a.width, a.min_height), (Length::Px(100.0), Length::Px(10.0)));
+        assert_eq!((a.border_width.left, a.border_style.left), (3.0, BorderStyle::Solid));
+        assert_eq!(a.border_color_set.bottom, Some(Color::rgb(0, 0, 255)));
+        assert_eq!(a.margin.top, Length::Px(7.0));
+    }
+
+    #[test]
+    fn css_counters_number_headings_and_nest() {
+        let doc = Document::parse(
+            r#"<style>
+                 body { counter-reset: chapter }
+                 h2 { counter-reset: sec; counter-increment: chapter }
+                 h2::before { content: "Chapter " counter(chapter, upper-roman) ": " }
+                 h3 { counter-increment: sec }
+                 h3::before { content: counter(chapter) "." counter(sec, lower-alpha) " " }
+                 ol { counter-reset: item }
+                 li { counter-increment: item }
+                 li::before { content: counters(item, ".") " " }
+               </style><body><h2 id="a">A</h2><h3 id="a1">x</h3><h3 id="a2">y</h3><h2 id="b">B</h2><h3 id="b1">z</h3>
+               <ol><li id="l1">one<ol><li id="l2">two</li><li id="l3">three</li></ol></li><li id="l4">four</li></ol></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let before = |id: &str| {
+            let n = doc.find(|n| n.attr("id") == Some(id)).unwrap();
+            let p = styles.pseudo(n, PseudoElement::Before).unwrap();
+            styles.content(p).to_string()
+        };
+        assert_eq!(before("a"), "Chapter I: ");
+        assert_eq!(before("a1"), "1.a ");
+        assert_eq!(before("a2"), "1.b ");
+        assert_eq!(before("b"), "Chapter II: ");
+        assert_eq!(before("b1"), "2.a ", "sec restarts under each h2");
+        assert_eq!(before("l1"), "1 ");
+        assert_eq!(before("l2"), "1.1 ");
+        assert_eq!(before("l3"), "1.2 ");
+        assert_eq!(before("l4"), "2 ");
     }
 
     #[test]
