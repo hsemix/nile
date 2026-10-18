@@ -2766,4 +2766,5 @@
   Object.defineProperty(g, "__storageModule", { value: { open: storageOpen } });
   
   /*@CANVAS@*/
+  /*@AUDIO@*/
   }

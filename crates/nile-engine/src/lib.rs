@@ -7318,6 +7318,72 @@ cd</textarea>
         let _ = std::fs::remove_file(path);
     }
 
+    /// A mono 8 kHz, 16-bit WAV of `ms` milliseconds of silence.
+    fn silent_wav(ms: u32) -> Vec<u8> {
+        let data = 8 * ms * 2;
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&(36 + data).to_le_bytes());
+        v.extend_from_slice(b"WAVEfmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&[1, 0, 1, 0]);
+        v.extend_from_slice(&8000u32.to_le_bytes());
+        v.extend_from_slice(&16000u32.to_le_bytes());
+        v.extend_from_slice(&[2, 0, 16, 0]);
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&data.to_le_bytes());
+        v.resize(v.len() + data as usize, 0);
+        v
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn audio_elements_and_the_sciter_audio_class_play_and_end() {
+        std::env::set_var("NILE_AUDIO", "off");
+        let dir = std::env::temp_dir().join(format!("nile-audio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("beep.wav"), silent_wav(250)).unwrap();
+        let path = dir.join("index.html");
+        std::fs::write(
+            &path,
+            r#"<body><audio id="a" src="beep.wav"></audio><script>
+                 window.log = [];
+                 const a = document.getElementById('a');
+                 for (const t of ['loadedmetadata', 'play', 'pause', 'ended']) a.addEventListener(t, () => log.push(t));
+                 window.dur = a.duration;
+                 a.volume = 0.5;
+                 a.play().then(() => log.push('started'));
+                 Audio.load(__DIR__ + '/beep.wav').then(async (s) => { log.push('loaded'); await s.play(); log.push('sciter-done'); });
+                 window.missing = 'pending';
+                 Audio.load('nope.wav').catch((e) => { window.missing = 'rejected'; });
+               </script></body>"#,
+        )
+        .unwrap();
+        let mut p = Page::load(path, (600.0, 300.0), 0.0);
+        p.layout(600.0, 300.0);
+        assert!((js(&mut p, "dur").parse::<f64>().unwrap() - 0.25).abs() < 0.01, "duration from the file");
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until && !js(&mut p, "log.join()").contains("sciter-done") {
+            std::thread::sleep(Duration::from_millis(30));
+            p.tick();
+        }
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(10));
+            p.tick();
+        }
+        let log = js(&mut p, "log.join()");
+        for expect in ["loadedmetadata", "play", "started", "ended", "loaded", "sciter-done"] {
+            assert!(log.contains(expect), "{expect} in {log}");
+        }
+        let ended_at = log.find("ended").unwrap();
+        assert!(log.find("sciter-done").unwrap() > log.find("loaded").unwrap(), "{log}");
+        assert!(ended_at > log.find("play").unwrap(), "{log}");
+        assert_eq!(js(&mut p, "a.ended + ',' + a.paused + ',' + a.volume"), "true,true,0.5");
+        assert_eq!(js(&mut p, "missing"), "rejected");
+        assert_eq!(js(&mut p, "(new Audio(__DIR__ + '/beep.wav')) instanceof Audio && !(a instanceof HTMLElement === false)"), "true");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn canvas_draws_an_img_by_its_src() {
         // A 1x1 red PNG as a data URL.

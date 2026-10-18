@@ -37,9 +37,10 @@ pub use net::{file_url, path_of_url, FetchRequest, FetchResponse, Fetcher, Local
 const EDIT: &str = include_str!("edit.js");
 const WEB: &str = include_str!("web.js");
 const CANVAS: &str = include_str!("canvas.js");
+const AUDIO: &str = include_str!("audio.js");
 
 fn prelude() -> String {
-    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", &WEB.replace("/*@CANVAS@*/", CANVAS))
+    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", &WEB.replace("/*@CANVAS@*/", CANVAS).replace("/*@AUDIO@*/", AUDIO))
 }
 
 /// Window ids are unique within the process (the main window, then each `new Window()`).
@@ -621,6 +622,54 @@ fn install_natives(
             }
         }
     });
+    // Audio: `audioLoad(src)` registers a file as "id,duration" (an error starts with \u{1}), `audioOp` drives it.
+    #[cfg(feature = "audio")]
+    {
+        native!("audioLoad", {
+            let env = env.clone();
+            move |src: String| -> String {
+                let Some(bytes) = env.image_bytes(&src) else { return format!("\u{1}{src}: not found") };
+                match nile_audio::load(bytes) {
+                    Ok((id, duration)) => format!("{id},{}", duration.map_or(String::new(), |d| d.to_string())),
+                    Err(e) => format!("\u{1}{e}"),
+                }
+            }
+        });
+        native!("audioOp", |op: String, id: i32, arg: f64| -> String {
+            let id = id as u32;
+            let done = |r: Result<(), String>| r.map_or_else(|e| format!("\u{1}{e}"), |()| String::new());
+            match op.as_str() {
+                "play" => done(nile_audio::play(id)),
+                "pause" => done(nile_audio::pause(id)),
+                "stop" => done(nile_audio::stop(id)),
+                "seek" => done(nile_audio::seek(id, arg)),
+                "volume" => done(nile_audio::set_volume(id, arg as f32)),
+                "muted" => done(nile_audio::set_muted(id, arg != 0.0)),
+                "loop" => done(nile_audio::set_loop(id, arg != 0.0)),
+                "rate" => done(nile_audio::set_rate(id, arg as f32)),
+                "unload" => {
+                    nile_audio::unload(id);
+                    String::new()
+                }
+                "state" => match nile_audio::state(id) {
+                    Some(s) => format!(
+                        "{{\"position\":{},\"playing\":{},\"ended\":{},\"duration\":{}}}",
+                        s.position,
+                        s.playing,
+                        s.ended,
+                        s.duration.map_or("null".to_string(), |d| d.to_string())
+                    ),
+                    None => "\u{1}no such audio".to_string(),
+                },
+                _ => String::new(),
+            }
+        });
+    }
+    #[cfg(not(feature = "audio"))]
+    {
+        native!("audioLoad", |_src: String| -> String { "\u{1}audio support is not built into this program".to_string() });
+        native!("audioOp", |_op: String, _id: i32, _arg: f64| -> String { String::new() });
+    }
     native!("viewport", {
         let env = env.clone();
         move || -> Vec<f32> {
@@ -1079,6 +1128,21 @@ impl ScriptHost {
         } else {
             None
         };
+        // Sounds: notice the ones that ended and let the page know; look again soon while any plays.
+        #[cfg(feature = "audio")]
+        let (ended, playing) = {
+            nile_audio::poll();
+            (nile_audio::take_events().into_iter().map(|(id, _)| id as i32).collect::<Vec<i32>>(), nile_audio::busy())
+        };
+        #[cfg(not(feature = "audio"))]
+        let (ended, playing): (Vec<i32>, bool) = (Vec::new(), false);
+        if playing || !ended.is_empty() {
+            self.call_global("__audioTick", |_, f| {
+                f.call::<_, ()>((ended.clone(),))?;
+                Ok(())
+            });
+        }
+        let poll = if playing { Some(poll.map_or(Duration::from_millis(100), |p| p.min(Duration::from_millis(100)))) } else { poll };
         let timer = (next >= 0.0).then(|| Duration::from_secs_f64(next / 1000.0));
         match (timer, poll) {
             (Some(t), Some(p)) => Some(t.min(p)),

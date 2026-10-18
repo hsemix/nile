@@ -68,3 +68,4 @@ For the broader feature list and remaining compatibility gaps, see the
 [project README](../../README.md#whats-supported-today). For Rust API details,
 generate the local crate documentation with `cargo doc --workspace --no-deps`;
 the entry page is `target/doc/nile_engine/index.html`.
+15. [Play sound with `Audio` and `<audio>`](audio.md).

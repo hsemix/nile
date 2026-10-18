@@ -8,6 +8,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+nile-audio = { path = "crates/nile-audio" }
+# Playback only (no recording, no dither); the decoders are features of nile-audio.
+rodio = { version = "0.23.0", default-features = false, features = ["playback"] }
 nile-dom = { path = "crates/nile-dom" }
 nile-style = { path = "crates/nile-style" }
 nile-text = { path = "crates/nile-text" }
