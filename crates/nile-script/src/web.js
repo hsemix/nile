@@ -2247,16 +2247,118 @@
     },
   });
 
-  // Files dropped on the window (not on a file input): a `drop` event with `dataTransfer.files`.
-  Object.defineProperty(g, "__fileDrop", {
-    value(id, paths) {
-      const target = wrap(id);
-      if (!target) return;
-      const files = paths.map((p) => new File(p));
-      const e = new Event("drop", { bubbles: true, cancelable: true });
-      e.dataTransfer = { files, types: ["Files"], items: files.map((f) => ({ kind: "file", type: f.type, getAsFile: () => f })), dropEffect: "copy" };
-      e.files = files;
-      target.dispatchEvent(e);
+  // ---- HTML5 drag and drop ---------------------------------------------------------------------
+  // The engine decides when a drag starts (`draggable="true"`), where the pointer is and when it ends; the
+  // events and the `DataTransfer` are here. `dragstart` / `drag` / `dragend` go to the source,
+  // `dragenter` / `dragover` / `dragleave` / `drop` to what is under the pointer. A `dragover` that calls
+  // `preventDefault()` accepts the drop.
+  const EFFECTS = { none: [], copy: ["copy"], copyLink: ["copy", "link"], copyMove: ["move", "copy"], link: ["link"], linkMove: ["move", "link"], move: ["move"], all: ["move", "copy", "link"], uninitialized: ["move", "copy", "link"] };
+  class DataTransferItem {
+    constructor(kind, type, data) { this.kind = kind; this.type = type; this._data = data; }
+    getAsString(cb) { if (this.kind === "string" && typeof cb === "function") setTimeout(() => cb(this._data), 0); }
+    getAsFile() { return this.kind === "file" ? this._data : null; }
+  }
+  class DataTransfer {
+    constructor() {
+      this._data = new Map(); this._mode = "rw"; this._image = null;
+      this.dropEffect = "none"; this.effectAllowed = "uninitialized"; this.files = [];
+    }
+    get types() { return [...this._data.keys(), ...(this.files.length ? ["Files"] : [])]; }
+    get items() {
+      const list = [...this._data].map(([t, v]) => new DataTransferItem("string", t, v)).concat(this.files.map((f) => new DataTransferItem("file", f.type, f)));
+      list.add = (data, type) => { if (typeof data === "string") this.setData(type, data); };
+      return list;
+    }
+    setData(type, value) { if (this._mode === "rw") this._data.set(String(type).toLowerCase() === "text" ? "text/plain" : String(type).toLowerCase(), String(value)); }
+    getData(type) {
+      if (this._mode === "protected") return "";
+      const t = String(type).toLowerCase();
+      return this._data.get(t === "text" ? "text/plain" : t) ?? (t === "url" ? (this._data.get("text/uri-list") ?? "") : "");
+    }
+    clearData(type) { if (this._mode !== "rw") return; type === undefined ? this._data.clear() : this._data.delete(String(type).toLowerCase()); }
+    setDragImage(el, x, y) { this._image = { el, x, y }; }
+  }
+  g.DataTransfer = DataTransfer;
+  g.DataTransferItem = DataTransferItem;
+  const dragEvent = (type, target, x, y, dt, related = null) => {
+    const e = new Event(type, { bubbles: true, cancelable: type !== "dragleave" && type !== "dragend" && type !== "drag" });
+    Object.assign(e, { clientX: x, clientY: y, pageX: x + (g.scrollX || 0), pageY: y + (g.scrollY || 0), screenX: x, screenY: y, button: 0, buttons: 1, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false, dataTransfer: dt, relatedTarget: related });
+    return e;
+  };
+  g.DragEvent = class DragEvent extends Event {};
+  let dnd = null;
+  const allowedEffects = (dt) => EFFECTS[dt.effectAllowed] || EFFECTS.uninitialized;
+  Object.defineProperties(g, {
+    __dndStart: {
+      value(id, x, y) {
+        const source = wrap(id);
+        if (!source) return false;
+        const dt = new DataTransfer();
+        const e = dragEvent("dragstart", source, x, y, dt);
+        source.dispatchEvent(e);
+        if (e.defaultPrevented) return false;
+        dt._mode = "protected";
+        dnd = { dt, source, over: null, accept: false, effect: "none" };
+        return true;
+      },
+    },
+    __dndMove: {
+      value(overId, x, y) {
+        if (!dnd) return { accept: false, effect: "none" };
+        const { dt, source } = dnd;
+        const target = overId > 0 ? wrap(overId) : null;
+        if (target !== dnd.over) {
+          if (dnd.over) dnd.over.dispatchEvent(dragEvent("dragleave", dnd.over, x, y, dt, target));
+          if (target) target.dispatchEvent(dragEvent("dragenter", target, x, y, dt, dnd.over));
+          dnd.over = target;
+        }
+        source.dispatchEvent(dragEvent("drag", source, x, y, dt));
+        let accept = false, effect = "none";
+        if (target) {
+          const allowed = allowedEffects(dt);
+          dt.dropEffect = allowed[0] || "none";
+          const e = dragEvent("dragover", target, x, y, dt);
+          target.dispatchEvent(e);
+          effect = allowed.includes(dt.dropEffect) ? dt.dropEffect : "none";
+          accept = e.defaultPrevented && effect !== "none";
+          if (!accept) effect = "none";
+        }
+        dnd.accept = accept; dnd.effect = effect;
+        return { accept, effect };
+      },
+    },
+    __dndEnd: {
+      value(drop, x, y) {
+        if (!dnd) return;
+        const { dt, source, over } = dnd;
+        dnd = null;
+        let effect = "none";
+        if (drop && over && dt.dropEffect !== "none") {
+          dt._mode = "ro";
+          dt.dropEffect = allowedEffects(dt).includes(dt.dropEffect) ? dt.dropEffect : "none";
+          effect = dt.dropEffect;
+          over.dispatchEvent(dragEvent("drop", over, x, y, dt));
+        } else if (over) {
+          over.dispatchEvent(dragEvent("dragleave", over, x, y, dt, null));
+        }
+        dt.dropEffect = effect;
+        source.dispatchEvent(dragEvent("dragend", source, x, y, dt));
+      },
+    },
+    // Files dropped on the window from outside: `dragenter`, `dragover` and `drop` with `dataTransfer.files`.
+    __fileDrop: {
+      value(id, paths) {
+        const target = wrap(id);
+        if (!target) return;
+        const files = paths.map((p) => new File(p));
+        const dt = new DataTransfer();
+        dt.files = files; dt._mode = "ro"; dt.effectAllowed = "all"; dt.dropEffect = "copy";
+        target.dispatchEvent(dragEvent("dragenter", target, 0, 0, dt));
+        target.dispatchEvent(dragEvent("dragover", target, 0, 0, dt));
+        const e = dragEvent("drop", target, 0, 0, dt);
+        e.files = files;
+        target.dispatchEvent(e);
+      },
     },
   });
 

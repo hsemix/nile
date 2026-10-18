@@ -142,6 +142,16 @@ const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 /// Half the caret's blink period.
 pub const CARET_BLINK: Duration = Duration::from_millis(530);
 
+/// An HTML5 drag in progress: the dragged element, what is under the pointer, whether the last `dragover` accepted a
+/// drop there, and where in the element the pointer took hold (for the ghost).
+#[derive(Debug, Clone)]
+pub struct Dnd {
+    pub source: NodeId,
+    pub over: Option<NodeId>,
+    pub accept: bool,
+    pub grab: (f32, f32),
+}
+
 /// A scroll-snap container that was just scrolled (see `Page::snap_due`).
 #[derive(Debug, Clone, Copy)]
 pub struct SnapPending {
@@ -877,6 +887,10 @@ pub struct Page {
     /// A scroll container with `scroll-snap-type` that was scrolled: when it settles, the offset it
     /// started the gesture at, and when to snap.
     pub snap_due: Option<SnapPending>,
+    /// A press on a `draggable` element: the element and where the pointer went down. It becomes a drag after a few pixels.
+    pub dnd_candidate: Option<(NodeId, f32, f32)>,
+    /// The HTML5 drag in progress (see `dnd_start`).
+    pub dnd: Option<Dnd>,
     /// List box row the shift-range started from, and the row keys moved to last.
     pub list_anchor: Option<(NodeId, usize)>,
     /// A list box being dragged over (the button went down on a row).
@@ -1220,6 +1234,8 @@ impl Page {
             ime_host: false,
             hover_due: None,
             snap_due: None,
+            dnd_candidate: None,
+            dnd: None,
             list_anchor: None,
             list_drag: None,
             list_press: None,
@@ -2115,6 +2131,9 @@ impl Page {
             return cursor;
         }
         use nile_style::Cursor;
+        if let Some(d) = &self.dnd {
+            return if d.accept { Cursor::Move } else { Cursor::NotAllowed };
+        }
         if self.bar_drag.is_some() || self.view.borrow().menu.is_some() {
             return Cursor::Default;
         }
@@ -2158,6 +2177,65 @@ impl Page {
         if let Some(n) = hover {
             self.emit(n, mouse("mouseover"));
         }
+        true
+    }
+
+    /// The nearest `draggable="true"` element at or above `node`.
+    fn draggable_at_or_above(&self, node: NodeId) -> Option<NodeId> {
+        let doc = self.doc.borrow();
+        let mut cur = Some(node);
+        while let Some(n) = cur {
+            match doc.node(n).attr("draggable").map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+                Some("true") => return Some(n),
+                Some("false") => return None,
+                _ => {}
+            }
+            cur = doc.node(n).parent;
+        }
+        None
+    }
+
+    /// The pointer moved far enough from a press on a draggable element: fire `dragstart`, and if scripts allow it
+    /// the element is being dragged.
+    fn dnd_start(&mut self, source: NodeId, px: f32, py: f32) -> bool {
+        self.dnd_candidate = None;
+        let (x, y) = self.pointer.unwrap_or((px, py));
+        let started = self.call("__dndStart", &format!("[{},{x},{y}]", source.0)).0.is_ok_and(|r| r.trim() == "true");
+        self.pressed = None;
+        let next = InteractionState { active: None, ..self.interaction() };
+        self.set_interaction(next);
+        if !started {
+            return true;
+        }
+        let (scroll, rect) = {
+            let mut v = self.view.borrow_mut();
+            let offsets = v.scroll_offsets.clone();
+            (v.scroll_y, v.layout().node_rect_scrolled(source, &offsets))
+        };
+        let grab = rect.map_or((0.0, 0.0), |r| (px - r.x, py - (r.y - scroll)));
+        self.dnd = Some(Dnd { source, over: None, accept: false, grab });
+        self.dnd_move(x, y);
+        true
+    }
+
+    fn dnd_move(&mut self, x: f32, y: f32) -> bool {
+        let over = self.hit_test(x, y);
+        let verdict = self.call("__dndMove", &format!("[{},{x},{y}]", over.map_or(0, |n| n.0))).0.unwrap_or_default();
+        let accept = verdict.contains("\"accept\":true");
+        if let Some(d) = &mut self.dnd {
+            d.over = over;
+            d.accept = accept;
+        }
+        true
+    }
+
+    /// The button was released (`drop`) or Escape pressed: end the drag.
+    fn dnd_end(&mut self, drop: bool) -> bool {
+        let (x, y) = self.pointer.unwrap_or((0.0, 0.0));
+        let accepted = self.dnd.as_ref().is_some_and(|d| d.accept);
+        let _ = self.call("__dndEnd", &format!("[{},{x},{y}]", drop && accepted));
+        self.dnd = None;
+        self.refresh_hover();
         true
     }
 
@@ -2206,6 +2284,14 @@ impl Page {
     }
 
     fn pointer_moved_here(&mut self, x: f32, y: f32) -> bool {
+        if self.dnd.is_some() {
+            return self.dnd_move(x, y);
+        }
+        if let Some((node, sx, sy)) = self.dnd_candidate {
+            if self.pressed.is_some() && (x - sx).hypot(y - sy) >= 4.0 {
+                return self.dnd_start(node, sx, sy);
+            }
+        }
         if self.image_drag.is_some() {
             return self.image_drag_to(x, y);
         }
@@ -2395,10 +2481,16 @@ impl Page {
         let mut keep_focus = false;
         // A press on empty canvas still reaches the document (popups close on it).
         let event_target = target.or_else(|| self.doc.borrow().body());
+        self.dnd_candidate = None;
         if let Some(t) = event_target {
             let (proceed, c) = self.emit(t, self.mouse_event("mousedown"));
             changed |= c;
             keep_focus = !proceed;
+            if proceed {
+                if let (Some(source), Some((x, y))) = (self.draggable_at_or_above(t), self.pointer) {
+                    self.dnd_candidate = Some((source, x, y));
+                }
+            }
         }
         let next = InteractionState {
             active: target,
@@ -2553,6 +2645,10 @@ impl Page {
     }
 
     fn release_here(&mut self) -> bool {
+        self.dnd_candidate = None;
+        if self.dnd.is_some() {
+            return self.dnd_end(true);
+        }
         if self.bar_drag.take().is_some() {
             return true;
         }
@@ -3774,6 +3870,11 @@ impl Page {
     /// A key event goes to the focused element, or `<body>`. Returns whether
     /// the page should keep its default handling (no `preventDefault`).
     pub fn key(&mut self, kind: &'static str, key: String, mods: ModifiersState) -> (bool, bool) {
+        if self.dnd.is_some() {
+            // Escape cancels a drag; other keys wait for it to end.
+            let cancel = kind == "keydown" && key == "Escape";
+            return (false, cancel && self.dnd_end(false));
+        }
         self.tooltip_hide();
         if let Some(r) = self.frames_key(kind, &key, mods) {
             return r;
@@ -3934,6 +4035,23 @@ impl Page {
                 &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection, dom_caret, preedit: ime_underline, only, skip: &skip, selected_image, bar },
             )
         });
+        // A drag in progress: the dragged element, translucent, following the pointer.
+        if let (Some(d), Some((px, py)), None) = (&self.dnd, self.pointer, portal) {
+            if let (Some(range), Some(rect)) = (tree.subtree_range(d.source), tree.node_rect_scrolled(d.source, &view.scroll_offsets)) {
+                let (dx, dy) = (px - d.grab.0 - rect.x, py - d.grab.1 - (rect.y - scroll));
+                canvas.save();
+                canvas.translate((dx, dy));
+                canvas.save_layer_alpha_f(None, 0.65);
+                self.renderer.paint(
+                    canvas,
+                    tree,
+                    &view.styles,
+                    &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret: None, selection: None, viewport: view.viewport, page_selection: &[], dom_caret: None, preedit: None, only: Some(range), skip: &[], selected_image: None, bar: None },
+                );
+                canvas.restore();
+                canvas.restore();
+            }
+        }
         canvas.restore();
         }
         if portal.is_none() {
@@ -7340,6 +7458,76 @@ cd</textarea>
         v.extend_from_slice(&data.to_le_bytes());
         v.resize(v.len() + data as usize, 0);
         v
+    }
+
+    #[test]
+    fn html5_drag_and_drop_fires_the_events_and_carries_data() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="src" draggable="true" style="width:60px;height:40px;background:#c33">drag me</div>
+               <div id="ok" style="position:absolute;left:200px;top:0;width:80px;height:80px;background:#3a3"></div>
+               <div id="no" style="position:absolute;left:300px;top:0;width:80px;height:80px;background:#999"></div>
+               <div id="plain" style="width:60px;height:20px">not draggable</div>
+               <script>
+                 window.log = [];
+                 const note = (e) => log.push(e.type + ':' + e.target.id);
+                 const src = document.getElementById('src'), ok = document.getElementById('ok'), no = document.getElementById('no');
+                 src.addEventListener('dragstart', (e) => { note(e); e.dataTransfer.setData('text/plain', 'payload'); e.dataTransfer.effectAllowed = 'copy'; });
+                 src.addEventListener('dragend', (e) => { note(e); log.push('effect=' + e.dataTransfer.dropEffect); });
+                 for (const t of ['dragenter', 'dragleave']) { ok.addEventListener(t, note); no.addEventListener(t, note); }
+                 ok.addEventListener('dragover', (e) => { e.preventDefault(); });
+                 ok.addEventListener('drop', (e) => { note(e); log.push('got=' + e.dataTransfer.getData('text/plain') + ',' + e.dataTransfer.types.join()); });
+                 no.addEventListener('dragover', () => {});
+                 no.addEventListener('drop', note);
+               </script></body>"#,
+            "dnd",
+        );
+        let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+        let (sx, sy) = center(&p, "src");
+        // Over a plain element nothing starts, however far the pointer goes.
+        let (px, py) = center(&p, "plain");
+        p.pointer_moved(px, py);
+        p.press();
+        p.pointer_moved(px + 50.0, py + 50.0);
+        p.release();
+        assert_eq!(ev(&mut p, "log.join()"), "");
+        // Accepted drop.
+        p.pointer_moved(sx, sy);
+        p.press();
+        p.pointer_moved(sx + 2.0, sy);
+        assert!(p.dnd.is_none(), "a tiny move is still a click");
+        p.pointer_moved(sx + 20.0, sy);
+        assert!(p.dnd.is_some());
+        let (ox, oy) = center(&p, "ok");
+        p.pointer_moved(ox, oy);
+        assert_eq!(p.cursor(), nile_style::Cursor::Move);
+        p.release();
+        let log = ev(&mut p, "log.join()");
+        assert!(log.starts_with("dragstart:src,dragenter:ok"), "{log}");
+        assert!(log.contains("drop:ok") && log.contains("got=payload,text/plain"), "{log}");
+        assert!(log.ends_with("dragend:src,effect=copy"), "{log}");
+        assert!(p.dnd.is_none());
+        // A zone that doesn't accept: no drop, and the drag ends with no effect.
+        ev(&mut p, "log.length = 0");
+        p.pointer_moved(sx, sy);
+        p.press();
+        p.pointer_moved(sx + 20.0, sy);
+        let (nx, ny) = center(&p, "no");
+        p.pointer_moved(nx, ny);
+        assert_eq!(p.cursor(), nile_style::Cursor::NotAllowed);
+        p.release();
+        let log = ev(&mut p, "log.join()");
+        assert!(!log.contains("drop:no") && log.contains("dragleave:no") && log.ends_with("effect=none"), "{log}");
+        // Escape cancels.
+        ev(&mut p, "log.length = 0");
+        p.pointer_moved(sx, sy);
+        p.press();
+        p.pointer_moved(sx + 20.0, sy);
+        p.pointer_moved(ox, oy);
+        p.key("keydown", "Escape".to_string(), ModifiersState::default());
+        p.release();
+        let log = ev(&mut p, "log.join()");
+        assert!(!log.contains("drop:ok") && log.ends_with("effect=none"), "{log}");
+        let _ = std::fs::remove_file(path);
     }
 
     #[cfg(feature = "audio")]

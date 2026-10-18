@@ -94,10 +94,12 @@ struct Snapshot {
     settle_ms: u64,
     /// `--select X1,Y1,X2,Y2`: drag a text selection.
     select: Option<[f32; 4]>,
+    /// `--drag X1,Y1,X2,Y2` (button left down, to see the ghost) or `--drop` (released at the end): press at 1, move to 2.
+    drag: Option<([f32; 4], bool)>,
 }
 
 fn render_png(page: &mut Page, snap: Snapshot) {
-    let Snapshot { out, width, height, scale, pointer, typed, compose, wait_ms, settle_ms, select } = snap;
+    let Snapshot { out, width, height, scale, pointer, typed, compose, wait_ms, settle_ms, select, drag } = snap;
     let out = out.as_str();
     // Let timers run (animations, setTimeout) before the snapshot.
     let wait = |page: &mut Page, ms: u64| {
@@ -133,6 +135,18 @@ fn render_png(page: &mut Page, snap: Snapshot) {
         page.press();
         page.pointer_moved(x2, y2);
         page.release();
+    }
+    if let Some(([x1, y1, x2, y2], release)) = drag {
+        page.layout(width as f32, height as f32);
+        page.pointer_moved(x1, y1);
+        page.press();
+        for i in 1..=8 {
+            let t = i as f32 / 8.0;
+            page.pointer_moved(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t);
+        }
+        if release {
+            page.release();
+        }
     }
     if let Some(text) = typed {
         let mut rest = text.as_str();
@@ -475,6 +489,7 @@ pub fn run(argv: Vec<String>) -> i32 {
     let mut wait_ms = 0u64;
     let mut settle_ms = 0u64;
     let mut select = None;
+    let mut drag = None;
     let mut typed = None;
     let mut compose = None;
     let mut pdf = None;
@@ -510,6 +525,12 @@ pub fn run(argv: Vec<String>) -> i32 {
                         context: arg == "--rclick",
                         wheel: if arg == "--wheel" { rest.first().copied().unwrap_or(0.0) } else { 0.0 },
                     });
+                }
+            }
+            "--drag" | "--drop" => {
+                let v: Vec<f32> = args.next().unwrap_or_default().split(',').filter_map(|n| n.parse().ok()).collect();
+                if let [a, b, c, d] = v[..] {
+                    drag = Some(([a, b, c, d], arg == "--drop"));
                 }
             }
             "--type" => typed = args.next(),
@@ -597,7 +618,7 @@ pub fn run(argv: Vec<String>) -> i32 {
         return 0;
     }
     if let Some(out) = png {
-        render_png(&mut page, Snapshot { out, width, height, scale, pointer, typed, compose, wait_ms, settle_ms, select });
+        render_png(&mut page, Snapshot { out, width, height, scale, pointer, typed, compose, wait_ms, settle_ms, select, drag });
         return 0;
     }
 
