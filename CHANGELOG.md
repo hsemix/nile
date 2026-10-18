@@ -8,6 +8,11 @@ the section becomes that version's.
 
 ## Unreleased
 
+### 2026-10-18
+
+#### Added
+- CSS flow and box properties (`examples/css-flow.html`): `visibility` (inherited; `hidden`/`collapse` keep the space, draw nothing of the box's own and aren't hit, a child can set `visible` again), `pointer-events: none` (inherited; hits pass through to what is below), `outline`, `outline-width/-style/-color/-offset` (drawn outside the border box, follows `border-radius`, takes no space), `order` on flex and grid items, the `flex-flow` shorthand (and `wrap-reverse` is read as `wrap`) and `aspect-ratio` (`2`, `16 / 9`, `auto`; also on images).
+
 ### 2026-10-17
 
 #### Added

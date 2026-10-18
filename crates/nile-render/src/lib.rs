@@ -157,8 +157,11 @@ impl Renderer {
                         jump = b.subtree_end.max(i + 1);
                         continue;
                     }
-                    self.paint_box(canvas, b, styles);
-                    if let Some(m) = tree.marker(b.node) {
+                    let shown = styles.get(b.node).visible;
+                    if shown {
+                        self.paint_box(canvas, b, styles);
+                    }
+                    if let Some(m) = tree.marker(b.node).filter(|_| shown) {
                         self.paint_marker(canvas, m, m.color.unwrap_or(styles.get(b.node).color));
                     }
                     if let Some(DomCaret::Empty { run, rect }) = dom_caret {
@@ -200,7 +203,9 @@ impl Renderer {
                     if let Some(&(_, from, to)) = page_selection.iter().find(|(run, ..)| *run == i) {
                         paint_selection(canvas, b.rect, content, from, to, highlight);
                     }
-                    self.paint_text(canvas, b.rect, content, styles);
+                    if styles.get(b.node).visible {
+                        self.paint_text(canvas, b.rect, content, styles);
+                    }
                     if let Some((_, from, to)) = preedit.filter(|(n, ..)| content.control && content.owners.iter().any(|(_, o)| o == n)) {
                         paint_underline(canvas, b.rect, content, from, to, styles.get(b.node).color);
                     }
@@ -469,6 +474,7 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
             self.paint_picture(canvas, data, s, b.rect);
         }
         paint_control_mark(canvas, s, b.rect, &styles.palette());
+        paint_outline(canvas, skia_rect(b.rect), s, radii);
     }
 
     /// The picture for `data` drawn `want` logical pixels big on a surface scaled by `scale`. Bitmaps
@@ -1008,6 +1014,40 @@ fn paint_decorated(
         }
     }
     canvas.restore();
+}
+
+/// `outline`: a line around the border box, `outline-offset` away from it, that takes no space.
+fn paint_outline(canvas: &Canvas, rect: Rect, s: &nile_style::ComputedStyle, radii: [(f32, f32); 4]) {
+    let o = s.outline;
+    if o.style == BorderStyle::None || o.width <= 0.0 {
+        return;
+    }
+    let color = o.color.unwrap_or(s.color);
+    if color.a == 0 {
+        return;
+    }
+    // The stroke is centred on a line `offset + width / 2` out from the border box.
+    let grow = o.offset + o.width / 2.0;
+    let line = Rect::from_ltrb(rect.left - grow, rect.top - grow, rect.right + grow, rect.bottom + grow);
+    if line.width() <= 0.0 || line.height() <= 0.0 {
+        return;
+    }
+    let radii = radii.map(|(rx, ry)| ((rx + grow).max(0.0), (ry + grow).max(0.0)));
+    let mut paint = fill(color);
+    paint.set_style(skia_safe::PaintStyle::Stroke);
+    paint.set_stroke_width(o.width);
+    paint.set_anti_alias(true);
+    match o.style {
+        BorderStyle::Dashed => {
+            paint.set_path_effect(skia_safe::PathEffect::dash(&[o.width * 3.0, o.width * 3.0], 0.0));
+        }
+        BorderStyle::Dotted => {
+            paint.set_stroke_cap(skia_safe::PaintCap::Round);
+            paint.set_path_effect(skia_safe::PathEffect::dash(&[0.01, o.width * 2.0], 0.0));
+        }
+        _ => {}
+    }
+    canvas.draw_rrect(round_rect(line, radii), &paint);
 }
 
 /// The check or radio dot for `appearance: checkbox | radio` when checked.

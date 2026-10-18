@@ -175,6 +175,8 @@ pub struct LayoutBox {
     pub border_gap: Option<(f32, f32)>,
     /// `backface-visibility: hidden`.
     pub backface_hidden: bool,
+    /// `pointer-events: none` or `visibility: hidden`: pointer hit testing passes through the box.
+    pub inert: bool,
     /// Collapsed table borders: the sides of this cell whose border lost to its neighbour's (the
     /// neighbour paints the shared line, see `resolve_collapsed_borders`).
     pub border_hidden: Edges<bool>,
@@ -1069,7 +1071,7 @@ impl LayoutTree {
     pub fn hit_test_scrolled(&self, x: f32, y: f32, offsets: &ScrollOffsets) -> Option<NodeId> {
         let places = self.placements(offsets);
         for (b, p) in self.boxes.iter().zip(&places).rev() {
-            if p.hidden {
+            if p.hidden || b.inert {
                 continue;
             }
             if let Some(c) = p.clip {
@@ -1865,6 +1867,9 @@ fn build_image(doc: &Document, styles: &StyleMap, tree: &mut TaffyTree<NodeCtx>,
     if size.0 > 0.0 && size.1 > 0.0 && !(wide && high) {
         ts.aspect_ratio = Some(size.0 / size.1);
     }
+    if let Some(r) = style.aspect_ratio {
+        ts.aspect_ratio = Some(r);
+    }
     let n = tree.new_leaf_with_context(ts, NodeCtx::Replaced { id, size, image }).ok()?;
     hand_off_absolute(style, n)
 }
@@ -1901,7 +1906,7 @@ fn build(
                 } else if is_value_control(node) {
                     build_control_text(doc, styles, text, tree, id).into_iter().collect()
                 } else {
-                    build_children(doc, styles, text, tree, &kids(doc, styles, id), style)
+                    build_children(doc, styles, text, tree, &ordered(styles, style, kids(doc, styles, id)), style)
                 }
             });
             let mut ts = taffy_style(style);
@@ -2338,6 +2343,19 @@ fn paints_box(s: &ComputedStyle) -> bool {
 }
 
 /// The children of `id` with its generated `::before` and `::after` boxes around them.
+fn is_inert(s: &ComputedStyle) -> bool {
+    !s.pointer_events || !s.visible
+}
+
+/// The children of a flex or grid container in `order` (stable, so equal orders keep the
+/// document order).
+fn ordered(styles: &StyleMap, container: &ComputedStyle, mut ids: Vec<NodeId>) -> Vec<NodeId> {
+    if matches!(container.display, Display::Flex | Display::Grid) && ids.iter().any(|n| styles.get(*n).order != 0) {
+        ids.sort_by_key(|n| styles.get(*n).order);
+    }
+    ids
+}
+
 fn kids(doc: &Document, styles: &StyleMap, id: NodeId) -> Vec<NodeId> {
     let node = doc.node(id);
     let mut out = Vec::with_capacity(node.children.len() + 2);
@@ -3301,13 +3319,13 @@ fn flatten(
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, border_hidden: Edges::default() })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, inert: is_inert(styles.get(*id)), border_hidden: Edges::default() })
         }
         Some(NodeCtx::Replaced { id, image, .. }) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, border_hidden: Edges::default() })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, inert: is_inert(styles.get(*id)), border_hidden: Edges::default() })
         }
         Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap }) => {
             // Final line breaking at the resolved width, so alignment is right.
@@ -3365,6 +3383,7 @@ fn flatten(
                 sticky: None,
                 border_gap: None,
                 backface_hidden: false,
+                inert: is_inert(styles.get(*node)),
                 border_hidden: Edges::default(),
             });
             for b in placed {
@@ -3800,6 +3819,7 @@ fn taffy_style(s: &ComputedStyle) -> Style {
             FlexDirection::ColumnReverse => taffy::FlexDirection::ColumnReverse,
         },
         flex_wrap: if s.flex_wrap { FlexWrap::Wrap } else { FlexWrap::NoWrap },
+        aspect_ratio: s.aspect_ratio,
         flex_grow: s.flex_grow,
         flex_shrink: s.flex_shrink,
         flex_basis: dim(s.flex_basis),
@@ -4667,6 +4687,29 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
         assert!(a.width > 20.0 && a.width < 120.0, "shrunk: {}", a.width);
         assert!(b.width <= 800.0 && b.width > 300.0, "capped at the container: {}", b.width);
         assert!(c.width < 40.0, "{}", c.width);
+    }
+
+    #[test]
+    fn pointer_events_and_visibility_let_hits_through_and_order_sorts_items() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><div id="under" style="width:100px;height:100px">
+                 <div id="none" style="position:absolute;left:0;top:0;width:100px;height:100px;pointer-events:none">
+                   <div id="kid" style="position:absolute;left:0;top:0;width:20px;height:20px;pointer-events:auto"></div></div>
+               </div>
+               <div id="hid" style="width:100px;height:30px;visibility:hidden"><span id="vis" style="visibility:visible">x</span></div>
+               <div style="display:flex;width:300px"><i id="a" style="order:2;width:10px">a</i><i id="b" style="order:1;width:10px">b</i><i id="c" style="width:10px">c</i></div>
+               <div id="ratio" style="width:80px;aspect-ratio:2"></div></body>"#,
+        );
+        let node = |id: &str| doc.find(|n| n.attr("id") == Some(id)).unwrap();
+        let none = Default::default();
+        assert_eq!(t.hit_test_scrolled(50.0, 50.0, &none), Some(node("under")), "pointer-events: none is transparent to hits");
+        assert_eq!(t.hit_test_scrolled(5.0, 5.0, &none), Some(node("kid")), "a child can turn them back on");
+        let hidden = rect_of(&doc, &t, "hid");
+        assert!(hidden.height >= 30.0, "visibility: hidden keeps the space");
+        assert_ne!(t.hit_test_scrolled(50.0, 105.0, &none), Some(node("hid")), "and is not hit");
+        let (a, b, c) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"), rect_of(&doc, &t, "c"));
+        assert!(c.x < b.x && b.x < a.x, "order puts c (0), b (1), a (2): {c:?} {b:?} {a:?}");
+        assert_eq!(rect_of(&doc, &t, "ratio").height, 40.0);
     }
 
     #[test]

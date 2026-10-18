@@ -126,6 +126,16 @@ pub enum BorderStyle {
     Dotted,
 }
 
+/// `outline`: a line drawn outside the border box that takes no space. `color: None` is
+/// `currentColor`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Outline {
+    pub width: f32,
+    pub style: BorderStyle,
+    pub color: Option<Color>,
+    pub offset: f32,
+}
+
 /// `background-size`. `None` in `Explicit` is `auto` for that axis.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum BgSize {
@@ -545,6 +555,16 @@ pub struct ComputedStyle {
     pub width_fit: bool,
     /// `cursor`; inherited.
     pub cursor: Cursor,
+    /// `visibility` (inherited): false for `hidden`/`collapse`, which keep the box's space but
+    /// draw and hit-test nothing of its own.
+    pub visible: bool,
+    /// `pointer-events` (inherited): false for `none`.
+    pub pointer_events: bool,
+    /// `order` of a flex or grid item.
+    pub order: i32,
+    pub outline: Outline,
+    /// `aspect-ratio` (width / height); `None` is `auto`.
+    pub aspect_ratio: Option<f32>,
     /// `color-scheme`; inherited. Only the root's counts for the user-agent sheet.
     pub color_scheme: ColorScheme,
     /// `accent-color` (`None` = auto: the system accent); inherited.
@@ -691,6 +711,11 @@ impl Default for ComputedStyle {
             table_fixed: false,
             vertical_align: VerticalAlign::Baseline,
             cursor: Cursor::Auto,
+            visible: true,
+            pointer_events: true,
+            order: 0,
+            outline: Outline::default(),
+            aspect_ratio: None,
             width_fit: false,
             color_scheme: ColorScheme::Light,
             accent_color: None,
@@ -940,6 +965,8 @@ impl ComputedStyle {
             border_collapse: parent.border_collapse,
             caption_bottom: parent.caption_bottom,
             cursor: parent.cursor,
+            visible: parent.visible,
+            pointer_events: parent.pointer_events,
             color_scheme: parent.color_scheme,
             accent_color: parent.accent_color,
             selection_bg: parent.selection_bg,
@@ -1408,6 +1435,9 @@ impl ComputedStyle {
         a.animations = other.animations.clone();
         a.transform_origin = other.transform_origin;
         a.cursor = other.cursor;
+        a.visible = other.visible;
+        a.pointer_events = other.pointer_events;
+        a.outline = other.outline;
         a.popup_position = other.popup_position;
         a.break_before = other.break_before;
         a.break_after = other.break_after;
@@ -2889,7 +2919,90 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 _ => return,
             }
         }
-        "flex-wrap" => s.flex_wrap = first.and_then(Value::ident) == Some("wrap"),
+        "flex-wrap" => s.flex_wrap = matches!(first.and_then(Value::ident), Some("wrap" | "wrap-reverse")),
+        // `flex-flow: <direction> || <wrap>`
+        "flex-flow" => {
+            for x in v {
+                match x.ident() {
+                    Some("row") => s.flex_direction = FlexDirection::Row,
+                    Some("column") => s.flex_direction = FlexDirection::Column,
+                    Some("row-reverse") => s.flex_direction = FlexDirection::RowReverse,
+                    Some("column-reverse") => s.flex_direction = FlexDirection::ColumnReverse,
+                    Some("wrap" | "wrap-reverse") => s.flex_wrap = true,
+                    Some("nowrap") => s.flex_wrap = false,
+                    _ => {}
+                }
+            }
+        }
+        "order" => {
+            if let Some(Value::Number(n)) = first {
+                s.order = *n as i32;
+            }
+        }
+        "visibility" => match first.and_then(Value::ident) {
+            Some("visible") => s.visible = true,
+            Some("hidden" | "collapse") => s.visible = false,
+            _ => {}
+        },
+        "pointer-events" => match first.and_then(Value::ident) {
+            Some("none") => s.pointer_events = false,
+            Some(_) => s.pointer_events = true,
+            None => {}
+        },
+        "aspect-ratio" => {
+            let nums: Vec<f32> = v.iter().filter_map(|x| if let Value::Number(n) = x { Some(*n) } else { None }).collect();
+            s.aspect_ratio = match nums.as_slice() {
+                [a] if *a > 0.0 => Some(*a),
+                [a, b] if *a > 0.0 && *b > 0.0 && v.iter().any(|x| matches!(x, Value::Slash)) => Some(a / b),
+                _ if first.and_then(Value::ident) == Some("auto") && nums.is_empty() => None,
+                _ => s.aspect_ratio,
+            };
+        }
+        "outline" => {
+            let mut o = Outline { width: 3.0, style: BorderStyle::None, color: None, offset: s.outline.offset };
+            for x in v {
+                if let Some(w) = px(x, fs) {
+                    o.width = w;
+                } else if let Some(c) = spec(x) {
+                    o.color = c;
+                } else {
+                    match x.ident() {
+                        Some("none" | "hidden") => o.style = BorderStyle::None,
+                        Some("dashed") => o.style = BorderStyle::Dashed,
+                        Some("dotted") => o.style = BorderStyle::Dotted,
+                        Some("solid" | "auto" | "double" | "groove" | "ridge" | "inset" | "outset") => o.style = BorderStyle::Solid,
+                        Some("thin") => o.width = 1.0,
+                        Some("medium") => o.width = 3.0,
+                        Some("thick") => o.width = 5.0,
+                        _ => {}
+                    }
+                }
+            }
+            s.outline = o;
+        }
+        "outline-width" => {
+            s.outline.width = match first.and_then(Value::ident) {
+                Some("thin") => 1.0,
+                Some("medium") => 3.0,
+                Some("thick") => 5.0,
+                _ => p(first).unwrap_or(s.outline.width),
+            }
+        }
+        "outline-style" => {
+            s.outline.style = match first.and_then(Value::ident) {
+                Some("none" | "hidden") => BorderStyle::None,
+                Some("dashed") => BorderStyle::Dashed,
+                Some("dotted") => BorderStyle::Dotted,
+                Some(_) => BorderStyle::Solid,
+                None => s.outline.style,
+            }
+        }
+        "outline-color" => {
+            if let Some(c) = first.and_then(spec) {
+                s.outline.color = c;
+            }
+        }
+        "outline-offset" => s.outline.offset = p(first).unwrap_or(s.outline.offset),
         "flex-grow" => {
             if let Some(Value::Number(n)) = first {
                 s.flex_grow = *n;
@@ -3511,6 +3624,21 @@ mod tests {
         // Done at 1 + 2*2 = 5s; `forwards` keeps the last (reversed) frame: from { opacity: 0 }.
         assert_eq!(opacity_at(&mut animator, &base, &mut styles, &doc, 6.0, false), 0.0);
         assert!(!animator.is_active());
+    }
+
+    #[test]
+    fn flow_and_box_properties_parse_and_inherit() {
+        let doc = Document::parse(r#"<div id="p" style="visibility:hidden;pointer-events:none;outline:2px dashed red;outline-offset:3px;order:-2;aspect-ratio:16/9;flex-flow:column wrap"><span id="c" style="visibility:visible"></span><b id="d"></b></div>"#);
+        let st = |id: &str| compute_styles(&doc).get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        let p = st("p");
+        assert!(!p.visible && !p.pointer_events);
+        assert_eq!((p.outline.width, p.outline.style, p.outline.offset), (2.0, BorderStyle::Dashed, 3.0));
+        assert_eq!(p.order, -2);
+        assert!((p.aspect_ratio.unwrap() - 16.0 / 9.0).abs() < 1e-5);
+        assert!(p.flex_wrap && p.flex_direction == FlexDirection::Column);
+        assert!(st("c").visible && !st("c").pointer_events, "visibility is overridden, pointer-events inherited");
+        assert!(!st("d").visible);
+        assert_eq!(st("d").outline, Outline::default(), "outline and order are not inherited");
     }
 
     #[test]
