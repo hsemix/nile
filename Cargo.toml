@@ -47,6 +47,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 arboard = { version = "3.6", default-features = false }
 imagesize = "0.13"
 base64 = "0.22"
+# Ed25519 and SHA-256 for update signatures (already linked by rustls).
+ring = "0.17"
 ureq = "3.4.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"

@@ -1195,6 +1195,7 @@ frameset { display: grid; height: 100%; min-height: 150px }
 frameset > * { min-width: 0; min-height: 0 }
 frameset > frame { height: auto }
 audio { display: none }
+[hidden] { display: none }
 splitter { display: block; background: #c8c8c8; cursor: col-resize }
 frameset[rows] > splitter { cursor: row-resize }
 iframe { display: inline-block; width: 300px; height: 150px; border: 0 }

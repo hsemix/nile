@@ -28,6 +28,8 @@ accesskit_winit.workspace = true
 
 nile-extension-pack = { path = "../nile-extension-pack" }
 serde_json = "1"
+ring.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 nile-extensions = { path = "../nile-extensions" }

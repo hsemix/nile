@@ -1,0 +1,1 @@
+{ "id": "nile.example.updater", "version": "1.0.0", "update": { "publicKey": "", "url": "update.json" } }

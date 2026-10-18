@@ -34,6 +34,7 @@ mod menu;
 #[cfg(target_os = "macos")]
 mod openevents;
 mod system;
+mod updates;
 
 use std::{path::PathBuf, rc::Rc, time::{Duration, Instant}};
 
@@ -452,10 +453,17 @@ fn linux_entry(out: &std::path::Path, icon: Option<&std::path::Path>, info: &bun
 /// code: opens windows and runs the event loop, or renders headless (`--png`, `--pdf`), packs
 /// (`--pack`) or brands (`--brand`). This is what the `nile` binary and the `nile-app` C library call.
 pub fn run(argv: Vec<String>) -> i32 {
-    // A packed app finds its files behind its own executable.
-    nile_dom::vfs::mount_self();
+    // A packed app finds its files behind its own executable, or in a signed update staged for it.
+    nile_dom::vfs::mount_self_with(updates::replacement);
+    updates::register_host_functions();
     if argv.first().is_some_and(|a| a == "--brand") {
         brand_command(&argv[1..]);
+    }
+    if argv.first().is_some_and(|a| a == "--keygen") {
+        updates::keygen_command(&argv[1..]);
+    }
+    if argv.first().is_some_and(|a| a == "--release") {
+        updates::release_command(&argv[1..]);
     }
     if argv.first().is_some_and(|a| a == "--pack") {
         pack_command(&argv[1..]);
@@ -549,6 +557,15 @@ pub fn run(argv: Vec<String>) -> i32 {
     }
     let _instance = match (&event_loop, single_instance_id(&file)) {
         (Some(event_loop), Some(id)) => {
+            // A restart after an update: the old instance is on its way out; wait for it to let go.
+            if std::env::var_os("NILE_RELAUNCH").is_some() {
+                for _ in 0..200 {
+                    if !instance::is_running(&id) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
             let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
             let payload = serde_json::json!({ "arguments": app_args, "cwd": cwd }).to_string();
             let proxy = event_loop.create_proxy();

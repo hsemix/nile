@@ -70,3 +70,4 @@ generate the local crate documentation with `cargo doc --workspace --no-deps`;
 the entry page is `target/doc/nile_engine/index.html`.
 15. [Play sound with `Audio` and `<audio>`](audio.md).
 16. [Run one instance, open links and files, start at login](app-lifecycle.md).
+17. [Publish signed updates for a packed app](updates.md).

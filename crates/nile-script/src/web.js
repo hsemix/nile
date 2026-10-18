@@ -1205,10 +1205,43 @@
   // so `run()` returns at once and `quit(code)` ends the program with that exit code.
   // `application.arguments` is the program's own arguments (a file the OS opens with the app, a
   // `myapp://` link). `second-instance`, `open-url` and `open-file` events come to `document` (and `window`).
+  const auUpdate = (name, ...args) => {
+    if (!g.host || !g.host.has(name)) throw new Error("updates are not available in this host");
+    return g.host[name](...args);
+  };
   Object.defineProperty(g, "application", { value: { start() {}, run() { return 0; }, quit(code = 0) { N.windowCommand("quit", +code | 0, 0); },
     get arguments() { return g.__envModule.arguments(); },
     // Make this program the handler of `scheme://` links / `.ext` files, or start it at login. Each
     // returns whether the system took it (macOS declares schemes and file types in the bundle, see `nile --pack --protocol`).
+    // Signed content updates (see docs/guide/updates.md): `version` is the app's, `checkForUpdates()` fetches the manifest
+    // named by nile.json (`update.url`) and resolves to the update or null, `downloadUpdate(update)` downloads and verifies
+    // it, `updateReady` says one is staged and `restartForUpdate()` starts the new version.
+    get version() { return auUpdate("nileUpdateConfig").version; },
+    get updateReady() { return auUpdate("nileUpdateConfig").ready || false; },
+    async checkForUpdates(manifestUrl) {
+      const cfg = auUpdate("nileUpdateConfig");
+      const where = manifestUrl || cfg.url;
+      if (!where) throw new Error("no update URL (nile.json: update.url)");
+      const r = await g.fetch(String(where));
+      if (!r.ok) throw new Error("update check failed: " + r.status);
+      const m = await r.json();
+      if (!m || !m.version || !m.url || !m.sha256 || !m.signature) throw new Error("the update manifest is incomplete");
+      if (!auUpdate("nileUpdateNewer", String(m.version), String(cfg.version))) return null;
+      return { ...m, url: new g.URL(String(m.url), new g.URL(String(where), g.location.href).href).href, current: cfg.version };
+    },
+    async downloadUpdate(update) {
+      const r = await g.fetch(String(update.url));
+      if (!r.ok) throw new Error("download failed: " + r.status);
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      const { url, current, ...manifest } = update;
+      const res = auUpdate("nileUpdateStage", JSON.stringify(manifest), bytesToB64(bytes));
+      if (res.error) throw new Error(res.error);
+      return res.version;
+    },
+    restartForUpdate() {
+      if (!auUpdate("nileUpdateRestart")) throw new Error("could not start the new version");
+      N.windowCommand("quit", 0, 0);
+    },
     registerProtocol(scheme) { return N.envCall("registerProtocol", [String(scheme)]) === "1"; },
     registerFileType(ext) { return N.envCall("registerFileType", [String(ext)]) === "1"; },
     get loginItem() { return N.envCall("loginItem", []) === "1"; },

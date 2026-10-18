@@ -1,0 +1,31 @@
+<!doctype html>
+<meta charset="utf-8"><title>updater</title>
+<style>
+body{margin:24px;font:14px sans-serif;width:520px}
+h3{margin:0 0 4px} .muted{color:#777}
+button{padding:6px 14px;margin:8px 8px 0 0}
+#status{margin-top:14px;padding:10px;border-radius:6px;background:#f2f2f2;min-height:20px}
+.ok{background:#e4f5e4 !important}.err{background:#fbe6e6 !important}
+</style>
+<h3>Updater demo <span class="muted" id="version"></span></h3>
+<div class="muted">Pack this folder, publish a newer version with <code>nile --release</code> and press the button.</div>
+<button id="check">Check for updates</button><button id="restart" hidden>Restart to update</button>
+<div id="status">Not checked yet.</div>
+<script>
+const $ = (s) => document.querySelector(s), say = (m, cls = '') => { const s = $('#status'); s.textContent = m; s.className = cls; };
+$('#version').textContent = 'v' + application.version;
+if (application.updateReady) { say('An update is installed and will start next time. Restart now?', 'ok'); $('#restart').hidden = false; }
+$('#check').onclick = async () => {
+  try {
+    say('Checking…');
+    const update = await application.checkForUpdates();
+    if (!update) return say('You have the latest version (v' + application.version + ').', 'ok');
+    say('Downloading v' + update.version + (update.notes ? ' — ' + update.notes : '') + '…');
+    await application.downloadUpdate(update);
+    say('v' + update.version + ' is downloaded and verified. Restart to use it.', 'ok');
+    $('#restart').hidden = false;
+  } catch (e) { say(String(e.message || e), 'err'); }
+};
+$('#restart').onclick = () => application.restartForUpdate();
+if (new URLSearchParams(location.search).has('auto') || application.arguments.includes('--auto-update')) $('#check').click();
+</script>

@@ -57,6 +57,11 @@ fn folder() -> Option<PathBuf> {
     Some(base)
 }
 
+/// Whether another instance of app `id` is alive right now (a connection that sends nothing).
+pub fn is_running(id: &str) -> bool {
+    folder().is_some_and(|dir| imp::is_running(&dir, &digest(id)))
+}
+
 /// Take the app `id`, or hand `payload` (one line of JSON) to the instance that has it. `on_message`
 /// runs on a background thread for each message a later launch sends.
 pub fn acquire(id: &str, payload: &str, on_message: impl Fn(String) + Send + 'static) -> Role {
@@ -79,6 +84,10 @@ mod imp {
         let mut answer = String::new();
         BufReader::new(stream).read_line(&mut answer)?;
         Ok(())
+    }
+
+    pub fn is_running(dir: &std::path::Path, name: &str) -> bool {
+        UnixStream::connect(dir.join(format!("{name}.sock"))).is_ok()
     }
 
     pub fn acquire(dir: PathBuf, name: &str, payload: &str, on_message: impl Fn(String) + Send + 'static) -> Role {
@@ -128,6 +137,11 @@ mod imp {
         Ok(())
     }
 
+    pub fn is_running(dir: &std::path::Path, name: &str) -> bool {
+        let Some(port) = std::fs::read_to_string(dir.join(format!("{name}.port"))).ok().and_then(|t| t.trim().parse::<u16>().ok()) else { return false };
+        TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(300)).is_ok()
+    }
+
     pub fn acquire(dir: PathBuf, name: &str, payload: &str, on_message: impl Fn(String) + Send + 'static) -> Role {
         let path = dir.join(format!("{name}.port"));
         for _ in 0..3 {
@@ -170,11 +184,13 @@ mod tests {
             let _ = tx.send(m);
         });
         let Role::Primary(guard) = first else { panic!("the first launch is the primary") };
+        assert!(is_running(&id), "the endpoint answers while the primary lives");
         let second = acquire(&id, r#"{"arguments":["a.txt"],"cwd":"/x"}"#, |_| panic!("the second must not listen"));
         assert!(matches!(second, Role::Secondary));
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), r#"{"arguments":["a.txt"],"cwd":"/x"}"#);
         // The owner goes away (here: its guard drops and removes the endpoint): the next launch is the primary again.
         drop(guard);
+        assert!(!is_running(&id));
         let (tx, _rx) = mpsc::channel::<String>();
         let again = acquire(&id, "{}", move |m| {
             let _ = tx.send(m);
