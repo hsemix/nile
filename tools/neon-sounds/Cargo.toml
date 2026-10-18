@@ -1,0 +1,8 @@
+[package]
+name = "neon-sounds"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone asset-generation tool, outside the Nile engine workspace.
+[workspace]

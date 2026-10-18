@@ -19,7 +19,13 @@ pub struct AppInfo {
     pub copyright: String,
     /// Desktop-entry categories, `Utility;` style (Linux).
     pub category: String,
+    /// URL schemes the app opens (`myapp` for `myapp://...`): declared in the macOS bundle and the Linux entry.
+    pub protocols: Vec<String>,
+    /// File extensions the app opens (`md`, `txt`), without the dot.
+    pub file_types: Vec<String>,
 }
+
+pub use nile_script::mime_of;
 
 impl AppInfo {
     /// `1.2.3.4` as four numbers (missing parts are 0).
@@ -103,11 +109,18 @@ pub fn desktop_entry(info: &AppInfo, exe: &Path, icon: Option<&Path>) -> String 
     if !info.description.is_empty() {
         out += &format!("Comment={}\n", info.description);
     }
-    out += &format!("Exec={}\n", quote(exe));
+    let opens = !info.protocols.is_empty() || !info.file_types.is_empty();
+    // `%U` hands the URLs and files the system opens with the app to it as arguments.
+    out += &format!("Exec={}{}\n", quote(exe), if opens { " %U" } else { "" });
     if let Some(icon) = icon {
         out += &format!("Icon={}\n", icon.to_string_lossy());
     }
     out += "Terminal=false\n";
+    if opens {
+        let mut mimes: Vec<String> = info.protocols.iter().map(|p| format!("x-scheme-handler/{}", p.to_ascii_lowercase())).collect();
+        mimes.extend(info.file_types.iter().filter_map(|e| mime_of(e)).map(str::to_string));
+        out += &format!("MimeType={};\n", mimes.join(";"));
+    }
     out += &format!("Categories={}\n", if info.category.is_empty() { "Utility;" } else { info.category.as_str() });
     if let Some(stem) = exe.file_name() {
         out += &format!("StartupWMClass={}\n", stem.to_string_lossy());
@@ -249,10 +262,25 @@ pub fn app_bundle(exe: &Path, archive: &Path, name: &str, icon: Option<&Path>, i
     let version = if info.version.is_empty() { "1.0".to_string() } else { info.version.clone() };
     let copyright = if info.copyright.is_empty() { String::new() } else { format!("  <key>NSHumanReadableCopyright</key><string>{}</string>\n", info.copyright) };
     let id: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let mut opens = String::new();
+    if !info.protocols.is_empty() {
+        opens += &format!(
+            "  <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>app.nile.{id}</string><key>CFBundleURLSchemes</key><array>{}</array></dict></array>\n",
+            info.protocols.iter().map(|p| format!("<string>{}</string>", esc(p))).collect::<String>()
+        );
+    }
+    if !info.file_types.is_empty() {
+        opens += &format!(
+            "  <key>CFBundleDocumentTypes</key><array><dict><key>CFBundleTypeName</key><string>{} document</string><key>CFBundleTypeRole</key><string>Editor</string><key>CFBundleTypeExtensions</key><array>{}</array></dict></array>\n",
+            esc(name),
+            info.file_types.iter().map(|e| format!("<string>{}</string>", esc(e.trim_start_matches('.')))).collect::<String>()
+        );
+    }
     std::fs::write(
         app.join("Contents/Info.plist"),
         format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n  <key>CFBundleName</key><string>{name}</string>\n  <key>CFBundleDisplayName</key><string>{name}</string>\n  <key>CFBundleExecutable</key><string>{name}</string>\n  <key>CFBundleIdentifier</key><string>app.nile.{id}</string>\n  <key>CFBundlePackageType</key><string>APPL</string>\n  <key>CFBundleVersion</key><string>{version}</string>\n  <key>CFBundleShortVersionString</key><string>{version}</string>\n{copyright}  <key>NSHighResolutionCapable</key><true/>\n{icon_key}</dict></plist>\n"
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n  <key>CFBundleName</key><string>{name}</string>\n  <key>CFBundleDisplayName</key><string>{name}</string>\n  <key>CFBundleExecutable</key><string>{name}</string>\n  <key>CFBundleIdentifier</key><string>app.nile.{id}</string>\n  <key>CFBundlePackageType</key><string>APPL</string>\n  <key>CFBundleVersion</key><string>{version}</string>\n  <key>CFBundleShortVersionString</key><string>{version}</string>\n{copyright}{opens}  <key>NSHighResolutionCapable</key><true/>\n{icon_key}</dict></plist>\n"
         ),
     )?;
     // The executable was changed after it was built: sign the whole bundle again (ad hoc).
@@ -275,7 +303,17 @@ mod tests {
     use super::*;
 
     fn info() -> AppInfo {
-        AppInfo { name: "Demo".into(), version: "1.2.3".into(), description: "A demo".into(), company: "Acme".into(), copyright: "(c) Acme".into(), category: String::new() }
+        AppInfo { name: "Demo".into(), version: "1.2.3".into(), description: "A demo".into(), company: "Acme".into(), copyright: "(c) Acme".into(), category: String::new(), protocols: Vec::new(), file_types: Vec::new() }
+    }
+
+    #[test]
+    fn the_linux_entry_lists_the_links_and_files_the_app_opens() {
+        let with = AppInfo { protocols: vec!["Notes".into()], file_types: vec!["md".into(), "weird".into()], ..info() };
+        let entry = desktop_entry(&with, Path::new("/opt/demo/demo"), None);
+        assert!(entry.contains("Exec=\"/opt/demo/demo\" %U"), "{entry}");
+        assert!(entry.contains("MimeType=x-scheme-handler/notes;text/markdown;"), "{entry}");
+        let plain = desktop_entry(&info(), Path::new("/opt/demo/demo"), None);
+        assert!(plain.contains("Exec=\"/opt/demo/demo\"\n") && !plain.contains("MimeType"), "{plain}");
     }
 
     #[test]

@@ -65,7 +65,12 @@ pub fn call(op: &str, args: &[String]) -> String {
         "userName" => std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default(),
         "machineName" => std::env::var("HOSTNAME").or_else(|_| std::env::var("COMPUTERNAME")).ok().filter(|h| !h.is_empty()).unwrap_or_else(|| command_output("hostname")),
         "domainName" => std::env::var("USERDOMAIN").unwrap_or_default(),
-        "arguments" => std::env::args().skip(1).collect::<Vec<_>>().join("\n"),
+        "arguments" => crate::app_arguments().join("\n"),
+        // Desktop integration (see `integration.rs`): "1" when the system took it.
+        "registerProtocol" => (crate::integration::register_protocol(arg(0)) as u8).to_string(),
+        "registerFileType" => (crate::integration::register_file_type(arg(0)) as u8).to_string(),
+        "setLoginItem" => (crate::integration::set_login_item(arg(0) == "1") as u8).to_string(),
+        "loginItem" => (crate::integration::login_item() as u8).to_string(),
         "home" => {
             let exe = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)).unwrap_or_default();
             exe.join(arg(0)).to_string_lossy().into_owned()

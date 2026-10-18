@@ -28,6 +28,8 @@ use rquickjs::{
 
 mod extensions;
 mod envmod;
+mod integration;
+pub use integration::mime_of;
 mod jsx;
 mod net;
 mod sys;
@@ -49,6 +51,18 @@ static NEXT_WINDOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 thread_local! {
     /// `Window.share`: JSON text by key, shared by the windows of one thread.
     static SHARE: RefCell<std::collections::HashMap<String, String>> = RefCell::default();
+}
+
+static APP_ARGUMENTS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+/// The program's own arguments (what is left after the shell took the page and its flags), which
+/// `application.arguments` and `@env`'s `arguments()` return. Unset, they are the process arguments.
+pub fn set_app_arguments(args: Vec<String>) {
+    *APP_ARGUMENTS.lock().unwrap() = Some(args);
+}
+
+pub fn app_arguments() -> Vec<String> {
+    APP_ARGUMENTS.lock().unwrap().clone().unwrap_or_else(|| std::env::args().skip(1).collect())
 }
 
 pub fn next_window_id() -> u32 {

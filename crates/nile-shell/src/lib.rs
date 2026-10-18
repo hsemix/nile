@@ -28,8 +28,11 @@ mod access;
 mod app;
 mod bundle;
 mod dialogs;
+mod instance;
 mod material;
 mod menu;
+#[cfg(target_os = "macos")]
+mod openevents;
 mod system;
 
 use std::{path::PathBuf, rc::Rc, time::{Duration, Instant}};
@@ -240,6 +243,8 @@ fn pack_command(args: &[String]) -> ! {
                 desktop = true;
             }
             "--install" => install = true,
+            "--protocol" => info.protocols.extend(it.next().cloned()),
+            "--file-type" => info.file_types.extend(it.next().map(|t| t.trim_start_matches('.').to_string())),
             _ => folder = Some(PathBuf::from(a)),
         }
     }
@@ -249,6 +254,20 @@ fn pack_command(args: &[String]) -> ! {
     };
     if nile_dom::vfs::start_file(&folder).is_none() {
         eprintln!("warning: {} has no main.html / index.html to start from", folder.display());
+    }
+    // `"protocols"` and `"fileTypes"` in the folder's nile.json are the same as `--protocol` / `--file-type`.
+    if let Some(config) = std::fs::read_to_string(folder.join("nile.json")).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) {
+        let list = |key: &str| config.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(|t| t.trim_start_matches('.').to_string())).collect::<Vec<_>>()).unwrap_or_default();
+        for p in list("protocols") {
+            if !info.protocols.contains(&p) {
+                info.protocols.push(p);
+            }
+        }
+        for t in list("fileTypes") {
+            if !info.file_types.contains(&t) {
+                info.file_types.push(t);
+            }
+        }
     }
     let target = extension_target.unwrap_or_else(|| nile_extension_pack::host_target().unwrap_or_default());
     let plan = match nile_extension_pack::plan(&folder, &target) {
@@ -274,7 +293,7 @@ fn pack_command(args: &[String]) -> ! {
         Err(error) => { eprintln!("could not serialize extension inventory: {error}"); std::process::exit(1); }
     }
     // No `--icon`: Nile's own icon, where the system shows one for the file (a Windows executable, a macOS bundle).
-    let bundle_wanted = icon.is_some();
+    let bundle_wanted = icon.is_some() || !info.protocols.is_empty() || !info.file_types.is_empty();
     let default_icon = std::env::temp_dir().join(format!("nile-default-icon-{}.png", std::process::id()));
     if icon.is_none() && (cfg!(windows) || out.extension().is_some_and(|e| e == "app")) && std::fs::write(&default_icon, bundle::DEFAULT_ICON).is_ok() {
         icon = Some(default_icon.clone());
@@ -322,7 +341,7 @@ fn pack_command(args: &[String]) -> ! {
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
                 // A `.desktop` entry (and the icon beside it) makes the program show up in menus and docks.
-                if icon.is_some() || desktop || install {
+                if icon.is_some() || desktop || install || !info.protocols.is_empty() || !info.file_types.is_empty() {
                     linux_entry(&out, icon.as_deref(), &info, install);
                 }
             }
@@ -453,9 +472,19 @@ pub fn run(argv: Vec<String>) -> i32 {
     let mut pdf = None;
     let mut page_no = None;
     let (mut width, mut height, mut scale) = (900u32, 640u32, 1.0f32);
+    // What isn't ours is the program's: in a packed app every plain argument (a file the system opens with it,
+    // a `myapp://` link), otherwise the ones after the page, or after a bare `--`.
+    let packed = nile_dom::vfs::mounted();
+    let mut app_args: Vec<String> = Vec::new();
+    let mut after_dashes = false;
 
     while let Some(arg) = args.next() {
+        if after_dashes {
+            app_args.push(arg);
+            continue;
+        }
         match arg.as_str() {
+            "--" => after_dashes = true,
             "--png" => png = args.next(),
             "--pdf" => pdf = args.next(),
             "--page" => page_no = args.next().and_then(|v| v.parse::<usize>().ok()),
@@ -486,9 +515,11 @@ pub fn run(argv: Vec<String>) -> i32 {
             "--settle" => settle_ms = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--wait" => wait_ms = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--scale" => scale = args.next().and_then(|v| v.parse().ok()).unwrap_or(scale),
+            _ if packed || file.is_some() => app_args.push(arg),
             _ => file = Some(PathBuf::from(arg)),
         }
     }
+    nile_script::set_app_arguments(app_args.clone());
     // No file (or a folder): the start file of the pack, the program's folder, or the folder given.
     let file = match file {
         Some(f) if f.is_dir() => nile_dom::vfs::start_file(&f),
@@ -504,6 +535,35 @@ pub fn run(argv: Vec<String>) -> i32 {
     // A window knows its id before its scripts run, so `new Window()` at startup can name its opener.
     let info = nile_script::WindowInfo { id: nile_script::next_window_id(), ..Default::default() };
     let headless = png.is_some() || pdf.is_some();
+    // The event loop comes first: one running copy of the app is decided before the page's scripts run, so a second
+    // launch hands its arguments over and ends without having run any of them.
+    let event_loop = (!headless).then(|| {
+        let mut builder = EventLoop::<app::UserEvent>::with_user_event();
+        #[cfg(target_os = "windows")]
+        menu::install_hook(&mut builder);
+        builder.build().expect("event loop")
+    });
+    #[cfg(target_os = "macos")]
+    if let Some(event_loop) = &event_loop {
+        openevents::install(event_loop.create_proxy());
+    }
+    let _instance = match (&event_loop, single_instance_id(&file)) {
+        (Some(event_loop), Some(id)) => {
+            let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+            let payload = serde_json::json!({ "arguments": app_args, "cwd": cwd }).to_string();
+            let proxy = event_loop.create_proxy();
+            match instance::acquire(&id, &payload, move |message| {
+                if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&message) {
+                    v["type"] = "second-instance".into();
+                    let _ = proxy.send_event(app::UserEvent::Application(v.to_string()));
+                }
+            }) {
+                instance::Role::Secondary => return 0,
+                instance::Role::Primary(guard) => Some(guard),
+            }
+        }
+        _ => None,
+    };
     // A `.js` start file is a bootstrap script (Sciter's `run.js`): it runs in a hidden window and opens the real ones.
     let bootstrap = !headless && file.extension().is_some_and(|e| e == "js");
     let mut page = if bootstrap {
@@ -524,12 +584,64 @@ pub fn run(argv: Vec<String>) -> i32 {
         return 0;
     }
 
-    let mut builder = EventLoop::<app::UserEvent>::with_user_event();
-    #[cfg(target_os = "windows")]
-    menu::install_hook(&mut builder);
-    let event_loop = builder.build().expect("event loop");
+    let event_loop = event_loop.expect("event loop");
     let mut app = app::App::new(page, event_loop.create_proxy());
     app.bootstrap = bootstrap;
     event_loop.run_app(&mut app).expect("run app");
     app.exit_code
+}
+
+/// The id this app asks to be single-instance under: the `app-single-instance` attribute on the start page's
+/// `<html>` tag, or `"singleInstance"` in the `nile.json` next to the start file (`true` for the program's name, or
+/// an id). Read from the files, before any script runs.
+fn single_instance_id(file: &std::path::Path) -> Option<String> {
+    let fallback = || std::env::current_exe().ok().and_then(|e| e.file_stem().map(|s| s.to_string_lossy().into_owned())).unwrap_or_else(|| "nile-app".into());
+    if file.extension().is_some_and(|e| e == "html" || e == "htm") {
+        if let Some(v) = nile_dom::vfs::read_to_string(file).ok().and_then(|text| html_attribute(&text, "app-single-instance")) {
+            return Some(if v.trim().is_empty() { fallback() } else { v.trim().to_string() });
+        }
+    }
+    let config = nile_dom::vfs::read_to_string(&file.parent()?.join("nile.json")).ok()?;
+    match serde_json::from_str::<serde_json::Value>(&config).ok()?.get("singleInstance")? {
+        serde_json::Value::Bool(true) => Some(fallback()),
+        serde_json::Value::String(id) if !id.trim().is_empty() => Some(id.trim().to_string()),
+        _ => None,
+    }
+}
+
+/// An attribute of the `<html ...>` start tag, found by scanning the text (no parsing, so no scripts and no
+/// side effects). `Some("")` for a bare attribute.
+fn html_attribute(text: &str, name: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let start = lower.find("<html")?;
+    let end = start + lower[start..].find('>')?;
+    let tag = &text[start + 5..end];
+    let tag_lower = &lower[start + 5..end];
+    let at = tag_lower.find(&format!(" {name}")).or_else(|| tag_lower.find(&format!("\n{name}")))? + 1 + name.len();
+    let rest = tag[at..].trim_start();
+    match rest.strip_prefix('=') {
+        None => Some(String::new()),
+        Some(value) => {
+            let value = value.trim_start();
+            match value.chars().next()? {
+                q @ ('"' | '\'') => value[1..].split(q).next().map(str::to_string),
+                _ => Some(value.split(|c: char| c.is_whitespace() || c == '>').next()?.to_string()),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::html_attribute;
+
+    #[test]
+    fn the_html_tag_attribute_is_found_without_parsing_the_page() {
+        let page = "<!doctype html>\n<HTML lang=en app-single-instance=\"my.app\" window-width=300><body app-single-instance=\"no\">";
+        assert_eq!(html_attribute(page, "app-single-instance").as_deref(), Some("my.app"));
+        assert_eq!(html_attribute("<html app-single-instance>", "app-single-instance").as_deref(), Some(""));
+        assert_eq!(html_attribute("<html app-single-instance=x>", "app-single-instance").as_deref(), Some("x"));
+        assert_eq!(html_attribute("<html lang=en><body app-single-instance=\"no\">", "app-single-instance"), None);
+        assert_eq!(html_attribute("<p>no html tag</p>", "app-single-instance"), None);
+    }
 }

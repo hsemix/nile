@@ -1203,7 +1203,24 @@
   let appMenu = null;
   // Sciter's `application` (bootstrap scripts, docs.sciter.com scapp): the program's own loop is the shell's,
   // so `run()` returns at once and `quit(code)` ends the program with that exit code.
-  Object.defineProperty(g, "application", { value: { start() {}, run() { return 0; }, quit(code = 0) { N.windowCommand("quit", +code | 0, 0); } }, configurable: true });
+  // `application.arguments` is the program's own arguments (a file the OS opens with the app, a
+  // `myapp://` link). `second-instance`, `open-url` and `open-file` events come to `document` (and `window`).
+  Object.defineProperty(g, "application", { value: { start() {}, run() { return 0; }, quit(code = 0) { N.windowCommand("quit", +code | 0, 0); },
+    get arguments() { return g.__envModule.arguments(); },
+    // Make this program the handler of `scheme://` links / `.ext` files, or start it at login. Each
+    // returns whether the system took it (macOS declares schemes and file types in the bundle, see `nile --pack --protocol`).
+    registerProtocol(scheme) { return N.envCall("registerProtocol", [String(scheme)]) === "1"; },
+    registerFileType(ext) { return N.envCall("registerFileType", [String(ext)]) === "1"; },
+    get loginItem() { return N.envCall("loginItem", []) === "1"; },
+    set loginItem(on) { N.envCall("setLoginItem", [on ? "1" : "0"]); } }, configurable: true });
+  Object.defineProperty(g, "__applicationEvent", {
+    value(type, data) {
+      const e = new Event(type, { cancelable: false });
+      Object.assign(e, data || {});
+      g.document.dispatchEvent(e);
+      g.dispatchEvent(e);
+    },
+  });
   // Classic scripts have no module scope: the page's folder.
   Object.defineProperty(g, "__DIR__", { get() { return String(location.href).replace(/[^/]*$/, ""); }, configurable: true });
   Object.defineProperty(g, "__FILE__", { get() { return String(location.href); }, configurable: true });

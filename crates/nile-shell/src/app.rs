@@ -21,6 +21,9 @@ use crate::{access, dialogs, material, menu, mods_of};
 /// What other threads (the accessibility layer) send the event loop.
 pub enum UserEvent {
     ExtensionWake,
+    /// Another launch of this app, or the system opening a URL or file with it: `{"type": "second-instance" |
+    /// "open-url" | "open-file", ...}`; the app's first window is raised and scripts are told.
+    Application(String),
     Access(accesskit_winit::Event),
     /// A menu bar item was chosen: a page item's node id, or a negative tag for a standard action.
     #[allow(dead_code)]
@@ -987,6 +990,9 @@ impl App {
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // The app has finished launching: take the open-documents Apple event back from AppKit's own handler.
+        #[cfg(target_os = "macos")]
+        crate::openevents::install_handlers();
         let Some(page) = self.first.take() else { return };
         let id = page.view.borrow().window_info.id;
         self.main_id = id;
@@ -1019,6 +1025,10 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let event = match event {
             UserEvent::ExtensionWake => return,
+            UserEvent::Application(json) => {
+                self.application_event(event_loop, &json);
+                return;
+            }
             UserEvent::Access(event) => event,
             UserEvent::Snap(hwnd, state) => {
                 let Some(idx) = self.wins.iter().position(|w| w.window.id() == WindowId::from(hwnd as u64)) else { return };
@@ -1118,6 +1128,32 @@ impl ApplicationHandler<UserEvent> for App {
             self.close(event_loop, id, 0, "null");
         }
         self.after(event_loop, id);
+    }
+}
+
+impl App {
+    /// A second launch (or the system opening something with this app): bring the app forward and tell its scripts.
+    fn application_event(&mut self, event_loop: &ActiveEventLoop, json: &str) {
+        let Ok(mut data) = serde_json::from_str::<serde_json::Value>(json) else { return };
+        let Some(kind) = data.get("type").and_then(|t| t.as_str()).map(str::to_string) else { return };
+        if let Some(map) = data.as_object_mut() {
+            map.remove("type");
+        }
+        // The first window that is not the hidden host of a bootstrap script.
+        let target = self.wins.iter().position(|w| !(self.bootstrap && w.id == self.main_id)).or(if self.wins.is_empty() { None } else { Some(0) });
+        let Some(idx) = target else { return };
+        let id = self.wins[idx].id;
+        let window = &self.wins[idx].window;
+        if window.is_minimized() == Some(true) {
+            window.set_minimized(false);
+        }
+        window.set_visible(true);
+        window.focus_window();
+        self.wins[idx].page.application_event(&kind, &data.to_string());
+        self.wins[idx].window.request_redraw();
+        if self.index(id).is_some() {
+            self.after(event_loop, id);
+        }
     }
 }
 

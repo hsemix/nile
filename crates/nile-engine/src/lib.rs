@@ -1009,6 +1009,12 @@ impl Page {
         self.call("__windowMessage", &format!("[{from},{json}]")).1
     }
 
+    /// An application-level event for scripts: `second-instance` (`arguments`, `cwd`), `open-url` (`url`)
+    /// or `open-file` (`path`), fired on the document and the window. `data_json` is a JSON object.
+    pub fn application_event(&mut self, kind: &str, data_json: &str) -> bool {
+        self.call("__applicationEvent", &format!("[\"{kind}\",{data_json}]")).1
+    }
+
     /// A window this one opened has closed, with the value it passed to `close()` (JSON).
     pub fn window_closed(&mut self, id: u32, value_json: &str) -> bool {
         self.call("__windowClosed", &format!("[{id},{value_json}]")).1
