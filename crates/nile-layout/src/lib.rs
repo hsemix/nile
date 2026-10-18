@@ -130,6 +130,8 @@ pub struct TextContent {
     /// `text-overflow: ellipsis` on a clipping box: the renderer cuts a too-long line short
     /// and draws "…".
     pub ellipsis: bool,
+    /// `-webkit-line-clamp`: only this many lines show, the last ending in an ellipsis.
+    pub clamp: Option<u32>,
 }
 
 impl TextContent {
@@ -1275,6 +1277,13 @@ fn plan_floats(tree: &mut TaffyTree<NodeCtx>, doc: &Document, styles: &StyleMap,
     changed
 }
 
+/// `-webkit-line-clamp` and `text-wrap: balance` for a text leaf.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct TextFlow {
+    clamp: Option<u32>,
+    balance: bool,
+}
+
 enum NodeCtx {
     Element(NodeId),
     /// An `<img>`: a leaf of its picture's size (0 x 0 without one).
@@ -1295,6 +1304,7 @@ enum NodeCtx {
         marks: Vec<ElementMark>,
         /// Never wrap (single-line text inputs).
         nowrap: bool,
+        flow: TextFlow,
     },
 }
 
@@ -1304,8 +1314,8 @@ fn measure_node(
     style: &Style,
 ) -> taffy::LayoutOutput {
     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |known, available| match ctx {
-        Some(NodeCtx::Text { layout, align, nowrap, .. }) => {
-            measure_text(layout, *align, known, available, *nowrap)
+        Some(NodeCtx::Text { layout, align, nowrap, flow, .. }) => {
+            measure_text(layout, *align, known, available, *nowrap, flow.clamp)
         }
         Some(NodeCtx::Replaced { size: (w, h), .. }) => {
             let (w, h) = (*w, *h);
@@ -1630,6 +1640,7 @@ fn measure_text(
     known: Size<Option<f32>>,
     available: Size<AvailableSpace>,
     nowrap: bool,
+    clamp: Option<u32>,
 ) -> Size<f32> {
     let max_width = known.width.or(match available.width {
         AvailableSpace::Definite(w) => Some(w),
@@ -1640,7 +1651,15 @@ fn measure_text(
     break_lines(layout, max_width, align);
     Size {
         width: known.width.unwrap_or_else(|| layout.width()),
-        height: known.height.unwrap_or_else(|| layout.height()),
+        height: known.height.unwrap_or_else(|| clamped_height(layout, clamp)),
+    }
+}
+
+/// The height of `layout`, cut after `clamp` lines when it has more.
+fn clamped_height(layout: &TextLayout, clamp: Option<u32>) -> f32 {
+    match clamp {
+        Some(n) if n >= 1 && layout.len() > n as usize => layout.lines().nth(n as usize - 1).map_or(layout.height(), |l| l.metrics().block_max_coord),
+        _ => layout.height(),
     }
 }
 
@@ -2793,6 +2812,7 @@ fn build_control_text(
             nodes: Vec::new(),
             marks: Vec::new(),
             nowrap: node.tag() != Some("textarea"),
+            flow: TextFlow::default(),
         },
     )
     .ok()
@@ -2987,6 +3007,11 @@ impl InlineText {
                     });
                     self.decos.len() - 1
                 });
+                // Horizontal margins are spacers of the enclosing decoration (the margin shows
+                // the parent's background, not the element's own).
+                let outer = deco;
+                let margin = |l: Length| if let Length::Px(v) = l { v.max(0.0) } else { 0.0 };
+                self.push_spacer(id, es, outer, margin(es.margin.left));
                 let deco = own.map_or(deco, |i| i as u32 + 1);
                 if own.is_some() {
                     self.push_spacer(id, es, deco, es.padding.left + es.border_width.left);
@@ -3003,6 +3028,7 @@ impl InlineText {
                 if own.is_some() {
                     self.push_spacer(id, es, deco, es.padding.right + es.border_width.right);
                 }
+                self.push_spacer(id, es, outer, margin(es.margin.right));
             }
             NodeKind::Document => {}
         }
@@ -3240,17 +3266,27 @@ fn build_inline_run_in(
                 baseline: baseline.map(|b| b + px(m.top)),
             })
         };
+        // `text-indent`: a spacer before the first character (the first line only, since it is
+        // the run's first thing). Positive indents only.
+        let indent = block_style.text_indent > 0.0;
+        if indent {
+            inline.push_spacer(run[0], block_style, 0, block_style.text_indent);
+        }
         for &id in run {
             inline.collect(doc, styles, id, 0, &mut make_box);
         }
     }
     inline.trim_end();
-    if inline.text.is_empty() && inline.boxes.is_empty() {
+    if (inline.text.is_empty() || inline.text == "\u{a0}" && block_style.text_indent > 0.0) && inline.boxes.is_empty() {
         return None;
     }
     for (_, ts) in &mut inline.spans {
         if ts.spacer {
-            ts.font_size /= text.nbsp_ratio(&ts.font_family, ts.font_weight);
+            // A one-pixel no-break space plus letter spacing makes up the width, so the run's
+            // font metrics never stretch the line (a 120px font would for a 30px margin).
+            let ratio = text.nbsp_ratio(&ts.font_family, ts.font_weight);
+            ts.letter_spacing = ts.font_size - ratio;
+            ts.font_size = 1.0;
         }
     }
     let base = text_style(block_style);
@@ -3274,6 +3310,7 @@ fn build_inline_run_in(
             user_select: block_style.user_select,
             ellipsis: block_style.text_ellipsis && block_style.overflow_x != OverflowKind::Visible && !block_style.white_space.wraps(),
             nowrap: !block_style.white_space.wraps(),
+            flow: TextFlow { clamp: block_style.line_clamp, balance: block_style.text_wrap == nile_style::TextWrap::Balance },
         },
     )
     .ok()
@@ -3327,7 +3364,7 @@ fn flatten(
             let fixed = styles.get(*id).position == Position::Fixed;
             out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, inert: is_inert(styles.get(*id)), border_hidden: Edges::default() })
         }
-        Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap }) => {
+        Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap, flow }) => {
             // Final line breaking at the resolved width, so alignment is right.
             // Taffy rounds box sizes to whole pixels, which can shave a
             // fraction off the measured width and force a spurious wrap, so
@@ -3352,6 +3389,22 @@ fn flatten(
                         (x - spec.x0, w)
                     });
                 }
+                _ if flow.balance && !*nowrap => {
+                    let container = width + 1.0;
+                    let narrow = nile_text::balanced_width(layout, container);
+                    if narrow < container - 1.0 {
+                        // Lines sit in a narrower column, placed where the alignment would put it.
+                        let shift = match align {
+                            nile_text::Alignment::Center => 0.5,
+                            nile_text::Alignment::End | nile_text::Alignment::Right => 1.0,
+                            _ => 0.0,
+                        };
+                        let x = (container - narrow) * shift;
+                        break_lines_varying(layout, container, *align, |_| (x, narrow));
+                    } else {
+                        break_lines(layout, Some(container), *align);
+                    }
+                }
                 _ => break_lines(layout, Some(width + 1.0), *align),
             }
             TEXT_LEAVES.with(|t| t.borrow_mut().push((out.len(), n)));
@@ -3372,7 +3425,7 @@ fn flatten(
             out.push(LayoutBox {
                 node: *node,
                 rect,
-                content: BoxContent::Text(Box::new(TextContent { layout, nodes, marks, decos, owners, text, spacers, control, user_select, ellipsis })),
+                content: BoxContent::Text(Box::new(TextContent { layout, nodes, marks, decos, owners, text, spacers, control, user_select, ellipsis, clamp: flow.clamp })),
                 subtree_end: 0,
                 scroll: None,
                 image: None,
@@ -3576,9 +3629,36 @@ fn text_style(s: &ComputedStyle) -> TextStyle {
         underline: s.underline,
         line_through: s.line_through,
         letter_spacing: s.letter_spacing,
+        word_spacing: s.word_spacing,
+        word_break: match s.word_break {
+            nile_style::WordBreak::Normal => nile_text::WordBreak::Normal,
+            nile_style::WordBreak::BreakAll => nile_text::WordBreak::BreakAll,
+            nile_style::WordBreak::KeepAll => nile_text::WordBreak::KeepAll,
+        },
+        overflow_wrap: match s.overflow_wrap {
+            nile_style::OverflowWrap::Normal => nile_text::OverflowWrap::Normal,
+            nile_style::OverflowWrap::Anywhere => nile_text::OverflowWrap::Anywhere,
+            nile_style::OverflowWrap::BreakWord => nile_text::OverflowWrap::BreakWord,
+        },
+        decoration: nile_text::Decoration {
+            style: match s.deco.style {
+                nile_style::DecoStyle::Solid => nile_text::DecoStyle::Solid,
+                nile_style::DecoStyle::Double => nile_text::DecoStyle::Double,
+                nile_style::DecoStyle::Dotted => nile_text::DecoStyle::Dotted,
+                nile_style::DecoStyle::Dashed => nile_text::DecoStyle::Dashed,
+                nile_style::DecoStyle::Wavy => nile_text::DecoStyle::Wavy,
+            },
+            color: s.deco.color.map(|c| [c.r, c.g, c.b, c.a]),
+            thickness: s.deco.thickness,
+            offset: s.deco.offset,
+        },
         align: alignment(s.text_align),
         font_variations: s.font_variations.clone(),
-        font_features: s.font_features.clone(),
+        font_features: match (s.font_variant.is_empty(), s.font_features.is_empty()) {
+            (true, _) => s.font_features.clone(),
+            (false, true) => s.font_variant.clone(),
+            (false, false) => format!("{}, {}", s.font_variant, s.font_features),
+        },
     }
 }
 
@@ -4710,6 +4790,57 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
         let (a, b, c) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"), rect_of(&doc, &t, "c"));
         assert!(c.x < b.x && b.x < a.x, "order puts c (0), b (1), a (2): {c:?} {b:?} {a:?}");
         assert_eq!(rect_of(&doc, &t, "ratio").height, 40.0);
+    }
+
+    #[test]
+    fn text_indent_line_clamp_and_word_break_change_the_lines() {
+        let height = |style: &str, body: &str| {
+            let (doc, t) = rects(&format!(r#"<body style="margin:0"><p id="p" style="margin:0;width:120px;{style}">{body}</p></body>"#));
+            rect_of(&doc, &t, "p").height
+        };
+        let words = "one two three four five six seven eight nine ten eleven twelve";
+        let plain = height("", words);
+        let two = height("display:-webkit-box;-webkit-line-clamp:2", words);
+        assert!(plain > two * 1.5, "clamped to two lines: {two} vs {plain}");
+        // A long word only wraps when allowed to break.
+        let long = "Supercalifragilisticexpialidocious";
+        assert!(height("word-break:break-all", long) > height("", long));
+        assert!(height("overflow-wrap:anywhere", long) > height("", long));
+        // The indent pushes the first line in: it is that much longer.
+        let first_line = |style: &str| {
+            let (_, t) = rects(&format!(r#"<body style="margin:0"><p style="margin:0;width:400px;{style}">aaaa bbbb</p></body>"#));
+            let b = t.boxes.iter().find(|b| matches!(b.content, BoxContent::Text(_))).unwrap();
+            let BoxContent::Text(c) = &b.content else { unreachable!() };
+            let advance = c.layout.lines().next().unwrap().metrics().advance;
+            advance
+        };
+        let shift = first_line("text-indent:60px") - first_line("");
+        assert!((shift - 60.0).abs() < 1.5, "indent of 60px, got {shift}");
+    }
+
+    #[test]
+    fn balanced_text_is_narrower_but_keeps_its_line_count() {
+        let lines = |style: &str| {
+            let (_, t) = rects(&format!(r#"<body style="margin:0"><p id="p" style="margin:0;width:300px;font-size:20px;{style}">Aa bb cc dd ee ff gg hh ii jj kk ll mm nn oo pp</p></body>"#));
+            let b = t.boxes.iter().find(|b| matches!(b.content, BoxContent::Text(_))).unwrap();
+            let BoxContent::Text(c) = &b.content else { unreachable!() };
+            let widths: Vec<f32> = c.layout.lines().map(|l| l.metrics().advance).collect();
+            widths
+        };
+        let normal = lines("");
+        let balanced = lines("text-wrap:balance");
+        assert_eq!(normal.len(), balanced.len());
+        let spread = |w: &[f32]| w.iter().cloned().fold(0.0_f32, f32::max) - w.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(spread(&balanced) < spread(&normal), "{balanced:?} vs {normal:?}");
+    }
+
+    #[test]
+    fn inline_horizontal_margins_take_space_without_stretching_the_line() {
+        let (doc, t) = rects(r#"<body style="margin:0;font-size:16px"><p style="margin:0"><span id="a" style="margin-right:40px">aa</span><span id="b">bb</span></p><p id="q" style="margin:0">aabb</p></body>"#);
+        let (a, q) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "q"));
+        assert!(a.height <= q.height + 0.5, "the spacer does not enlarge the line: {a:?} vs {q:?}");
+        let b = rect_of(&doc, &t, "b");
+        assert!(b.x >= a.x + a.width + 39.0, "b starts after a's margin: {a:?} {b:?}");
     }
 
     #[test]

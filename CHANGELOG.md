@@ -10,7 +10,11 @@ the section becomes that version's.
 
 ### 2026-10-18
 
+#### Fixed
+- Horizontal `margin` on inline elements (`<span style="margin-right: 20px">`) was ignored; it now takes space. Large inline padding or margin no longer makes the line taller (the spacer run is a one-pixel space stretched with letter spacing instead of a huge font).
+
 #### Added
+- CSS text properties (`examples/css-text.html`): `text-indent` (positive, first line), `word-spacing`, `word-break` (`break-all`, `keep-all`; `break-word` as `overflow-wrap: anywhere`), `overflow-wrap`/`word-wrap`, `text-shadow` (several shadows, blur), `text-decoration-style` (`double`, `dotted`, `dashed`, `wavy`), `text-decoration-color`, `text-decoration-thickness`, `text-underline-offset` and the full `text-decoration` shorthand, `-webkit-line-clamp`/`line-clamp` (with `display: -webkit-box`; the last line ends in an ellipsis), `text-wrap: balance` (two to six lines), `caret-color` and `font-variant` / `font-variant-numeric` (OpenType features through `font-feature-settings`).
 - CSS flow and box properties (`examples/css-flow.html`): `visibility` (inherited; `hidden`/`collapse` keep the space, draw nothing of the box's own and aren't hit, a child can set `visible` again), `pointer-events: none` (inherited; hits pass through to what is below), `outline`, `outline-width/-style/-color/-offset` (drawn outside the border box, follows `border-radius`, takes no space), `order` on flex and grid items, the `flex-flow` shorthand (and `wrap-reverse` is read as `wrap`) and `aspect-ratio` (`2`, `16 / 9`, `auto`; also on images).
 
 ### 2026-10-17

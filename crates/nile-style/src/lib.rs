@@ -126,6 +126,53 @@ pub enum BorderStyle {
     Dotted,
 }
 
+/// `word-break`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WordBreak {
+    #[default]
+    Normal,
+    BreakAll,
+    KeepAll,
+}
+
+/// `overflow-wrap` / `word-wrap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverflowWrap {
+    #[default]
+    Normal,
+    Anywhere,
+    BreakWord,
+}
+
+/// `text-decoration-style`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecoStyle {
+    #[default]
+    Solid,
+    Double,
+    Dotted,
+    Dashed,
+    Wavy,
+}
+
+/// `text-wrap`: `balance` evens the lines of a short paragraph out; `pretty` is read as `wrap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextWrap {
+    #[default]
+    Wrap,
+    Balance,
+}
+
+/// How underline and line-through are drawn: `color: None` is the text color, `thickness`/`offset`
+/// `None` is the font's own.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DecoLook {
+    pub style: DecoStyle,
+    pub color: Option<Color>,
+    pub thickness: Option<f32>,
+    pub offset: Option<f32>,
+}
+
 /// `outline`: a line drawn outside the border box that takes no space. `color: None` is
 /// `currentColor`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -563,6 +610,23 @@ pub struct ComputedStyle {
     /// `order` of a flex or grid item.
     pub order: i32,
     pub outline: Outline,
+    /// `word-spacing` in px (inherited).
+    pub word_spacing: f32,
+    pub word_break: WordBreak,
+    pub overflow_wrap: OverflowWrap,
+    /// `text-decoration-style`/`-color`/`-thickness` and `text-underline-offset`.
+    pub deco: DecoLook,
+    /// `text-shadow` (inherited); `blur` is the blur radius, `spread` and `inset` are unused.
+    pub text_shadow: Vec<BoxShadow>,
+    /// `text-indent` in px: the first line of a block starts this far in (inherited).
+    pub text_indent: f32,
+    /// `caret-color`; `None` is `auto` (the text color).
+    pub caret_color: Option<Color>,
+    /// `-webkit-line-clamp`: lines shown before an ellipsis.
+    pub line_clamp: Option<u32>,
+    pub text_wrap: TextWrap,
+    /// OpenType feature tags from `font-variant*` (`"smcp" 1, "tnum" 1`), inherited.
+    pub font_variant: String,
     /// `aspect-ratio` (width / height); `None` is `auto`.
     pub aspect_ratio: Option<f32>,
     /// `color-scheme`; inherited. Only the root's counts for the user-agent sheet.
@@ -715,6 +779,16 @@ impl Default for ComputedStyle {
             pointer_events: true,
             order: 0,
             outline: Outline::default(),
+            word_spacing: 0.0,
+            word_break: WordBreak::Normal,
+            overflow_wrap: OverflowWrap::Normal,
+            deco: DecoLook::default(),
+            text_shadow: Vec::new(),
+            text_indent: 0.0,
+            caret_color: None,
+            line_clamp: None,
+            text_wrap: TextWrap::Wrap,
+            font_variant: String::new(),
             aspect_ratio: None,
             width_fit: false,
             color_scheme: ColorScheme::Light,
@@ -967,6 +1041,15 @@ impl ComputedStyle {
             cursor: parent.cursor,
             visible: parent.visible,
             pointer_events: parent.pointer_events,
+            word_spacing: parent.word_spacing,
+            word_break: parent.word_break,
+            overflow_wrap: parent.overflow_wrap,
+            deco: parent.deco,
+            text_shadow: parent.text_shadow.clone(),
+            text_indent: parent.text_indent,
+            caret_color: parent.caret_color,
+            text_wrap: parent.text_wrap,
+            font_variant: parent.font_variant.clone(),
             color_scheme: parent.color_scheme,
             accent_color: parent.accent_color,
             selection_bg: parent.selection_bg,
@@ -1438,6 +1521,8 @@ impl ComputedStyle {
         a.visible = other.visible;
         a.pointer_events = other.pointer_events;
         a.outline = other.outline;
+        a.text_shadow = other.text_shadow.clone();
+        a.caret_color = other.caret_color;
         a.popup_position = other.popup_position;
         a.break_before = other.break_before;
         a.break_after = other.break_after;
@@ -2222,6 +2307,17 @@ fn bg_repeat(v: &[Value]) -> Option<(bool, bool)> {
     }
 }
 
+fn deco_style(i: &str) -> Option<DecoStyle> {
+    Some(match i {
+        "solid" => DecoStyle::Solid,
+        "double" => DecoStyle::Double,
+        "dotted" => DecoStyle::Dotted,
+        "dashed" => DecoStyle::Dashed,
+        "wavy" => DecoStyle::Wavy,
+        _ => return None,
+    })
+}
+
 fn color_of(x: &Value, current: Color) -> Option<Color> {
     x.color().or_else(|| (x.ident() == Some("currentcolor")).then_some(current))
 }
@@ -2348,7 +2444,7 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
     match d.name.as_str() {
         "display" => {
             s.display = match first.and_then(Value::ident) {
-                Some("block") => Display::Block,
+                Some("block" | "-webkit-box") => Display::Block,
                 Some("inline") => Display::Inline,
                 Some("inline-block") => Display::InlineBlock,
                 Some("flex") | Some("inline-flex") => Display::Flex,
@@ -2900,6 +2996,141 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         "text-decoration" | "text-decoration-line" => {
             s.underline = v.iter().any(|x| x.ident() == Some("underline"));
             s.line_through = v.iter().any(|x| x.ident() == Some("line-through"));
+            // The shorthand also resets and sets the look: `underline wavy red 2px`.
+            if d.name == "text-decoration" {
+                s.deco = DecoLook { offset: s.deco.offset, ..DecoLook::default() };
+                for x in v {
+                    if let Some(w) = px(x, fs) {
+                        s.deco.thickness = Some(w);
+                    } else if let Some(c) = color_of(x, current) {
+                        s.deco.color = Some(c);
+                    } else if let Some(st) = x.ident().and_then(deco_style) {
+                        s.deco.style = st;
+                    }
+                }
+            }
+        }
+        "text-decoration-style" => {
+            if let Some(st) = first.and_then(Value::ident).and_then(deco_style) {
+                s.deco.style = st;
+            }
+        }
+        "text-decoration-color" => {
+            if let Some(c) = first.and_then(|x| color_of(x, current)) {
+                s.deco.color = Some(c);
+            }
+        }
+        "text-decoration-thickness" => match first.and_then(Value::ident) {
+            Some("auto" | "from-font") => s.deco.thickness = None,
+            _ => {
+                if let Some(w) = p(first) {
+                    s.deco.thickness = Some(w);
+                }
+            }
+        },
+        "text-underline-offset" => match first.and_then(Value::ident) {
+            Some("auto") => s.deco.offset = None,
+            _ => {
+                if let Some(o) = p(first) {
+                    s.deco.offset = Some(o);
+                }
+            }
+        },
+        "word-spacing" => match first {
+            Some(Value::Ident(i)) if i == "normal" => s.word_spacing = 0.0,
+            other => s.word_spacing = p(other).unwrap_or(s.word_spacing),
+        },
+        "word-break" => match first.and_then(Value::ident) {
+            Some("normal") => s.word_break = WordBreak::Normal,
+            Some("break-all") => s.word_break = WordBreak::BreakAll,
+            Some("keep-all") => s.word_break = WordBreak::KeepAll,
+            // The deprecated value: break anywhere if the word doesn't fit.
+            Some("break-word") => s.overflow_wrap = OverflowWrap::Anywhere,
+            _ => {}
+        },
+        "overflow-wrap" | "word-wrap" => match first.and_then(Value::ident) {
+            Some("normal") => s.overflow_wrap = OverflowWrap::Normal,
+            Some("anywhere") => s.overflow_wrap = OverflowWrap::Anywhere,
+            Some("break-word") => s.overflow_wrap = OverflowWrap::BreakWord,
+            _ => {}
+        },
+        "text-indent" => {
+            if let Some(n) = p(first) {
+                s.text_indent = n;
+            }
+        }
+        "caret-color" => match first {
+            Some(x) if x.ident() == Some("auto") => s.caret_color = None,
+            Some(x) => {
+                if let Some(c) = color_of(x, current) {
+                    s.caret_color = Some(c);
+                }
+            }
+            None => {}
+        },
+        "text-wrap" | "text-wrap-style" => match first.and_then(Value::ident) {
+            Some("balance") => s.text_wrap = TextWrap::Balance,
+            Some("wrap" | "pretty" | "stable") => s.text_wrap = TextWrap::Wrap,
+            _ => {}
+        },
+        "-webkit-line-clamp" | "line-clamp" => match first {
+            Some(Value::Number(n)) if *n >= 1.0 => s.line_clamp = Some(*n as u32),
+            Some(x) if x.ident() == Some("none") => s.line_clamp = None,
+            _ => {}
+        },
+        // `text-shadow: <x> <y> [<blur>] [<color>], ...`
+        "text-shadow" => {
+            let mut shadows = Vec::new();
+            for group in v.split(|x| *x == Value::Comma) {
+                let mut lens = Vec::new();
+                let mut color = current;
+                for x in group {
+                    if let Some(n) = px(x, fs) {
+                        lens.push(n);
+                    } else if let Some(c) = color_of(x, current) {
+                        color = c;
+                    }
+                }
+                if let [dx, dy, rest @ ..] = lens.as_slice() {
+                    shadows.push(BoxShadow { dx: *dx, dy: *dy, blur: rest.first().copied().unwrap_or(0.0).max(0.0), spread: 0.0, color, inset: false });
+                }
+            }
+            if !shadows.is_empty() || first.and_then(Value::ident) == Some("none") {
+                s.text_shadow = shadows;
+            }
+        }
+        "font-variant" | "font-variant-caps" | "font-variant-numeric" | "font-variant-ligatures" | "font-variant-position" => {
+            let tags: Vec<&str> = v
+                .iter()
+                .filter_map(Value::ident)
+                .filter_map(|i| match i {
+                    "small-caps" => Some("\"smcp\" 1"),
+                    "all-small-caps" => Some("\"smcp\" 1, \"c2sc\" 1"),
+                    "petite-caps" => Some("\"pcap\" 1"),
+                    "tabular-nums" => Some("\"tnum\" 1"),
+                    "proportional-nums" => Some("\"pnum\" 1"),
+                    "lining-nums" => Some("\"lnum\" 1"),
+                    "oldstyle-nums" => Some("\"onum\" 1"),
+                    "slashed-zero" => Some("\"zero\" 1"),
+                    "ordinal" => Some("\"ordn\" 1"),
+                    "diagonal-fractions" => Some("\"frac\" 1"),
+                    "no-common-ligatures" => Some("\"liga\" 0, \"clig\" 0"),
+                    "common-ligatures" => Some("\"liga\" 1"),
+                    "sub" => Some("\"subs\" 1"),
+                    "super" => Some("\"sups\" 1"),
+                    _ => None,
+                })
+                .collect();
+            // `normal` (or `none`) clears the list; the longhands add to it.
+            if first.and_then(Value::ident) == Some("normal") || d.name == "font-variant" {
+                s.font_variant.clear();
+            }
+            for t in tags {
+                if !s.font_variant.is_empty() {
+                    s.font_variant.push_str(", ");
+                }
+                s.font_variant.push_str(t);
+            }
         }
         "text-align" => {
             s.text_align = match first.and_then(Value::ident) {
@@ -3639,6 +3870,24 @@ mod tests {
         assert!(st("c").visible && !st("c").pointer_events, "visibility is overridden, pointer-events inherited");
         assert!(!st("d").visible);
         assert_eq!(st("d").outline, Outline::default(), "outline and order are not inherited");
+    }
+
+    #[test]
+    fn text_properties_parse() {
+        let doc = Document::parse(r#"<p id="p" style="word-spacing:3px;word-break:break-all;overflow-wrap:anywhere;text-indent:20px;caret-color:red;text-wrap:balance;-webkit-line-clamp:3;text-shadow:1px 2px 3px red, 0 0 5px blue;text-decoration:underline wavy blue 2px;text-underline-offset:4px;font-variant:small-caps;font-variant-numeric:tabular-nums"><span id="c">x</span></p>"#);
+        let styles = compute_styles(&doc);
+        let st = |id: &str| styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        let p = st("p");
+        assert_eq!((p.word_spacing, p.word_break, p.overflow_wrap, p.text_indent), (3.0, WordBreak::BreakAll, OverflowWrap::Anywhere, 20.0));
+        assert_eq!(p.caret_color, Some(Color::rgb(255, 0, 0)));
+        assert_eq!((p.text_wrap, p.line_clamp), (TextWrap::Balance, Some(3)));
+        assert_eq!(p.text_shadow.len(), 2);
+        assert_eq!((p.text_shadow[0].dx, p.text_shadow[0].dy, p.text_shadow[0].blur), (1.0, 2.0, 3.0));
+        assert!(p.underline);
+        assert_eq!((p.deco.style, p.deco.thickness, p.deco.offset, p.deco.color), (DecoStyle::Wavy, Some(2.0), Some(4.0), Some(Color::rgb(0, 0, 255))));
+        assert!(p.font_variant.contains("tnum") && p.font_variant.contains("smcp"), "the longhand adds to the shorthand: {}", p.font_variant);
+        let c = st("c");
+        assert_eq!((c.word_spacing, c.text_indent, c.text_shadow.len(), c.line_clamp), (3.0, 20.0, 2, None), "inherited except line-clamp");
     }
 
     #[test]

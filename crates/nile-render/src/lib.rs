@@ -166,7 +166,7 @@ impl Renderer {
                     }
                     if let Some(DomCaret::Empty { run, rect }) = dom_caret {
                         if run == i {
-                            canvas.draw_rect(Rect::from_xywh(rect.x, rect.y, 1.0, rect.height), &fill(styles.get(b.node).color));
+                            canvas.draw_rect(Rect::from_xywh(rect.x, rect.y, 1.0, rect.height), &fill(caret_color(styles, b.node)));
                         }
                     }
                     if let Some(list) = tree.list_box(b.node) {
@@ -210,11 +210,11 @@ impl Renderer {
                         paint_underline(canvas, b.rect, content, from, to, styles.get(b.node).color);
                     }
                     if let Some((_, at)) = caret.filter(|(n, _)| content.owners.iter().any(|(_, o)| o == n)) {
-                        paint_caret(canvas, b.rect, content, at, styles.get(b.node).color);
+                        paint_caret(canvas, b.rect, content, at, caret_color(styles, b.node));
                     }
                     if let Some(DomCaret::Run { run, byte }) = dom_caret {
                         if run == i {
-                            paint_caret(canvas, b.rect, content, byte, styles.get(b.node).color);
+                            paint_caret(canvas, b.rect, content, byte, caret_color(styles, b.node));
                         }
                     }
                 }
@@ -604,10 +604,14 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
         // `text-overflow: ellipsis`: where the first line must stop to leave room for "…".
         let ellipsis = content.filter(|(c, _)| c.ellipsis && layout.full_width() > rect.width + 0.5);
         let mut truncated = false;
-        for line in layout.lines() {
-            if truncated {
+        // `-webkit-line-clamp`: only the first `n` lines show and the last gets an ellipsis.
+        let clamp = content.and_then(|(c, _)| c.clamp).filter(|n| layout.len() > *n as usize);
+        for (line_no, line) in layout.lines().enumerate() {
+            if truncated || clamp.is_some_and(|n| line_no >= n as usize) {
                 break;
             }
+            let last_clamped = clamp.is_some_and(|n| line_no + 1 == n as usize);
+            let mut tail: Option<(f32, f32, Font, Paint)> = None;
             if let Some((content, _)) = content {
                 paint_inline_fragments(canvas, rect, content, &line);
             }
@@ -640,11 +644,13 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
                 let mut cut: Option<(f32, f32)> = None;
                 let dots = font.unichar_to_glyph('\u{2026}' as i32);
                 let dots_w = font.measure_str("\u{2026}", None).0;
+                let mut last_end = None;
                 for g in glyph_run.positioned_glyphs() {
-                    if ellipsis.is_some() && dots != 0 && g.x + g.advance > rect.width - dots_w {
+                    if (ellipsis.is_some() || last_clamped) && dots != 0 && g.x + g.advance > rect.width - dots_w {
                         cut = Some((g.x, g.y));
                         break;
                     }
+                    last_end = Some((g.x + g.advance, g.y - glyph_run.style().brush.shift));
                     glyph_ids.push(g.id as GlyphId);
                     positions.push(Point::new(g.x, g.y - glyph_run.style().brush.shift));
                 }
@@ -671,18 +677,49 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
                 let x = rect.x + glyph_run.offset();
                 let baseline = rect.y + glyph_run.baseline() - style.brush.shift;
                 let fm = run.font_metrics();
+                // `text-shadow`: the first shadow is the topmost, so draw them last to first.
+                let owner_style = content.and_then(|(c, st)| {
+                    let at = run.text_range().start;
+                    c.owners.iter().find(|(r, _)| r.contains(&at)).map(|(_, n)| st.get(*n))
+                });
+                for sh in owner_style.map(|o| o.text_shadow.as_slice()).unwrap_or_default().iter().rev() {
+                    let mut shadow = Paint::default();
+                    shadow.set_anti_alias(true);
+                    shadow.set_color(Color::from_argb(sh.color.a, sh.color.r, sh.color.g, sh.color.b));
+                    if sh.blur > 0.0 {
+                        shadow.set_mask_filter(skia_safe::MaskFilter::blur(skia_safe::BlurStyle::Normal, sh.blur / 2.0, false));
+                    }
+                    canvas.draw_glyphs_at(&glyph_ids, positions.as_slice(), (rect.x + sh.dx, rect.y + sh.dy), &font, &shadow);
+                }
                 canvas.draw_glyphs_at(&glyph_ids, positions.as_slice(), (rect.x, rect.y), &font, &paint);
+                if last_clamped && cut.is_none() && dots != 0 {
+                    // Nothing was cut on this line yet: the ellipsis follows its last glyph.
+                    tail = last_end.map(|(x, y)| (x, y, font.clone(), paint.clone()));
+                }
 
-                let line_at = |offset: f32, size: f32| {
-                    let top = baseline - offset;
-                    canvas.draw_rect(Rect::from_ltrb(x, top, x + glyph_run.advance(), top + size.max(1.0)), &paint);
+                let look = style.brush.decoration;
+                let mut line_paint = paint.clone();
+                if let Some([r, g, b, a]) = look.color {
+                    line_paint.set_color(Color::from_argb(a, r, g, b));
+                }
+                let line_at = |offset: f32, size: f32, shifted: bool| {
+                    // `text-underline-offset` is measured down from the baseline; the font's is up.
+                    let top = match look.offset.filter(|_| shifted) {
+                        Some(o) => baseline + o,
+                        None => baseline - offset,
+                    };
+                    let thick = look.thickness.unwrap_or(size).max(1.0);
+                    draw_decoration(canvas, x, x + glyph_run.advance(), top, thick, look.style, &line_paint);
                 };
                 if style.underline.is_some() {
-                    line_at(fm.underline_offset, fm.underline_size);
+                    line_at(fm.underline_offset, fm.underline_size, true);
                 }
                 if style.strikethrough.is_some() {
-                    line_at(fm.strikethrough_offset, fm.strikethrough_size);
+                    line_at(fm.strikethrough_offset, fm.strikethrough_size, false);
                 }
+            }
+            if let Some((x, y, font, paint)) = tail {
+                canvas.draw_glyphs_at(&[font.unichar_to_glyph('\u{2026}' as i32)], &[Point::new(x, y)][..], (rect.x, rect.y), &font, &paint);
             }
         }
     }
@@ -1014,6 +1051,60 @@ fn paint_decorated(
         }
     }
     canvas.restore();
+}
+
+/// `caret-color`, else the text color.
+fn caret_color(styles: &StyleMap, node: NodeId) -> CssColor {
+    let s = styles.get(node);
+    s.caret_color.unwrap_or(s.color)
+}
+
+/// One underline or line-through from `x0` to `x1` whose top is at `top`.
+fn draw_decoration(canvas: &Canvas, x0: f32, x1: f32, top: f32, thick: f32, style: nile_text::DecoStyle, paint: &Paint) {
+    use nile_text::DecoStyle;
+    match style {
+        DecoStyle::Solid => {
+            canvas.draw_rect(Rect::from_ltrb(x0, top, x1, top + thick), paint);
+        }
+        DecoStyle::Double => {
+            canvas.draw_rect(Rect::from_ltrb(x0, top, x1, top + thick), paint);
+            let y = top + thick * 2.0;
+            canvas.draw_rect(Rect::from_ltrb(x0, y, x1, y + thick), paint);
+        }
+        DecoStyle::Dotted | DecoStyle::Dashed | DecoStyle::Wavy => {
+            let mut line = paint.clone();
+            line.set_style(skia_safe::PaintStyle::Stroke);
+            line.set_stroke_width(thick);
+            line.set_anti_alias(true);
+            let y = top + thick / 2.0;
+            let mut path = skia_safe::PathBuilder::new();
+            match style {
+                DecoStyle::Dotted => {
+                    line.set_stroke_cap(skia_safe::PaintCap::Round);
+                    line.set_path_effect(skia_safe::PathEffect::dash(&[0.01, thick * 2.0], 0.0));
+                    path.move_to((x0, y)).line_to((x1, y));
+                }
+                DecoStyle::Dashed => {
+                    line.set_path_effect(skia_safe::PathEffect::dash(&[thick * 3.0, thick * 2.0], 0.0));
+                    path.move_to((x0, y)).line_to((x1, y));
+                }
+                _ => {
+                    // A sine-ish wave: quarter-wavelength quadratic segments up and down.
+                    let (amp, step) = (thick.max(1.0) * 1.2, thick.max(1.0) * 2.0);
+                    path.move_to((x0, y));
+                    let (mut x, mut up) = (x0, true);
+                    while x < x1 {
+                        let nx = (x + step).min(x1);
+                        let cy = if up { y - amp } else { y + amp };
+                        path.quad_to(((x + nx) / 2.0, cy), (nx, y));
+                        x = nx;
+                        up = !up;
+                    }
+                }
+            }
+            canvas.draw_path(&path.detach(), &line);
+        }
+    }
 }
 
 /// `outline`: a line around the border box, `outline-offset` away from it, that takes no space.

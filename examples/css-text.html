@@ -1,0 +1,140 @@
+<!doctype html><meta charset="utf-8" /><title>text properties</title>
+<style>
+  body {
+    margin: 12px;
+    font: 15px sans-serif;
+    width: 560px;
+  }
+  h4 {
+    margin: 12px 0 4px;
+    color: #555;
+  }
+  .b {
+    background: #eef;
+    padding: 6px;
+    margin: 0;
+  }
+  .indent {
+    text-indent: 2em;
+  }
+  .ws {
+    word-spacing: 12px;
+  }
+  .brk {
+    width: 140px;
+    word-break: break-all;
+    background: #fed;
+    padding: 4px;
+  }
+  .anywhere {
+    width: 140px;
+    overflow-wrap: anywhere;
+    background: #fed;
+    padding: 4px;
+  }
+  .keep {
+    width: 140px;
+    word-break: keep-all;
+    background: #fed;
+    padding: 4px;
+  }
+  .sh {
+    font-size: 30px;
+    font-weight: bold;
+    color: #fff;
+    text-shadow:
+      2px 2px 0 #c33,
+      4px 4px 6px rgba(0, 0, 0, 0.5);
+    background: #468;
+    padding: 4px 10px;
+  }
+  .glow {
+    font-size: 26px;
+    color: #fff;
+    background: #222;
+    text-shadow:
+      0 0 8px #0f8,
+      0 0 16px #0f8;
+    padding: 4px 10px;
+  }
+  .d span {
+    margin-right: 14px;
+  }
+  .clamp {
+    width: 260px;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    background: #efe;
+    padding: 4px;
+  }
+  .bal {
+    width: 360px;
+    font-size: 24px;
+    text-align: center;
+    background: #eef;
+    padding: 6px;
+    margin: 0;
+  }
+  .nb {
+    width: 360px;
+    font-size: 24px;
+    text-align: center;
+    background: #eef;
+    padding: 6px;
+    margin: 0;
+  }
+  .var {
+    font-size: 22px;
+  }
+</style>
+<h4>text-indent</h4>
+<p class="b indent">
+  An indented paragraph: only the first line is pushed in, the rest of the lines
+  start at the left edge as usual, whatever the width.
+</p>
+<h4>word-spacing</h4>
+<p class="b ws">wide word spacing here</p>
+<h4>word-break / overflow-wrap</h4>
+<div style="display: flex; gap: 8px">
+  <p class="brk">Supercalifragilisticexpialidocious break-all</p>
+  <p class="anywhere">Supercalifragilisticexpialidocious anywhere</p>
+  <p class="keep">Supercalifragilisticexpialidocious keep-all</p>
+</div>
+<h4>text-shadow</h4>
+<div class="sh">Shadowed text</div>
+<div class="glow" style="margin-top: 6px">Glowing text</div>
+<h4>text-decoration-style / color / thickness / underline-offset</h4>
+<div class="d" style="font-size: 20px">
+  <span style="text-decoration: underline wavy red">wavy</span
+  ><span style="text-decoration: underline dotted #36c 3px">dotted</span
+  ><span style="text-decoration: underline dashed green">dashed</span
+  ><span style="text-decoration: underline double #c60">double</span
+  ><span
+    style="
+      text-decoration: underline;
+      text-underline-offset: 6px;
+      text-decoration-thickness: 3px;
+      text-decoration-color: purple;
+    "
+    >offset</span
+  ><span style="text-decoration: line-through wavy #c00">strike</span>
+</div>
+<h4>-webkit-line-clamp: 2</h4>
+<div class="clamp">
+  This is a long paragraph of text that should be cut after two lines with an
+  ellipsis at the end of the second line, however much more there is of it.
+</div>
+<h4>text-wrap: balance (top) vs normal</h4>
+<p class="bal" style="text-wrap: balance">
+  A headline that wraps onto a second line
+</p>
+<p class="nb" style="margin-top: 6px">
+  A headline that wraps onto a second line
+</p>
+<h4>font-variant</h4>
+<div class="var">
+  <span style="font-variant: small-caps">Small Caps Text</span> &nbsp;
+  <span style="font-variant-numeric: tabular-nums">1111 vs 0000</span>
+</div>
