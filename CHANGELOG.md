@@ -8,6 +8,12 @@ the section becomes that version's.
 
 ## Unreleased
 
+### 2026-10-19
+
+#### Added
+- `media="platform != 'OSX'"` now works on any element, not only `<include>`: a false expression drops the element and its subtree when the page is parsed (set at run time by a script, it has no effect).
+- Platform-specific window attributes: `window-frame-osx="native"` (also `-windows`, `-linux`, on any `window-*` attribute) overrides the plain attribute on that platform. `<include>` can't do this since it can't set attributes on `<html>`.
+
 ### 2026-10-18
 
 #### Fixed

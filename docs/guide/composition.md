@@ -24,6 +24,21 @@ resolve from the fragment containing them. Expansion stops after 16 levels to
 limit nesting and cycles. Included markup then belongs to the outer document,
 so its ordinary image/script URLs use the outer page's asset base.
 
+## Platform-conditional elements
+
+`media="platform != 'OSX'"` (also `==`, joined with `and` / `or`; platforms `Windows`, `OSX`,
+`Linux`) works on **any element**, not only `<include>`: when the expression is false the element and
+its subtree are left out when the page is parsed.
+
+```html
+<header media="platform != 'OSX'"><!-- custom caption buttons --></header>
+```
+
+This is a Nile extension. Sciter documents `media` only for `<include>`, `<link>`, `<style>` and
+`<script>`, so a page that relies on it elsewhere shows the element in real Sciter. Unrecognised
+expressions count as true, a script that sets `media` later has no effect, and `<link media="print">`
+keeps its CSS meaning.
+
 ```sh
 cargo run -p nile-shell -- examples/include.html
 ```
@@ -31,6 +46,11 @@ cargo run -p nile-shell -- examples/include.html
 The example also shows platform media expressions, including
 `media="platform != 'Nope'"`. Use an include for reusable headers or CSS that
 should become part of the same document.
+
+`<html>`'s own attributes can't be conditional this way (an `<include>` can't set attributes on its
+parent either). For the window, add a platform suffix to any `window-*` attribute:
+`<html window-frame="solid" window-frame-osx="native">` gives macOS a native frame and the other
+platforms a solid one. Suffixes are `-osx`, `-windows` and `-linux`; also a Nile extension.
 
 ## Embed a separate document
 

@@ -59,9 +59,12 @@ webpki-roots = "1"
 # and fast incremental builds.
 [profile.dev]
 opt-level = 1
+debug = 1
+incremental = false
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = 0
 
 [profile.release]
 opt-level = "s"
@@ -69,6 +72,11 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+
+[profile.test]
+debug = 1
+incremental = false
 
 # Native extensions must unwind so their `guard` can turn a panic into a status code; the engine
 # itself doesn't (unwinding costs ~1.2 MB of binary). Build extensions with `--profile extension`.

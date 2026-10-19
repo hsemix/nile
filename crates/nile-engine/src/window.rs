@@ -143,7 +143,9 @@ fn boolean(v: Option<&str>, default: bool) -> bool {
 impl WindowConfig {
     pub fn from_document(doc: &Document) -> WindowConfig {
         let html = doc.find(|n| n.tag() == Some("html")).unwrap_or(Document::ROOT);
-        let attr = |name: &str| doc.node(html).attr(name);
+        // `window-frame-osx="native"` (or `-windows` / `-linux`) overrides `window-frame` on that platform.
+        let suffix = if cfg!(windows) { "windows" } else if cfg!(target_os = "macos") { "osx" } else { "linux" };
+        let attr = |name: &str| doc.node(html).attr(&format!("{name}-{suffix}")).or_else(|| doc.node(html).attr(name));
         let title = attr("window-title")
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
@@ -298,6 +300,15 @@ mod tests {
 
     fn config(html: &str) -> WindowConfig {
         WindowConfig::from_document(&Document::parse(html))
+    }
+
+    #[test]
+    fn platform_suffixed_attributes_override_the_plain_one() {
+        let here = if cfg!(windows) { "windows" } else if cfg!(target_os = "macos") { "osx" } else { "linux" };
+        let other = if here == "osx" { "linux" } else { "osx" };
+        let html = format!(r#"<html window-frame="solid" window-frame-{here}="native" window-width-{other}="9"></html>"#);
+        let c = config(&html);
+        assert_eq!((c.frame, c.width), (Frame::Native, None));
     }
 
     #[test]
