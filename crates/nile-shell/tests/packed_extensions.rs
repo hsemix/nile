@@ -65,7 +65,7 @@ fn app(root: &Path, id: &str, version: &str, external: bool) {
         sys.fs.writeFileSync(sys.getenv('NILE_TEST_REPORT'), JSON.stringify({ok:true, rows:rows.length, events, dataPath:application.dataPath, asset:__FILE__}));
         // Context disposal must stop both an active event source and active SQL VM.
         db.query('WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<1000000000) SELECT sum(x) FROM c').catch(() => {});
-      })().catch(error => { sys.fs.writeFileSync(sys.getenv('NILE_TEST_REPORT'), JSON.stringify({error:String(error.stack||error)})); });
+      })().catch(error => { sys.fs.writeFileSync(sys.getenv('NILE_TEST_REPORT'), JSON.stringify({error:String(error)+' '+String(error.stack||'')})); });
     </script></body></html>"#).unwrap();
 }
 fn pack(root: &Path, output: &Path) {
@@ -84,7 +84,8 @@ fn launch(exe: &Path, root: &Path, report: &str) -> std::process::Child {
         .current_dir(root.join("other-cwd"))
         .args(["--png"])
         .arg(root.join(format!("{report}.png")))
-        .args(["--wait", "1200"])
+        // A slow CI runner needs seconds, not one: the script ends the wait early only once it has no work pending.
+        .args(["--wait", "5000"])
         .env("NILE_NATIVE_CACHE_HOME", root.join("cache"))
         .env("NILE_APP_DATA_HOME", root.join("data"))
         .env("NILE_TEST_REPORT", root.join(report))
