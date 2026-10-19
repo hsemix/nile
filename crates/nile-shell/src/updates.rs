@@ -123,16 +123,21 @@ pub fn public_key_of(key_pkcs8_b64: &str) -> Option<String> {
     Some(B64.encode(pair.public_key().as_ref()))
 }
 
-/// Where this app's staged update lives: `<user data>/nile/updates/<id>/`.
-fn store(id: &str) -> Option<PathBuf> {
+/// The user's per-app data folder (`~/Library/Application Support`, `%LOCALAPPDATA%`, `$XDG_DATA_HOME`).
+pub fn data_base() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     let base = PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support");
     #[cfg(windows)]
     let base = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
     #[cfg(all(unix, not(target_os = "macos")))]
     let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or(PathBuf::from(std::env::var_os("HOME")?).join(".local/share"));
+    Some(base)
+}
+
+/// Where this app's staged update lives: `<user data>/nile/updates/<id>/`.
+fn store(id: &str) -> Option<PathBuf> {
     let safe: String = id.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
-    Some(base.join("nile/updates").join(safe))
+    Some(data_base()?.join("nile/updates").join(safe))
 }
 
 #[cfg(test)]

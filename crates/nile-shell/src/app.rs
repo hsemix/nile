@@ -59,6 +59,9 @@ enum Action {
 
 struct Win {
     id: u32,
+    /// `window-remember`: (app key, slot) the geometry is saved under, and when it is next due to be written.
+    remember: Option<(String, String)>,
+    remember_due: Option<Instant>,
     window: Rc<Window>,
     surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
     /// Windows: draws translucent windows (softbuffer's backend loses the alpha channel).
@@ -340,6 +343,26 @@ impl Win {
         self.window.set_cursor(icon_of(want));
     }
 
+    /// Write the window's geometry for `window-remember` (the last normal rectangle stays when it is
+    /// maximized, minimized or full screen).
+    fn persist(&mut self) {
+        self.remember_due = None;
+        let Some((app, slot)) = &self.remember else { return };
+        let w = &self.window;
+        let mut s = crate::winstate::load(app, slot).unwrap_or_default();
+        let maximized = w.is_maximized();
+        if !maximized && !w.is_minimized().unwrap_or(false) && w.fullscreen().is_none() {
+            if let Ok(p) = w.outer_position() {
+                let size = w.inner_size().to_logical::<f32>(w.scale_factor());
+                (s.x, s.y, s.w, s.h) = (p.x, p.y, size.width, size.height);
+            }
+        }
+        s.maximized = maximized;
+        if s.w >= 50.0 && s.h >= 50.0 {
+            crate::winstate::save(app, slot, &s);
+        }
+    }
+
     /// One winit event for this window. True if the user asked to close it.
     fn handle(&mut self, event: WindowEvent) -> bool {
         let window = self.window.clone();
@@ -350,7 +373,17 @@ impl Win {
                     window.request_redraw();
                 }
             }
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => window.request_redraw(),
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                if self.remember.is_some() {
+                    self.remember_due = Some(Instant::now() + std::time::Duration::from_millis(500));
+                }
+                window.request_redraw()
+            }
+            WindowEvent::Moved(_) => {
+                if self.remember.is_some() {
+                    self.remember_due = Some(Instant::now() + std::time::Duration::from_millis(500));
+                }
+            }
             WindowEvent::DroppedFile(path) => self.dropped.push(path.to_string_lossy().into_owned()),
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = window.scale_factor();
@@ -643,6 +676,16 @@ impl App {
                 parent_align = Some(5);
             }
         }
+        // `window-remember`: the size and maximized state of the last run.
+        let remember = config.remember.clone().map(|slot| (crate::winstate::app_key(&page.path), slot));
+        let saved = remember.as_ref().and_then(|(app, slot)| crate::winstate::load(app, slot));
+        if let Some(s) = saved.filter(|_| explicit_pos.is_none()) {
+            config.width = Some(Size::Px(s.w));
+            config.height = Some(Size::Px(s.h));
+            if s.maximized {
+                config.state = InitialState::Maximized;
+            }
+        }
         let (w, h) = config.inner_size(desktop);
         let mut attrs = Window::default_attributes()
             .with_title(config.title.clone())
@@ -716,10 +759,16 @@ impl App {
             attrs = attrs.with_owner_window(hwnd);
         }
         let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
+        // A remembered position, if it is still on a screen.
+        let screens: Vec<(i32, i32, u32, u32)> = event_loop.available_monitors().map(|m| (m.position().x, m.position().y, m.size().width, m.size().height)).collect();
+        let restored = saved.filter(|s| explicit_pos.is_none() && crate::winstate::on_screen(s.x, s.y, (s.w * window.scale_factor() as f32) as u32, &screens));
+        if let Some(s) = restored {
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(s.x, s.y));
+        }
         let pos = explicit_pos
             .or_else(|| parent_align.zip(opener_rect).map(|(a, r)| align(a, (w, h), (r[0], r[1], r[2], r[3]))))
             .or_else(|| config.position((w, h), desktop));
-        if let Some((x, y)) = pos {
+        if let (Some((x, y)), None) = (pos, restored) {
             window.set_outer_position(LogicalPosition::new(x, y));
         }
         match config.state {
@@ -745,6 +794,8 @@ impl App {
         let title = config.title.clone();
         self.wins.push(Win {
             id,
+            remember,
+            remember_due: None,
             window,
             surface,
             #[cfg(windows)]
@@ -862,6 +913,7 @@ impl App {
         }
         let Some(idx) = self.index(id) else { return };
         self.portals.retain(|p| p.owner != id);
+        self.wins[idx].persist();
         let win = self.wins.remove(idx);
         if let Some(opener) = win.opener.and_then(|o| self.index(o)) {
             self.wins[opener].page.window_closed(id, value);
@@ -1034,6 +1086,14 @@ impl ApplicationHandler<UserEvent> for App {
         self.create(event_loop, page, id, None);
     }
 
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        for w in &mut self.wins {
+            if w.remember.is_some() {
+                w.persist();
+            }
+        }
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let mut next: Option<std::time::Duration> = None;
         for id in self.wins.iter().map(|w| w.id).collect::<Vec<_>>() {
@@ -1045,6 +1105,14 @@ impl ApplicationHandler<UserEvent> for App {
             let (changed, n) = self.wins[i].page.tick();
             if changed {
                 self.wins[i].window.request_redraw();
+            }
+            let mut n = n;
+            if let Some(due) = self.wins[i].remember_due {
+                if due <= Instant::now() {
+                    self.wins[i].persist();
+                } else {
+                    n = [n, Some(due - Instant::now())].into_iter().flatten().min();
+                }
             }
             next = [next, n].into_iter().flatten().min();
             self.after(event_loop, id);

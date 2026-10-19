@@ -8,6 +8,11 @@ the section becomes that version's.
 
 ## Unreleased
 
+### 2026-10-20
+
+#### Added
+- `window-remember` on `<html>` (a Nile extension): the window reopens with the size, position and maximized state it was closed with, saved per app (`nile.json` id, else the program's name) and per name in `<user data>/nile/windows/<app>.json`; saved shortly after a move or resize, on close and at exit; a position that is no longer on any screen is dropped. `examples/window-remember.html`.
+
 ### 2026-10-19
 
 #### Removed

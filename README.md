@@ -256,7 +256,7 @@ What changed and when is in the [changelog](CHANGELOG.md).
   (docs.sciter.com/docs/HTML/html-window): `window-title`, `window-width`/`-height` (px or % of the desktop),
   `window-min-*`/`-max-*`, `window-resizable` (`true`, `false` or an edge margin like `6px`),
   `window-minimizable`/`-maximizable`, `window-state` (`shown`, `minimized`, `maximized`, `full-screen`, `hidden`),
-  `window-alignment` (1-9 on the numeric keypad's layout, 5 = centre), `window-icon`, and `window-frame`
+  `window-alignment` (1-9 on the numeric keypad's layout, 5 = centre), `window-icon`, `window-remember` (Nile: reopen with the last size, position and maximized state, kept per app in the user data folder; a position on a monitor that is gone is ignored), and `window-frame`
   (`default`/`standard`, `extended` (macOS: content under the title bar), `solid` (no system frame), `solid-with-shadow` (no frame, the system's drop shadow on macOS and Windows; `examples/solid-shadow.html`),
   `transparent`), and Nile's `window-material` (`blur`, `acrylic`, `mica`, `tabbed`, `sidebar`, `hud`: the system's frosted backdrop behind a page with a transparent background; `examples/transparent.html`, `examples/material.html`). With no system frame, elements with `role="window-caption"` drag the window (double-click
   maximizes) and `role="window-minimize"`/`window-maximize`/`window-close` are the buttons; the edges resize it.

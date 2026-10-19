@@ -38,6 +38,7 @@ mod menu;
 mod openevents;
 mod system;
 mod updates;
+mod winstate;
 
 use std::{path::PathBuf, rc::Rc, time::{Duration, Instant}};
 

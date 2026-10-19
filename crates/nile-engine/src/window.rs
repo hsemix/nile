@@ -115,6 +115,8 @@ pub struct WindowConfig {
     /// `window-material`.
     pub material: Material,
     pub icon: Option<String>,
+    /// `window-remember`: the name its size, position and maximized state are saved under (a bare attribute is "main").
+    pub remember: Option<String>,
 }
 
 fn size(v: &str) -> Option<Size> {
@@ -185,6 +187,7 @@ impl WindowConfig {
             },
             material: attr("window-material").map_or(Material::Auto, Material::parse),
             icon: attr("window-icon").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            remember: attr("window-remember").map(|s| s.trim()).filter(|s| !s.eq_ignore_ascii_case("false")).map(|s| if s.is_empty() || s.eq_ignore_ascii_case("true") { "main".to_string() } else { s.to_string() }),
         }
     }
 
@@ -300,6 +303,14 @@ mod tests {
 
     fn config(html: &str) -> WindowConfig {
         WindowConfig::from_document(&Document::parse(html))
+    }
+
+    #[test]
+    fn window_remember_names_the_saved_slot() {
+        assert_eq!(config(r#"<html></html>"#).remember, None);
+        assert_eq!(config(r#"<html window-remember></html>"#).remember.as_deref(), Some("main"));
+        assert_eq!(config(r#"<html window-remember="editor"></html>"#).remember.as_deref(), Some("editor"));
+        assert_eq!(config(r#"<html window-remember="false"></html>"#).remember, None);
     }
 
     #[test]

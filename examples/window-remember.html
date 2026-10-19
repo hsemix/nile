@@ -1,0 +1,19 @@
+<html window-title="Window remember" window-remember="demo" window-width="520" window-height="320">
+<head>
+<style>
+  body { margin: 0; padding: 24px; font: 14px system-ui; }
+  h1 { font-size: 18px; margin: 0 0 10px; }
+  code { background: #8882; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>Window remember</h1>
+  <p>Resize or move this window (or maximize it), close it, and run the example again: it opens the way you left it.</p>
+  <p>The page asks for it with <code>window-remember="demo"</code> on <code>&lt;html&gt;</code>.</p>
+  <p id="size"></p>
+<script>
+  const show = () => { document.getElementById("size").textContent = "Now: " + innerWidth + " x " + innerHeight; };
+  addEventListener("resize", show); show();
+</script>
+</body>
+</html>
