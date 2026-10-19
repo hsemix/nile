@@ -792,7 +792,7 @@ impl App {
             }
             (None, None) => Page::html_window("<body></body>", dir, size, info),
         };
-        page.clipboard = Box::new(SystemClipboard::default());
+        page.set_clipboard(Box::new(SystemClipboard::default()));
         page.set_dialogs(Rc::new(dialogs::NativeDialogs));
         page
     }

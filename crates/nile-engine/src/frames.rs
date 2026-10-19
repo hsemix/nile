@@ -201,7 +201,7 @@ impl Page {
                 let outbox = Rc::new(RefCell::new(Vec::new()));
                 let css = style_url.as_deref().and_then(|u| nile_dom::vfs::read_to_string(&self.resolve_path(u)).ok());
                 let mut page = self.load_frame_document(&source, (w, h), Embed { outbox: outbox.clone(), css });
-                page.clipboard = Box::new(crate::MemoryClipboard::default());
+                page.share_clipboard(self.clipboard.clone());
                 page.view.borrow_mut().dialogs = self.view.borrow().dialogs.clone();
                 self.frames.borrow_mut().slots.insert(id, FrameSlot { page: Box::new(page), src: key, rect: (x, y, bounds.width, bounds.height), size: (w, h), map, origin, clip, outbox, buf: Vec::new() });
                 created.push(id);
@@ -258,15 +258,13 @@ impl Page {
         }).map(|(&id, _)| id)
     }
 
-    /// Run `f` on a frame's page with the outer clipboard and modifier keys lent to it.
+    /// Run `f` on a frame's page with the outer modifier keys lent to it.
     pub(crate) fn with_frame<R>(&mut self, id: NodeId, f: impl FnOnce(&mut Page) -> R) -> Option<R> {
         let mods = self.mods;
         let mut fr = self.frames.try_borrow_mut().ok()?;
         let slot = fr.slots.get_mut(&id)?;
-        std::mem::swap(&mut self.clipboard, &mut slot.page.clipboard);
         slot.page.mods = mods;
         let out = f(&mut slot.page);
-        std::mem::swap(&mut self.clipboard, &mut slot.page.clipboard);
         Some(out)
     }
 

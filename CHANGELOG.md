@@ -14,6 +14,7 @@ the section becomes that version's.
 - Browser navigation APIs: `history` (`pushState`, `replaceState`, `back`...), the `hashchange` event and writing to `location` (`href`, `hash`, `assign`, `replace`, `reload`). `location` stays as a read-only description of the page's URL. Nile is a desktop UI engine, not a browser; apps route with their own code, `new Window` or frames.
 
 #### Added
+- `Clipboard` (Sciter's API: `read`, `write`, `readText`, `writeText`, `has`; also exported by `@nile`/`@sciter`): text, HTML, pictures (`ImageData`), copied files and in-app JSON, on the OS clipboard in the `nile` binary. The page, its frames and its scripts share one clipboard (`SharedClipboard`; `Page::set_clipboard`). The `Clipboard` trait gained `image`/`set_image`/`files`/`set_files`. `arboard` now builds with `image-data`. `examples/clipboard.html`.
 - `media="platform != 'OSX'"` now works on any element, not only `<include>`: a false expression drops the element and its subtree when the page is parsed (set at run time by a script, it has no effect).
 - Platform-specific window attributes: `window-frame-osx="native"` (also `-windows`, `-linux`, on any `window-*` attribute) overrides the plain attribute on that platform. `<include>` can't do this since it can't set attributes on `<html>`.
 

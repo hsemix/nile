@@ -46,7 +46,7 @@ use winit::{event_loop::EventLoop, keyboard::ModifiersState};
 /// Opens `page` in a window and runs the event loop until the last window closes; returns the
 /// exit code (`application.quit(code)`).
 pub fn run_page(mut page: Page) -> i32 {
-    page.clipboard = Box::new(SystemClipboard::default());
+    page.set_clipboard(Box::new(SystemClipboard::default()));
     page.set_dialogs(Rc::new(dialogs::NativeDialogs));
     let mut builder = EventLoop::<app::UserEvent>::with_user_event();
     #[cfg(target_os = "windows")]
@@ -610,7 +610,7 @@ pub fn run(argv: Vec<String>) -> i32 {
         Page::html_window(&format!("<html window-state=\"hidden\"><body><script type=\"module\" src=\"{name}\"></script></body></html>"), dir, (width as f32, height as f32), info)
     } else if !headless { Page::load_window(file, (width as f32, height as f32), info) } else { Page::load(file, (width as f32, height as f32), 0.0) };
     if !headless {
-        page.clipboard = Box::new(SystemClipboard::default());
+        page.set_clipboard(Box::new(SystemClipboard::default()));
         page.set_dialogs(Rc::new(dialogs::NativeDialogs));
     }
     if pdf.is_some() || (png.is_some() && page_no.is_some()) {

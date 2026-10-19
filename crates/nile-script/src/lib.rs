@@ -218,6 +218,22 @@ pub trait Environment {
     fn clear_edit_selection(&self) {}
     /// `execCommand('copy' | 'cut' | 'paste')`: the host does it with its clipboard.
     fn clipboard_request(&self, _kind: &str) {}
+    /// Read one clipboard flavour: `text`, `html`, `json`, or `files` (paths joined by newlines).
+    fn clipboard_get(&self, _kind: &str) -> Option<String> {
+        None
+    }
+    /// The clipboard's picture as (width, height, RGBA bytes).
+    fn clipboard_get_image(&self) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
+    /// Put one flavour on the clipboard: `text` (a), `html` (a, with `b` as its plain text),
+    /// `files` (a: paths joined by newlines) or `json` (a, with `b` as its text form).
+    fn clipboard_put(&self, _kind: &str, _a: &str, _b: Option<&str>) -> bool {
+        false
+    }
+    fn clipboard_put_image(&self, _width: u32, _height: u32, _rgba: &[u8]) -> bool {
+        false
+    }
     /// Close, move, resize, ... the host window. Embedders without a window ignore it.
     fn window_command(&self, _cmd: WindowCommand) {}
     /// Show the popup element `node` in an OS window of its own (`rect`: its border box in viewport
@@ -327,7 +343,7 @@ impl Loader for FileLoader {
         let builtin = match name {
             "@sys" => Some("const m = globalThis.__sysModule;\nexport const fs = m.fs;\nexport const TCP = m.TCP;\nexport const UDP = m.UDP;\nexport const Pipe = m.Pipe;\nexport const TTY = m.TTY;\nexport const Process = m.Process;\nexport const spawn = m.spawn;\nexport const hrtime = m.hrtime;\nexport const gettimeofday = m.gettimeofday;\nexport const uname = m.uname;\nexport const isatty = m.isatty;\nexport const environ = m.environ;\nexport const getenv = m.getenv;\nexport const setenv = m.setenv;\nexport const unsetenv = m.unsetenv;\nexport const cwd = m.cwd;\nexport const chdir = m.chdir;\nexport const homedir = m.homedir;\nexport const tmpdir = m.tmpdir;\nexport const exepath = m.exepath;\nexport const random = m.random;\nexport default m;"),
             "@nile" => Some(
-                "const m = globalThis.__sciterModule;\nexport const { VERSION, REVISION, QUICKJS_VERSION, setModuleUrlResolver, loadLibrary, parseValue, devicePixels, on, off, once, onGlobalEvent, offGlobalEvent, $, $$, uuid, encode, decode, compress, decompress, toBase64, fromBase64, md5, crc32 } = m;\nconst imp = m.import;\nexport { imp as import };\nexport default m;",
+                "const m = globalThis.__sciterModule;\nexport const { Clipboard, VERSION, REVISION, QUICKJS_VERSION, setModuleUrlResolver, loadLibrary, parseValue, devicePixels, on, off, once, onGlobalEvent, offGlobalEvent, $, $$, uuid, encode, decode, compress, decompress, toBase64, fromBase64, md5, crc32 } = m;\nconst imp = m.import;\nexport { imp as import };\nexport default m;",
             ),
             "@debug" => Some("const m = globalThis.__debugModule;\nexport const { setUnhandledExceptionHandler, setConsoleOutputHandler, callStackAt, setResourceArrivalHandler, setBreakpointHandler, setBreakpoints, getElementByUID, getUIDofElement, highlightElement, getStyleRulesOfElement, containerId, objectKind, sublimatedValue, sublimatedValueElements, frameVariables } = m;\nexport default m;"),
             "@storage" => Some("const m = globalThis.__storageModule;\nexport const open = m.open;\nexport default m;"),
@@ -712,6 +728,33 @@ fn install_natives(
     native!("clipboardRequest", {
         let env = env.clone();
         move |kind: String| env.clipboard_request(&kind)
+    });
+    native!("clipGet", {
+        let env = env.clone();
+        move |kind: String| env.clipboard_get(&kind)
+    });
+    native!("clipGetImage", {
+        let env = env.clone();
+        move || {
+            env.clipboard_get_image().map(|(w, h, rgba)| {
+                use base64::Engine as _;
+                format!("{w},{h},{}", base64::engine::general_purpose::STANDARD.encode(rgba))
+            })
+        }
+    });
+    native!("clipPut", {
+        let env = env.clone();
+        move |kind: String, a: String, b: Option<String>| env.clipboard_put(&kind, &a, b.as_deref())
+    });
+    native!("clipPutImage", {
+        let env = env.clone();
+        move |w: u32, h: u32, data: String| {
+            use base64::Engine as _;
+            match base64::engine::general_purpose::STANDARD.decode(data.as_bytes()) {
+                Ok(rgba) if rgba.len() == w as usize * h as usize * 4 => env.clipboard_put_image(w, h, &rgba),
+                _ => false,
+            }
+        }
     });
     native!("selClear", {
         let env = env.clone();

@@ -49,6 +49,7 @@ for these examples.
 | Excel-style grid, formulas and local saving | [Spreadsheet guide](../../examples/excel/README.md), [example](../../examples/excel/index.html) |
 | IME composition | [IME](../../examples/ime.html) |
 | Networking and storage | [Fetch](../../examples/fetch.html), [data guide](data-and-services.md) |
+| Clipboard (text, html, image, files, json) | [Clipboard](../../examples/clipboard.html) |
 | Built-in modules | [Nile modules](../../examples/nile-modules.html) |
 | Includes, frames and resizable panes | [Include](../../examples/include.html), [Frames](../../examples/frames.html), [Frameset](../../examples/frameset.html) |
 | Fixed/sticky positioning and stacking | [Fixed](../../examples/fixed.html), [Stacking](../../examples/stacking.html) |
@@ -69,6 +70,7 @@ For the broader feature list and remaining compatibility gaps, see the
 generate the local crate documentation with `cargo doc --workspace --no-deps`;
 the entry page is `target/doc/nile_engine/index.html`.
 15. [Play sound with `Audio` and `<audio>`](audio.md).
+16. [Copy and paste text, images and files](clipboard.md).
 16. [Run one instance, open links and files, start at login](app-lifecycle.md).
 17. [Publish signed updates for a packed app](updates.md).
 18. [Drag and drop elements and files](drag-and-drop.md).

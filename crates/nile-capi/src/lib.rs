@@ -583,7 +583,7 @@ pub unsafe extern "C" fn nile_view_selected_text(view: *mut NileView) -> *mut c_
 #[no_mangle]
 pub unsafe extern "C" fn nile_view_set_clipboard(view: *mut NileView, clipboard: NileClipboard) {
     if let Some(v) = view_ref(view) {
-        v.page.clipboard = Box::new(CClipboard(clipboard));
+        v.page.set_clipboard(Box::new(CClipboard(clipboard)));
     }
 }
 

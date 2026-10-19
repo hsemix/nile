@@ -1003,7 +1003,51 @@
   };
   const LENGTH_UNITS = { px: 1, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, pt: 96 / 72, pc: 16 };
   const unsupported = (what) => () => { throw new Error(what + " is not available in Nile"); };
+  // `Clipboard` (docs.sciter.com/docs/JS.runtime/Clipboard). `image` is an `ImageData` (RGBA) here, where
+  // Sciter has a Graphics.Image; text, html, files and json follow its shapes. `link` is not supported.
+  const Clipboard = {
+    read() {
+      const out = {};
+      const text = N.clipGet("text"), html = N.clipGet("html"), json = N.clipGet("json"), files = N.clipGet("files"), img = N.clipGetImage();
+      if (text != null) out.text = text;
+      if (html != null) out.html = html;
+      if (json != null) { try { out.json = JSON.parse(json); } catch {} }
+      if (files != null) out.file = files.split("\n");
+      if (img != null) {
+        const i1 = img.indexOf(","), i2 = img.indexOf(",", i1 + 1);
+        const w = Number(img.slice(0, i1)), h = Number(img.slice(i1 + 1, i2)), b64 = img.slice(i2 + 1);
+        out.image = new g.ImageData(new Uint8ClampedArray(b64ToBytes(b64).buffer), w, h);
+      }
+      return out;
+    },
+    readText() { const t = N.clipGet("text"); return t == null ? undefined : t; },
+    has(type) {
+      switch (type) {
+        case "text": return N.clipGet("text") != null;
+        case "html": return N.clipGet("html") != null;
+        case "json": return N.clipGet("json") != null;
+        case "file": return N.clipGet("files") != null;
+        case "image": return N.clipGetImage() != null;
+        default: return false;
+      }
+    },
+    writeText(text) { return N.clipPut("text", String(text), undefined); },
+    // A system clipboard holds one primary flavour at a time (a picture, files, or text with its html); the
+    // first of image, file, json, html, text that is given wins, and `text` rides along as the plain form.
+    write(data) {
+      if (data == null || typeof data !== "object") return false;
+      const img = data.image;
+      if (img && img.data && img.width > 0) return N.clipPutImage(img.width, img.height, bytesToB64(new Uint8Array(img.data.buffer, img.data.byteOffset, img.data.byteLength)));
+      if (Array.isArray(data.file) && data.file.length) return N.clipPut("files", data.file.map(String).join("\n"), undefined);
+      if (data.json !== undefined) return N.clipPut("json", JSON.stringify(data.json), data.text == null ? undefined : String(data.text));
+      if (data.html != null) return N.clipPut("html", String(data.html), data.text == null ? "" : String(data.text));
+      if (data.text != null) return N.clipPut("text", String(data.text), undefined);
+      return false;
+    },
+  };
+  g.Clipboard = Clipboard;
   const sciterModule = {
+    Clipboard,
     VERSION: "1.0.0.0", REVISION: "0", QUICKJS_VERSION: "2024-01-13",
     import: unsupported("import() (use `await import(...)`)"),
     setModuleUrlResolver() { /* bare names are not resolved yet */ },

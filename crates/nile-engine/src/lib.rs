@@ -66,8 +66,6 @@ impl std::ops::BitOrAssign for ModifiersState {
     }
 }
 
-/// Text clipboard. The system one in the window; an in-memory one for headless
-/// runs and tests, so they never touch the user's clipboard.
 pub trait Clipboard {
     fn text(&mut self) -> Option<String>;
     fn set_text(&mut self, text: &str);
@@ -80,25 +78,58 @@ pub trait Clipboard {
     fn set_html(&mut self, _html: &str, text: &str) {
         self.set_text(text);
     }
+    /// A picture on the clipboard.
+    fn image(&mut self) -> Option<ClipImage> {
+        None
+    }
+    fn set_image(&mut self, _image: &ClipImage) {}
+    /// Files copied in the system's file manager.
+    fn files(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+    fn set_files(&mut self, _files: &[String]) {}
+}
+
+/// A clipboard picture: premultiplied-agnostic RGBA, row by row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
 }
 
 #[derive(Default)]
-pub struct MemoryClipboard(Option<String>, Option<String>);
+pub struct MemoryClipboard {
+    text: Option<String>,
+    html: Option<String>,
+    image: Option<ClipImage>,
+    files: Vec<String>,
+}
 
 impl Clipboard for MemoryClipboard {
     fn text(&mut self) -> Option<String> {
-        self.0.clone()
+        self.text.clone()
     }
     fn set_text(&mut self, text: &str) {
-        self.0 = Some(text.to_string());
-        self.1 = None;
+        *self = MemoryClipboard { text: Some(text.to_string()), ..Default::default() };
     }
     fn html(&mut self) -> Option<String> {
-        self.1.clone()
+        self.html.clone()
     }
     fn set_html(&mut self, html: &str, text: &str) {
-        self.0 = Some(text.to_string());
-        self.1 = Some(html.to_string());
+        *self = MemoryClipboard { text: Some(text.to_string()), html: Some(html.to_string()), ..Default::default() };
+    }
+    fn image(&mut self) -> Option<ClipImage> {
+        self.image.clone()
+    }
+    fn set_image(&mut self, image: &ClipImage) {
+        *self = MemoryClipboard { image: Some(image.clone()), ..Default::default() };
+    }
+    fn files(&mut self) -> Vec<String> {
+        self.files.clone()
+    }
+    fn set_files(&mut self, files: &[String]) {
+        *self = MemoryClipboard { files: files.to_vec(), ..Default::default() };
     }
 }
 
@@ -134,6 +165,93 @@ impl Clipboard for SystemClipboard {
         if let Some(c) = self.get() {
             let _ = c.set_html(html, Some(text));
         }
+    }
+    fn image(&mut self) -> Option<ClipImage> {
+        let img = self.get()?.get_image().ok()?;
+        Some(ClipImage { width: img.width as u32, height: img.height as u32, rgba: img.bytes.into_owned() })
+    }
+    fn set_image(&mut self, image: &ClipImage) {
+        if let Some(c) = self.get() {
+            let _ = c.set_image(arboard::ImageData { width: image.width as usize, height: image.height as usize, bytes: image.rgba.as_slice().into() });
+        }
+    }
+    fn files(&mut self) -> Vec<String> {
+        let Some(c) = self.get() else { return Vec::new() };
+        c.get().file_list().map(|l| l.iter().map(|p| p.to_string_lossy().into_owned()).collect()).unwrap_or_default()
+    }
+    fn set_files(&mut self, files: &[String]) {
+        if let Some(c) = self.get() {
+            let _ = c.set().file_list(files);
+        }
+    }
+}
+
+/// The clipboard a page, its frames and its scripts all share. `json` is the one flavour the
+/// system clipboards don't carry: it is kept in the process and counts only while the text that
+/// was put with it is still the clipboard's text.
+#[derive(Clone)]
+pub struct SharedClipboard(Rc<RefCell<SharedInner>>);
+
+struct SharedInner {
+    system: Box<dyn Clipboard>,
+    json: Option<(String, Option<String>)>,
+}
+
+impl Default for SharedClipboard {
+    fn default() -> Self {
+        SharedClipboard::new(Box::new(MemoryClipboard::default()))
+    }
+}
+
+impl SharedClipboard {
+    pub fn new(system: Box<dyn Clipboard>) -> Self {
+        SharedClipboard(Rc::new(RefCell::new(SharedInner { system, json: None })))
+    }
+    /// Swap the clipboard everyone shares for another (the embedder's own, or the OS one).
+    pub fn replace(&self, system: Box<dyn Clipboard>) {
+        let mut inner = self.0.borrow_mut();
+        inner.system = system;
+        inner.json = None;
+    }
+    pub fn json(&self) -> Option<String> {
+        let mut inner = self.0.borrow_mut();
+        let (json, text) = inner.json.clone()?;
+        (inner.system.text() == text).then_some(json)
+    }
+    pub fn set_json(&self, json: &str, text: Option<&str>) {
+        let mut inner = self.0.borrow_mut();
+        match text {
+            Some(t) => inner.system.set_text(t),
+            None => inner.system.set_text(""),
+        }
+        inner.json = Some((json.to_string(), text.or(Some("")).map(str::to_string)));
+    }
+}
+
+impl Clipboard for SharedClipboard {
+    fn text(&mut self) -> Option<String> {
+        self.0.borrow_mut().system.text()
+    }
+    fn set_text(&mut self, text: &str) {
+        self.0.borrow_mut().system.set_text(text)
+    }
+    fn html(&mut self) -> Option<String> {
+        self.0.borrow_mut().system.html()
+    }
+    fn set_html(&mut self, html: &str, text: &str) {
+        self.0.borrow_mut().system.set_html(html, text)
+    }
+    fn image(&mut self) -> Option<ClipImage> {
+        self.0.borrow_mut().system.image()
+    }
+    fn set_image(&mut self, image: &ClipImage) {
+        self.0.borrow_mut().system.set_image(image)
+    }
+    fn files(&mut self) -> Vec<String> {
+        self.0.borrow_mut().system.files()
+    }
+    fn set_files(&mut self, files: &[String]) {
+        self.0.borrow_mut().system.set_files(files)
     }
 }
 
@@ -205,6 +323,8 @@ pub struct View {
     pub edit_sel: Option<(DomPoint, DomPoint)>,
     /// `copy`/`cut`/`paste` asked for by scripts, for the page to do with its clipboard.
     pub clipboard_requests: Vec<String>,
+    /// The clipboard scripts read and write (`Clipboard.read()`...); the page's own handle is the same one.
+    pub clipboard: SharedClipboard,
     /// Where `<img>` and `url()` backgrounds are read from: the page's folder.
     pub images: FileImages,
     /// The open `<select>` drop-down and its highlighted row.
@@ -751,6 +871,40 @@ impl Environment for Env {
         self.0.borrow_mut().clipboard_requests.push(kind.to_string());
     }
 
+    fn clipboard_get(&self, kind: &str) -> Option<String> {
+        let mut c = self.0.borrow().clipboard.clone();
+        match kind {
+            "text" => c.text(),
+            "html" => c.html().filter(|h| !h.trim().is_empty()),
+            "json" => c.json(),
+            "files" => Some(c.files().join("\n")).filter(|f| !f.is_empty()),
+            _ => None,
+        }
+    }
+
+    fn clipboard_get_image(&self) -> Option<(u32, u32, Vec<u8>)> {
+        let mut c = self.0.borrow().clipboard.clone();
+        c.image().map(|i| (i.width, i.height, i.rgba))
+    }
+
+    fn clipboard_put(&self, kind: &str, a: &str, b: Option<&str>) -> bool {
+        let mut c = self.0.borrow().clipboard.clone();
+        match kind {
+            "text" => c.set_text(a),
+            "html" => c.set_html(a, b.unwrap_or_default()),
+            "json" => c.set_json(a, b),
+            "files" => c.set_files(&a.split('\n').filter(|f| !f.is_empty()).map(str::to_string).collect::<Vec<_>>()),
+            _ => return false,
+        }
+        true
+    }
+
+    fn clipboard_put_image(&self, width: u32, height: u32, rgba: &[u8]) -> bool {
+        let mut c = self.0.borrow().clipboard.clone();
+        c.set_image(&ClipImage { width, height, rgba: rgba.to_vec() });
+        true
+    }
+
     fn window_command(&self, cmd: WindowCommand) {
         self.0.borrow_mut().window_requests.push(cmd);
     }
@@ -900,7 +1054,7 @@ pub struct Page {
     pub list_cursor: Option<(NodeId, usize)>,
     /// Time, position and count of the last primary click, for double/triple-click.
     pub last_click: Option<(Instant, (f32, f32), u32)>,
-    pub clipboard: Box<dyn Clipboard>,
+    pub clipboard: SharedClipboard,
     /// A mouse drag extending the page selection.
     pub page_drag: bool,
     /// A scrollbar thumb being dragged.
@@ -1128,6 +1282,7 @@ impl Page {
             page_sel: None,
             edit_sel: None,
             clipboard_requests: Vec::new(),
+            clipboard: SharedClipboard::default(),
             images: FileImages::new(path.parent().map(PathBuf::from).unwrap_or_default()),
             focus_changes: Vec::new(),
             window_requests: Vec::new(),
@@ -1213,6 +1368,7 @@ impl Page {
         // Scripts may have changed the document.
         view.borrow_mut().sync();
 
+        let clipboard = view.borrow().clipboard.clone();
         Page {
             path,
             memory,
@@ -1241,7 +1397,7 @@ impl Page {
             list_press: None,
             list_cursor: None,
             last_click: None,
-            clipboard: Box::new(MemoryClipboard::default()),
+            clipboard,
             history: std::collections::HashMap::new(),
             bar_drag: None,
             bar_hover: None,
@@ -1260,19 +1416,30 @@ impl Page {
         }
     }
 
+    /// Use `clipboard` for this page and its scripts (frames share their outer page's).
+    pub fn share_clipboard(&mut self, clipboard: SharedClipboard) {
+        self.view.borrow_mut().clipboard = clipboard.clone();
+        self.clipboard = clipboard;
+    }
+
+    /// Replace the system clipboard behind the one this page shares.
+    pub fn set_clipboard(&mut self, system: Box<dyn Clipboard>) {
+        self.clipboard.replace(system);
+    }
+
     pub fn reload(&mut self) {
         let (viewport, scroll) = {
             let v = self.view.borrow();
             (v.viewport, v.scroll_y)
         };
-        let clipboard = std::mem::replace(&mut self.clipboard, Box::new(MemoryClipboard::default()));
+        let clipboard = self.clipboard.clone();
         let dialogs = self.view.borrow().dialogs.clone();
         let info = self.view.borrow().window_info.clone();
         *self = match self.memory.take() {
             Some(html) => Page::from_source_in(html.clone(), self.path.clone(), Some(html), viewport, scroll, None, info),
             None => Page::load_in(self.path.clone(), viewport, scroll, None, info),
         };
-        self.clipboard = clipboard;
+        self.share_clipboard(clipboard);
         self.view.borrow_mut().dialogs = dialogs;
     }
 
@@ -6343,6 +6510,38 @@ cd</textarea>
             }
         }
         assert_eq!(js(&mut p, "document.getElementById('o').textContent"), "POST");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scripts_read_and_write_the_clipboard() {
+        let (mut p, path) = page(
+            r#"<body><script>
+                 window.out = [];
+                 out.push(Clipboard.has("text"), Clipboard.readText() === undefined);
+                 Clipboard.writeText("plain");
+                 out.push(Clipboard.readText(), Clipboard.has("html"));
+                 Clipboard.write({ html: "<b>x</b>", text: "x" });
+                 const r = Clipboard.read();
+                 out.push(r.html, r.text);
+                 const px = new ImageData(new Uint8ClampedArray([255, 0, 0, 255, 0, 255, 0, 255]), 2, 1);
+                 out.push(Clipboard.write({ image: px }), Clipboard.has("image"), Clipboard.has("text"));
+                 const im = Clipboard.read().image;
+                 out.push(im.width, im.height, Array.from(im.data).join(" "));
+                 Clipboard.write({ json: { a: [1, 2] }, text: "tag" });
+                 out.push(JSON.stringify(Clipboard.read().json), Clipboard.readText());
+                 Clipboard.writeText("other");
+                 out.push(Clipboard.has("json"));
+                 Clipboard.write({ file: ["/a/b.txt", "/c.png"] });
+                 out.push(Clipboard.read().file.join("|"));
+               </script></body>"#,
+            "clipboardjs",
+        );
+        p.sync();
+        assert_eq!(
+            js(&mut p, "out.join(';')"),
+            "false;true;plain;false;<b>x</b>;x;true;true;false;2;1;255 0 0 255 0 255 0 255;{\"a\":[1,2]};tag;false;/a/b.txt|/c.png"
+        );
         let _ = std::fs::remove_file(path);
     }
 
