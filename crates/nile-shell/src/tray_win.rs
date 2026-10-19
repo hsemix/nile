@@ -63,7 +63,7 @@ fn data(hwnd: HWND) -> NOTIFYICONDATAW {
 
 /// Add the icon, or update it when it is already there (`shown`). The shell copies the picture, so
 /// the handle is freed right away.
-pub fn set_tray(hwnd: HWND, shown: &mut bool, icon: Option<(&[u8], u32, u32)>, tooltip: &str) {
+pub fn set_tray(hwnd: HWND, shown: &mut bool, icon: Option<(&[u8], u32, u32)>, tooltip: &str) -> Result<(), String> {
     let hicon = icon.and_then(|(rgba, w, h)| icon_from(rgba, w, h));
     let mut nid = data(hwnd);
     nid.uFlags = NIF_MESSAGE | NIF_TIP | if hicon.is_some() { NIF_ICON } else { 0 };
@@ -73,13 +73,22 @@ pub fn set_tray(hwnd: HWND, shown: &mut bool, icon: Option<(&[u8], u32, u32)>, t
         *slot = unit;
     }
     // SAFETY: `nid` is fully initialised and outlives the call.
-    unsafe {
-        Shell_NotifyIconW(if *shown { NIM_MODIFY } else { NIM_ADD }, &nid);
+    let added = unsafe {
+        let ok = Shell_NotifyIconW(if *shown { NIM_MODIFY } else { NIM_ADD }, &nid);
         if let Some(h) = hicon {
             DestroyIcon(h);
         }
+        ok
+    };
+    if added == 0 {
+        return Err(format!("Shell_NotifyIconW failed (last error {})", std::io::Error::last_os_error()));
     }
     *shown = true;
+    match (icon.is_some(), hicon.is_some()) {
+        (false, _) => Err("the icon file could not be read (shown without a picture)".into()),
+        (true, false) => Err("the icon picture could not be turned into a Windows icon (shown without a picture)".into()),
+        _ => Ok(()),
+    }
 }
 
 pub fn remove_tray(hwnd: HWND, shown: &mut bool) {
@@ -130,8 +139,8 @@ struct TaskbarVtbl {
     activate_tab: usize,
     set_active_alt: usize,
     mark_fullscreen_window: usize,
-    set_progress_value: usize,
-    set_progress_state: usize,
+    set_progress_value: unsafe extern "system" fn(*mut c_void, HWND, u64, u64) -> Hr,
+    set_progress_state: unsafe extern "system" fn(*mut c_void, HWND, i32) -> Hr,
     register_tab: usize,
     unregister_tab: usize,
     set_tab_order: usize,
@@ -169,6 +178,35 @@ pub fn set_overlay(hwnd: HWND, icon: Option<(&[u8], u32, u32)>, description: &st
         // The taskbar keeps its own copy of the icon.
         if let Some(h) = hicon {
             DestroyIcon(h);
+        }
+    }
+    ok
+}
+
+/// The taskbar button's progress bar: `None` clears it, `Some(None)` is the marquee, `Some(Some(f))` a
+/// fraction from 0 to 1.
+pub fn set_progress(hwnd: HWND, progress: Option<Option<f32>>) -> bool {
+    const NOPROGRESS: i32 = 0;
+    const INDETERMINATE: i32 = 1;
+    const NORMAL: i32 = 2;
+    let mut ok = false;
+    // SAFETY: as in `set_overlay`.
+    unsafe {
+        let mut raw: *mut c_void = std::ptr::null_mut();
+        let hr = CoCreateInstance(&CLSID_TASKBAR_LIST, std::ptr::null_mut(), CLSCTX_INPROC_SERVER, &IID_ITASKBAR_LIST3, &mut raw);
+        if hr >= 0 && !raw.is_null() {
+            let object = raw as *mut TaskbarObject;
+            let vtbl = &*(*object).vtbl;
+            if (vtbl.hr_init)(raw) >= 0 {
+                ok = match progress {
+                    None => (vtbl.set_progress_state)(raw, hwnd, NOPROGRESS) >= 0,
+                    Some(None) => (vtbl.set_progress_state)(raw, hwnd, INDETERMINATE) >= 0,
+                    Some(Some(f)) => {
+                        (vtbl.set_progress_state)(raw, hwnd, NORMAL) >= 0 && (vtbl.set_progress_value)(raw, hwnd, (f.clamp(0.0, 1.0) * 1000.0) as u64, 1000) >= 0
+                    }
+                };
+            }
+            (vtbl.release)(raw);
         }
     }
     ok

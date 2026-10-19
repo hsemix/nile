@@ -43,7 +43,7 @@ accesskit_winit = "0.34"
 accesskit_consumer = "0.39"
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObject", "NSArray", "NSData", "NSGeometry"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSView", "NSResponder", "NSGraphics", "NSMenu", "NSMenuItem", "NSApplication", "NSEvent", "NSCell", "NSControl", "NSVisualEffectView", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSImage", "NSDockTile", "NSColor", "NSColorSpace", "objc2-core-foundation"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSView", "NSResponder", "NSGraphics", "NSMenu", "NSMenuItem", "NSApplication", "NSEvent", "NSCell", "NSControl", "NSVisualEffectView", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSImage", "NSImageView", "NSImageCell", "NSProgressIndicator", "NSDockTile", "NSColor", "NSColorSpace", "objc2-core-foundation"] }
 # image-data: clipboard pictures (adds the `image` crate with PNG/TIFF only).
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 imagesize = "0.13"

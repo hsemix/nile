@@ -104,6 +104,7 @@ pub struct App {
     /// Which window's tray icon and badge are shown, and what they were last built from (spec, document version).
     tray_owner: Option<(u32, Option<nile_script::TraySpec>, u64)>,
     badge_owner: Option<(u32, Option<String>)>,
+    progress_owner: Option<(u32, nile_script::Progress)>,
     active: u32,
     /// Started from a `run.js`: the first window is a hidden host for the script, and the program ends
     /// when the windows it opened are all closed.
@@ -121,7 +122,7 @@ impl App {
                 let _ = proxy.send_event(UserEvent::Snap(hwnd, state));
             });
         }
-        App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0, menu: None, tray_owner: None, badge_owner: None, active: 0, bootstrap: false, exit_code: 0 }
+        App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0, menu: None, tray_owner: None, badge_owner: None, progress_owner: None, active: 0, bootstrap: false, exit_code: 0 }
     }
 }
 
@@ -972,6 +973,12 @@ impl App {
         if (badge.is_some() || owns) && self.badge_owner.as_ref().map(|(_, b)| b) != Some(&badge) {
             menu.set_badge(&self.wins[i].window, badge.as_deref());
             self.badge_owner = badge.is_some().then_some((id, badge));
+        }
+        let progress = self.wins[i].page.progress();
+        let owns = self.progress_owner.as_ref().is_some_and(|(o, _)| *o == id);
+        if (progress != nile_script::Progress::None || owns) && self.progress_owner.as_ref().map(|(_, p)| p) != Some(&progress) {
+            menu.set_progress(&self.wins[i].window, progress);
+            self.progress_owner = (progress != nile_script::Progress::None).then_some((id, progress));
         }
     }
 

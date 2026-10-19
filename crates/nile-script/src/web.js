@@ -1224,7 +1224,7 @@
     if (!g.host || !g.host.has(name)) throw new Error("updates are not available in this host");
     return g.host[name](...args);
   };
-  let badgeText = null;
+  let badgeText = null, progressValue = null;
   Object.defineProperty(g, "application", { value: { start() {}, run() { return 0; }, quit(code = 0) { N.windowCommand("quit", +code | 0, 0); },
     get arguments() { return g.__envModule.arguments(); },
     // Make this program the handler of `scheme://` links / `.ext` files, or start it at login. Each
@@ -1263,6 +1263,14 @@
     set badge(v) {
       badgeText = v == null || v === "" || v === 0 ? null : String(v);
       N.badgeSet(badgeText == null ? "" : badgeText, badgeText != null);
+    },
+    // Progress on the dock icon (macOS) or taskbar button (Windows): `application.progress = 0.4` (0 to 1),
+    // `"indeterminate"` (Windows; macOS shows a full bar), `null` clears it.
+    get progress() { return progressValue; },
+    set progress(v) {
+      if (v == null || v === false || v === "") { progressValue = null; N.progressSet(0, 0); }
+      else if (v === "indeterminate") { progressValue = "indeterminate"; N.progressSet(1, 0); }
+      else { const n = Number(v); if (Number.isNaN(n)) return; progressValue = Math.min(1, Math.max(0, n)); N.progressSet(2, progressValue); }
     },
     registerProtocol(scheme) { return N.envCall("registerProtocol", [String(scheme)]) === "1"; },
     registerFileType(ext) { return N.envCall("registerFileType", [String(ext)]) === "1"; },

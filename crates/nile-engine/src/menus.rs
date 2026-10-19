@@ -173,6 +173,11 @@ impl Page {
         self.view.borrow().badge.clone()
     }
 
+    /// The dock / taskbar progress, if the page set one.
+    pub fn progress(&self) -> nile_script::Progress {
+        self.view.borrow().progress
+    }
+
     /// The tray icon was clicked (`trayclick`) or double-clicked (`traydoubleclick`).
     pub fn tray_event(&mut self, kind: &str) -> bool {
         self.call("__trayEvent", &format!("[\"{kind}\"]")).1

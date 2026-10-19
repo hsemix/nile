@@ -38,6 +38,7 @@ impl NativeMenu {
     pub fn set(&mut self, _window: &winit::window::Window, _app_name: &str, _items: Option<Vec<nile_engine::menus::MenuItem>>) {}
     pub fn set_tray(&mut self, _window: &winit::window::Window, _tray: Option<&nile_engine::menus::TrayInfo>) {}
     pub fn set_badge(&mut self, _window: &winit::window::Window, _text: Option<&str>) {}
+    pub fn set_progress(&mut self, _window: &winit::window::Window, _progress: nile_script::Progress) {}
     pub fn tray_choice(&mut self, _window: &winit::window::Window) -> Option<u64> {
         None
     }
@@ -110,7 +111,9 @@ mod win {
             match tray {
                 Some(info) => {
                     let icon = nile_engine::Page::icon_from_bytes(&info.icon);
-                    crate::tray_win::set_tray(hwnd, &mut self.tray_shown, icon.as_ref().map(|(p, w, h)| (p.as_slice(), *w, *h)), &info.tooltip);
+                    if let Err(e) = crate::tray_win::set_tray(hwnd, &mut self.tray_shown, icon.as_ref().map(|(p, w, h)| (p.as_slice(), *w, *h)), &info.tooltip) {
+                        eprintln!("[tray] {e} ({} icon bytes)", info.icon.len());
+                    }
                 }
                 None => crate::tray_win::remove_tray(self.tray_hwnd, &mut self.tray_shown),
             }
@@ -134,6 +137,20 @@ mod win {
                 }
             });
             table.get(cmd.wrapping_sub(1)).copied()
+        }
+
+        /// The taskbar button's progress bar.
+        pub fn set_progress(&mut self, window: &Window, progress: nile_script::Progress) {
+            let Ok(RawWindowHandle::Win32(h)) = window.window_handle().map(|h| h.as_raw()) else { return };
+            use nile_script::Progress;
+            crate::tray_win::set_progress(
+                h.hwnd.get(),
+                match progress {
+                    Progress::None => None,
+                    Progress::Indeterminate => Some(None),
+                    Progress::Value(f) => Some(Some(f)),
+                },
+            );
         }
 
         /// The taskbar button's badge.
@@ -249,8 +266,8 @@ mod mac {
 
     use nile_engine::menus::{Accel, MenuItem};
     use objc2::{define_class, msg_send, rc::Retained, sel, MainThreadOnly};
-    use objc2_app_kit::{NSApplication, NSControlStateValueOn, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength};
-    use objc2_foundation::{MainThreadMarker, NSData, NSObject, NSObjectProtocol, NSSize, NSString};
+    use objc2_app_kit::{NSApplication, NSControlStateValueOn, NSEventModifierFlags, NSImage, NSImageView, NSMenu, NSMenuItem, NSProgressIndicator, NSProgressIndicatorStyle, NSView, NSStatusBar, NSStatusItem, NSVariableStatusItemLength};
+    use objc2_foundation::{MainThreadMarker, NSData, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
     use winit::event_loop::EventLoopProxy;
 
     use crate::app::UserEvent;
@@ -291,6 +308,7 @@ mod mac {
         /// when that changes.
         last: Option<(String, Option<Vec<MenuItem>>)>,
         status: Option<Retained<NSStatusItem>>,
+        dock_bar: Option<Retained<NSProgressIndicator>>,
         tray_last: Option<nile_engine::menus::TrayInfo>,
         /// Added to the tag of the items built now (tray menus: `TRAY_TAG`, so their owner's page gets them).
         tag_base: std::cell::Cell<isize>,
@@ -301,7 +319,7 @@ mod mac {
             let mtm = MainThreadMarker::new()?;
             let _ = PROXY.set(proxy);
             let target: Retained<MenuTarget> = unsafe { msg_send![mtm.alloc::<MenuTarget>(), init] };
-            Some(NativeMenu { target, last: None, status: None, tray_last: None, tag_base: std::cell::Cell::new(0) })
+            Some(NativeMenu { target, last: None, status: None, dock_bar: None, tray_last: None, tag_base: std::cell::Cell::new(0) })
         }
 
         /// Show the page's menu as the application's menu bar (or, with `None` after one was shown,
@@ -394,6 +412,52 @@ mod mac {
         /// The status item shows its own menu: nothing to ask for.
         pub fn tray_choice(&mut self, _window: &winit::window::Window) -> Option<u64> {
             None
+        }
+
+        /// A progress bar over the dock icon. The dock tile's content view replaces the icon, so it holds the
+        /// application icon with the bar drawn along its bottom.
+        pub fn set_progress(&mut self, _window: &winit::window::Window, progress: nile_script::Progress) {
+            use nile_script::Progress;
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let app = NSApplication::sharedApplication(mtm);
+            let tile = app.dockTile();
+            if progress == Progress::None {
+                if self.dock_bar.take().is_some() {
+                    tile.setContentView(None);
+                    tile.display();
+                }
+                return;
+            }
+            let bar = match &self.dock_bar {
+                Some(bar) => bar.clone(),
+                None => {
+                    let size = tile.size();
+                    let container = NSView::initWithFrame(mtm.alloc(), NSRect::new(NSPoint::new(0.0, 0.0), size));
+                    let icon = NSImageView::initWithFrame(mtm.alloc(), NSRect::new(NSPoint::new(0.0, 0.0), size));
+                    icon.setImage(app.applicationIconImage().as_deref());
+                    container.addSubview(&icon);
+                    let bar = NSProgressIndicator::initWithFrame(mtm.alloc(), NSRect::new(NSPoint::new(size.width * 0.08, size.height * 0.06), NSSize::new(size.width * 0.84, 14.0)));
+                    bar.setStyle(NSProgressIndicatorStyle::Bar);
+                    bar.setMinValue(0.0);
+                    bar.setMaxValue(1.0);
+                    container.addSubview(&bar);
+                    tile.setContentView(Some(&container));
+                    self.dock_bar = Some(bar.clone());
+                    bar
+                }
+            };
+            match progress {
+                Progress::Value(f) => {
+                    bar.setIndeterminate(false);
+                    bar.setDoubleValue(f as f64);
+                }
+                // The dock tile isn't animated by the app, so an unknown amount shows a full bar.
+                _ => {
+                    bar.setIndeterminate(false);
+                    bar.setDoubleValue(1.0);
+                }
+            }
+            tile.display();
         }
 
         /// The dock icon's badge.

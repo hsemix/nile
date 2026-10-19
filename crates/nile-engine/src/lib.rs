@@ -20,7 +20,7 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 use nile_dom::{Document, NodeId, ScriptSource};
 use nile_layout::{DomPoint, TextPoint, FileImages, LayoutOptions, LayoutTree, MenuRequest, ScrollOffsets};
 use nile_render::{Overlay, Renderer};
-use nile_script::{Environment, ScriptHost, TraySpec, UiEvent, WindowCommand, WindowInfo};
+use nile_script::{Environment, Progress, ScriptHost, TraySpec, UiEvent, WindowCommand, WindowInfo};
 use nile_style::{compute_styles_in, Animator, InteractionState, StyleMap};
 use nile_text::TextEngine;
 use skia_safe::{surfaces, AlphaType, Color, ColorType, ImageInfo};
@@ -354,6 +354,7 @@ pub struct View {
     /// The tray icon and dock/taskbar badge the page asked for (the shell shows them).
     pub tray: Option<TraySpec>,
     pub badge: Option<String>,
+    pub progress: Progress,
     /// Popups that are shown in windows of their own (see `Portal`).
     pub portals: Vec<Portal>,
     /// A file chooser a click on `<input type=file>` asked for; the embedder answers with
@@ -930,6 +931,10 @@ impl Environment for Env {
         self.0.borrow_mut().badge = text;
     }
 
+    fn set_progress(&self, progress: Progress) {
+        self.0.borrow_mut().progress = progress;
+    }
+
     fn native_menu(&self) -> bool {
         self.0.borrow().native_menu
     }
@@ -1321,6 +1326,7 @@ impl Page {
             menu_invocations: Vec::new(),
             tray: None,
             badge: None,
+            progress: Progress::None,
             portals: Vec::new(),
         }));
         view.borrow_mut().adopt(styles);
@@ -6607,6 +6613,15 @@ cd</textarea>
         let info = p.tray().expect("tray");
         assert_eq!((info.tooltip.as_str(), info.template, info.items.len()), ("Tip", true, 2));
         assert_eq!(p.badge().as_deref(), Some("4"));
+        assert_eq!(p.progress(), nile_script::Progress::None);
+        js(&mut p, "application.progress = 0.25; 0");
+        assert_eq!(p.progress(), nile_script::Progress::Value(0.25));
+        js(&mut p, "application.progress = 7; 0");
+        assert_eq!(p.progress(), nile_script::Progress::Value(1.0));
+        js(&mut p, "application.progress = 'indeterminate'; 0");
+        assert_eq!(p.progress(), nile_script::Progress::Indeterminate);
+        js(&mut p, "application.progress = null; 0");
+        assert_eq!(p.progress(), nile_script::Progress::None);
         js(&mut p, "application.badge = null; Window.this.tray = null; 0");
         assert!(p.tray().is_none() && p.badge().is_none());
         let _ = std::fs::remove_file(path);

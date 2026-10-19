@@ -161,6 +161,16 @@ pub enum WindowCommand {
     ResizeTo(f32, f32),
 }
 
+/// `application.progress`: the progress shown on the dock icon / taskbar button.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Progress {
+    #[default]
+    None,
+    Indeterminate,
+    /// 0.0 to 1.0.
+    Value(f32),
+}
+
 /// `Window.this.tray = {...}`: the notification-area (system tray) icon the page asked for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraySpec {
@@ -264,6 +274,7 @@ pub trait Environment {
     fn set_tray(&self, _spec: Option<TraySpec>) {}
     /// The text on the dock / taskbar icon (`application.badge`); `None` clears it.
     fn set_badge(&self, _text: Option<String>) {}
+    fn set_progress(&self, _progress: Progress) {}
     fn portal_clear(&self, _node: NodeId) {}
     /// How this window was opened.
     fn window_info(&self) -> WindowInfo {
@@ -810,6 +821,17 @@ fn install_natives(
         let env = env.clone();
         move |on: bool, icon: String, tooltip: String, menu: i32, template: bool| {
             env.set_tray(on.then(|| TraySpec { icon, tooltip, menu: node(menu), template }))
+        }
+    });
+    native!("progressSet", {
+        let env = env.clone();
+        // kind: 0 none, 1 indeterminate, 2 a value
+        move |kind: i32, value: f64| {
+            env.set_progress(match kind {
+                1 => Progress::Indeterminate,
+                2 => Progress::Value(value.clamp(0.0, 1.0) as f32),
+                _ => Progress::None,
+            })
         }
     });
     native!("badgeSet", {
