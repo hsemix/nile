@@ -24,6 +24,9 @@
 mod alpha_win;
 #[cfg(windows)]
 mod snap_win;
+#[cfg(windows)]
+mod tray_win;
+mod badge;
 mod access;
 mod app;
 mod bundle;

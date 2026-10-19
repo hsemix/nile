@@ -35,6 +35,9 @@ pub enum UserEvent {
     /// the system is hit testing for Snap Layouts.
     #[allow(dead_code)]
     Snap(isize, u8),
+    /// The tray icon was clicked (`trayclick`) or double-clicked (`traydoubleclick`).
+    #[allow(dead_code)]
+    Tray(&'static str),
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -95,6 +98,9 @@ pub struct App {
     main_id: u32,
     /// The system menu bar (macOS), and the window whose page supplies it.
     menu: Option<menu::NativeMenu>,
+    /// Which window's tray icon and badge are shown, and what they were last built from (spec, document version).
+    tray_owner: Option<(u32, Option<nile_script::TraySpec>, u64)>,
+    badge_owner: Option<(u32, Option<String>)>,
     active: u32,
     /// Started from a `run.js`: the first window is a hidden host for the script, and the program ends
     /// when the windows it opened are all closed.
@@ -112,7 +118,7 @@ impl App {
                 let _ = proxy.send_event(UserEvent::Snap(hwnd, state));
             });
         }
-        App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0, menu: None, active: 0, bootstrap: false, exit_code: 0 }
+        App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0, menu: None, tray_owner: None, badge_owner: None, active: 0, bootstrap: false, exit_code: 0 }
     }
 }
 
@@ -875,6 +881,7 @@ impl App {
             }
         }
         self.sync_menu(id);
+        self.sync_tray(id);
     }
 
     /// Show a window's `Window.this.menu` as the system menu bar: the active window's on macOS (one
@@ -888,6 +895,32 @@ impl App {
         let items = self.wins[i].page.app_menu();
         let name = self.wins.first().map(|w| w.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "Nile".into());
         menu.set(&self.wins[i].window, &name, items);
+    }
+
+    /// Show the tray icon and dock/taskbar badge a window's page asked for. The window that set them owns
+    /// them; another window's empty request doesn't remove them.
+    fn sync_tray(&mut self, id: u32) {
+        let Some(menu) = self.menu.as_mut() else { return };
+        let Some(i) = self.wins.iter().position(|w| w.id == id) else { return };
+        let (spec, version) = {
+            let v = self.wins[i].page.view.borrow();
+            (v.tray.clone(), self.wins[i].page.doc.borrow().version)
+        };
+        let owns = self.tray_owner.as_ref().is_some_and(|(o, ..)| *o == id);
+        if spec.is_some() || owns {
+            let unchanged = matches!(&self.tray_owner, Some((o, s, v)) if *o == id && *s == spec && *v == version);
+            if !unchanged {
+                let info = if spec.is_some() { self.wins[i].page.tray() } else { None };
+                menu.set_tray(&self.wins[i].window, info.as_ref());
+                self.tray_owner = spec.is_some().then_some((id, spec, version));
+            }
+        }
+        let badge = self.wins[i].page.badge();
+        let owns = self.badge_owner.as_ref().is_some_and(|(o, _)| *o == id);
+        if (badge.is_some() || owns) && self.badge_owner.as_ref().map(|(_, b)| b) != Some(&badge) {
+            menu.set_badge(&self.wins[i].window, badge.as_deref());
+            self.badge_owner = badge.is_some().then_some((id, badge));
+        }
     }
 
     /// A menu item with a standard role that the page didn't handle itself.
@@ -1059,8 +1092,32 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::Tray(kind) => {
+                let id = self.tray_owner.as_ref().map_or(self.main_id, |(o, ..)| *o);
+                let Some(idx) = self.index(id) else { return };
+                if kind == "traymenu" {
+                    // Windows: the secondary button asks the app to show the menu.
+                    let node = self.menu.as_mut().and_then(|m| m.tray_choice(&self.wins[idx].window));
+                    if let Some(node) = node {
+                        if let Some(role) = self.wins[idx].page.menu_click(node) {
+                            self.menu_role(event_loop, id, &role);
+                        }
+                    }
+                } else {
+                    self.wins[idx].page.tray_event(kind);
+                }
+                self.wins[idx].window.request_redraw();
+                if self.index(id).is_some() {
+                    self.after(event_loop, id);
+                }
+                return;
+            }
             UserEvent::Menu(tag) => {
-                let id = self.active;
+                let (id, tag) = if tag >= menu::TRAY_TAG {
+                    (self.tray_owner.as_ref().map_or(self.main_id, |(o, ..)| *o), tag - menu::TRAY_TAG)
+                } else {
+                    (self.active, tag)
+                };
                 let Some(idx) = self.index(id) else { return };
                 let role = match menu::role_of_tag(tag) {
                     Some(role) => self.wins[idx].page.menu_role(role),

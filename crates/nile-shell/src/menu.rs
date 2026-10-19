@@ -5,6 +5,10 @@
 #[cfg(target_os = "macos")]
 pub use mac::NativeMenu;
 
+/// Tags of tray menu items start here (the page item's node id is added): `UserEvent::Menu` routes them to the
+/// window that owns the tray icon.
+pub const TRAY_TAG: isize = 1 << 40;
+
 /// The standard action behind a negative menu tag (the Edit menu's items and Quit).
 pub fn role_of_tag(tag: isize) -> Option<&'static str> {
     Some(match tag {
@@ -32,6 +36,11 @@ impl NativeMenu {
         None
     }
     pub fn set(&mut self, _window: &winit::window::Window, _app_name: &str, _items: Option<Vec<nile_engine::menus::MenuItem>>) {}
+    pub fn set_tray(&mut self, _window: &winit::window::Window, _tray: Option<&nile_engine::menus::TrayInfo>) {}
+    pub fn set_badge(&mut self, _window: &winit::window::Window, _text: Option<&str>) {}
+    pub fn tray_choice(&mut self, _window: &winit::window::Window) -> Option<u64> {
+        None
+    }
 }
 
 /// Win32 menu bars: one `HMENU` per window, commands arriving as `WM_COMMAND` through winit's
@@ -62,6 +71,9 @@ mod win {
         builder.with_msg_hook(|msg| {
             // SAFETY: winit passes a pointer to the `MSG` it is dispatching.
             let msg = unsafe { &*(msg as *const MSG) };
+            if let Some(kind) = crate::tray_win::tray_event(msg) {
+                return PROXY.get().is_some_and(|p| p.send_event(UserEvent::Tray(kind)).is_ok());
+            }
             if msg.message != WM_COMMAND || (msg.wParam >> 16) != 0 || msg.lParam != 0 {
                 return false;
             }
@@ -76,12 +88,63 @@ mod win {
 
     pub struct NativeMenu {
         last: HashMap<isize, Option<Vec<MenuItem>>>,
+        tray_shown: bool,
+        tray_hwnd: isize,
+        tray_last: Option<nile_engine::menus::TrayInfo>,
+        badge_last: Option<String>,
     }
 
     impl NativeMenu {
         pub fn new(proxy: EventLoopProxy<UserEvent>) -> Option<NativeMenu> {
             let _ = PROXY.set(proxy);
-            Some(NativeMenu { last: HashMap::new() })
+            Some(NativeMenu { last: HashMap::new(), tray_shown: false, tray_hwnd: 0, tray_last: None, badge_last: None })
+        }
+
+        /// Show, update or (with `None`) remove the notification-area icon, owned by `window`.
+        pub fn set_tray(&mut self, window: &Window, tray: Option<&nile_engine::menus::TrayInfo>) {
+            let Ok(RawWindowHandle::Win32(h)) = window.window_handle().map(|h| h.as_raw()) else { return };
+            let hwnd = h.hwnd.get();
+            if self.tray_last.as_ref() == tray && self.tray_hwnd == hwnd {
+                return;
+            }
+            match tray {
+                Some(info) => {
+                    let icon = nile_engine::Page::icon_from_bytes(&info.icon);
+                    crate::tray_win::set_tray(hwnd, &mut self.tray_shown, icon.as_ref().map(|(p, w, h)| (p.as_slice(), *w, *h)), &info.tooltip);
+                }
+                None => crate::tray_win::remove_tray(self.tray_hwnd, &mut self.tray_shown),
+            }
+            self.tray_hwnd = hwnd;
+            self.tray_last = tray.cloned();
+        }
+
+        /// The tray icon's menu at the pointer: the page item chosen, if any.
+        pub fn tray_choice(&mut self, _window: &Window) -> Option<u64> {
+            let items = self.tray_last.as_ref()?.items.clone();
+            if items.is_empty() || !self.tray_shown {
+                return None;
+            }
+            let mut table = Vec::new();
+            let cmd = crate::tray_win::tray_menu(self.tray_hwnd, |menu| {
+                // SAFETY: `menu` is the live popup menu the call just made.
+                unsafe {
+                    for item in &items {
+                        append(menu, item, &mut table);
+                    }
+                }
+            });
+            table.get(cmd.wrapping_sub(1)).copied()
+        }
+
+        /// The taskbar button's badge.
+        pub fn set_badge(&mut self, window: &Window, text: Option<&str>) {
+            let Ok(RawWindowHandle::Win32(h)) = window.window_handle().map(|h| h.as_raw()) else { return };
+            if self.badge_last.as_deref() == text {
+                return;
+            }
+            self.badge_last = text.map(str::to_string);
+            let image = text.and_then(crate::badge::render);
+            crate::tray_win::set_overlay(h.hwnd.get(), image.as_ref().map(|(p, w, h)| (p.as_slice(), *w, *h)), text.unwrap_or(""));
         }
 
         /// Give `window` the page's menu as its menu bar (none removes it).
@@ -186,8 +249,8 @@ mod mac {
 
     use nile_engine::menus::{Accel, MenuItem};
     use objc2::{define_class, msg_send, rc::Retained, sel, MainThreadOnly};
-    use objc2_app_kit::{NSApplication, NSControlStateValueOn, NSEventModifierFlags, NSMenu, NSMenuItem};
-    use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString};
+    use objc2_app_kit::{NSApplication, NSControlStateValueOn, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength};
+    use objc2_foundation::{MainThreadMarker, NSData, NSObject, NSObjectProtocol, NSSize, NSString};
     use winit::event_loop::EventLoopProxy;
 
     use crate::app::UserEvent;
@@ -211,6 +274,14 @@ mod mac {
                     let _ = proxy.send_event(UserEvent::Menu(sender.tag()));
                 }
             }
+
+            /// The status item's button, when it has no menu of its own.
+            #[unsafe(method(trayClicked:))]
+            fn tray_clicked(&self, _sender: &NSObject) {
+                if let Some(proxy) = PROXY.get() {
+                    let _ = proxy.send_event(UserEvent::Tray("trayclick"));
+                }
+            }
         }
     );
 
@@ -219,6 +290,10 @@ mod mac {
         /// What the bar was last built from (the app name and the page's menu), so it is only rebuilt
         /// when that changes.
         last: Option<(String, Option<Vec<MenuItem>>)>,
+        status: Option<Retained<NSStatusItem>>,
+        tray_last: Option<nile_engine::menus::TrayInfo>,
+        /// Added to the tag of the items built now (tray menus: `TRAY_TAG`, so their owner's page gets them).
+        tag_base: std::cell::Cell<isize>,
     }
 
     impl NativeMenu {
@@ -226,7 +301,7 @@ mod mac {
             let mtm = MainThreadMarker::new()?;
             let _ = PROXY.set(proxy);
             let target: Retained<MenuTarget> = unsafe { msg_send![mtm.alloc::<MenuTarget>(), init] };
-            Some(NativeMenu { target, last: None })
+            Some(NativeMenu { target, last: None, status: None, tray_last: None, tag_base: std::cell::Cell::new(0) })
         }
 
         /// Show the page's menu as the application's menu bar (or, with `None` after one was shown,
@@ -264,6 +339,70 @@ mod mac {
             self.last = Some(key);
         }
 
+        /// Show, update or (with `None`) remove the menu-bar status item.
+        pub fn set_tray(&mut self, _window: &winit::window::Window, tray: Option<&nile_engine::menus::TrayInfo>) {
+            if self.tray_last.as_ref() == tray {
+                return;
+            }
+            self.tray_last = tray.cloned();
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let bar = NSStatusBar::systemStatusBar();
+            let Some(info) = tray else {
+                if let Some(old) = self.status.take() {
+                    bar.removeStatusItem(&old);
+                }
+                return;
+            };
+            let item = match &self.status {
+                Some(i) => i.clone(),
+                None => {
+                    let i = bar.statusItemWithLength(NSVariableStatusItemLength);
+                    self.status = Some(i.clone());
+                    i
+                }
+            };
+            let Some(button) = item.button(mtm) else { return };
+            let image = NSImage::initWithData(mtm.alloc(), &NSData::with_bytes(&info.icon));
+            match image {
+                Some(image) => {
+                    image.setSize(NSSize::new(18.0, 18.0));
+                    image.setTemplate(info.template);
+                    button.setImage(Some(&image));
+                    button.setTitle(&NSString::from_str(""));
+                }
+                None => button.setTitle(&NSString::from_str(&info.tooltip.chars().take(2).collect::<String>())),
+            }
+            button.setToolTip(Some(&NSString::from_str(&info.tooltip)));
+            if info.items.is_empty() {
+                item.setMenu(None);
+                unsafe {
+                    button.setTarget(Some(&self.target));
+                    button.setAction(Some(sel!(trayClicked:)));
+                }
+            } else {
+                let menu = NSMenu::new(mtm);
+                menu.setAutoenablesItems(false);
+                self.tag_base.set(super::TRAY_TAG);
+                for it in &info.items {
+                    menu.addItem(&self.entry(mtm, it));
+                }
+                self.tag_base.set(0);
+                item.setMenu(Some(&menu));
+            }
+        }
+
+        /// The status item shows its own menu: nothing to ask for.
+        pub fn tray_choice(&mut self, _window: &winit::window::Window) -> Option<u64> {
+            None
+        }
+
+        /// The dock icon's badge.
+        pub fn set_badge(&mut self, _window: &winit::window::Window, text: Option<&str>) {
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let tile = NSApplication::sharedApplication(mtm).dockTile();
+            tile.setBadgeLabel(text.map(NSString::from_str).as_deref());
+        }
+
         fn item(&self, mtm: MainThreadMarker, title: &str, action: Option<objc2::runtime::Sel>, key: &str, mask: NSEventModifierFlags) -> Retained<NSMenuItem> {
             let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str(title), action, &NSString::from_str(key)) };
             item.setKeyEquivalentModifierMask(mask);
@@ -274,7 +413,7 @@ mod mac {
         fn fires(&self, mtm: MainThreadMarker, title: &str, tag: isize, key: &str, mask: NSEventModifierFlags) -> Retained<NSMenuItem> {
             let item = self.item(mtm, title, Some(sel!(fire:)), key, mask);
             unsafe { item.setTarget(Some(&self.target)) };
-            item.setTag(tag);
+            item.setTag(tag + self.tag_base.get());
             item
         }
 

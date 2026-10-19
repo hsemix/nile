@@ -20,7 +20,7 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 use nile_dom::{Document, NodeId, ScriptSource};
 use nile_layout::{DomPoint, TextPoint, FileImages, LayoutOptions, LayoutTree, MenuRequest, ScrollOffsets};
 use nile_render::{Overlay, Renderer};
-use nile_script::{Environment, ScriptHost, UiEvent, WindowCommand, WindowInfo};
+use nile_script::{Environment, ScriptHost, TraySpec, UiEvent, WindowCommand, WindowInfo};
 use nile_style::{compute_styles_in, Animator, InteractionState, StyleMap};
 use nile_text::TextEngine;
 use skia_safe::{surfaces, AlphaType, Color, ColorType, ImageInfo};
@@ -345,6 +345,9 @@ pub struct View {
     pub window_info: WindowInfo,
     /// The `<menu>` element the page chose as the application menu bar (`Window.this.menu`).
     pub app_menu: Option<NodeId>,
+    /// The tray icon and dock/taskbar badge the page asked for (the shell shows them).
+    pub tray: Option<TraySpec>,
+    pub badge: Option<String>,
     /// Popups that are shown in windows of their own (see `Portal`).
     pub portals: Vec<Portal>,
     /// A file chooser a click on `<input type=file>` asked for; the embedder answers with
@@ -913,6 +916,14 @@ impl Environment for Env {
         self.0.borrow().window_info.clone()
     }
 
+    fn set_tray(&self, spec: Option<TraySpec>) {
+        self.0.borrow_mut().tray = spec;
+    }
+
+    fn set_badge(&self, text: Option<String>) {
+        self.0.borrow_mut().badge = text;
+    }
+
     fn set_app_menu(&self, node: Option<NodeId>) {
         let mut v = self.0.borrow_mut();
         v.app_menu = node;
@@ -1292,6 +1303,8 @@ impl Page {
             window_rect: None,
             window_info: info,
             app_menu: None,
+            tray: None,
+            badge: None,
             portals: Vec::new(),
         }));
         view.borrow_mut().adopt(styles);
@@ -6542,6 +6555,24 @@ cd</textarea>
             js(&mut p, "out.join(';')"),
             "false;true;plain;false;<b>x</b>;x;true;true;false;2;1;255 0 0 255 0 255 0 255;{\"a\":[1,2]};tag;false;/a/b.txt|/c.png"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tray_and_badge_requests_reach_the_shell() {
+        let (mut p, path) = page(
+            r#"<body><menu id="t"><li id="a">One</li><li id="b" disabled>Two</li></menu><script>
+                 Window.this.tray = { icon: "none.png", tooltip: "Tip", menu: document.getElementById("t"), template: true };
+                 application.badge = 4;
+               </script></body>"#,
+            "tray",
+        );
+        p.sync();
+        let info = p.tray().expect("tray");
+        assert_eq!((info.tooltip.as_str(), info.template, info.items.len()), ("Tip", true, 2));
+        assert_eq!(p.badge().as_deref(), Some("4"));
+        js(&mut p, "application.badge = null; Window.this.tray = null; 0");
+        assert!(p.tray().is_none() && p.badge().is_none());
         let _ = std::fs::remove_file(path);
     }
 

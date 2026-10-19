@@ -1224,6 +1224,7 @@
     if (!g.host || !g.host.has(name)) throw new Error("updates are not available in this host");
     return g.host[name](...args);
   };
+  let badgeText = null;
   Object.defineProperty(g, "application", { value: { start() {}, run() { return 0; }, quit(code = 0) { N.windowCommand("quit", +code | 0, 0); },
     get arguments() { return g.__envModule.arguments(); },
     // Make this program the handler of `scheme://` links / `.ext` files, or start it at login. Each
@@ -1257,10 +1258,17 @@
       if (!auUpdate("nileUpdateRestart")) throw new Error("could not start the new version");
       N.windowCommand("quit", 0, 0);
     },
+    // A short text on the dock (macOS) or taskbar (Windows) icon: `application.badge = 3`; null or "" clears it.
+    get badge() { return badgeText; },
+    set badge(v) {
+      badgeText = v == null || v === "" || v === 0 ? null : String(v);
+      N.badgeSet(badgeText == null ? "" : badgeText, badgeText != null);
+    },
     registerProtocol(scheme) { return N.envCall("registerProtocol", [String(scheme)]) === "1"; },
     registerFileType(ext) { return N.envCall("registerFileType", [String(ext)]) === "1"; },
     get loginItem() { return N.envCall("loginItem", []) === "1"; },
     set loginItem(on) { N.envCall("setLoginItem", [on ? "1" : "0"]); } }, configurable: true });
+  Object.defineProperty(g, "__trayEvent", { value(type) { const e = new Event(type); g.document.dispatchEvent(e); g.dispatchEvent(e); } });
   Object.defineProperty(g, "__applicationEvent", {
     value(type, data) {
       const e = new Event(type, { cancelable: false });
@@ -1272,6 +1280,7 @@
   // Classic scripts have no module scope: the page's folder.
   Object.defineProperty(g, "__DIR__", { get() { return String(location.href).replace(/[^/]*$/, ""); }, configurable: true });
   Object.defineProperty(g, "__FILE__", { get() { return String(location.href); }, configurable: true });
+  let trayState = null;
   class Window {
     constructor(params = {}) { openWindow(this, params, false); }
     static get this() { return thisWindow; }
@@ -1331,6 +1340,15 @@
     // The application menu bar of the window: `Window.this.menu = document.$("menu#app")`. The shell shows
     // it as the system menu bar on macOS and Windows (elsewhere the page draws its own); null removes it.
     get menu() { return appMenu; }
+    // The tray icon (notification area): `Window.this.tray = { icon: "tray.png", tooltip: "My app", menu: $("menu#tray") }`
+    // (`template: true` lets macOS tint a one-colour icon); null removes it. `trayclick` and `traydoubleclick`
+    // fire on the document. Nile extension (Sciter has no tray API); not available on Linux yet.
+    get tray() { return trayState; }
+    set tray(v) {
+      trayState = v || null;
+      if (v) N.traySet(true, String(v.icon || ""), String(v.tooltip || ""), v.menu ? v.menu._id : -1, v.template === true);
+      else N.traySet(false, "", "", -1, false);
+    }
     set menu(el) { appMenu = el || null; N.menuSet(el ? el._id : -1); }
     get isActive() { return this === thisWindow ? active : this._valid; }
     get isValid() { return this === thisWindow || this._valid; }

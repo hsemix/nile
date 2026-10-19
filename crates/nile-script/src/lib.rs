@@ -161,6 +161,18 @@ pub enum WindowCommand {
     ResizeTo(f32, f32),
 }
 
+/// `Window.this.tray = {...}`: the notification-area (system tray) icon the page asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraySpec {
+    /// The icon file, as the page wrote it (relative to the page).
+    pub icon: String,
+    pub tooltip: String,
+    /// The `<menu>` shown when the icon is clicked with the secondary button.
+    pub menu: Option<NodeId>,
+    /// A single-colour icon the system may recolour (macOS menu bar).
+    pub template: bool,
+}
+
 /// What scripts can ask of the embedder: layout results and the viewport.
 /// Implementations must bring styles/layout up to date with the document
 /// before answering, since scripts expect to read what they just wrote.
@@ -241,6 +253,10 @@ pub trait Environment {
     fn portal_set(&self, _node: NodeId, _rect: [f32; 4]) {}
     /// The `<menu>` element chosen as the application menu bar, or none.
     fn set_app_menu(&self, _node: Option<NodeId>) {}
+    /// Show (or with `None` remove) the tray icon.
+    fn set_tray(&self, _spec: Option<TraySpec>) {}
+    /// The text on the dock / taskbar icon (`application.badge`); `None` clears it.
+    fn set_badge(&self, _text: Option<String>) {}
     fn portal_clear(&self, _node: NodeId) {}
     /// How this window was opened.
     fn window_info(&self) -> WindowInfo {
@@ -782,6 +798,16 @@ fn install_natives(
     native!("dialog", {
         let env = env.clone();
         move |kind: String, a: String, b: String, c: String, d: String| -> Option<String> { env.dialog(&kind, [&a, &b, &c, &d]) }
+    });
+    native!("traySet", {
+        let env = env.clone();
+        move |on: bool, icon: String, tooltip: String, menu: i32, template: bool| {
+            env.set_tray(on.then(|| TraySpec { icon, tooltip, menu: node(menu), template }))
+        }
+    });
+    native!("badgeSet", {
+        let env = env.clone();
+        move |text: String, on: bool| env.set_badge(on.then_some(text))
     });
     native!("menuSet", {
         let env = env.clone();

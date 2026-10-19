@@ -144,7 +144,40 @@ pub fn menu_json(items: &[MenuItem]) -> String {
     format!("[{}]", body.join(","))
 }
 
+/// The tray icon as the shell needs it: the icon file's bytes, tooltip and menu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrayInfo {
+    pub icon: Vec<u8>,
+    pub tooltip: String,
+    pub items: Vec<MenuItem>,
+    pub template: bool,
+}
+
 impl Page {
+    /// The tray icon the page asked for (`Window.this.tray`), with its menu read from the DOM now.
+    pub fn tray(&mut self) -> Option<TrayInfo> {
+        let spec = self.view.borrow().tray.clone()?;
+        self.view.borrow_mut().sync();
+        let v = self.view.borrow();
+        let icon = nile_layout::ImageLoader::bytes(&v.images, &spec.icon).unwrap_or_default();
+        let doc = self.doc.borrow();
+        let items = match spec.menu {
+            Some(m) if doc.node(m).tag().is_some() => items_of(&doc, &v.styles, m),
+            _ => Vec::new(),
+        };
+        Some(TrayInfo { icon, tooltip: spec.tooltip, items, template: spec.template })
+    }
+
+    /// The dock / taskbar badge text, if the page set one.
+    pub fn badge(&self) -> Option<String> {
+        self.view.borrow().badge.clone()
+    }
+
+    /// The tray icon was clicked (`trayclick`) or double-clicked (`traydoubleclick`).
+    pub fn tray_event(&mut self, kind: &str) -> bool {
+        self.call("__trayEvent", &format!("[\"{kind}\"]")).1
+    }
+
     /// The application menu the page chose (`Window.this.menu`), if any.
     pub fn app_menu(&mut self) -> Option<Vec<MenuItem>> {
         let root = self.view.borrow().app_menu?;
