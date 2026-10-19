@@ -369,28 +369,40 @@ mod tests {
         v
     }
 
+    /// Wait (at most two seconds) until `ready` holds, polling the engine as the host's tick does.
+    fn wait_for(ready: impl Fn() -> bool) {
+        let until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < until && !ready() {
+            poll();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn a_silent_track_plays_pauses_seeks_and_ends() {
         std::env::set_var("NILE_AUDIO", "off");
-        let (id, duration) = load(wav(300)).unwrap();
-        assert!((duration.unwrap() - 0.3).abs() < 0.01);
+        // Long enough that a slow machine can't run it out while the test sleeps.
+        let (id, duration) = load(wav(5000)).unwrap();
+        assert!((duration.unwrap() - 5.0).abs() < 0.01);
         assert_eq!(state(id).unwrap().position, 0.0);
+        let began = Instant::now();
         play(id).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         let s = state(id).unwrap();
-        assert!(s.playing && s.position > 0.05 && s.position < 0.2, "{s:?}");
+        let elapsed = began.elapsed().as_secs_f64();
+        assert!(s.playing && s.position > 0.05 && s.position <= elapsed + 0.01, "{s:?} after {elapsed}");
         pause(id).unwrap();
         let held = state(id).unwrap().position;
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(state(id).unwrap().position, held, "paused time stands still");
-        seek(id, 0.25).unwrap();
-        assert!((state(id).unwrap().position - 0.25).abs() < 1e-6);
+        // Near the end, then let it run out.
+        seek(id, 4.9).unwrap();
+        assert!((state(id).unwrap().position - 4.9).abs() < 1e-6);
         play(id).unwrap();
-        std::thread::sleep(Duration::from_millis(120));
-        poll();
+        wait_for(|| state(id).is_some_and(|s| s.ended));
         assert_eq!(take_events(), vec![(id, Event::Ended)]);
         let s = state(id).unwrap();
-        assert!(s.ended && !s.playing && (s.position - 0.3).abs() < 0.01);
+        assert!(s.ended && !s.playing && (s.position - 5.0).abs() < 0.01, "{s:?}");
         play(id).unwrap();
         assert!(state(id).unwrap().playing && !state(id).unwrap().ended, "play after the end starts over");
         stop(id).unwrap();

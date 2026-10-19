@@ -99,6 +99,12 @@ fn report(root: &Path, name: &str) -> Value {
             .expect("packed script must execute and write exact results"),
     )
     .unwrap();
+    if value["ok"] != true {
+        // `error:` lines reach CI's failure annotations; the panic message does not.
+        for line in format!("packed test report {name}: {value:#}").lines() {
+            eprintln!("error: {line}");
+        }
+    }
     assert_eq!(value["ok"], true, "{value}");
     assert!(value["events"].as_u64().unwrap() >= 2);
     assert!(

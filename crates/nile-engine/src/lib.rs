@@ -7566,6 +7566,8 @@ cd</textarea>
             p.tick();
         }
         let log = js(&mut p, "log.join()");
+        // One `error:` line, so CI's failure annotation shows what happened.
+        eprintln!("error: audio test log: {log}");
         for expect in ["loadedmetadata", "play", "started", "ended", "loaded", "sciter-done"] {
             assert!(log.contains(expect), "{expect} in {log}");
         }
