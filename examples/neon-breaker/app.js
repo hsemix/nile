@@ -1,6 +1,7 @@
 import { createGame, start, launch, pause, resume, nextLevel, update, drainEvents, WIDTH, HEIGHT, STEP, LEVELS, clamp } from './game.js';
 import { createRenderer } from './render.js';
 import { createSound } from './audio.js';
+import { parseLevels } from './levels.js';
 const $ = id => document.getElementById(id);
 const canvas = $('game');
 const game = createGame(20261018);
@@ -18,6 +19,8 @@ try {
   if (Number.isFinite(saved.volume)) preferences.volume = clamp(saved.volume, 0, 1);
 } catch (_) { /* A damaged preference file must not prevent play. */ }
 let panel = null;
+let pendingLevels = null;
+let dropBusy = false;
 let overlayKey = '';
 let lastTime = null;
 let accumulator = 0;
@@ -54,7 +57,7 @@ function fitArena() {
 function text(id, value) { if ($(id).textContent !== value) $(id).textContent = value; }
 function updateHud() {
   text('score', String(game.score).padStart(6, '0'));
-  text('best', String(Math.max(best, game.score)).padStart(6, '0'));
+  text('best', String(game.layouts ? best : Math.max(best, game.score)).padStart(6, '0'));
   text('sector', '0' + (game.level + 1) + ' / 0' + LEVELS);
   text('lives', Array(Math.max(0, game.lives)).fill('●').join(' ') || '—');
   const effects = [];
@@ -73,7 +76,11 @@ function renderOverlay() {
   if (!panel && ['ready', 'playing'].includes(game.phase)) { overlay.style.display = 'none'; overlay.innerHTML = ''; return; }
   overlay.style.display = 'flex';
   let body = '';
-  if (panel === 'settings') {
+  if (panel === 'standard') {
+    body = '<div class="tag">STANDARD CAMPAIGN</div><h2>Restore standard sectors?</h2><p>This ends the current run and returns to the standard title screen.</p><button class="primary" data-game-action="standard">Restore standard campaign</button><button class="secondary" data-game-action="back">Cancel</button>';
+  } else if (panel === 'import') {
+    body = '<div class="tag">CUSTOM CAMPAIGN</div><h2>Play these sectors?</h2><p>This replaces your current run. Custom scores do not change your standard high score. Custom levels last until you close the app or restore the standard campaign.</p><button class="primary" data-game-action="import">Play custom campaign</button><button class="secondary" data-game-action="back">Cancel</button>';
+  } else if (panel === 'settings') {
     body = '<div class="tag">MAKE IT YOURS</div><h2>Sound & display</h2><label class="settings-field"><span>Master volume</span><input id="volume" type="range" min="0" max="1" step="0.05" value="' + preferences.volume + '"></label><label class="settings-check"><input id="music" type="checkbox"' + (preferences.music ? ' checked' : '') + '>Background music</label><label class="settings-check"><input id="reduced" type="checkbox"' + (preferences.reduced ? ' checked' : '') + '>Reduce motion and particles</label><label class="settings-check"><input id="sharp" type="checkbox"' + (preferences.sharp ? ' checked' : '') + '>Sharper canvas (uses more processing)</label><button class="primary" data-game-action="back">Done</button>';
   } else if (panel === 'help') {
     body = '<div class="tag">FIND YOUR FLOW</div><h2>Keep it in play.</h2><p>Steer with your mouse, ← →, or A / D.<br>Space or click launches the ball.<br>P / Escape pauses. M mutes. F toggles fullscreen.<br><br>Hit the edges of the paddle to change the angle. Break bricks without touching the paddle to build a combo.<br><br>Catch W for a wider paddle, 3 for multiball, and S for a one-use safety shield.</p><button class="primary" data-game-action="back">Got it</button>';
@@ -92,7 +99,7 @@ function renderOverlay() {
   overlay.querySelector('button')?.focus();
 }
 function sync() {
-  if (game.score > best) best = game.score;
+  if (!game.layouts && game.score > best) best = game.score;
   updateHud(); renderOverlay(); sound.sync(game.phase); needsDraw = true;
 }
 function primary() {
@@ -105,7 +112,7 @@ function primary() {
   if (['ready', 'playing'].includes(game.phase)) canvas.focus();
 }
 function togglePause() {
-  if (panel) { panel = null; sync(); return; }
+  if (panel) { panel = null; pendingLevels = null; sync(); return; }
   if (game.phase === 'paused') resume(game); else pause(game);
   keys.clear(); input.direction = 0; input.target = null; accumulator = 0; lastTime = null; sync();
   if (game.phase !== 'paused') canvas.focus();
@@ -142,7 +149,7 @@ function frame(timestamp) {
     if (steps === 18) accumulator = 0;
   } else accumulator = 0;
   processEvents();
-  if (game.score > best) best = game.score;
+  if (!game.layouts && game.score > best) best = game.score;
   if (best !== savedBest && timestamp - saveTime > 1000) { persist(); saveTime = timestamp; }
   if (game.phase !== previousPhase) { persist(); sync(); }
   const animate = ['ready', 'playing'].includes(game.phase) && !panel;
@@ -167,9 +174,18 @@ $('overlay').addEventListener('click', event => {
   const action = target.dataset.gameAction;
   if (action === 'primary') primary();
   else if (action === 'help') showPanel('help');
-  else if (action === 'back') { panel = null; sync(); }
+  else if (action === 'back') { panel = null; pendingLevels = null; sync(); }
+  else if (action === 'import' && pendingLevels) {
+    game.layouts = pendingLevels; pendingLevels = null; panel = null;
+    game.phase = 'over'; primary(); message('Custom campaign loaded. Standard high score is kept separately.');
+  }
   else if (action === 'restart-request') showPanel('restart');
   else if (action === 'restart') { panel = null; game.phase = 'over'; primary(); }
+  else if (action === 'standard') {
+    pendingLevels = null; game.layouts = null; panel = null;
+    start(game); game.phase = 'title'; renderer.clear(); sound.stop(); sync();
+    message('Standard campaign restored.');
+  }
 });
 $('overlay').addEventListener('input', event => {
   if (event.target.id !== 'volume') return;
@@ -206,6 +222,27 @@ function loseFocus() {
 window.addEventListener('blur', loseFocus);
 Window.this.on('activate', event => { if (!event.reason) loseFocus(); });
 window.addEventListener('resize', fitArena);
-Window.this.on('closerequest', () => { best = Math.max(best, game.score); persist(); stopped = true; cancelAnimationFrame(rafId); sound.stop(); });
+Window.this.on('closerequest', () => { if (!game.layouts) best = Math.max(best, game.score); persist(); stopped = true; cancelAnimationFrame(rafId); sound.stop(); });
+const dropZone = $('level-drop');
+dropZone.addEventListener('dragover', event => {
+  if (!event.dataTransfer?.types.includes('Files')) return;
+  event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; dropZone.classList.add('over');
+});
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('over'));
+dropZone.addEventListener('drop', async event => {
+  event.preventDefault(); dropZone.classList.remove('over');
+  if (dropBusy) return;
+  const files = event.dataTransfer?.files || [];
+  if (files.length !== 1 || !/\.json$/i.test(files[0].name)) { message('Drop one JSON campaign file.'); return; }
+  if (files[0].size > 16384) { message('Level files must be at most 16 KB.'); return; }
+  dropBusy = true;
+  pause(game); keys.clear(); actionKeys.clear(); input.direction = 0; input.target = null; sync();
+  try {
+    const layouts = parseLevels(await files[0].text());
+    pendingLevels = layouts; showPanel('import');
+  } catch (error) { message('Could not load campaign: ' + error.message); }
+  finally { dropBusy = false; }
+});
+$('standard-levels').addEventListener('click', () => showPanel('standard'));
 configure(); fitArena(); sync(); rafId = requestAnimationFrame(timestamp => { fitArena(); frame(timestamp); });
 console.log('neon breaker ready');

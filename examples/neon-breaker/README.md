@@ -20,6 +20,20 @@ paddle (12 seconds), multiball (up to three balls), or a one-use safety shield.
 Three lost volleys end a run. High score and sound/display preferences survive
 restarts. Settings include music, volume, reduced motion, and sharper rendering.
 
+## Drop custom campaigns
+
+Drop a `.json` campaign onto the dashed area below the playfield. Try
+`examples/neon-breaker/sample-campaign.json`. Loading pauses the game and asks
+before replacing the run; Cancel keeps the old run paused. Invalid files leave
+it intact. Restore the built-in layouts with **Standard campaign**.
+
+Campaign files use `{"version":1,"sectors":[...]}` with exactly three sectors,
+each containing six strings of twelve cells. `.` is empty, `1` is a normal
+brick, `2` is armored, and `W`, `M`, `S` are bricks containing wide-paddle,
+multiball, and shield capsules. Every sector needs a brick; files are limited
+to 16 KB. Custom campaigns stay in memory and their scores do not affect the
+standard high score.
+
 ## Package
 
 Build the shell, then use Nile's packager:

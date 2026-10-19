@@ -101,6 +101,39 @@ async function runChecks() {
     preferences.muted = true; preferences.music = false; preferences.volume = .3; preferences.sharp = false; preferences.reduced = true; configure(); persist();
     const saved = JSON.parse(localStorage.getItem(storageKey));
     assert(saved.best === 4321 && saved.muted && saved.volume === .3, 'High score and sound preferences save to local storage');
+    const campaign = { version: 1, sectors: Array.from({length: 3}, () => ['WMS211111111', '............', '............', '............', '............', '............']) };
+    const parsed = parseLevels(JSON.stringify(campaign));
+    assert(parsed[0].length === 12 && parsed[0][3].hp === 2 && parsed[0][0].power === 'wide', 'Campaign parser maps armor and power-ups');
+    for (const invalid of ['null', '{}', '{', JSON.stringify({version:1,sectors:[[],[],[]]}), JSON.stringify({version:1,sectors:Array(3).fill(Array(6).fill('............'))}), ' '.repeat(16385)]) {
+      let rejected = false; try { parseLevels(invalid); } catch (_) { rejected = true; }
+      assert(rejected, 'Malformed, oversized, or empty campaign is rejected');
+    }
+    const filePath = getenv('NEON_TEST_REPORT') + '.campaign.json';
+    fs.writeFileSync(filePath, JSON.stringify(campaign));
+    const deliver = async files => {
+      const dt = new DataTransfer(); dt.files = files;
+      const over = new Event('dragover', {bubbles:true,cancelable:true}); over.dataTransfer = dt; dropZone.dispatchEvent(over);
+      assert(over.defaultPrevented && dt.dropEffect === 'copy', 'File drag is accepted as a copy');
+      const event = new Event('drop', {bubbles:true,cancelable:true}); event.dataTransfer = dt; dropZone.dispatchEvent(event);
+      await sleep(80);
+    };
+    const oldBricks = game.bricks;
+    await deliver([new File(filePath)]);
+    assert(panel === 'import' && game.phase === 'paused' && game.bricks === oldBricks, 'File drop pauses and asks before replacing the run');
+    $('overlay').querySelector('[data-game-action="back"]').click();
+    assert(!pendingLevels && game.bricks === oldBricks, 'Cancel preserves the current campaign');
+    await deliver([new File(filePath)]);
+    $('overlay').querySelector('[data-game-action="import"]').click();
+    assert(game.layouts && game.phase === 'playing' && game.bricks.length === 12, 'Confirm starts the dropped campaign');
+    game.bricks[0].hp = 0; start(game);
+    assert(game.bricks[0].hp === 1, 'Restart copies pristine custom bricks');
+    game.score = 999999; sync(); assert(best === 4321, 'Custom scores cannot overwrite the standard record');
+    await deliver([new File(filePath), new File(filePath)]);
+    assert($('message').textContent.includes('one JSON'), 'Multiple files are rejected without replacing the campaign');
+    fs.writeFileSync(filePath, '{}'); await deliver([new File(filePath)]);
+    assert($('message').textContent.includes('Could not load') && game.layouts, 'Invalid file contents leave the campaign intact');
+    $('standard-levels').click(); $('overlay').querySelector('[data-game-action="standard"]').click();
+    assert(!game.layouts && game.phase === 'title' && game.bricks.length === 72, 'Standard campaign can be restored explicitly');
     pause(game); sync(); stopped = true; cancelAnimationFrame(rafId); sound.stop();
     fs.writeFileSync(getenv('NEON_TEST_REPORT'), JSON.stringify({ ok: true, results, best, frames, simulationSteps }));
     console.log('NEON CHECKS PASSED: ' + results.length);

@@ -23,7 +23,7 @@ function makeBricks(level) {
   return result;
 }
 function prepareLevel(game) {
-  game.bricks = makeBricks(game.level); game.drops = []; game.combo = 0;
+  game.bricks = game.layouts ? game.layouts[game.level].map(brick => ({ ...brick })) : makeBricks(game.level); game.drops = []; game.combo = 0;
   game.wideUntil = 0; game.shield = 0; game.paddle.w = 112;
   game.balls = [ballAtPaddle(game)]; game.phase = 'ready';
 }
