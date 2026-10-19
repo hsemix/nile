@@ -781,23 +781,13 @@
   };
   Object.assign(XMLHttpRequest, { UNSENT: 0, OPENED: 1, HEADERS_RECEIVED: 2, LOADING: 3, DONE: 4 });
 
-  // ---- location, history, navigator --------------------------------------------
+  // ---- location, navigator --------------------------------------------
   let here = new URL("about:blank");
   Object.defineProperty(g, "__setLocation", { value(url) { try { here = new URL(url); } catch { here = new URL("about:blank"); } } });
-  const hashChanged = (old) => {
-    if (old !== here.href) {
-      const ev = new Event("hashchange");
-      ev.oldURL = old; ev.newURL = here.href;
-      g.dispatchEvent(ev);
-    }
-  };
+  // Read-only: the page's own URL (for `__DIR__`, `document.URL` and relative paths). A desktop
+  // app has no address bar, back button or history stack, so nothing here navigates.
   const loc = {
     get href() { return here.href; },
-    set href(v) {
-      const old = here.href;
-      const next = new URL(v, here.href);
-      if (next.href.split("#")[0] === old.split("#")[0]) { here = next; hashChanged(old); } // other pages can't be opened from a script
-    },
     get protocol() { return here.protocol; },
     get host() { return here.host; },
     get hostname() { return here.hostname; },
@@ -806,30 +796,11 @@
     get pathname() { return here.pathname; },
     get search() { return here.search; },
     get hash() { return here.hash; },
-    set hash(v) {
-      const old = here.href;
-      here.hash = v ? (String(v).startsWith("#") ? String(v) : "#" + v) : "";
-      hashChanged(old);
-    },
-    assign(u) { loc.href = u; },
-    replace(u) { loc.href = u; },
-    reload() {},
     toString() { return here.href; },
   };
-  Object.defineProperty(g, "location", { get: () => loc, set: (v) => { loc.href = v; } });
+  Object.defineProperty(g, "location", { get: () => loc });
   Object.defineProperty(document, "location", { get: () => loc });
   Object.defineProperty(document, "URL", { get: () => here.href });
-  const states = [null];
-  Object.defineProperty(g, "history", {
-    value: {
-      get length() { return states.length; },
-      get state() { return states[states.length - 1]; },
-      scrollRestoration: "auto",
-      pushState(state, title, url) { states.push(state ?? null); if (url != null) here = new URL(url, here.href); },
-      replaceState(state, title, url) { states[states.length - 1] = state ?? null; if (url != null) here = new URL(url, here.href); },
-      back() {}, forward() {}, go() {},
-    },
-  });
   Object.defineProperty(g, "navigator", {
     value: { userAgent: "Mozilla/5.0 Nile/0.1", appName: "Nile", language: "en-US", languages: ["en-US", "en"], onLine: true, platform: "", hardwareConcurrency: 4, cookieEnabled: false, maxTouchPoints: 0 },
   });

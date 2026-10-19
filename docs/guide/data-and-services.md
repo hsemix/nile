@@ -81,8 +81,8 @@ updateLayout();
 
 Resize/intersection observations are checked after layout changes or scrolling.
 Intersection `rootMargin` is ignored. `window.location` exposes the page's
-`file://` URL, but only hash updates take effect; assigning another URL does not
-navigate. `history.pushState`/`replaceState` exist without back/forward navigation.
+`file://` URL, read-only. There is no browser navigation (`history`,
+`hashchange`, assigning `location`): a desktop app routes with its own code.
 
 ## Built-in modules
 

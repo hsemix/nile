@@ -6347,14 +6347,13 @@ cd</textarea>
     }
 
     #[test]
-    fn observers_location_and_history_follow_the_page() {
+    fn observers_and_location_follow_the_page() {
         let (mut p, path) = page(
             r#"<body style="margin:0"><div id="top" style="height:100px"></div><div style="height:600px"></div><div id="far" style="height:50px"></div>
                <script>
                  window.log = [];
                  new ResizeObserver(es => es.forEach(e => log.push('ro ' + e.target.id + ' ' + e.contentRect.height))).observe(document.getElementById('top'));
                  new IntersectionObserver(es => es.forEach(e => log.push('io ' + e.target.id + ' ' + e.isIntersecting))).observe(document.getElementById('far'));
-                 window.addEventListener('hashchange', e => log.push('hash ' + location.hash));
                </script>"#,
             "observers",
         );
@@ -6367,13 +6366,12 @@ cd</textarea>
         p.wheel(0.0, -700.0);
         p.sync();
         assert_eq!(log(&mut p), "ro top 100,io far false,ro top 120,io far true");
-        // location and history.
+        // location.
         assert!(js(&mut p, "location.href").starts_with("file://"));
         assert_eq!(js(&mut p, "location.pathname.endsWith('observers.html') + ',' + devicePixelRatio"), "true,1");
-        js(&mut p, "location.hash = 'two'; 0");
-        assert!(js(&mut p, "log.join(',')").ends_with("hash #two"));
-        js(&mut p, "history.pushState({ a: 1 }, '', '?q=1#three'); 0");
-        assert_eq!(js(&mut p, "location.search + location.hash + history.state.a + history.length"), "?q=1#three12");
+        // Nothing navigates: `location` is read-only and there is no `history`.
+        js(&mut p, "location.hash = 'two'; location.href = 'x.html'; 0");
+        assert_eq!(js(&mut p, "location.hash + typeof history"), "undefined");
         let _ = std::fs::remove_file(path);
     }
 

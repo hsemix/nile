@@ -168,10 +168,10 @@ inside an observer callback. See [virtualization](performance.md).
 `URL(input,base)` and `URLSearchParams(init)` provide implemented parsing and
 query operations; URLSearchParams supports append/set/get/getAll/delete/has,
 sort/forEach/iteration/string conversion. They are partial implementations.
-`location` exposes href/protocol/host/path/query/hash and assign/replace-style
-members. Changing the hash works; assigning another page URL does not navigate.
-`history.pushState/replaceState` keep state without a real back/forward stack.
-Use `new Window`, frame load methods or application routing to show other content.
+`location` is read-only (href/protocol/host/path/query/hash): it tells a script
+where its page lives. Nile has no navigation: no `history`, no `hashchange`, no
+assigning `location`. Use `new Window`, frame load methods or your own routing
+to show other content.
 
 `navigator` exposes runtime identity/platform/locale placeholders rather than
 all browser device APIs. Use `@env` for native platform information.
