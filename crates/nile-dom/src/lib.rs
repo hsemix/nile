@@ -69,7 +69,7 @@ mod stylelink;
 pub mod vfs;
 pub use include::expand as expand_includes;
 pub use stylelink::{inline_imports, inline_links};
-use include::rewrite_frames;
+use include::{media_matches, rewrite_frames};
 
 impl Document {
     pub const ROOT: NodeId = NodeId(0);
@@ -89,6 +89,13 @@ impl Document {
     fn convert(&mut self, handle: &Handle, parent: Option<NodeId>) {
         let kind = match &handle.data {
             NodeData::Document => NodeKind::Document,
+            // Sciter's `media="platform != 'OSX'"` works on any element: a false one (and its
+            // subtree) never enters the document.
+            NodeData::Element { attrs, .. }
+                if attrs.borrow().iter().any(|a| &*a.name.local == "media" && !media_matches(&a.value)) =>
+            {
+                return
+            }
             NodeData::Element { name, attrs, .. } => NodeKind::Element {
                 // `rewrite_frames` hid `<frame>` from the HTML parser behind this name.
                 tag: match &*name.local {
@@ -459,6 +466,18 @@ pub enum DomError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_on_any_element_drops_it_when_false() {
+        let here = include::platform();
+        let html = format!(
+            "<body><header media=\"platform != '{here}'\"><b>gone</b></header><nav media=\"platform == '{here}'\">kept</nav></body>"
+        );
+        let doc = Document::parse(&html);
+        assert!(doc.find(|n| n.tag() == Some("header")).is_none());
+        assert!(doc.find(|n| n.tag() == Some("b")).is_none());
+        assert!(doc.find(|n| n.tag() == Some("nav")).is_some());
+    }
 
     #[test]
     fn mutation_and_serialization() {

@@ -8,11 +8,16 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+nile-audio = { path = "crates/nile-audio" }
+# Playback only (no recording, no dither); the decoders are features of nile-audio.
+rodio = { version = "0.23.0", default-features = false, features = ["playback"] }
 nile-dom = { path = "crates/nile-dom" }
 nile-style = { path = "crates/nile-style" }
 nile-text = { path = "crates/nile-text" }
 nile-layout = { path = "crates/nile-layout" }
 nile-render = { path = "crates/nile-render" }
+nile-canvas = { path = "crates/nile-canvas" }
+nile-svg = { path = "crates/nile-svg", default-features = false }
 nile-script = { path = "crates/nile-script" }
 nile-engine = { path = "crates/nile-engine" }
 nile-capi = { path = "crates/nile-capi" }
@@ -37,11 +42,14 @@ windows-sys = { version = "0.52", default-features = false, features = ["Win32_F
 accesskit_winit = "0.34"
 accesskit_consumer = "0.39"
 objc2 = "0.6.5"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObject", "NSArray"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSView", "NSResponder", "NSGraphics", "NSMenu", "NSMenuItem", "NSApplication", "NSEvent", "NSCell", "NSControl", "NSVisualEffectView", "NSColor", "NSColorSpace", "objc2-core-foundation"] }
-arboard = { version = "3.6", default-features = false }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObject", "NSArray", "NSData", "NSGeometry"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSView", "NSResponder", "NSGraphics", "NSMenu", "NSMenuItem", "NSApplication", "NSEvent", "NSCell", "NSControl", "NSVisualEffectView", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSImage", "NSImageView", "NSImageCell", "NSProgressIndicator", "NSDockTile", "NSColor", "NSColorSpace", "objc2-core-foundation"] }
+# image-data: clipboard pictures (adds the `image` crate with PNG/TIFF only).
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 imagesize = "0.13"
 base64 = "0.22"
+# Ed25519 and SHA-256 for update signatures (already linked by rustls).
+ring = "0.17"
 ureq = "3.4.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
@@ -52,13 +60,27 @@ webpki-roots = "1"
 # and fast incremental builds.
 [profile.dev]
 opt-level = 1
+debug = 1
+incremental = false
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = 0
 
 [profile.release]
 opt-level = "s"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+panic = "abort"
+
+
+[profile.test]
+debug = 1
+incremental = false
+
+# Native extensions must unwind so their `guard` can turn a panic into a status code; the engine
+# itself doesn't (unwinding costs ~1.2 MB of binary). Build extensions with `--profile extension`.
+[profile.extension]
+inherits = "release"
 panic = "unwind"

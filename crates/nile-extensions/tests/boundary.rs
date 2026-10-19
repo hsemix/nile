@@ -186,15 +186,22 @@ fn notifications_wake_unsubscribe_overflow_and_shutdown() {
         .start(token, "notifications.watch", "{}", &[], true)
         .unwrap();
     assert_eq!(wait(&host, id).status, NILE_OK);
-    std::thread::sleep(Duration::from_millis(50));
-    assert!(host
-        .drain()
-        .iter()
-        .any(|d| d.event && d.call == id && d.json.contains("sequence")));
+    // Poll rather than sleep a fixed time: a loaded CI host can starve the 10 ms producer.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut seen = false;
+    while !seen {
+        seen = host.drain().iter().any(|d| d.event && d.call == id && d.json.contains("sequence"));
+        assert!(seen || Instant::now() < deadline, "no notification arrived");
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert!(wakes.load(Ordering::Relaxed) >= 2);
-    std::thread::sleep(Duration::from_millis(40));
-    let events = host.drain();
-    assert!(!events.is_empty() && events.len() <= 128);
+    let mut events = host.drain();
+    while events.is_empty() {
+        assert!(Instant::now() < deadline, "no further notification arrived");
+        std::thread::sleep(Duration::from_millis(5));
+        events = host.drain();
+    }
+    assert!(events.len() <= 128);
     host.cancel(token, id);
     std::thread::sleep(Duration::from_millis(30));
     assert!(host.drain().is_empty());
@@ -421,4 +428,30 @@ fn sqlite_oversized_results_reject_and_leave_connection_usable() {
         call(&host, "sqlite.close", json!({"handle":handle})).status,
         NILE_OK
     );
+}
+
+#[test]
+fn an_oversized_reply_rejects_the_call_even_if_the_extension_ignores_the_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = support::fixture(temp.path(), None);
+    let config = support::package(temp.path(), "fixture", "@fixture", &library, "");
+    let host = Extensions::load(&config).unwrap();
+    let d = call(&host, "fixture.big", json!({}));
+    assert_eq!(d.status, NILE_FAILED);
+    assert_eq!(d.code, "RESULT_LIMIT");
+    assert!(!host.pending(), "the call is settled, not left pending");
+}
+
+#[test]
+fn a_failed_extension_init_calls_no_hooks() {
+    let temp = tempfile::tempdir().unwrap();
+    let library = support::fixture(temp.path(), Some("FAIL_INIT"));
+    let config = support::package(temp.path(), "fixture", "@fixture", &library, "");
+    let path = temp.path().join("fixture").join(format!("native{}", std::env::consts::DLL_SUFFIX));
+    let native = unsafe { libloading::Library::new(path).unwrap() };
+    assert!(Extensions::load(&config).err().unwrap().contains("initialization failed"));
+    unsafe {
+        let shutdowns = native.get::<unsafe extern "C" fn() -> u32>(b"fixture_shutdown_count\0").unwrap()();
+        assert_eq!(shutdowns, 0, "shutdown must not run for an extension whose init failed");
+    }
 }

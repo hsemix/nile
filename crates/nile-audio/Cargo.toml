@@ -1,0 +1,18 @@
+[package]
+name = "nile-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["mp3", "wav", "flac"]
+# Decoders. Measured on macOS: mp3 ~0.1 MB, flac ~0.05 MB, wav (with the player itself) ~0.6 MB,
+# aac/mp4 ~0.25 MB, ogg vorbis ~0.7 MB.
+mp3 = ["rodio/mp3"]
+wav = ["rodio/wav"]
+flac = ["rodio/flac"]
+vorbis = ["rodio/vorbis"]
+aac = ["rodio/mp4"]
+
+[dependencies]
+rodio = { workspace = true }

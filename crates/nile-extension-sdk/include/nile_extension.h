@@ -6,6 +6,15 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+/* Marks the one symbol an extension library exports. */
+#ifndef NILE_EXTENSION_EXPORT
+#  if defined(_WIN32)
+#    define NILE_EXTENSION_EXPORT __declspec(dllexport)
+#  else
+#    define NILE_EXTENSION_EXPORT __attribute__((visibility("default")))
+#  endif
+#endif
+
 
 #define NILE_ABI_VERSION 1
 
@@ -116,8 +125,9 @@ extern "C" {
 
 /**
  * The only symbol a native package must export. Tables are size/version checked.
+ * On Windows the prototype and the definition must both be `dllexport`.
  */
-extern NileStatus nile_extension_init(const struct NileExtensionApi *api,
+NILE_EXTENSION_EXPORT NileStatus nile_extension_init(const struct NileExtensionApi *api,
                                       struct NileExtension *extension);
 
 #ifdef __cplusplus

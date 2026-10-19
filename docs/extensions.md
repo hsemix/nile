@@ -15,7 +15,7 @@ The engine depends on this generic adapter, **not** on the SQLite package.
 From the repository root, with Rust and a C compiler available:
 
 ```sh
-python3 scripts/build-extension.py sqlite --dest examples/sqlite/extensions/sqlite
+cargo run -p nile-extensions --example build-extension -- sqlite --dest examples/sqlite/extensions/sqlite
 cargo run -p nile-shell -- examples/sqlite/index.html
 ```
 
@@ -24,7 +24,7 @@ actual database rows. The UI timer continues while requests run. `customers.db`
 is relative to `examples/sqlite/nile.json`, independent of subsequent changes to
 process working directory. Repeated clicks persist additional rows.
 
-The build script assembles an ordinary directory:
+The Rust build tool assembles an ordinary directory:
 
 ```text
 sqlite/
@@ -61,7 +61,8 @@ The application opts in through `nile.json`:
 {"extensions":{"@sqlite":"./extensions/sqlite"}}
 ```
 
-The nearest `nile.json` in the page directory or its ancestors is used. Configured
+The nearest `nile.json` in the page directory or its ancestors is used; the search stops
+before the filesystem root, the user's home folder and any folder above it. Configured
 package directories resolve relative to that configuration, never a later CWD.
 Only declared packages load, before classic or module startup scripts. All
 packages initialize even if not imported. Import names must start with `@`, have
@@ -106,7 +107,7 @@ continue to work without an inventory or application identity.
 Build, pack and run the included example:
 
 ```sh
-python3 scripts/build-extension.py sqlite --dest examples/sqlite/extensions/sqlite
+cargo run -p nile-extensions --example build-extension -- sqlite --dest examples/sqlite/extensions/sqlite
 cargo run -p nile-shell -- --pack examples/sqlite -o SqliteExample
 ./SqliteExample
 # Headless execution: click Insert and query, then let completions settle:
@@ -179,8 +180,10 @@ Nile creates Unix directories with mode 0700 and checks ownership/permissions.
 On macOS it conservatively rejects nonempty extended ACLs rather than accepting
 access grants beyond those mode bits.
 On Windows it installs protected owner/SYSTEM DACLs on new cache directories and
-rejects broader/unknown DACLs on reuse. Existing symlink/reparse ancestors and
-linked native files are refused. A per-hash OS file lock serializes simultaneous
+rejects broader/unknown DACLs on reuse. Links in the OS-provided root itself (a symlinked `/home`, a dotfile-managed
+`~/.cache`, an `XDG_*` override) are resolved first; any symlink/reparse point *below* it,
+and any linked native file, is refused (Windows does not resolve the root: a linked
+`%LOCALAPPDATA%` is refused). A per-hash OS file lock serializes simultaneous
 launches. Extraction uses unpredictable private staging directories, create-new
 files, bounded streaming decompression, length/hash verification and atomic directory
 rename. Verified warm-cache reuse hashes every inventoried file again, rejects
@@ -282,17 +285,17 @@ dlopen limitations described below still apply.
 Canonical names are `macos-{aarch64,x86_64}`, `windows-{aarch64,x86_64}-msvc`, and
 `linux-{aarch64,x86_64}-{gnu,musl}`. There is no fallback between architectures,
 C runtimes, operating systems or ABI versions. Other targets fail explicitly.
-The package script uses an explicit Rust-target map and never relabels a library
+The package builder uses an explicit Rust-target map and never relabels a library
 for another platform. Standard suffixes are `.dylib`, `.dll`, `.so` respectively.
 
 ```sh
-python3 scripts/build-extension.py sqlite --release --dest dist/sqlite
-python3 scripts/build-extension.py notifications --release --dest dist/notifications
+cargo run -p nile-extensions --example build-extension -- sqlite --release --dest dist/sqlite
+cargo run -p nile-extensions --example build-extension -- notifications --release --dest dist/notifications
 # Cross build only when the Rust target and native C toolchain are installed:
-python3 scripts/build-extension.py sqlite --target x86_64-pc-windows-msvc --release --dest dist/sqlite
+cargo run -p nile-extensions --example build-extension -- sqlite --target x86_64-pc-windows-msvc --release --dest dist/sqlite
 ```
 
-The script preserves manifest entries for previously assembled targets. A native
+The builder preserves manifest entries for previously assembled targets. A native
 SQLite build bundles SQLite through `rusqlite`/`libsqlite3-sys`; it needs a C compiler.
 Windows uses MSVC, macOS Xcode command line tools, and Linux a matching GNU/musl
 compiler. In practice build each binary on its target CI runner. GNU Linux packages
@@ -315,7 +318,7 @@ cp -R extensions/sqlite /tmp/nile-native/extensions/
 cargo build --manifest-path /tmp/nile-native/extensions/sqlite/Cargo.toml --release
 ```
 
-The reproducible automated check is `python3 scripts/check-extension-standalone.py`.
+The reproducible automated check is `cargo run -p nile-extensions --example check-extension-standalone`.
 It builds release mode outside the workspace and checks the complete dependency
 graph for engine/QuickJS dependencies.
 
@@ -424,7 +427,9 @@ opaque `user` value, and lifecycle hooks. Publish teardown hooks before starting
 workers or registering operations, so partial initialization can be cleaned up.
 The host provides a zero/default-initialized full-size output table. Disposal and
 shutdown hooks are mandatory for successful initialization, even if they are no-ops.
-A failed context initialization still receives disposal and shutdown.
+A failed `nile_extension_init` receives **no** hooks (clean up before returning the
+failure; a nonzero `user` makes the host keep the library mapped rather than unload it).
+A failed context initialization receives `shutdown` but not `context_dispose`.
 
 Register namespaced operations with `api->register_operation(api->host, name,
 dispatch, user)`. Names start with the manifest identity followed by `.`; duplicates
@@ -451,8 +456,11 @@ and no native dispatch status; operation failures never gain this flag from thei
 status/code/message. An already accepted completion takes precedence over a later
 dispatch error. Return `NILE_OK` after successfully scheduling
 asynchronous work; every ordinary call requires one eventual terminal completion.
-If completion returns `NILE_INVALID`/`NILE_OVERLOADED`, fix/reduce the reply and retry
-with a bounded error. Closed or duplicate calls must not be retried.
+If completion returns `NILE_INVALID`, fix the reply and retry. A reply over the size
+limit (1 MiB of JSON, strings and buffers together) returns `NILE_OVERLOADED` *and* the
+host rejects the call itself with `RESULT_LIMIT`, so an extension that ignores the status
+cannot leave the Promise pending; a retry then returns `NILE_DUPLICATE`. Closed or
+duplicate calls must not be retried. An overloaded *event* is dropped.
 
 Wrapper modules import the scoped bridge with `import native from '@native'`.
 Only modules under a declared package root can resolve this import. The bridge
@@ -581,12 +589,16 @@ leak, not recovery or a claim of successful cleanup. Normal paths fully clean up
 A v1 extension must report failure rather than claim successful teardown with live workers.
 
 Rust exports and **every callback** must catch panics, using SDK `guard` (including
-void cancellation/resource callbacks). Both workspace profiles use `panic="unwind"`
-so recoverable panics can become `NILE_PANIC`/structured errors. Independent Rust
-builds must also use unwind. Abort-mode binaries, allocator/OOM aborts, UB and foreign
-exceptions cannot be recovered by `catch_unwind`; no process isolation is promised.
-SDK/loader errors return status/Result instead of calling exit/abort. A release build
-must not silently weaken these guarantees by switching back to `panic="abort"`.
+void cancellation/resource callbacks). An extension **must be built with `panic="unwind"`**
+so a recoverable panic becomes `NILE_PANIC`/a structured error: the workspace's `dev` and
+`extension` profiles do (the `build-extension` Rust example's `--release` uses `--profile extension`,
+an optimized build that unwinds), an independent Rust build gets it by default, and a plain
+`release` build of an extension in this workspace does **not**. The engine itself builds with
+`panic="abort"` (unwinding would add ~1.2 MB to every binary); a panic inside its own callbacks
+is a bug that aborts the process, which is why extensions never see engine panics. Abort-mode
+extension builds, allocator/OOM aborts, UB and foreign exceptions cannot be recovered by
+`catch_unwind`; no process isolation is promised. SDK/loader errors return status/Result
+instead of calling exit/abort.
 
 This ABI supports request/response and ongoing event services, not rendering integration,
 real-time audio callbacks or zero-copy shared memory. Those require future explicit,

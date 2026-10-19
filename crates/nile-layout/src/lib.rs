@@ -19,11 +19,12 @@ use std::rc::Rc;
 mod affine;
 pub use affine::Affine;
 mod images;
+mod svg;
 mod pagination;
 mod paged;
 pub use paged::{PagedBox, SHEET_GAP};
 pub use pagination::{paginate, paginate_boxes, paginate_tree, paginate_with, Fragments, Repeat};
-pub use images::{FileImages, ImageData, ImageLoader};
+pub use images::{FileImages, ImageData, ImageLoader, SvgInfo};
 
 pub use nile_dom::NodeId;
 use nile_dom::{Document, NodeKind};
@@ -129,6 +130,8 @@ pub struct TextContent {
     /// `text-overflow: ellipsis` on a clipping box: the renderer cuts a too-long line short
     /// and draws "…".
     pub ellipsis: bool,
+    /// `-webkit-line-clamp`: only this many lines show, the last ending in an ellipsis.
+    pub clamp: Option<u32>,
 }
 
 impl TextContent {
@@ -174,6 +177,8 @@ pub struct LayoutBox {
     pub border_gap: Option<(f32, f32)>,
     /// `backface-visibility: hidden`.
     pub backface_hidden: bool,
+    /// `pointer-events: none` or `visibility: hidden`: pointer hit testing passes through the box.
+    pub inert: bool,
     /// Collapsed table borders: the sides of this cell whose border lost to its neighbour's (the
     /// neighbour paints the shared line, see `resolve_collapsed_borders`).
     pub border_hidden: Edges<bool>,
@@ -1068,7 +1073,7 @@ impl LayoutTree {
     pub fn hit_test_scrolled(&self, x: f32, y: f32, offsets: &ScrollOffsets) -> Option<NodeId> {
         let places = self.placements(offsets);
         for (b, p) in self.boxes.iter().zip(&places).rev() {
-            if p.hidden {
+            if p.hidden || b.inert {
                 continue;
             }
             if let Some(c) = p.clip {
@@ -1272,6 +1277,13 @@ fn plan_floats(tree: &mut TaffyTree<NodeCtx>, doc: &Document, styles: &StyleMap,
     changed
 }
 
+/// `-webkit-line-clamp` and `text-wrap: balance` for a text leaf.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct TextFlow {
+    clamp: Option<u32>,
+    balance: bool,
+}
+
 enum NodeCtx {
     Element(NodeId),
     /// An `<img>`: a leaf of its picture's size (0 x 0 without one).
@@ -1292,6 +1304,7 @@ enum NodeCtx {
         marks: Vec<ElementMark>,
         /// Never wrap (single-line text inputs).
         nowrap: bool,
+        flow: TextFlow,
     },
 }
 
@@ -1301,8 +1314,8 @@ fn measure_node(
     style: &Style,
 ) -> taffy::LayoutOutput {
     taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |known, available| match ctx {
-        Some(NodeCtx::Text { layout, align, nowrap, .. }) => {
-            measure_text(layout, *align, known, available, *nowrap)
+        Some(NodeCtx::Text { layout, align, nowrap, flow, .. }) => {
+            measure_text(layout, *align, known, available, *nowrap, flow.clamp)
         }
         Some(NodeCtx::Replaced { size: (w, h), .. }) => {
             let (w, h) = (*w, *h);
@@ -1627,6 +1640,7 @@ fn measure_text(
     known: Size<Option<f32>>,
     available: Size<AvailableSpace>,
     nowrap: bool,
+    clamp: Option<u32>,
 ) -> Size<f32> {
     let max_width = known.width.or(match available.width {
         AvailableSpace::Definite(w) => Some(w),
@@ -1637,7 +1651,15 @@ fn measure_text(
     break_lines(layout, max_width, align);
     Size {
         width: known.width.unwrap_or_else(|| layout.width()),
-        height: known.height.unwrap_or_else(|| layout.height()),
+        height: known.height.unwrap_or_else(|| clamped_height(layout, clamp)),
+    }
+}
+
+/// The height of `layout`, cut after `clamp` lines when it has more.
+fn clamped_height(layout: &TextLayout, clamp: Option<u32>) -> f32 {
+    match clamp {
+        Some(n) if n >= 1 && layout.len() > n as usize => layout.lines().nth(n as usize - 1).map_or(layout.height(), |l| l.metrics().block_max_coord),
+        _ => layout.height(),
     }
 }
 
@@ -1803,11 +1825,47 @@ fn image_for(src: &str) -> Option<Rc<ImageData>> {
     IMAGES.with(|m| m.borrow().get(src).cloned())
 }
 
+/// An inline `<svg>` as a picture: its subtree written out as a document, sized by its
+/// `width`/`height`, else its `viewBox`, else the 300 x 150 browsers use.
+fn inline_svg(doc: &Document, id: NodeId, style: &ComputedStyle) -> ImageData {
+    use std::hash::{Hash, Hasher};
+    let node = doc.node(id);
+    let source = svg::serialize(doc, id, Some(style.color));
+    let css = svg::page_rules(doc, id);
+    let length = |name: &str| node.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok()).filter(|v| *v > 0.0);
+    let view_box: Option<(f32, f32)> = node.attr("viewBox").and_then(|v| {
+        let n: Vec<f32> = v.split([' ', ',']).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect();
+        (n.len() == 4 && n[2] > 0.0 && n[3] > 0.0).then(|| (n[2], n[3]))
+    });
+    let (w, h) = match (length("width"), length("height"), view_box) {
+        (Some(w), Some(h), _) => (w, h),
+        (Some(w), None, Some((vw, vh))) => (w, w * vh / vw),
+        (None, Some(h), Some((vw, vh))) => (h * vw / vh, h),
+        (None, None, Some(vb)) => vb,
+        (w, h, _) => (w.unwrap_or(300.0), h.unwrap_or(150.0)),
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    css.hash(&mut hasher);
+    let stretch = node.attr("preserveAspectRatio").is_some_and(|v| v.trim().starts_with("none"));
+    ImageData { id: hasher.finish() | (1 << 63), bytes: source.into_bytes(), width: w.ceil() as u32, height: h.ceil() as u32, canvas: None, svg: Some(SvgInfo { css, stretch }) }
+}
+
 /// An `<img>`: sized by CSS, else its `width`/`height` attributes, else its picture.
 fn build_image(doc: &Document, styles: &StyleMap, tree: &mut TaffyTree<NodeCtx>, id: NodeId) -> Option<taffy::NodeId> {
     let node = doc.node(id);
     let style = styles.get(id);
-    let image = node.attr("src").and_then(image_for);
+    let canvas = node.tag() == Some("canvas");
+    // A canvas is a picture that changes: its box is sized by `width`/`height` (300x150 by default)
+    // and the renderer reads its pixels from the drawing surface.
+    let image = if node.tag() == Some("svg") {
+        Some(Rc::new(inline_svg(doc, id, style)))
+    } else if canvas {
+        let side = |name: &str, default: u32| node.attr(name).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(default);
+        Some(Rc::new(ImageData { id: 0, bytes: Vec::new(), width: side("width", 300), height: side("height", 150), canvas: node.attr("nile-canvas").and_then(|v| v.parse().ok()), svg: None }))
+    } else {
+        node.attr("src").and_then(image_for)
+    };
     let mut ts = taffy_style(style);
     let attr = |name: &str| node.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
     let (mut wide, mut high) = (style.width != Length::Auto, style.height != Length::Auto);
@@ -1828,6 +1886,9 @@ fn build_image(doc: &Document, styles: &StyleMap, tree: &mut TaffyTree<NodeCtx>,
     if size.0 > 0.0 && size.1 > 0.0 && !(wide && high) {
         ts.aspect_ratio = Some(size.0 / size.1);
     }
+    if let Some(r) = style.aspect_ratio {
+        ts.aspect_ratio = Some(r);
+    }
     let n = tree.new_leaf_with_context(ts, NodeCtx::Replaced { id, size, image }).ok()?;
     hand_off_absolute(style, n)
 }
@@ -1844,7 +1905,7 @@ fn build(
     }
     let node = doc.node(id);
     let style = styles.get(id);
-    if node.tag() == Some("img") && style.display != Display::None {
+    if matches!(node.tag(), Some("img" | "canvas" | "svg")) && style.display != Display::None {
         return build_image(doc, styles, tree, id);
     }
 
@@ -1864,7 +1925,7 @@ fn build(
                 } else if is_value_control(node) {
                     build_control_text(doc, styles, text, tree, id).into_iter().collect()
                 } else {
-                    build_children(doc, styles, text, tree, &kids(doc, styles, id), style)
+                    build_children(doc, styles, text, tree, &ordered(styles, style, kids(doc, styles, id)), style)
                 }
             });
             let mut ts = taffy_style(style);
@@ -2301,6 +2362,19 @@ fn paints_box(s: &ComputedStyle) -> bool {
 }
 
 /// The children of `id` with its generated `::before` and `::after` boxes around them.
+fn is_inert(s: &ComputedStyle) -> bool {
+    !s.pointer_events || !s.visible
+}
+
+/// The children of a flex or grid container in `order` (stable, so equal orders keep the
+/// document order).
+fn ordered(styles: &StyleMap, container: &ComputedStyle, mut ids: Vec<NodeId>) -> Vec<NodeId> {
+    if matches!(container.display, Display::Flex | Display::Grid) && ids.iter().any(|n| styles.get(*n).order != 0) {
+        ids.sort_by_key(|n| styles.get(*n).order);
+    }
+    ids
+}
+
 fn kids(doc: &Document, styles: &StyleMap, id: NodeId) -> Vec<NodeId> {
     let node = doc.node(id);
     let mut out = Vec::with_capacity(node.children.len() + 2);
@@ -2738,6 +2812,7 @@ fn build_control_text(
             nodes: Vec::new(),
             marks: Vec::new(),
             nowrap: node.tag() != Some("textarea"),
+            flow: TextFlow::default(),
         },
     )
     .ok()
@@ -2932,6 +3007,11 @@ impl InlineText {
                     });
                     self.decos.len() - 1
                 });
+                // Horizontal margins are spacers of the enclosing decoration (the margin shows
+                // the parent's background, not the element's own).
+                let outer = deco;
+                let margin = |l: Length| if let Length::Px(v) = l { v.max(0.0) } else { 0.0 };
+                self.push_spacer(id, es, outer, margin(es.margin.left));
                 let deco = own.map_or(deco, |i| i as u32 + 1);
                 if own.is_some() {
                     self.push_spacer(id, es, deco, es.padding.left + es.border_width.left);
@@ -2948,6 +3028,7 @@ impl InlineText {
                 if own.is_some() {
                     self.push_spacer(id, es, deco, es.padding.right + es.border_width.right);
                 }
+                self.push_spacer(id, es, outer, margin(es.margin.right));
             }
             NodeKind::Document => {}
         }
@@ -3185,17 +3266,27 @@ fn build_inline_run_in(
                 baseline: baseline.map(|b| b + px(m.top)),
             })
         };
+        // `text-indent`: a spacer before the first character (the first line only, since it is
+        // the run's first thing). Positive indents only.
+        let indent = block_style.text_indent > 0.0;
+        if indent {
+            inline.push_spacer(run[0], block_style, 0, block_style.text_indent);
+        }
         for &id in run {
             inline.collect(doc, styles, id, 0, &mut make_box);
         }
     }
     inline.trim_end();
-    if inline.text.is_empty() && inline.boxes.is_empty() {
+    if (inline.text.is_empty() || inline.text == "\u{a0}" && block_style.text_indent > 0.0) && inline.boxes.is_empty() {
         return None;
     }
     for (_, ts) in &mut inline.spans {
         if ts.spacer {
-            ts.font_size /= text.nbsp_ratio(&ts.font_family, ts.font_weight);
+            // A one-pixel no-break space plus letter spacing makes up the width, so the run's
+            // font metrics never stretch the line (a 120px font would for a 30px margin).
+            let ratio = text.nbsp_ratio(&ts.font_family, ts.font_weight);
+            ts.letter_spacing = ts.font_size - ratio;
+            ts.font_size = 1.0;
         }
     }
     let base = text_style(block_style);
@@ -3219,6 +3310,7 @@ fn build_inline_run_in(
             user_select: block_style.user_select,
             ellipsis: block_style.text_ellipsis && block_style.overflow_x != OverflowKind::Visible && !block_style.white_space.wraps(),
             nowrap: !block_style.white_space.wraps(),
+            flow: TextFlow { clamp: block_style.line_clamp, balance: block_style.text_wrap == nile_style::TextWrap::Balance },
         },
     )
     .ok()
@@ -3264,15 +3356,15 @@ fn flatten(
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, border_hidden: Edges::default() })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, inert: is_inert(styles.get(*id)), border_hidden: Edges::default() })
         }
         Some(NodeCtx::Replaced { id, image, .. }) => {
             let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, border_hidden: Edges::default() })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, inert: is_inert(styles.get(*id)), border_hidden: Edges::default() })
         }
-        Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap }) => {
+        Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap, flow }) => {
             // Final line breaking at the resolved width, so alignment is right.
             // Taffy rounds box sizes to whole pixels, which can shave a
             // fraction off the measured width and force a spurious wrap, so
@@ -3297,6 +3389,22 @@ fn flatten(
                         (x - spec.x0, w)
                     });
                 }
+                _ if flow.balance && !*nowrap => {
+                    let container = width + 1.0;
+                    let narrow = nile_text::balanced_width(layout, container);
+                    if narrow < container - 1.0 {
+                        // Lines sit in a narrower column, placed where the alignment would put it.
+                        let shift = match align {
+                            nile_text::Alignment::Center => 0.5,
+                            nile_text::Alignment::End | nile_text::Alignment::Right => 1.0,
+                            _ => 0.0,
+                        };
+                        let x = (container - narrow) * shift;
+                        break_lines_varying(layout, container, *align, |_| (x, narrow));
+                    } else {
+                        break_lines(layout, Some(container), *align);
+                    }
+                }
                 _ => break_lines(layout, Some(width + 1.0), *align),
             }
             TEXT_LEAVES.with(|t| t.borrow_mut().push((out.len(), n)));
@@ -3317,7 +3425,7 @@ fn flatten(
             out.push(LayoutBox {
                 node: *node,
                 rect,
-                content: BoxContent::Text(Box::new(TextContent { layout, nodes, marks, decos, owners, text, spacers, control, user_select, ellipsis })),
+                content: BoxContent::Text(Box::new(TextContent { layout, nodes, marks, decos, owners, text, spacers, control, user_select, ellipsis, clamp: flow.clamp })),
                 subtree_end: 0,
                 scroll: None,
                 image: None,
@@ -3328,6 +3436,7 @@ fn flatten(
                 sticky: None,
                 border_gap: None,
                 backface_hidden: false,
+                inert: is_inert(styles.get(*node)),
                 border_hidden: Edges::default(),
             });
             for b in placed {
@@ -3397,13 +3506,13 @@ fn is_flex_or_grid(s: &ComputedStyle) -> bool {
 /// Whether a box is a stacking context: positioned with a `z-index` (or a flex/grid item with
 /// one), faded, transformed or `fixed`. Its descendants are painted as a unit.
 fn forms_context(s: &ComputedStyle, flex_item: bool) -> bool {
-    (s.z_index.is_some() && (s.position != Position::Static || flex_item)) || s.opacity < 1.0 || !s.transform.is_empty() || s.position == Position::Fixed
+    (s.z_index.is_some() && (s.position != Position::Static || flex_item)) || s.opacity < 1.0 || !s.transform.is_empty() || s.layered() || s.position == Position::Fixed
 }
 
 /// Boxes that clip, fade, transform or stick their contents: a positioned descendant inside
 /// one can't be painted outside it, so it isn't hoisted past it.
 fn confines(s: &ComputedStyle) -> bool {
-    s.clips() || s.opacity < 1.0 || !s.transform.is_empty() || s.position == Position::Sticky
+    s.clips() || s.opacity < 1.0 || !s.transform.is_empty() || s.layered() || s.position == Position::Sticky
 }
 
 /// The descendants of `n` that belong in the paint order of the stacking context `n` is (or
@@ -3473,7 +3582,7 @@ fn paint_layer(s: &ComputedStyle, flex_item: bool) -> (u8, i32) {
         Some(z) if (positioned || flex_item) && z < 0 => (0, z),
         Some(z) if (positioned || flex_item) && z > 0 => (3, z),
         Some(_) if flex_item => (2, 0),
-        _ if positioned || s.opacity < 1.0 || !s.transform.is_empty() => (2, 0),
+        _ if positioned || s.opacity < 1.0 || !s.transform.is_empty() || s.layered() => (2, 0),
         _ => (1, 0),
     }
 }
@@ -3520,9 +3629,36 @@ fn text_style(s: &ComputedStyle) -> TextStyle {
         underline: s.underline,
         line_through: s.line_through,
         letter_spacing: s.letter_spacing,
+        word_spacing: s.word_spacing,
+        word_break: match s.word_break {
+            nile_style::WordBreak::Normal => nile_text::WordBreak::Normal,
+            nile_style::WordBreak::BreakAll => nile_text::WordBreak::BreakAll,
+            nile_style::WordBreak::KeepAll => nile_text::WordBreak::KeepAll,
+        },
+        overflow_wrap: match s.overflow_wrap {
+            nile_style::OverflowWrap::Normal => nile_text::OverflowWrap::Normal,
+            nile_style::OverflowWrap::Anywhere => nile_text::OverflowWrap::Anywhere,
+            nile_style::OverflowWrap::BreakWord => nile_text::OverflowWrap::BreakWord,
+        },
+        decoration: nile_text::Decoration {
+            style: match s.deco.style {
+                nile_style::DecoStyle::Solid => nile_text::DecoStyle::Solid,
+                nile_style::DecoStyle::Double => nile_text::DecoStyle::Double,
+                nile_style::DecoStyle::Dotted => nile_text::DecoStyle::Dotted,
+                nile_style::DecoStyle::Dashed => nile_text::DecoStyle::Dashed,
+                nile_style::DecoStyle::Wavy => nile_text::DecoStyle::Wavy,
+            },
+            color: s.deco.color.map(|c| [c.r, c.g, c.b, c.a]),
+            thickness: s.deco.thickness,
+            offset: s.deco.offset,
+        },
         align: alignment(s.text_align),
         font_variations: s.font_variations.clone(),
-        font_features: s.font_features.clone(),
+        font_features: match (s.font_variant.is_empty(), s.font_features.is_empty()) {
+            (true, _) => s.font_features.clone(),
+            (false, true) => s.font_variant.clone(),
+            (false, false) => format!("{}, {}", s.font_variant, s.font_features),
+        },
     }
 }
 
@@ -3763,6 +3899,7 @@ fn taffy_style(s: &ComputedStyle) -> Style {
             FlexDirection::ColumnReverse => taffy::FlexDirection::ColumnReverse,
         },
         flex_wrap: if s.flex_wrap { FlexWrap::Wrap } else { FlexWrap::NoWrap },
+        aspect_ratio: s.aspect_ratio,
         flex_grow: s.flex_grow,
         flex_shrink: s.flex_shrink,
         flex_basis: dim(s.flex_basis),
@@ -4630,6 +4767,80 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
         assert!(a.width > 20.0 && a.width < 120.0, "shrunk: {}", a.width);
         assert!(b.width <= 800.0 && b.width > 300.0, "capped at the container: {}", b.width);
         assert!(c.width < 40.0, "{}", c.width);
+    }
+
+    #[test]
+    fn pointer_events_and_visibility_let_hits_through_and_order_sorts_items() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><div id="under" style="width:100px;height:100px">
+                 <div id="none" style="position:absolute;left:0;top:0;width:100px;height:100px;pointer-events:none">
+                   <div id="kid" style="position:absolute;left:0;top:0;width:20px;height:20px;pointer-events:auto"></div></div>
+               </div>
+               <div id="hid" style="width:100px;height:30px;visibility:hidden"><span id="vis" style="visibility:visible">x</span></div>
+               <div style="display:flex;width:300px"><i id="a" style="order:2;width:10px">a</i><i id="b" style="order:1;width:10px">b</i><i id="c" style="width:10px">c</i></div>
+               <div id="ratio" style="width:80px;aspect-ratio:2"></div></body>"#,
+        );
+        let node = |id: &str| doc.find(|n| n.attr("id") == Some(id)).unwrap();
+        let none = Default::default();
+        assert_eq!(t.hit_test_scrolled(50.0, 50.0, &none), Some(node("under")), "pointer-events: none is transparent to hits");
+        assert_eq!(t.hit_test_scrolled(5.0, 5.0, &none), Some(node("kid")), "a child can turn them back on");
+        let hidden = rect_of(&doc, &t, "hid");
+        assert!(hidden.height >= 30.0, "visibility: hidden keeps the space");
+        assert_ne!(t.hit_test_scrolled(50.0, 105.0, &none), Some(node("hid")), "and is not hit");
+        let (a, b, c) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"), rect_of(&doc, &t, "c"));
+        assert!(c.x < b.x && b.x < a.x, "order puts c (0), b (1), a (2): {c:?} {b:?} {a:?}");
+        assert_eq!(rect_of(&doc, &t, "ratio").height, 40.0);
+    }
+
+    #[test]
+    fn text_indent_line_clamp_and_word_break_change_the_lines() {
+        let height = |style: &str, body: &str| {
+            let (doc, t) = rects(&format!(r#"<body style="margin:0"><p id="p" style="margin:0;width:120px;{style}">{body}</p></body>"#));
+            rect_of(&doc, &t, "p").height
+        };
+        let words = "one two three four five six seven eight nine ten eleven twelve";
+        let plain = height("", words);
+        let two = height("display:-webkit-box;-webkit-line-clamp:2", words);
+        assert!(plain > two * 1.5, "clamped to two lines: {two} vs {plain}");
+        // A long word only wraps when allowed to break.
+        let long = "Supercalifragilisticexpialidocious";
+        assert!(height("word-break:break-all", long) > height("", long));
+        assert!(height("overflow-wrap:anywhere", long) > height("", long));
+        // The indent pushes the first line in: it is that much longer.
+        let first_line = |style: &str| {
+            let (_, t) = rects(&format!(r#"<body style="margin:0"><p style="margin:0;width:400px;{style}">aaaa bbbb</p></body>"#));
+            let b = t.boxes.iter().find(|b| matches!(b.content, BoxContent::Text(_))).unwrap();
+            let BoxContent::Text(c) = &b.content else { unreachable!() };
+            let advance = c.layout.lines().next().unwrap().metrics().advance;
+            advance
+        };
+        let shift = first_line("text-indent:60px") - first_line("");
+        assert!((shift - 60.0).abs() < 1.5, "indent of 60px, got {shift}");
+    }
+
+    #[test]
+    fn balanced_text_is_narrower_but_keeps_its_line_count() {
+        let lines = |style: &str| {
+            let (_, t) = rects(&format!(r#"<body style="margin:0"><p id="p" style="margin:0;width:300px;font-size:20px;{style}">Aa bb cc dd ee ff gg hh ii jj kk ll mm nn oo pp</p></body>"#));
+            let b = t.boxes.iter().find(|b| matches!(b.content, BoxContent::Text(_))).unwrap();
+            let BoxContent::Text(c) = &b.content else { unreachable!() };
+            let widths: Vec<f32> = c.layout.lines().map(|l| l.metrics().advance).collect();
+            widths
+        };
+        let normal = lines("");
+        let balanced = lines("text-wrap:balance");
+        assert_eq!(normal.len(), balanced.len());
+        let spread = |w: &[f32]| w.iter().cloned().fold(0.0_f32, f32::max) - w.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(spread(&balanced) < spread(&normal), "{balanced:?} vs {normal:?}");
+    }
+
+    #[test]
+    fn inline_horizontal_margins_take_space_without_stretching_the_line() {
+        let (doc, t) = rects(r#"<body style="margin:0;font-size:16px"><p id="pa" style="margin:0"><span id="a" style="margin-right:40px">aa</span><span id="b">bb</span></p><p id="q" style="margin:0">aabb</p></body>"#);
+        let (a, q, pa) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "q"), rect_of(&doc, &t, "pa"));
+        assert!((pa.height - q.height).abs() < 0.5, "the spacer does not enlarge the line: {pa:?} vs {q:?}");
+        let b = rect_of(&doc, &t, "b");
+        assert!(b.x >= a.x + 40.0 + 8.0, "b starts after a's text and its 40px margin: {a:?} {b:?}");
     }
 
     #[test]

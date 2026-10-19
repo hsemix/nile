@@ -1,0 +1,181 @@
+<!doctype html>
+<html
+  window-title="Northstar Workspace"
+  window-width="1440"
+  window-height="900"
+  window-min-width="900"
+  window-min-height="600"
+  window-frame="solid"
+  window-resizable="6px"
+>
+  <head>
+    <meta charset="utf-8" />
+    <title>Northstar Workspace</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <div class="logo">n</div>
+      <div class="caption" role="window-caption">
+        <span id="window-title">Northstar Workspace</span
+        ><span class="window-edition">LOCAL WORKBENCH</span>
+      </div>
+      <button class="window" role="window-minimize" aria-label="Minimize">
+        -</button
+      ><button class="window" role="window-maximize" aria-label="Maximize">
+        □</button
+      ><button
+        class="window close-window"
+        role="window-close"
+        aria-label="Close window"
+      >
+        x
+      </button>
+    </header>
+    <div id="menubar" role="menubar" aria-label="Application menu"></div>
+    <div
+      id="workbench-toolbar"
+      role="toolbar"
+      aria-label="Workspace commands"
+    ></div>
+    <div class="app">
+      <aside id="sidebar">
+        <div class="pane-heading">
+          <span>PROJECT EXPLORER</span
+          ><button
+            data-wb-command="toggle-explorer"
+            aria-label="Hide project explorer"
+          >
+            x
+          </button>
+        </div>
+        <button class="nav-button" data-action="dashboard">
+          ▦ &nbsp; Overview</button
+        ><button class="nav-button" data-action="search">
+          ⌕ &nbsp; Search everything
+        </button>
+        <div class="section-label">
+          PROJECTS
+          <button data-action="new-project" aria-label="New project">+</button>
+        </div>
+        <div
+          id="projects"
+          role="group"
+          aria-label="Projects and documents"
+        ></div>
+        <button class="nav-button subtle" data-action="archives">
+          ▤ &nbsp; Archived projects
+        </button>
+        <div class="sidebar-bottom">
+          <button class="nav-button" data-action="settings">
+            ⚙ &nbsp; Workspace settings
+          </button>
+          <div class="local-label">
+            <span class="dot"></span> Private · stored on this device
+          </div>
+        </div>
+      </aside>
+      <div
+        id="resize"
+        role="separator"
+        aria-label="Resize project sidebar"
+        tabindex="0"
+      ></div>
+      <div class="main">
+        <div class="topbar">
+          <span id="breadcrumb">Workspace / Overview</span
+          ><span class="badge">OFFLINE READY</span>
+        </div>
+        <div class="document-tabs">
+          <div id="tabs" role="tablist" aria-label="Workspace tabs"></div>
+          <button
+            data-action="new-project"
+            title="New project"
+            aria-label="New project"
+          >
+            +
+          </button>
+        </div>
+        <div id="content"><h1>Opening your workspace…</h1></div>
+        <div
+          id="activity-resize"
+          class="pane-splitter horizontal"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize activity panel"
+          tabindex="0"
+        ></div>
+        <section id="activity" aria-label="Workspace activity">
+          <div class="pane-heading">
+            <div class="row">
+              <button id="activity-all" data-wb-command="activity-all">
+                Activity</button
+              ><button id="activity-errors" data-wb-command="activity-errors">
+                Errors</button
+              ><span id="activity-count"></span>
+            </div>
+            <div>
+              <button
+                data-wb-command="clear-activity"
+                title="Clear activity"
+              >
+                Clear</button
+              ><button
+                data-wb-command="toggle-activity"
+                aria-label="Hide activity panel"
+              >
+                x
+              </button>
+            </div>
+          </div>
+          <div
+            id="activity-log"
+            role="log"
+            aria-label="Activity messages"
+          ></div>
+        </section>
+      </div>
+      <div
+        id="inspector-resize"
+        class="pane-splitter"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize properties panel"
+        tabindex="0"
+      ></div>
+      <section id="inspector" aria-label="Properties">
+        <div class="pane-heading">
+          <span>PROPERTIES</span
+          ><button
+            data-wb-command="toggle-inspector"
+            aria-label="Hide properties panel"
+          >
+            x
+          </button>
+        </div>
+        <div id="inspector-content"></div>
+      </section>
+    </div>
+    <footer>
+      <span id="notice" role="status" aria-live="polite"
+        >Connecting to local database…</span
+      >
+      <div class="row">
+        <button
+          data-wb-command="toggle-explorer"
+          title="Toggle project explorer"
+        >
+          Explorer</button
+        ><button data-wb-command="toggle-inspector" title="Toggle properties">
+          Properties</button
+        ><button data-wb-command="toggle-activity" title="Toggle activity">
+          Activity</button
+        ><span id="save-status">Northstar Workspace</span>
+      </div>
+    </footer>
+    <div id="overlay"></div>
+    <div id="menu"></div>
+    <div id="workbench-menu"></div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

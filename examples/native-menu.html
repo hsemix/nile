@@ -12,7 +12,7 @@
 </style></head>
 <body>
   <h1>Native menu bar</h1>
-  <p>On macOS and Windows <code>Window.this.menu = element</code> shows this <code>&lt;menu&gt;</code> as the system menu bar. Items fire <code>click</code>; shortcuts work; <code>role</code> items (copy, paste, quit...) do the standard thing. Elsewhere, draw it yourself.</p>
+  <p>On macOS and Windows <code>Window.this.menu = element</code> shows this <code>&lt;menu&gt;</code> as the system menu bar. Items fire <code>click</code>; shortcuts work; <code>role</code> items (copy, paste, quit...) do the standard thing. On Linux the same markup is drawn as a bar inside the window (try <code>NILE_MENU=inline</code> elsewhere).</p>
   <textarea placeholder="Select text here, then use Edit > Copy / Paste"></textarea>
   <div id="log">Choose a menu item…</div>
 

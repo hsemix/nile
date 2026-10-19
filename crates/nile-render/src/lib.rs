@@ -62,6 +62,8 @@ pub struct Renderer {
     varied: HashMap<(u64, u32, Vec<i16>), Option<Typeface>>,
     /// Decoded pictures by `ImageData::id`; `None` where decoding failed.
     pictures: HashMap<u64, Option<skia_safe::Image>>,
+    /// SVG pictures rasterised at the pixel size they were drawn at: `(ImageData::id, width, height)`.
+    svg_pictures: HashMap<(u64, u32, u32), Option<skia_safe::Image>>,
     /// The system theme's colours for what no stylesheet reaches (set at the start of each paint).
     pal: nile_style::Palette,
 }
@@ -74,7 +76,7 @@ impl Default for Renderer {
 
 impl Renderer {
     pub fn new() -> Self {
-        Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new(), varied: HashMap::new(), pictures: HashMap::new(), pal: nile_style::Palette::new(false, nile_style::default_accent()) }
+        Renderer { font_mgr: FontMgr::new(), typefaces: HashMap::new(), varied: HashMap::new(), pictures: HashMap::new(), svg_pictures: HashMap::new(), pal: nile_style::Palette::new(false, nile_style::default_accent()) }
     }
 
     /// Paint the whole tree.
@@ -105,16 +107,16 @@ impl Renderer {
         let Overlay { scroll_y, offsets, caret, selection, viewport, page_selection, dom_caret, preedit, skip, .. } = *overlay;
         // Boxes that wrap their subtree (an `overflow` clip, or an `opacity` layer) end
         // where the subtree does. `None` is an opacity layer.
-        let mut open: Vec<(usize, Option<&LayoutBox>)> = Vec::new();
+        let mut open: Vec<Close> = Vec::new();
         let mut jump = 0;
         for (i, b) in tree.boxes.iter().enumerate().skip(from).take(to.saturating_sub(from)) {
             if i < jump {
                 continue;
             }
-            while open.last().is_some_and(|(end, _)| i >= *end) {
-                let (_, container) = open.pop().expect("checked above");
-                canvas.restore();
-                if let Some(container) = container {
+            while open.last().is_some_and(|c| i >= c.end) {
+                let close = open.pop().expect("checked above");
+                close.finish(canvas);
+                if let Some(container) = close.container {
                     paint_scrollbars(canvas, container, offsets, styles, overlay);
                 }
             }
@@ -132,36 +134,64 @@ impl Renderer {
                         // Pinned to the viewport: drop the page scroll and any ancestor transform.
                         canvas.save();
                         canvas.set_matrix(&skia_safe::M44::from(base));
-                        open.push((b.subtree_end.max(i + 1), None));
+                        open.push(Close::restore(b.subtree_end.max(i + 1)));
                     }
                     let dy = b.sticky_shift(scroll_y, viewport.1);
                     if dy != 0.0 {
                         canvas.save();
                         canvas.translate((0.0, dy));
-                        open.push((b.subtree_end.max(i + 1), None));
+                        open.push(Close::restore(b.subtree_end.max(i + 1)));
                     }
-                    let opacity = styles.get(b.node).opacity;
-                    if opacity < 1.0 {
-                        canvas.save_layer_alpha_f(None, opacity);
-                        open.push((b.subtree_end.max(i + 1), None));
+                    let st = styles.get(b.node);
+                    let end = b.subtree_end.max(i + 1);
+                    // Opacity, filters, blend modes, isolation and masks paint the subtree as a unit.
+                    if st.opacity < 1.0 || !st.filter.is_empty() || st.blend != nile_style::Blend::Normal || st.isolate || st.mask_image.is_some() {
+                        let mut paint = Paint::default();
+                        paint.set_alpha_f(st.opacity);
+                        if let Some(f) = filter_chain(&st.filter) {
+                            paint.set_image_filter(f);
+                        }
+                        paint.set_blend_mode(blend_mode(st.blend));
+                        canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().paint(&paint));
+                        open.push(Close::restore(end));
                     }
                     if let Some(t) = &b.transform {
                         canvas.save();
                         canvas.concat(&skia_safe::Matrix::new_all(t.a, t.c, t.e, t.b, t.d, t.f, t.g, t.h, t.i));
-                        open.push((b.subtree_end.max(i + 1), None));
+                        open.push(Close::restore(b.subtree_end.max(i + 1)));
+                    }
+                    if let Some(path) = st.clip_path.as_ref().and_then(|c| clip_path_of(c, st, b.rect)) {
+                        canvas.save();
+                        canvas.clip_path(&path, skia_safe::ClipOp::Intersect, true);
+                        open.push(Close::restore(end));
+                    }
+                    if let Some(shader) = st.mask_image.as_ref().and_then(|g| gradient_shader(g, skia_rect(b.rect))) {
+                        // Drawn when the subtree is done: keeps the layer's pixels where the mask is opaque.
+                        open.push(Close { end, container: None, restore: false, mask: Some((skia_rect(b.rect), shader)) });
                     }
                     if b.backface_hidden && canvas_faces_away(canvas) {
                         // Turned away (a flipped card's other side): neither it nor its content shows.
                         jump = b.subtree_end.max(i + 1);
                         continue;
                     }
-                    self.paint_box(canvas, b, styles);
-                    if let Some(m) = tree.marker(b.node) {
+                    let shown = styles.get(b.node).visible;
+                    if shown {
+                        if let Some(f) = filter_chain(&st.backdrop_filter) {
+                            // What is behind the box, filtered, inside its (rounded) border box.
+                            canvas.save();
+                            canvas.clip_rrect(round_rect(skia_rect(b.rect), st.corner_radii(b.rect.width, b.rect.height)), skia_safe::ClipOp::Intersect, true);
+                            canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().backdrop(&f));
+                            canvas.restore();
+                            canvas.restore();
+                        }
+                        self.paint_box(canvas, b, styles);
+                    }
+                    if let Some(m) = tree.marker(b.node).filter(|_| shown) {
                         self.paint_marker(canvas, m, m.color.unwrap_or(styles.get(b.node).color));
                     }
                     if let Some(DomCaret::Empty { run, rect }) = dom_caret {
                         if run == i {
-                            canvas.draw_rect(Rect::from_xywh(rect.x, rect.y, 1.0, rect.height), &fill(styles.get(b.node).color));
+                            canvas.draw_rect(Rect::from_xywh(rect.x, rect.y, 1.0, rect.height), &fill(caret_color(styles, b.node)));
                         }
                     }
                     if let Some(list) = tree.list_box(b.node) {
@@ -186,7 +216,7 @@ impl Renderer {
                             canvas.clip_rect(skia_rect(sb.clip), None, true);
                         }
                         canvas.translate((-ox, -oy));
-                        open.push((b.subtree_end, Some(b)));
+                        open.push(Close { end: b.subtree_end, container: Some(b), restore: true, mask: None });
                     }
                 }
                 BoxContent::Text(content) => {
@@ -198,24 +228,26 @@ impl Renderer {
                     if let Some(&(_, from, to)) = page_selection.iter().find(|(run, ..)| *run == i) {
                         paint_selection(canvas, b.rect, content, from, to, highlight);
                     }
-                    self.paint_text(canvas, b.rect, content, styles);
+                    if styles.get(b.node).visible {
+                        self.paint_text(canvas, b.rect, content, styles);
+                    }
                     if let Some((_, from, to)) = preedit.filter(|(n, ..)| content.control && content.owners.iter().any(|(_, o)| o == n)) {
                         paint_underline(canvas, b.rect, content, from, to, styles.get(b.node).color);
                     }
                     if let Some((_, at)) = caret.filter(|(n, _)| content.owners.iter().any(|(_, o)| o == n)) {
-                        paint_caret(canvas, b.rect, content, at, styles.get(b.node).color);
+                        paint_caret(canvas, b.rect, content, at, caret_color(styles, b.node));
                     }
                     if let Some(DomCaret::Run { run, byte }) = dom_caret {
                         if run == i {
-                            paint_caret(canvas, b.rect, content, byte, styles.get(b.node).color);
+                            paint_caret(canvas, b.rect, content, byte, caret_color(styles, b.node));
                         }
                     }
                 }
             }
         }
-        while let Some((_, container)) = open.pop() {
-            canvas.restore();
-            if let Some(container) = container {
+        while let Some(close) = open.pop() {
+            close.finish(canvas);
+            if let Some(container) = close.container {
                 paint_scrollbars(canvas, container, offsets, styles, overlay);
             }
         }
@@ -349,7 +381,7 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
                 canvas.draw_rect(Rect::from_xywh(r.x, r.y, r.width, r.height), &paint);
             }
             MarkerKind::Image(data) => {
-                if let Some(img) = self.picture(data) {
+                if let Some(img) = self.picture(data, (r.width, r.height), device_scale(canvas)) {
                     canvas.draw_image_rect(&img, None, Rect::from_xywh(r.x, r.y, r.width, r.height), &Paint::default());
                 }
             }
@@ -432,7 +464,7 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
         let s = styles.get(b.node);
         let radii = s.corner_radii(b.rect.width, b.rect.height);
         paint_shadows(canvas, skia_rect(b.rect), &s.box_shadow, radii);
-        let photo = b.bg_image.as_ref().and_then(|data| self.background_shader(data, s, b.rect));
+        let photo = b.bg_image.as_ref().and_then(|data| self.background_shader(data, s, b.rect, device_scale(canvas)));
         let mut border = Border { width: s.border_width, color: s.border_color, style: s.border_style };
         // A checked box takes the author's `accent-color` (the user-agent sheet paints the system accent).
         let accent_box = s.checked && matches!(s.appearance, Appearance::Checkbox | Appearance::Radio);
@@ -467,9 +499,32 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
             self.paint_picture(canvas, data, s, b.rect);
         }
         paint_control_mark(canvas, s, b.rect, &styles.palette());
+        paint_outline(canvas, skia_rect(b.rect), s, radii);
     }
 
-    fn picture(&mut self, data: &ImageData) -> Option<skia_safe::Image> {
+    /// The picture for `data` drawn `want` logical pixels big on a surface scaled by `scale`. Bitmaps
+    /// are decoded once; an SVG is rasterised at the size it is drawn, so it stays sharp.
+    fn picture(&mut self, data: &ImageData, want: (f32, f32), scale: f32) -> Option<skia_safe::Image> {
+        // A canvas is drawn from its surface as it is now, never from the cache.
+        if let Some(canvas) = data.canvas {
+            return nile_canvas::snapshot(canvas);
+        }
+        if let Some(svg) = &data.svg {
+            let (w, h) = ((want.0 * scale).ceil().max(1.0) as u32, (want.1 * scale).ceil().max(1.0) as u32);
+            if self.svg_pictures.len() > 64 {
+                self.svg_pictures.clear();
+            }
+            return self
+                .svg_pictures
+                .entry((data.id, w, h))
+                .or_insert_with(|| {
+                    let style = nile_svg::Style { css: svg.css.clone() };
+                    let raster = nile_svg::rasterize(&data.bytes, &style, w, h, svg.stretch)?;
+                    let info = skia_safe::ImageInfo::new((raster.width as i32, raster.height as i32), skia_safe::ColorType::RGBA8888, skia_safe::AlphaType::Premul, None);
+                    skia_safe::images::raster_from_data(&info, skia_safe::Data::new_copy(&raster.pixels), raster.width as usize * 4)
+                })
+                .clone();
+        }
         self.pictures
             .entry(data.id)
             .or_insert_with(|| skia_safe::Image::from_encoded(skia_safe::Data::new_copy(&data.bytes)))
@@ -478,15 +533,41 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
 
     /// An `<img>`'s picture, stretched over its content box.
     fn paint_picture(&mut self, canvas: &Canvas, data: &ImageData, s: &nile_style::ComputedStyle, r: LRect) {
-        let Some(img) = self.picture(data) else { return };
         let (b, p) = (s.border_width, s.padding);
         let dest = Rect::from_ltrb(r.x + b.left + p.left, r.y + b.top + p.top, r.x + r.width - b.right - p.right, r.y + r.height - b.bottom - p.bottom);
         if dest.width() <= 0.0 || dest.height() <= 0.0 {
             return;
         }
+        // `object-fit` / `object-position`: where the picture sits inside the content box.
+        let (iw, ih) = (data.width as f32, data.height as f32);
+        let (dw, dh) = (dest.width(), dest.height());
+        let contain = if iw > 0.0 && ih > 0.0 { (dw / iw).min(dh / ih) } else { 1.0 };
+        let (w, h) = match s.object_fit {
+            _ if iw <= 0.0 || ih <= 0.0 => (dw, dh),
+            nile_style::ObjectFit::Fill => (dw, dh),
+            nile_style::ObjectFit::Contain => (iw * contain, ih * contain),
+            nile_style::ObjectFit::Cover => {
+                let k = (dw / iw).max(dh / ih);
+                (iw * k, ih * k)
+            }
+            nile_style::ObjectFit::None => (iw, ih),
+            nile_style::ObjectFit::ScaleDown => {
+                let k = contain.min(1.0);
+                (iw * k, ih * k)
+            }
+        };
+        let at = |p: StopPos, free: f32| match p {
+            StopPos::Px(px) => px,
+            StopPos::Fraction(f) => f * free,
+        };
+        let target = Rect::from_xywh(dest.left + at(s.object_position.0, dw - w), dest.top + at(s.object_position.1, dh - h), w, h);
+        let Some(img) = self.picture(data, (w, h), device_scale(canvas)) else { return };
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
         canvas.save();
+        if s.object_fit != nile_style::ObjectFit::Fill {
+            canvas.clip_rect(dest, None, true);
+        }
         if s.has_rounding() {
             // The picture follows the padding edge: each corner's radius less the border and padding there.
             let radii = s.corner_radii(r.width, r.height);
@@ -495,13 +576,12 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
             canvas.clip_rrect(RRect::new_rect_radii(dest, &[shrunk[0], shrunk[1], shrunk[2], shrunk[3]]), skia_safe::ClipOp::Intersect, true);
         }
         let sampling = skia_safe::SamplingOptions::new(skia_safe::FilterMode::Linear, skia_safe::MipmapMode::Linear);
-        canvas.draw_image_rect_with_sampling_options(&img, None, dest, sampling, &paint);
+        canvas.draw_image_rect_with_sampling_options(&img, None, target, sampling, &paint);
         canvas.restore();
     }
 
     /// A shader that paints `data` as `background-image: url()` over the box `r`.
-    fn background_shader(&mut self, data: &ImageData, s: &nile_style::ComputedStyle, r: LRect) -> Option<skia_safe::Shader> {
-        let img = self.picture(data)?;
+    fn background_shader(&mut self, data: &ImageData, s: &nile_style::ComputedStyle, r: LRect, scale: f32) -> Option<skia_safe::Shader> {
         let b = s.border_width;
         // The image is placed in the padding box.
         let (ax, ay) = (r.x + b.left, r.y + b.top);
@@ -534,6 +614,9 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
         if tw <= 0.0 || th <= 0.0 {
             return None;
         }
+        let img = self.picture(data, (tw, th), scale)?;
+        // An SVG was rasterised at the tile's size, so the shader scales by the bitmap's own size.
+        let (iw, ih) = if data.svg.is_some() { (img.width() as f32, img.height() as f32) } else { (iw, ih) };
         let (px, py) = s.background_position;
         let ox = ax + match px {
             StopPos::Px(v) => v,
@@ -572,10 +655,14 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
         // `text-overflow: ellipsis`: where the first line must stop to leave room for "…".
         let ellipsis = content.filter(|(c, _)| c.ellipsis && layout.full_width() > rect.width + 0.5);
         let mut truncated = false;
-        for line in layout.lines() {
-            if truncated {
+        // `-webkit-line-clamp`: only the first `n` lines show and the last gets an ellipsis.
+        let clamp = content.and_then(|(c, _)| c.clamp).filter(|n| layout.len() > *n as usize);
+        for (line_no, line) in layout.lines().enumerate() {
+            if truncated || clamp.is_some_and(|n| line_no >= n as usize) {
                 break;
             }
+            let last_clamped = clamp.is_some_and(|n| line_no + 1 == n as usize);
+            let mut tail: Option<(f32, f32, Font, Paint)> = None;
             if let Some((content, _)) = content {
                 paint_inline_fragments(canvas, rect, content, &line);
             }
@@ -608,11 +695,13 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
                 let mut cut: Option<(f32, f32)> = None;
                 let dots = font.unichar_to_glyph('\u{2026}' as i32);
                 let dots_w = font.measure_str("\u{2026}", None).0;
+                let mut last_end = None;
                 for g in glyph_run.positioned_glyphs() {
-                    if ellipsis.is_some() && dots != 0 && g.x + g.advance > rect.width - dots_w {
+                    if (ellipsis.is_some() || last_clamped) && dots != 0 && g.x + g.advance > rect.width - dots_w {
                         cut = Some((g.x, g.y));
                         break;
                     }
+                    last_end = Some((g.x + g.advance, g.y - glyph_run.style().brush.shift));
                     glyph_ids.push(g.id as GlyphId);
                     positions.push(Point::new(g.x, g.y - glyph_run.style().brush.shift));
                 }
@@ -639,18 +728,49 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
                 let x = rect.x + glyph_run.offset();
                 let baseline = rect.y + glyph_run.baseline() - style.brush.shift;
                 let fm = run.font_metrics();
+                // `text-shadow`: the first shadow is the topmost, so draw them last to first.
+                let owner_style = content.and_then(|(c, st)| {
+                    let at = run.text_range().start;
+                    c.owners.iter().find(|(r, _)| r.contains(&at)).map(|(_, n)| st.get(*n))
+                });
+                for sh in owner_style.map(|o| o.text_shadow.as_slice()).unwrap_or_default().iter().rev() {
+                    let mut shadow = Paint::default();
+                    shadow.set_anti_alias(true);
+                    shadow.set_color(Color::from_argb(sh.color.a, sh.color.r, sh.color.g, sh.color.b));
+                    if sh.blur > 0.0 {
+                        shadow.set_mask_filter(skia_safe::MaskFilter::blur(skia_safe::BlurStyle::Normal, sh.blur / 2.0, false));
+                    }
+                    canvas.draw_glyphs_at(&glyph_ids, positions.as_slice(), (rect.x + sh.dx, rect.y + sh.dy), &font, &shadow);
+                }
                 canvas.draw_glyphs_at(&glyph_ids, positions.as_slice(), (rect.x, rect.y), &font, &paint);
+                if last_clamped && cut.is_none() && dots != 0 {
+                    // Nothing was cut on this line yet: the ellipsis follows its last glyph.
+                    tail = last_end.map(|(x, y)| (x, y, font.clone(), paint.clone()));
+                }
 
-                let line_at = |offset: f32, size: f32| {
-                    let top = baseline - offset;
-                    canvas.draw_rect(Rect::from_ltrb(x, top, x + glyph_run.advance(), top + size.max(1.0)), &paint);
+                let look = style.brush.decoration;
+                let mut line_paint = paint.clone();
+                if let Some([r, g, b, a]) = look.color {
+                    line_paint.set_color(Color::from_argb(a, r, g, b));
+                }
+                let line_at = |offset: f32, size: f32, shifted: bool| {
+                    // `text-underline-offset` is measured down from the baseline; the font's is up.
+                    let top = match look.offset.filter(|_| shifted) {
+                        Some(o) => baseline + o,
+                        None => baseline - offset,
+                    };
+                    let thick = look.thickness.unwrap_or(size).max(1.0);
+                    draw_decoration(canvas, x, x + glyph_run.advance(), top, thick, look.style, &line_paint);
                 };
                 if style.underline.is_some() {
-                    line_at(fm.underline_offset, fm.underline_size);
+                    line_at(fm.underline_offset, fm.underline_size, true);
                 }
                 if style.strikethrough.is_some() {
-                    line_at(fm.strikethrough_offset, fm.strikethrough_size);
+                    line_at(fm.strikethrough_offset, fm.strikethrough_size, false);
                 }
+            }
+            if let Some((x, y, font, paint)) = tail {
+                canvas.draw_glyphs_at(&[font.unichar_to_glyph('\u{2026}' as i32)], &[Point::new(x, y)][..], (rect.x, rect.y), &font, &paint);
             }
         }
     }
@@ -736,6 +856,12 @@ fn extract_collection_face(bytes: &[u8], index: usize) -> Option<Vec<u8>> {
 }
 
 /// The Skia shader for `g` painted over `r`.
+/// How many device pixels a logical pixel is on `canvas` now (its transform's scale).
+fn device_scale(canvas: &Canvas) -> f32 {
+    let m = canvas.local_to_device_as_3x3();
+    m.scale_x().hypot(m.skew_y()).max(0.01)
+}
+
 fn gradient_shader(g: &Gradient, r: Rect) -> Option<skia_safe::Shader> {
     use skia_safe::gradient::{interpolation::InPremul, Colors, Gradient as SkGradient, Interpolation};
     let (w, h) = (r.width(), r.height());
@@ -976,6 +1102,244 @@ fn paint_decorated(
         }
     }
     canvas.restore();
+}
+
+/// An entry of the stack of boxes whose subtree is being painted: what to undo when the subtree ends.
+struct Close<'a> {
+    /// Paint-list index where the subtree ends.
+    end: usize,
+    /// A scroll container whose bars are drawn after its content.
+    container: Option<&'a LayoutBox>,
+    restore: bool,
+    /// `mask-image`: the rectangle and gradient to multiply the layer by.
+    mask: Option<(Rect, skia_safe::Shader)>,
+}
+
+impl Close<'_> {
+    fn restore(end: usize) -> Self {
+        Close { end, container: None, restore: true, mask: None }
+    }
+
+    fn finish(&self, canvas: &Canvas) {
+        if let Some((rect, shader)) = &self.mask {
+            let mut paint = Paint::default();
+            paint.set_shader(shader.clone());
+            paint.set_blend_mode(skia_safe::BlendMode::DstIn);
+            canvas.draw_rect(*rect, &paint);
+        }
+        if self.restore {
+            canvas.restore();
+        }
+    }
+}
+
+fn blend_mode(b: nile_style::Blend) -> skia_safe::BlendMode {
+    use nile_style::Blend as B;
+    use skia_safe::BlendMode as M;
+    match b {
+        B::Normal => M::SrcOver,
+        B::Multiply => M::Multiply,
+        B::Screen => M::Screen,
+        B::Overlay => M::Overlay,
+        B::Darken => M::Darken,
+        B::Lighten => M::Lighten,
+        B::ColorDodge => M::ColorDodge,
+        B::ColorBurn => M::ColorBurn,
+        B::HardLight => M::HardLight,
+        B::SoftLight => M::SoftLight,
+        B::Difference => M::Difference,
+        B::Exclusion => M::Exclusion,
+        B::Hue => M::Hue,
+        B::Saturation => M::Saturation,
+        B::Color => M::Color,
+        B::Luminosity => M::Luminosity,
+    }
+}
+
+/// The 4x5 colour matrix (row-major, offsets in 0..1) for a CSS colour filter function.
+fn filter_matrix(f: &nile_style::FilterFn) -> Option<[f32; 20]> {
+    use nile_style::FilterFn as F;
+    let rgb = |m: [[f32; 3]; 3], off: [f32; 3]| {
+        [m[0][0], m[0][1], m[0][2], 0.0, off[0], m[1][0], m[1][1], m[1][2], 0.0, off[1], m[2][0], m[2][1], m[2][2], 0.0, off[2], 0.0, 0.0, 0.0, 1.0, 0.0]
+    };
+    Some(match *f {
+        F::Brightness(a) => rgb([[a, 0.0, 0.0], [0.0, a, 0.0], [0.0, 0.0, a]], [0.0; 3]),
+        F::Contrast(a) => {
+            let o = 0.5 - 0.5 * a;
+            rgb([[a, 0.0, 0.0], [0.0, a, 0.0], [0.0, 0.0, a]], [o; 3])
+        }
+        F::Invert(a) => {
+            let k = 1.0 - 2.0 * a;
+            rgb([[k, 0.0, 0.0], [0.0, k, 0.0], [0.0, 0.0, k]], [a; 3])
+        }
+        F::Grayscale(a) => {
+            let s = 1.0 - a;
+            rgb(
+                [[0.2126 + 0.7874 * s, 0.7152 - 0.7152 * s, 0.0722 - 0.0722 * s], [0.2126 - 0.2126 * s, 0.7152 + 0.2848 * s, 0.0722 - 0.0722 * s], [0.2126 - 0.2126 * s, 0.7152 - 0.7152 * s, 0.0722 + 0.9278 * s]],
+                [0.0; 3],
+            )
+        }
+        F::Sepia(a) => {
+            let s = 1.0 - a;
+            rgb(
+                [[0.393 + 0.607 * s, 0.769 - 0.769 * s, 0.189 - 0.189 * s], [0.349 - 0.349 * s, 0.686 + 0.314 * s, 0.168 - 0.168 * s], [0.272 - 0.272 * s, 0.534 - 0.534 * s, 0.131 + 0.869 * s]],
+                [0.0; 3],
+            )
+        }
+        F::Saturate(s) => rgb([[0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s], [0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s], [0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s]], [0.0; 3]),
+        F::HueRotate(deg) => {
+            let (sin, cos) = deg.to_radians().sin_cos();
+            rgb(
+                [
+                    [0.213 + cos * 0.787 - sin * 0.213, 0.715 - cos * 0.715 - sin * 0.715, 0.072 - cos * 0.072 + sin * 0.928],
+                    [0.213 - cos * 0.213 + sin * 0.143, 0.715 + cos * 0.285 + sin * 0.140, 0.072 - cos * 0.072 - sin * 0.283],
+                    [0.213 - cos * 0.213 - sin * 0.787, 0.715 - cos * 0.715 + sin * 0.715, 0.072 + cos * 0.928 + sin * 0.072],
+                ],
+                [0.0; 3],
+            )
+        }
+        F::Opacity(a) => [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, a, 0.0],
+        F::Blur(_) | F::DropShadow { .. } => return None,
+    })
+}
+
+/// A Skia image filter running the CSS `filter` functions in order; `None` for an empty list.
+fn filter_chain(list: &[nile_style::FilterFn]) -> Option<skia_safe::ImageFilter> {
+    use nile_style::FilterFn as F;
+    use skia_safe::image_filters;
+    let mut chain: Option<skia_safe::ImageFilter> = None;
+    for f in list {
+        let next = match *f {
+            F::Blur(sigma) if sigma > 0.0 => image_filters::blur((sigma, sigma), None, chain.clone(), None),
+            F::DropShadow { dx, dy, blur, color } => {
+                let c = skia_safe::Color4f::new(f32::from(color.r) / 255.0, f32::from(color.g) / 255.0, f32::from(color.b) / 255.0, f32::from(color.a) / 255.0);
+                image_filters::drop_shadow((dx, dy), (blur / 2.0, blur / 2.0), c, None, chain.clone(), None)
+            }
+            ref other => filter_matrix(other).and_then(|m| image_filters::color_filter(skia_safe::color_filters::matrix_row_major(&m, None), chain.clone(), None)),
+        };
+        chain = next.or(chain);
+    }
+    chain
+}
+
+/// A `clip-path` basic shape as a path in layout coordinates, for the box `r`.
+fn clip_path_of(c: &nile_style::ShapeOutside, s: &nile_style::ComputedStyle, r: LRect) -> Option<skia_safe::Path> {
+    use nile_style::{ResolvedShape, ShapeBox};
+    let (b, p) = (s.border_width, s.padding);
+    let (x, y, w, h) = match c.reference {
+        ShapeBox::ContentBox => (r.x + b.left + p.left, r.y + b.top + p.top, r.width - b.left - b.right - p.left - p.right, r.height - b.top - b.bottom - p.top - p.bottom),
+        ShapeBox::PaddingBox => (r.x + b.left, r.y + b.top, r.width - b.left - b.right, r.height - b.top - b.bottom),
+        _ => (r.x, r.y, r.width, r.height),
+    };
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let mut path = skia_safe::PathBuilder::new();
+    match c.shape.resolve(w, h, 0.0) {
+        ResolvedShape::Ellipse { cx, cy, rx, ry } => {
+            path.add_oval(Rect::from_ltrb(x + cx - rx, y + cy - ry, x + cx + rx, y + cy + ry), None, None);
+        }
+        ResolvedShape::Rect { x0, y0, x1, y1 } => {
+            path.add_rect(Rect::from_ltrb(x + x0, y + y0, x + x1, y + y1), None, None);
+        }
+        ResolvedShape::Polygon(points) => {
+            let mut it = points.into_iter().map(|(px, py)| Point::new(x + px, y + py));
+            path.move_to(it.next()?);
+            for pt in it {
+                path.line_to(pt);
+            }
+            path.close();
+        }
+    }
+    Some(path.detach())
+}
+
+/// `caret-color`, else the text color.
+fn caret_color(styles: &StyleMap, node: NodeId) -> CssColor {
+    let s = styles.get(node);
+    s.caret_color.unwrap_or(s.color)
+}
+
+/// One underline or line-through from `x0` to `x1` whose top is at `top`.
+fn draw_decoration(canvas: &Canvas, x0: f32, x1: f32, top: f32, thick: f32, style: nile_text::DecoStyle, paint: &Paint) {
+    use nile_text::DecoStyle;
+    match style {
+        DecoStyle::Solid => {
+            canvas.draw_rect(Rect::from_ltrb(x0, top, x1, top + thick), paint);
+        }
+        DecoStyle::Double => {
+            canvas.draw_rect(Rect::from_ltrb(x0, top, x1, top + thick), paint);
+            let y = top + thick * 2.0;
+            canvas.draw_rect(Rect::from_ltrb(x0, y, x1, y + thick), paint);
+        }
+        DecoStyle::Dotted | DecoStyle::Dashed | DecoStyle::Wavy => {
+            let mut line = paint.clone();
+            line.set_style(skia_safe::PaintStyle::Stroke);
+            line.set_stroke_width(thick);
+            line.set_anti_alias(true);
+            let y = top + thick / 2.0;
+            let mut path = skia_safe::PathBuilder::new();
+            match style {
+                DecoStyle::Dotted => {
+                    line.set_stroke_cap(skia_safe::PaintCap::Round);
+                    line.set_path_effect(skia_safe::PathEffect::dash(&[0.01, thick * 2.0], 0.0));
+                    path.move_to((x0, y)).line_to((x1, y));
+                }
+                DecoStyle::Dashed => {
+                    line.set_path_effect(skia_safe::PathEffect::dash(&[thick * 3.0, thick * 2.0], 0.0));
+                    path.move_to((x0, y)).line_to((x1, y));
+                }
+                _ => {
+                    // A sine-ish wave: quarter-wavelength quadratic segments up and down.
+                    let (amp, step) = (thick.max(1.0) * 1.2, thick.max(1.0) * 2.0);
+                    path.move_to((x0, y));
+                    let (mut x, mut up) = (x0, true);
+                    while x < x1 {
+                        let nx = (x + step).min(x1);
+                        let cy = if up { y - amp } else { y + amp };
+                        path.quad_to(((x + nx) / 2.0, cy), (nx, y));
+                        x = nx;
+                        up = !up;
+                    }
+                }
+            }
+            canvas.draw_path(&path.detach(), &line);
+        }
+    }
+}
+
+/// `outline`: a line around the border box, `outline-offset` away from it, that takes no space.
+fn paint_outline(canvas: &Canvas, rect: Rect, s: &nile_style::ComputedStyle, radii: [(f32, f32); 4]) {
+    let o = s.outline;
+    if o.style == BorderStyle::None || o.width <= 0.0 {
+        return;
+    }
+    let color = o.color.unwrap_or(s.color);
+    if color.a == 0 {
+        return;
+    }
+    // The stroke is centred on a line `offset + width / 2` out from the border box.
+    let grow = o.offset + o.width / 2.0;
+    let line = Rect::from_ltrb(rect.left - grow, rect.top - grow, rect.right + grow, rect.bottom + grow);
+    if line.width() <= 0.0 || line.height() <= 0.0 {
+        return;
+    }
+    let radii = radii.map(|(rx, ry)| ((rx + grow).max(0.0), (ry + grow).max(0.0)));
+    let mut paint = fill(color);
+    paint.set_style(skia_safe::PaintStyle::Stroke);
+    paint.set_stroke_width(o.width);
+    paint.set_anti_alias(true);
+    match o.style {
+        BorderStyle::Dashed => {
+            paint.set_path_effect(skia_safe::PathEffect::dash(&[o.width * 3.0, o.width * 3.0], 0.0));
+        }
+        BorderStyle::Dotted => {
+            paint.set_stroke_cap(skia_safe::PaintCap::Round);
+            paint.set_path_effect(skia_safe::PathEffect::dash(&[0.01, o.width * 2.0], 0.0));
+        }
+        _ => {}
+    }
+    canvas.draw_rrect(round_rect(line, radii), &paint);
 }
 
 /// The check or radio dot for `appearance: checkbox | radio` when checked.

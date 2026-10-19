@@ -789,6 +789,12 @@
       },
     });
   }
+  // `hidden` reflects the attribute (the user-agent sheet gives `[hidden]` display: none).
+  Object.defineProperty(Element.prototype, "hidden", {
+    configurable: true,
+    get() { return this.hasAttribute("hidden"); },
+    set(v) { v ? this.setAttribute("hidden", "") : this.removeAttribute("hidden"); },
+  });
   // Selection in text controls, in characters of `value` (UTF-16 units in browsers; same for the BMP).
   const TEXT_TAGS = new Set(["input", "textarea"]);
   Object.defineProperty(Element.prototype, "selectionStart", {

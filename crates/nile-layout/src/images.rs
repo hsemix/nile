@@ -19,6 +19,21 @@ pub struct ImageData {
     pub bytes: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// A `<canvas>`: the id of its drawing surface (nile-canvas); `bytes` is empty and the renderer
+    /// takes the current pixels from the surface instead.
+    pub canvas: Option<u32>,
+    /// An SVG (a file, a `data:` URL or an inline `<svg>`): `bytes` is the document and the renderer
+    /// rasterises it at the size it is drawn.
+    pub svg: Option<SvgInfo>,
+}
+
+/// What an SVG picture needs besides its source.
+#[derive(Debug, Clone, Default)]
+pub struct SvgInfo {
+    /// The page's style sheets, which can reach the SVG's elements.
+    pub css: Option<String>,
+    /// `preserveAspectRatio="none"` on the root: stretch instead of fitting.
+    pub stretch: bool,
 }
 
 /// Finds the image a page refers to as `src`.
@@ -52,11 +67,26 @@ impl FileImages {
                 Some(percent_decode(data))
             };
         }
-        let path = src.strip_prefix("file://").unwrap_or(src);
         // Ignore a query string or fragment.
-        let path = path.split(['?', '#']).next().unwrap_or(path);
+        let src = src.split(['?', '#']).next().unwrap_or(src);
+        let path = match src.strip_prefix("file://") {
+            Some(rest) => file_url_path(rest),
+            None => src.to_string(),
+        };
         nile_dom::vfs::read(&self.base.join(path)).ok()
     }
+}
+
+/// The path in a `file://` URL (what follows the scheme): `localhost` dropped, `%20` and friends decoded, and on
+/// Windows `/C:/dir/x` turned into `C:/dir/x`.
+fn file_url_path(rest: &str) -> String {
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    let path = String::from_utf8_lossy(&percent_decode(rest)).into_owned();
+    let drive = path.as_bytes().get(2) == Some(&b':') && path.as_bytes().get(1).is_some_and(u8::is_ascii_alphabetic);
+    if drive && path.starts_with('/') {
+        return path[1..].to_string();
+    }
+    path
 }
 
 fn percent_decode(s: &str) -> Vec<u8> {
@@ -87,10 +117,16 @@ impl ImageLoader for FileImages {
             return hit.clone();
         }
         let loaded = self.read(src).and_then(|bytes| {
-            let size = imagesize::blob_size(&bytes).ok()?;
+            let (width, height, svg) = if nile_svg::looks_like_svg(&bytes) {
+                let (w, h) = nile_svg::size(&bytes)?;
+                (w.ceil() as u32, h.ceil() as u32, Some(SvgInfo::default()))
+            } else {
+                let size = imagesize::blob_size(&bytes).ok()?;
+                (size.width as u32, size.height as u32, None)
+            };
             let mut id = self.next_id.borrow_mut();
             *id += 1;
-            Some(Rc::new(ImageData { id: *id, bytes, width: size.width as u32, height: size.height as u32 }))
+            Some(Rc::new(ImageData { id: *id, bytes, width, height, canvas: None, svg }))
         });
         self.cache.borrow_mut().insert(src.to_string(), loaded.clone());
         loaded
@@ -103,6 +139,14 @@ mod tests {
 
     // A 1x1 transparent PNG.
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn file_urls_become_paths() {
+        assert_eq!(file_url_path("/Users/a/My%20Song.mp3"), "/Users/a/My Song.mp3");
+        assert_eq!(file_url_path("localhost/tmp/x"), "/tmp/x");
+        assert_eq!(file_url_path("/C:/Users/a%20b/x.png"), "C:/Users/a b/x.png");
+        assert_eq!(file_url_path("/C:"), "C:");
+    }
 
     #[test]
     fn data_urls_and_missing_files() {

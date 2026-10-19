@@ -150,7 +150,7 @@ pub fn platform() -> &'static str {
 
 /// A small media expression: `platform == "Windows"`, `!=`, joined by `and` / `or` (`and` binds
 /// tighter). Anything it doesn't understand counts as true, so a fragment isn't silently lost.
-fn media_matches(expr: &str) -> bool {
+pub(crate) fn media_matches(expr: &str) -> bool {
     expr.split(" or ").any(|alt| alt.split(" and ").all(comparison))
 }
 

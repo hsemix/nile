@@ -1,0 +1,57 @@
+<html window-title="Clipboard" window-width="560" window-height="420">
+<head>
+<style>
+  body { margin: 0; padding: 20px; font: 14px system-ui; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .row { margin: 8px 0; display: flex; gap: 8px; align-items: center; }
+  canvas { border: 1px solid #8884; background: #fff; }
+  pre { background: #8881; padding: 10px; border-radius: 6px; min-height: 90px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h1>Clipboard: text, html, image, files, json</h1>
+  <div class="row">
+    <canvas id="art" width="120" height="80"></canvas>
+    <button id="copy-image">Copy image</button>
+    <button id="copy-html">Copy rich text</button>
+    <button id="copy-json">Copy JSON</button>
+  </div>
+  <div class="row">
+    <button id="read">Read clipboard</button>
+    <canvas id="pasted" width="120" height="80"></canvas>
+  </div>
+  <pre id="out">Press Read.</pre>
+<script>
+  const art = document.getElementById("art").getContext("2d");
+  const grad = art.createLinearGradient(0, 0, 120, 80);
+  grad.addColorStop(0, "#ff6b6b"); grad.addColorStop(1, "#4d96ff");
+  art.fillStyle = grad; art.fillRect(0, 0, 120, 80);
+  art.fillStyle = "#fff"; art.font = "20px sans-serif"; art.fillText("Nile", 36, 46);
+
+  document.getElementById("copy-image").addEventListener("click", () => {
+    Clipboard.write({ image: art.getImageData(0, 0, 120, 80) });
+  });
+  document.getElementById("copy-html").addEventListener("click", () => {
+    Clipboard.write({ html: "<b>Bold</b> and <i>italic</i>", text: "Bold and italic" });
+  });
+  document.getElementById("copy-json").addEventListener("click", () => {
+    Clipboard.write({ json: { id: 7, tags: ["a", "b"] }, text: "item 7" });
+  });
+  document.getElementById("read").addEventListener("click", () => {
+    const c = Clipboard.read();
+    const lines = ["has: " + ["text", "html", "image", "file", "json"].filter((t) => Clipboard.has(t)).join(", ")];
+    if (c.text !== undefined) lines.push("text: " + c.text);
+    if (c.html !== undefined) lines.push("html: " + c.html);
+    if (c.json !== undefined) lines.push("json: " + JSON.stringify(c.json));
+    if (c.file) lines.push("files: " + c.file.join(", "));
+    if (c.image) {
+      lines.push("image: " + c.image.width + "x" + c.image.height);
+      const ctx = document.getElementById("pasted").getContext("2d");
+      ctx.clearRect(0, 0, 120, 80);
+      ctx.putImageData(c.image, 0, 0);
+    }
+    document.getElementById("out").textContent = lines.join("\n");
+  });
+</script>
+</body>
+</html>

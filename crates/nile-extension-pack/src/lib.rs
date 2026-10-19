@@ -507,7 +507,34 @@ fn os_root(cache: bool) -> std::result::Result<PathBuf, String> {
     if !value.is_absolute() {
         return Err("cache/data root must be absolute".into());
     }
-    Ok(value)
+    Ok(resolve_root(value))
+}
+/// Resolve links in the OS-provided root (a symlinked `/home`, `~/.cache` managed by a dotfile
+/// tool, `XDG_*` overrides): those are the user's own layout. `directory` then refuses any link
+/// *below* it, which is where an attacker's link would sit. The part of the path that doesn't
+/// exist yet is appended unresolved. Not done on Windows, where roots are never links in practice.
+fn resolve_root(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        path
+    }
+    #[cfg(not(windows))]
+    {
+        let mut rest = Vec::new();
+        let mut existing = path.as_path();
+        loop {
+            if let Ok(real) = existing.canonicalize() {
+                return rest.iter().rev().fold(real, |p, part| p.join(part));
+            }
+            match (existing.parent(), existing.file_name()) {
+                (Some(parent), Some(name)) => {
+                    rest.push(name.to_owned());
+                    existing = parent;
+                }
+                _ => return path,
+            }
+        }
+    }
 }
 /// Refuse link/reparse ancestors and create new directories privately. Existing
 /// OS parents need not be private; Nile's own root and every child must be.
@@ -1105,16 +1132,22 @@ mod tests {
             .inventory
             .unwrap();
         let old = std::env::var_os("NILE_NATIVE_CACHE_HOME");
+        let source = root.join("extensions/demo");
+        let run = || materialize(&inventory.application, &inventory.target, &inventory.packages[0], &source);
+        // A link in the OS-provided root (symlinked /home, a dotfile-managed ~/.cache) is the
+        // user's own layout and is followed...
         fs::create_dir(root.join("real-cache")).unwrap();
         symlink(root.join("real-cache"), root.join("cache")).unwrap();
         std::env::set_var("NILE_NATIVE_CACHE_HOME", root.join("cache"));
-        assert!(materialize(
-            &inventory.application,
-            &inventory.target,
-            &inventory.packages[0],
-            &root.join("extensions/demo")
-        )
-        .is_err());
+        let published = run().expect("a symlinked cache root is resolved");
+        assert!(published.starts_with(root.join("real-cache")), "{published:?}");
+        // ...but a link *below* it, where an attacker's would sit, is refused.
+        fs::create_dir(root.join("elsewhere")).unwrap();
+        fs::create_dir(root.join("cache2")).unwrap();
+        symlink(root.join("elsewhere"), root.join("cache2/nile-native")).unwrap();
+        std::env::set_var("NILE_NATIVE_CACHE_HOME", root.join("cache2"));
+        assert!(run().is_err());
+        assert!(fs::read_dir(root.join("elsewhere")).unwrap().next().is_none(), "nothing was written through the link");
         if let Some(old) = old {
             std::env::set_var("NILE_NATIVE_CACHE_HOME", old);
         } else {

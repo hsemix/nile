@@ -376,7 +376,10 @@ unsafe extern "C" fn dispatch(user: u64, request: *const NileRequest) -> NileSta
         }
         let state = &*(user as *const State);
         let r = &*request;
-        if r.flags != 0 || state.stopping.load(Ordering::Acquire) {
+        if r.flags != 0 {
+            return NILE_INVALID; // no subscriptions here
+        }
+        if state.stopping.load(Ordering::Acquire) {
             return NILE_CLOSED;
         }
         let args = match serde_json::from_slice(r.json.bytes()) {

@@ -72,7 +72,10 @@ struct Shared {
     wake: Mutex<Option<Wake>>,
 }
 fn text(slice: NileSlice) -> Result<String, NileStatus> {
-    if slice.len > MAX_BYTES as u64 || (slice.len != 0 && slice.data.is_null()) {
+    if slice.len > MAX_BYTES as u64 {
+        return Err(NILE_OVERLOADED);
+    }
+    if slice.len != 0 && slice.data.is_null() {
         return Err(NILE_INVALID);
     }
     // Trusted native caller guarantees readable pointers. Length/encoding still checked.
@@ -133,7 +136,10 @@ unsafe fn copy_reply(
     let mut total = json.len() + message.len() + code.len();
     let mut buffers = Vec::new();
     for slice in reply.buffers.slices() {
-        if slice.len > MAX_BYTES as u64 || (slice.len != 0 && slice.data.is_null()) {
+        if slice.len > MAX_BYTES as u64 {
+            return Err(NILE_OVERLOADED);
+        }
+        if slice.len != 0 && slice.data.is_null() {
             return Err(NILE_INVALID);
         }
         total += slice.len as usize;
@@ -190,6 +196,28 @@ unsafe fn accept(
         }
         let mut delivery = match copy_reply(host, call, event, reply) {
             Ok(d) => d,
+            // A reply over the size limit ends the call with a rejection, so an extension that
+            // ignores this status cannot leave the Promise pending. The extension still sees
+            // `NILE_OVERLOADED`; a retry finds the call settled (`NILE_DUPLICATE`).
+            Err(NILE_OVERLOADED) if !event => {
+                state.calls.insert(call, true);
+                state.done.push_back(Delivery {
+                    host,
+                    call,
+                    event: false,
+                    status: NILE_FAILED,
+                    dispatch_status: None,
+                    code: "RESULT_LIMIT".into(),
+                    message: format!("extension reply exceeds the {MAX_BYTES} byte limit"),
+                    json: "null".into(),
+                    buffers: Vec::new(),
+                });
+                drop(state);
+                if let Some(wake) = shared.wake.lock().unwrap().clone() {
+                    wake();
+                }
+                return NILE_OVERLOADED;
+            }
             Err(e) => return e,
         };
         delivery.dispatch_status = dispatch_status;
@@ -401,6 +429,10 @@ struct Loaded {
     shared: Arc<Shared>,
     api: Box<NileExtensionApi>,
     extension: NileExtension,
+    /// `nile_extension_init` returned `NILE_OK` with a compatible table: the hooks may be called.
+    initialized: bool,
+    /// `context_init` returned `NILE_OK` (or there is none): `context_dispose` is owed.
+    context_ready: bool,
     // LAST: callbacks and API must outlive cleanup. Drop explicitly invokes shutdown before unload.
     _library: Option<libloading::Library>,
 }
@@ -427,6 +459,16 @@ impl Drop for Loaded {
             state.done.clear();
             state.events.clear();
         }
+        if !self.initialized {
+            // A failed `nile_extension_init` cleans up after itself, so no hook is called. A
+            // nonzero `user` means it left state behind: keep its code mapped.
+            if self.extension.user != 0 {
+                self.quarantine();
+            } else {
+                registry().lock().unwrap().remove(&self.api.host);
+            }
+            return;
+        }
         if self.extension.abi_version != NILE_ABI_VERSION
             || self.extension.struct_size < std::mem::size_of::<NileExtension>() as u32
         {
@@ -440,7 +482,7 @@ impl Drop for Loaded {
             return;
         }
         unsafe {
-            if let Some(dispose) = self.extension.context_dispose {
+            if let Some(dispose) = self.extension.context_dispose.filter(|_| self.context_ready) {
                 if dispose(self.extension.user, self.shared.context) != NILE_OK {
                     self.quarantine();
                     return;
@@ -617,6 +659,8 @@ impl Extensions {
                 shared,
                 api,
                 extension: NileExtension::default(),
+                initialized: false,
+                context_ready: false,
                 _library: Some(library),
             };
             let status = unsafe { init(&*loaded.api, &mut loaded.extension) };
@@ -642,6 +686,9 @@ impl Extensions {
                     format!("extension {import}: disposal and shutdown hooks required"),
                 ));
             }
+            // From here the extension is fully initialized: `shutdown` is owed, even if the
+            // context cannot start.
+            loaded.initialized = true;
             if let Some(init) = loaded.extension.context_init {
                 let status = unsafe { init(loaded.extension.user, this.context) };
                 if status != NILE_OK {
@@ -651,6 +698,7 @@ impl Extensions {
                     ));
                 }
             }
+            loaded.context_ready = true;
             this.packages.push(Package {
                 import,
                 root,

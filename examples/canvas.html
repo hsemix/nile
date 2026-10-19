@@ -1,0 +1,92 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>canvas</title>
+<style>
+  body { font: 14px system-ui; margin: 0; padding: 16px; background: #f4f5f7; }
+  h3 { margin: 0 0 10px; font-weight: 600; }
+  .grid { display: flex; flex-wrap: wrap; gap: 14px; }
+  figure { margin: 0; background: #fff; border: 1px solid #d5d8de; border-radius: 8px; padding: 8px; }
+  figcaption { font-size: 12px; color: #555; margin-top: 6px; }
+  canvas { display: block; background: repeating-conic-gradient(#f0f0f0 0% 25%, #fff 0% 50%) 50% / 16px 16px; }
+</style></head>
+<body>
+  <h3>&lt;canvas&gt; 2D context</h3>
+  <div class="grid">
+    <figure><canvas id="shapes" width="240" height="160"></canvas><figcaption>paths, arcs, fill and stroke</figcaption></figure>
+    <figure><canvas id="grad" width="240" height="160"></canvas><figcaption>gradients, shadows, alpha</figcaption></figure>
+    <figure><canvas id="text" width="240" height="160"></canvas><figcaption>text, transforms, clip</figcaption></figure>
+    <figure><canvas id="anim" width="240" height="160"></canvas><figcaption>requestAnimationFrame</figcaption></figure>
+    <figure><canvas id="pix" width="240" height="160"></canvas><figcaption>ImageData, compositing, Path2D</figcaption></figure>
+  </div>
+  <script>
+    // 1. shapes
+    {
+      const c = $('#shapes').getContext('2d');
+      c.fillStyle = '#e8f0fe'; c.fillRect(0, 0, 240, 160);
+      c.fillStyle = '#4285f4'; c.fillRect(14, 14, 60, 40);
+      c.strokeStyle = '#ea4335'; c.lineWidth = 4; c.strokeRect(90, 14, 60, 40);
+      c.beginPath(); c.arc(190, 34, 22, 0, Math.PI * 2); c.fillStyle = '#fbbc04'; c.fill(); c.stroke();
+      c.beginPath(); c.moveTo(20, 140); c.lineTo(60, 80); c.lineTo(100, 140); c.closePath();
+      c.fillStyle = '#34a853'; c.fill(); c.lineJoin = 'round'; c.lineWidth = 3; c.strokeStyle = '#0d652d'; c.stroke();
+      c.beginPath(); c.moveTo(120, 140); c.quadraticCurveTo(150, 60, 180, 140); c.bezierCurveTo(190, 100, 210, 100, 225, 140);
+      c.lineWidth = 3; c.lineCap = 'round'; c.strokeStyle = '#673ab7'; c.stroke();
+      c.setLineDash([6, 4]); c.strokeStyle = '#555'; c.lineWidth = 1.5; c.strokeRect(8, 70, 108, 80);
+    }
+    // 2. gradients and shadows
+    {
+      const c = $('#grad').getContext('2d');
+      const lg = c.createLinearGradient(0, 0, 240, 0);
+      lg.addColorStop(0, '#ff6b6b'); lg.addColorStop(0.5, '#feca57'); lg.addColorStop(1, '#48dbfb');
+      c.fillStyle = lg; c.fillRect(10, 10, 220, 40);
+      const rg = c.createRadialGradient(60, 105, 4, 60, 105, 40);
+      rg.addColorStop(0, '#fff'); rg.addColorStop(1, '#5f27cd');
+      c.fillStyle = rg; c.beginPath(); c.arc(60, 105, 40, 0, 7); c.fill();
+      c.shadowColor = 'rgba(0,0,0,0.45)'; c.shadowBlur = 8; c.shadowOffsetX = 4; c.shadowOffsetY = 4;
+      c.fillStyle = '#10ac84'; c.fillRect(130, 70, 60, 60);
+      c.shadowColor = 'transparent';
+      c.globalAlpha = 0.5; c.fillStyle = '#ee5253'; c.fillRect(160, 100, 60, 50);
+    }
+    // 3. text, transforms and a clip
+    {
+      const c = $('#text').getContext('2d');
+      c.fillStyle = '#222'; c.font = 'bold 20px sans-serif'; c.fillText('Hello canvas', 10, 30);
+      c.font = '14px serif'; c.fillStyle = '#555';
+      const w = c.measureText('measured width').width; c.fillText('measured width', 10, 52); c.fillRect(10, 56, w, 2);
+      c.save(); c.translate(120, 110); c.rotate(-0.4); c.fillStyle = '#c0392b'; c.font = '18px sans-serif';
+      c.textAlign = 'center'; c.fillText('rotated', 0, 0); c.restore();
+      c.save(); c.beginPath(); c.arc(50, 110, 28, 0, Math.PI * 2); c.clip();
+      c.fillStyle = '#27ae60'; c.fillRect(20, 80, 60, 30); c.fillStyle = '#2980b9'; c.fillRect(20, 110, 60, 30); c.restore();
+      c.strokeStyle = '#aaa'; c.strokeText('outline', 150, 140);
+    }
+    // 4. animation
+    {
+      const cv = $('#anim'), c = cv.getContext('2d');
+      const tick = (t) => {
+        c.clearRect(0, 0, 240, 160);
+        for (let i = 0; i < 6; i++) {
+          const a = t / 600 + i * Math.PI / 3;
+          c.fillStyle = `hsl(${i * 60}, 70%, 55%)`;
+          c.beginPath(); c.arc(120 + Math.cos(a) * 50, 80 + Math.sin(a) * 50, 14, 0, Math.PI * 2); c.fill();
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }
+    // 5. ImageData, compositing, Path2D
+    {
+      const c = $('#pix').getContext('2d');
+      const img = c.createImageData(60, 60);
+      for (let y = 0; y < 60; y++) for (let x = 0; x < 60; x++) {
+        const i = (y * 60 + x) * 4; img.data[i] = x * 4; img.data[i + 1] = y * 4; img.data[i + 2] = 128; img.data[i + 3] = 255;
+      }
+      c.putImageData(img, 10, 10);
+      const back = c.getImageData(20, 20, 1, 1).data;
+      c.fillStyle = '#000'; c.font = '11px monospace'; c.fillText('px(20,20)=' + [...back].join(','), 80, 24);
+      c.fillStyle = '#e74c3c'; c.fillRect(90, 40, 60, 40);
+      c.globalCompositeOperation = 'destination-out'; c.beginPath(); c.arc(120, 60, 18, 0, 7); c.fill();
+      c.globalCompositeOperation = 'source-over';
+      const star = new Path2D('M 40 100 L 48 120 L 70 122 L 53 136 L 58 158 L 40 146 L 22 158 L 27 136 L 10 122 L 32 120 Z');
+      c.fillStyle = '#f1c40f'; c.fill(star); c.strokeStyle = '#b7950b'; c.setLineDash([]); c.lineWidth = 1.5; c.stroke(star);
+      c.fillStyle = '#333'; c.fillText(c.isPointInPath(star, 40, 125) ? 'inside' : 'outside', 90, 110);
+    }
+  </script>
+</body></html>

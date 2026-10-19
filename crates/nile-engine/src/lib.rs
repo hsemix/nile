@@ -20,7 +20,7 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 use nile_dom::{Document, NodeId, ScriptSource};
 use nile_layout::{DomPoint, TextPoint, FileImages, LayoutOptions, LayoutTree, MenuRequest, ScrollOffsets};
 use nile_render::{Overlay, Renderer};
-use nile_script::{Environment, ScriptHost, UiEvent, WindowCommand, WindowInfo};
+use nile_script::{Environment, Progress, ScriptHost, TraySpec, UiEvent, WindowCommand, WindowInfo};
 use nile_style::{compute_styles_in, Animator, InteractionState, StyleMap};
 use nile_text::TextEngine;
 use skia_safe::{surfaces, AlphaType, Color, ColorType, ImageInfo};
@@ -66,8 +66,6 @@ impl std::ops::BitOrAssign for ModifiersState {
     }
 }
 
-/// Text clipboard. The system one in the window; an in-memory one for headless
-/// runs and tests, so they never touch the user's clipboard.
 pub trait Clipboard {
     fn text(&mut self) -> Option<String>;
     fn set_text(&mut self, text: &str);
@@ -80,25 +78,58 @@ pub trait Clipboard {
     fn set_html(&mut self, _html: &str, text: &str) {
         self.set_text(text);
     }
+    /// A picture on the clipboard.
+    fn image(&mut self) -> Option<ClipImage> {
+        None
+    }
+    fn set_image(&mut self, _image: &ClipImage) {}
+    /// Files copied in the system's file manager.
+    fn files(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+    fn set_files(&mut self, _files: &[String]) {}
+}
+
+/// A clipboard picture: premultiplied-agnostic RGBA, row by row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
 }
 
 #[derive(Default)]
-pub struct MemoryClipboard(Option<String>, Option<String>);
+pub struct MemoryClipboard {
+    text: Option<String>,
+    html: Option<String>,
+    image: Option<ClipImage>,
+    files: Vec<String>,
+}
 
 impl Clipboard for MemoryClipboard {
     fn text(&mut self) -> Option<String> {
-        self.0.clone()
+        self.text.clone()
     }
     fn set_text(&mut self, text: &str) {
-        self.0 = Some(text.to_string());
-        self.1 = None;
+        *self = MemoryClipboard { text: Some(text.to_string()), ..Default::default() };
     }
     fn html(&mut self) -> Option<String> {
-        self.1.clone()
+        self.html.clone()
     }
     fn set_html(&mut self, html: &str, text: &str) {
-        self.0 = Some(text.to_string());
-        self.1 = Some(html.to_string());
+        *self = MemoryClipboard { text: Some(text.to_string()), html: Some(html.to_string()), ..Default::default() };
+    }
+    fn image(&mut self) -> Option<ClipImage> {
+        self.image.clone()
+    }
+    fn set_image(&mut self, image: &ClipImage) {
+        *self = MemoryClipboard { image: Some(image.clone()), ..Default::default() };
+    }
+    fn files(&mut self) -> Vec<String> {
+        self.files.clone()
+    }
+    fn set_files(&mut self, files: &[String]) {
+        *self = MemoryClipboard { files: files.to_vec(), ..Default::default() };
     }
 }
 
@@ -135,12 +166,117 @@ impl Clipboard for SystemClipboard {
             let _ = c.set_html(html, Some(text));
         }
     }
+    fn image(&mut self) -> Option<ClipImage> {
+        let img = self.get()?.get_image().ok()?;
+        Some(ClipImage { width: img.width as u32, height: img.height as u32, rgba: img.bytes.into_owned() })
+    }
+    fn set_image(&mut self, image: &ClipImage) {
+        if let Some(c) = self.get() {
+            let _ = c.set_image(arboard::ImageData { width: image.width as usize, height: image.height as usize, bytes: image.rgba.as_slice().into() });
+        }
+    }
+    fn files(&mut self) -> Vec<String> {
+        let Some(c) = self.get() else { return Vec::new() };
+        c.get().file_list().map(|l| l.iter().map(|p| p.to_string_lossy().into_owned()).collect()).unwrap_or_default()
+    }
+    fn set_files(&mut self, files: &[String]) {
+        if let Some(c) = self.get() {
+            let _ = c.set().file_list(files);
+        }
+    }
+}
+
+/// The clipboard a page, its frames and its scripts all share. `json` is the one flavour the
+/// system clipboards don't carry: it is kept in the process and counts only while the text that
+/// was put with it is still the clipboard's text.
+#[derive(Clone)]
+pub struct SharedClipboard(Rc<RefCell<SharedInner>>);
+
+struct SharedInner {
+    system: Box<dyn Clipboard>,
+    json: Option<(String, Option<String>)>,
+}
+
+impl Default for SharedClipboard {
+    fn default() -> Self {
+        SharedClipboard::new(Box::new(MemoryClipboard::default()))
+    }
+}
+
+impl SharedClipboard {
+    pub fn new(system: Box<dyn Clipboard>) -> Self {
+        SharedClipboard(Rc::new(RefCell::new(SharedInner { system, json: None })))
+    }
+    /// Swap the clipboard everyone shares for another (the embedder's own, or the OS one).
+    pub fn replace(&self, system: Box<dyn Clipboard>) {
+        let mut inner = self.0.borrow_mut();
+        inner.system = system;
+        inner.json = None;
+    }
+    pub fn json(&self) -> Option<String> {
+        let mut inner = self.0.borrow_mut();
+        let (json, text) = inner.json.clone()?;
+        (inner.system.text() == text).then_some(json)
+    }
+    pub fn set_json(&self, json: &str, text: Option<&str>) {
+        let mut inner = self.0.borrow_mut();
+        match text {
+            Some(t) => inner.system.set_text(t),
+            None => inner.system.set_text(""),
+        }
+        inner.json = Some((json.to_string(), text.or(Some("")).map(str::to_string)));
+    }
+}
+
+impl Clipboard for SharedClipboard {
+    fn text(&mut self) -> Option<String> {
+        self.0.borrow_mut().system.text()
+    }
+    fn set_text(&mut self, text: &str) {
+        self.0.borrow_mut().system.set_text(text)
+    }
+    fn html(&mut self) -> Option<String> {
+        self.0.borrow_mut().system.html()
+    }
+    fn set_html(&mut self, html: &str, text: &str) {
+        self.0.borrow_mut().system.set_html(html, text)
+    }
+    fn image(&mut self) -> Option<ClipImage> {
+        self.0.borrow_mut().system.image()
+    }
+    fn set_image(&mut self, image: &ClipImage) {
+        self.0.borrow_mut().system.set_image(image)
+    }
+    fn files(&mut self) -> Vec<String> {
+        self.0.borrow_mut().system.files()
+    }
+    fn set_files(&mut self, files: &[String]) {
+        self.0.borrow_mut().system.set_files(files)
+    }
 }
 
 /// How long the pointer rests on an element before its tooltip shows.
 const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 /// Half the caret's blink period.
 pub const CARET_BLINK: Duration = Duration::from_millis(530);
+
+/// An HTML5 drag in progress: the dragged element, what is under the pointer, whether the last `dragover` accepted a
+/// drop there, and where in the element the pointer took hold (for the ghost).
+#[derive(Debug, Clone)]
+pub struct Dnd {
+    pub source: NodeId,
+    pub over: Option<NodeId>,
+    pub accept: bool,
+    pub grab: (f32, f32),
+}
+
+/// A scroll-snap container that was just scrolled (see `Page::snap_due`).
+#[derive(Debug, Clone, Copy)]
+pub struct SnapPending {
+    pub node: NodeId,
+    pub from: (f32, f32),
+    pub due: Instant,
+}
 
 /// A popup element that the shell shows in an OS window of its own. `rect` is its border box in
 /// this window's viewport coordinates (it may lie outside the viewport).
@@ -187,6 +323,8 @@ pub struct View {
     pub edit_sel: Option<(DomPoint, DomPoint)>,
     /// `copy`/`cut`/`paste` asked for by scripts, for the page to do with its clipboard.
     pub clipboard_requests: Vec<String>,
+    /// The clipboard scripts read and write (`Clipboard.read()`...); the page's own handle is the same one.
+    pub clipboard: SharedClipboard,
     /// Where `<img>` and `url()` backgrounds are read from: the page's folder.
     pub images: FileImages,
     /// The open `<select>` drop-down and its highlighted row.
@@ -207,6 +345,16 @@ pub struct View {
     pub window_info: WindowInfo,
     /// The `<menu>` element the page chose as the application menu bar (`Window.this.menu`).
     pub app_menu: Option<NodeId>,
+    /// A system menu bar shows `app_menu` (true on macOS and Windows, where the shell and C hosts can build
+    /// one). False makes scripts draw an in-window bar: the default elsewhere, `NILE_MENU=inline` forces it
+    /// (screenshots), `Page::set_native_menu` lets an embedder choose.
+    pub native_menu: bool,
+    /// Items chosen in the in-window bar, waiting for the page to run them.
+    pub menu_invocations: Vec<u64>,
+    /// The tray icon and dock/taskbar badge the page asked for (the shell shows them).
+    pub tray: Option<TraySpec>,
+    pub badge: Option<String>,
+    pub progress: Progress,
     /// Popups that are shown in windows of their own (see `Portal`).
     pub portals: Vec<Portal>,
     /// A file chooser a click on `<input type=file>` asked for; the embedder answers with
@@ -447,6 +595,83 @@ impl View {
         changed
     }
 
+    /// Where a scroll container with `scroll-snap-type` can come to rest on each axis (offsets).
+    pub fn snap_points(&mut self, node: NodeId) -> (Vec<f32>, Vec<f32>) {
+        use nile_style::SnapAlign;
+        let style = self.styles.get(node).clone();
+        let Some(sb) = self.layout().scroll_box(node).copied() else { return (Vec::new(), Vec::new()) };
+        let (mx, my) = sb.max_offset();
+        let pad = style.scroll_padding;
+        let port = sb.clip;
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        let doc_rc = self.doc.clone();
+        let doc = doc_rc.borrow();
+        let inside = |mut n: NodeId| {
+            while let Some(parent) = doc.node(n).parent {
+                if parent == node {
+                    return true;
+                }
+                n = parent;
+            }
+            false
+        };
+        let tree = self.layout().boxes.iter().filter(|b| matches!(b.content, nile_layout::BoxContent::Element)).map(|b| (b.node, b.rect)).collect::<Vec<_>>();
+        for (n, r) in tree {
+            let a = self.styles.get(n).scroll_snap_align;
+            if (a.0 == SnapAlign::None && a.1 == SnapAlign::None) || n == node || !inside(n) {
+                continue;
+            }
+            let at = |align: SnapAlign, start: f32, size: f32, port_start: f32, port_size: f32, pad_start: f32, pad_end: f32| match align {
+                SnapAlign::None => None,
+                SnapAlign::Start => Some(start - port_start - pad_start),
+                SnapAlign::Center => Some(start + size / 2.0 - (port_start + (pad_start + port_size - pad_end) / 2.0)),
+                SnapAlign::End => Some(start + size - (port_start + port_size) + pad_end),
+            };
+            if style.scroll_snap_type.x {
+                if let Some(v) = at(a.0, r.x, r.width, port.x, port.width, pad.left, pad.right) {
+                    xs.push(v.clamp(0.0, mx));
+                }
+            }
+            if style.scroll_snap_type.y {
+                if let Some(v) = at(a.1, r.y, r.height, port.y, port.height, pad.top, pad.bottom) {
+                    ys.push(v.clamp(0.0, my));
+                }
+            }
+        }
+        for list in [&mut xs, &mut ys] {
+            list.sort_by(f32::total_cmp);
+            list.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        }
+        (xs, ys)
+    }
+
+    /// Settle a snap container: on each snapping axis, the nearest snap point beyond where the
+    /// gesture began in the direction it went (or the nearest one, if it came back).
+    pub fn snap_settle(&mut self, pending: SnapPending) -> bool {
+        let style = self.styles.get(pending.node).clone();
+        let (xs, ys) = self.snap_points(pending.node);
+        let (ox, oy) = self.scroll_offsets.get(&pending.node).copied().unwrap_or_default();
+        let pick = |points: &[f32], origin: f32, now: f32, extent: f32| -> f32 {
+            if points.is_empty() {
+                return now;
+            }
+            let dir = (now - origin).signum();
+            let nearest = |it: &mut dyn Iterator<Item = f32>| it.min_by(|a, b| (a - now).abs().total_cmp(&(b - now).abs()));
+            let beyond = if (now - origin).abs() < 0.5 { None } else { nearest(&mut points.iter().copied().filter(|p| dir * (p - origin) > 0.5)) };
+            let target = beyond.or_else(|| nearest(&mut points.iter().copied())).unwrap_or(now);
+            // `proximity` only pulls when a point is near; `mandatory` always does.
+            if style.scroll_snap_type.mandatory || (target - now).abs() <= extent * 0.3 {
+                target
+            } else {
+                now
+            }
+        };
+        let extent = self.layout().scroll_box(pending.node).map_or((300.0, 300.0), |sb| (sb.clip.width, sb.clip.height));
+        let (nx, ny) = (pick(&xs, pending.from.0, ox, extent.0), pick(&ys, pending.from.1, oy, extent.1));
+        self.set_element_scroll(pending.node, nx, ny)
+    }
+
     /// Scroll an `overflow` element, clamped to its range. True if it moved.
     pub fn set_element_scroll(&mut self, node: NodeId, x: f32, y: f32) -> bool {
         self.sync();
@@ -555,6 +780,10 @@ impl Environment for Env {
         nile_style::system_theme().dark
     }
 
+    fn image_bytes(&self, src: &str) -> Option<Vec<u8>> {
+        nile_layout::ImageLoader::bytes(&self.0.borrow().images, src)
+    }
+
     fn viewport(&self) -> (f32, f32) {
         self.0.borrow().viewport
     }
@@ -652,12 +881,66 @@ impl Environment for Env {
         self.0.borrow_mut().clipboard_requests.push(kind.to_string());
     }
 
+    fn clipboard_get(&self, kind: &str) -> Option<String> {
+        let mut c = self.0.borrow().clipboard.clone();
+        match kind {
+            "text" => c.text(),
+            "html" => c.html().filter(|h| !h.trim().is_empty()),
+            "json" => c.json(),
+            "files" => Some(c.files().join("\n")).filter(|f| !f.is_empty()),
+            _ => None,
+        }
+    }
+
+    fn clipboard_get_image(&self) -> Option<(u32, u32, Vec<u8>)> {
+        let mut c = self.0.borrow().clipboard.clone();
+        c.image().map(|i| (i.width, i.height, i.rgba))
+    }
+
+    fn clipboard_put(&self, kind: &str, a: &str, b: Option<&str>) -> bool {
+        let mut c = self.0.borrow().clipboard.clone();
+        match kind {
+            "text" => c.set_text(a),
+            "html" => c.set_html(a, b.unwrap_or_default()),
+            "json" => c.set_json(a, b),
+            "files" => c.set_files(&a.split('\n').filter(|f| !f.is_empty()).map(str::to_string).collect::<Vec<_>>()),
+            _ => return false,
+        }
+        true
+    }
+
+    fn clipboard_put_image(&self, width: u32, height: u32, rgba: &[u8]) -> bool {
+        let mut c = self.0.borrow().clipboard.clone();
+        c.set_image(&ClipImage { width, height, rgba: rgba.to_vec() });
+        true
+    }
+
     fn window_command(&self, cmd: WindowCommand) {
         self.0.borrow_mut().window_requests.push(cmd);
     }
 
     fn window_info(&self) -> WindowInfo {
         self.0.borrow().window_info.clone()
+    }
+
+    fn set_tray(&self, spec: Option<TraySpec>) {
+        self.0.borrow_mut().tray = spec;
+    }
+
+    fn set_badge(&self, text: Option<String>) {
+        self.0.borrow_mut().badge = text;
+    }
+
+    fn set_progress(&self, progress: Progress) {
+        self.0.borrow_mut().progress = progress;
+    }
+
+    fn native_menu(&self) -> bool {
+        self.0.borrow().native_menu
+    }
+
+    fn menu_invoke(&self, id: u64) {
+        self.0.borrow_mut().menu_invocations.push(id);
     }
 
     fn set_app_menu(&self, node: Option<NodeId>) {
@@ -785,6 +1068,13 @@ pub struct Page {
     pub ime_host: bool,
     /// When the hover target is next recomputed after scrolling.
     pub hover_due: Option<Instant>,
+    /// A scroll container with `scroll-snap-type` that was scrolled: when it settles, the offset it
+    /// started the gesture at, and when to snap.
+    pub snap_due: Option<SnapPending>,
+    /// A press on a `draggable` element: the element and where the pointer went down. It becomes a drag after a few pixels.
+    pub dnd_candidate: Option<(NodeId, f32, f32)>,
+    /// The HTML5 drag in progress (see `dnd_start`).
+    pub dnd: Option<Dnd>,
     /// List box row the shift-range started from, and the row keys moved to last.
     pub list_anchor: Option<(NodeId, usize)>,
     /// A list box being dragged over (the button went down on a row).
@@ -794,7 +1084,7 @@ pub struct Page {
     pub list_cursor: Option<(NodeId, usize)>,
     /// Time, position and count of the last primary click, for double/triple-click.
     pub last_click: Option<(Instant, (f32, f32), u32)>,
-    pub clipboard: Box<dyn Clipboard>,
+    pub clipboard: SharedClipboard,
     /// A mouse drag extending the page selection.
     pub page_drag: bool,
     /// A scrollbar thumb being dragged.
@@ -917,6 +1207,12 @@ impl Page {
         self.call("__windowMessage", &format!("[{from},{json}]")).1
     }
 
+    /// An application-level event for scripts: `second-instance` (`arguments`, `cwd`), `open-url` (`url`)
+    /// or `open-file` (`path`), fired on the document and the window. `data_json` is a JSON object.
+    pub fn application_event(&mut self, kind: &str, data_json: &str) -> bool {
+        self.call("__applicationEvent", &format!("[\"{kind}\",{data_json}]")).1
+    }
+
     /// A window this one opened has closed, with the value it passed to `close()` (JSON).
     pub fn window_closed(&mut self, id: u32, value_json: &str) -> bool {
         self.call("__windowClosed", &format!("[{id},{value_json}]")).1
@@ -1016,6 +1312,7 @@ impl Page {
             page_sel: None,
             edit_sel: None,
             clipboard_requests: Vec::new(),
+            clipboard: SharedClipboard::default(),
             images: FileImages::new(path.parent().map(PathBuf::from).unwrap_or_default()),
             focus_changes: Vec::new(),
             window_requests: Vec::new(),
@@ -1025,6 +1322,11 @@ impl Page {
             window_rect: None,
             window_info: info,
             app_menu: None,
+            native_menu: cfg!(any(target_os = "macos", target_os = "windows")) && std::env::var("NILE_MENU").map_or(true, |v| v != "inline"),
+            menu_invocations: Vec::new(),
+            tray: None,
+            badge: None,
+            progress: Progress::None,
             portals: Vec::new(),
         }));
         view.borrow_mut().adopt(styles);
@@ -1101,6 +1403,7 @@ impl Page {
         // Scripts may have changed the document.
         view.borrow_mut().sync();
 
+        let clipboard = view.borrow().clipboard.clone();
         Page {
             path,
             memory,
@@ -1121,12 +1424,15 @@ impl Page {
             ime_cursor: None,
             ime_host: false,
             hover_due: None,
+            snap_due: None,
+            dnd_candidate: None,
+            dnd: None,
             list_anchor: None,
             list_drag: None,
             list_press: None,
             list_cursor: None,
             last_click: None,
-            clipboard: Box::new(MemoryClipboard::default()),
+            clipboard,
             history: std::collections::HashMap::new(),
             bar_drag: None,
             bar_hover: None,
@@ -1145,19 +1451,35 @@ impl Page {
         }
     }
 
+    /// Use `clipboard` for this page and its scripts (frames share their outer page's).
+    pub fn share_clipboard(&mut self, clipboard: SharedClipboard) {
+        self.view.borrow_mut().clipboard = clipboard.clone();
+        self.clipboard = clipboard;
+    }
+
+    /// Tell scripts whether a system menu bar shows `Window.this.menu` (false: they draw one in the window).
+    pub fn set_native_menu(&mut self, native: bool) {
+        self.view.borrow_mut().native_menu = native;
+    }
+
+    /// Replace the system clipboard behind the one this page shares.
+    pub fn set_clipboard(&mut self, system: Box<dyn Clipboard>) {
+        self.clipboard.replace(system);
+    }
+
     pub fn reload(&mut self) {
         let (viewport, scroll) = {
             let v = self.view.borrow();
             (v.viewport, v.scroll_y)
         };
-        let clipboard = std::mem::replace(&mut self.clipboard, Box::new(MemoryClipboard::default()));
+        let clipboard = self.clipboard.clone();
         let dialogs = self.view.borrow().dialogs.clone();
         let info = self.view.borrow().window_info.clone();
         *self = match self.memory.take() {
             Some(html) => Page::from_source_in(html.clone(), self.path.clone(), Some(html), viewport, scroll, None, info),
             None => Page::load_in(self.path.clone(), viewport, scroll, None, info),
         };
-        self.clipboard = clipboard;
+        self.share_clipboard(clipboard);
         self.view.borrow_mut().dialogs = dialogs;
     }
 
@@ -1213,6 +1535,10 @@ impl Page {
     /// restyle this page and its frames so `prefers-color-scheme`, system colours and the accent apply.
     pub fn system_theme_changed(&mut self) {
         self.view.borrow_mut().restyle();
+        // `matchMedia('(prefers-color-scheme: dark)')` lists fire `change` when their answer flipped.
+        if let Some(host) = &self.scripts {
+            let _ = host.call("__mediaCheck", "[]");
+        }
         let frames = self.frames.clone();
         for slot in frames.borrow_mut().slots.values_mut() {
             slot.page.system_theme_changed();
@@ -1248,11 +1574,27 @@ impl Page {
         for kind in requests {
             self.clipboard_command(&kind);
         }
+        let chosen = std::mem::take(&mut self.view.borrow_mut().menu_invocations);
+        for id in chosen {
+            if let Some(role) = self.menu_click(id) {
+                let command = match role.as_str() {
+                    "quit" => Some(WindowCommand::Quit(0)),
+                    "close" => Some(WindowCommand::Close),
+                    "minimize" => Some(WindowCommand::Minimize),
+                    "zoom" | "maximize" => Some(WindowCommand::ToggleMaximize),
+                    _ => None,
+                };
+                if let Some(c) = command {
+                    self.view.borrow_mut().window_requests.push(c);
+                }
+            }
+        }
         for node in scrolled {
             self.emit(node, UiEvent::Plain("scroll"));
         }
         let delivered = self.deliver_frame_messages();
-        changed | moved | delivered
+        // A canvas drawn on needs a repaint, not a new layout.
+        changed | moved | delivered | nile_canvas::take_dirty()
     }
 
     /// Focus moved from `old` to `new`: end the old input's edit (firing
@@ -1410,6 +1752,18 @@ impl Page {
             if moved {
                 self.sync();
                 self.hover_after_scroll();
+                let snaps = self.view.borrow().styles.get(n).scroll_snap_type;
+                if snaps.x || snaps.y {
+                    // Keep where the gesture began; snap once the wheel has been quiet for a moment.
+                    let from = self.snap_due.filter(|p| p.node == n).map_or_else(
+                        || {
+                            let (ox, oy) = self.view.borrow().scroll_offsets.get(&n).copied().unwrap_or_default();
+                            (ox + dx, oy + dy)
+                        },
+                        |p| p.from,
+                    );
+                    self.snap_due = Some(SnapPending { node: n, from, due: Instant::now() + Duration::from_millis(140) });
+                }
                 return;
             }
             cur = self.doc.borrow().node(n).parent;
@@ -1999,6 +2353,9 @@ impl Page {
             return cursor;
         }
         use nile_style::Cursor;
+        if let Some(d) = &self.dnd {
+            return if d.accept { Cursor::Move } else { Cursor::NotAllowed };
+        }
         if self.bar_drag.is_some() || self.view.borrow().menu.is_some() {
             return Cursor::Default;
         }
@@ -2042,6 +2399,65 @@ impl Page {
         if let Some(n) = hover {
             self.emit(n, mouse("mouseover"));
         }
+        true
+    }
+
+    /// The nearest `draggable="true"` element at or above `node`.
+    fn draggable_at_or_above(&self, node: NodeId) -> Option<NodeId> {
+        let doc = self.doc.borrow();
+        let mut cur = Some(node);
+        while let Some(n) = cur {
+            match doc.node(n).attr("draggable").map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+                Some("true") => return Some(n),
+                Some("false") => return None,
+                _ => {}
+            }
+            cur = doc.node(n).parent;
+        }
+        None
+    }
+
+    /// The pointer moved far enough from a press on a draggable element: fire `dragstart`, and if scripts allow it
+    /// the element is being dragged.
+    fn dnd_start(&mut self, source: NodeId, px: f32, py: f32) -> bool {
+        self.dnd_candidate = None;
+        let (x, y) = self.pointer.unwrap_or((px, py));
+        let started = self.call("__dndStart", &format!("[{},{x},{y}]", source.0)).0.is_ok_and(|r| r.trim() == "true");
+        self.pressed = None;
+        let next = InteractionState { active: None, ..self.interaction() };
+        self.set_interaction(next);
+        if !started {
+            return true;
+        }
+        let (scroll, rect) = {
+            let mut v = self.view.borrow_mut();
+            let offsets = v.scroll_offsets.clone();
+            (v.scroll_y, v.layout().node_rect_scrolled(source, &offsets))
+        };
+        let grab = rect.map_or((0.0, 0.0), |r| (px - r.x, py - (r.y - scroll)));
+        self.dnd = Some(Dnd { source, over: None, accept: false, grab });
+        self.dnd_move(x, y);
+        true
+    }
+
+    fn dnd_move(&mut self, x: f32, y: f32) -> bool {
+        let over = self.hit_test(x, y);
+        let verdict = self.call("__dndMove", &format!("[{},{x},{y}]", over.map_or(0, |n| n.0))).0.unwrap_or_default();
+        let accept = verdict.contains("\"accept\":true");
+        if let Some(d) = &mut self.dnd {
+            d.over = over;
+            d.accept = accept;
+        }
+        true
+    }
+
+    /// The button was released (`drop`) or Escape pressed: end the drag.
+    fn dnd_end(&mut self, drop: bool) -> bool {
+        let (x, y) = self.pointer.unwrap_or((0.0, 0.0));
+        let accepted = self.dnd.as_ref().is_some_and(|d| d.accept);
+        let _ = self.call("__dndEnd", &format!("[{},{x},{y}]", drop && accepted));
+        self.dnd = None;
+        self.refresh_hover();
         true
     }
 
@@ -2090,6 +2506,14 @@ impl Page {
     }
 
     fn pointer_moved_here(&mut self, x: f32, y: f32) -> bool {
+        if self.dnd.is_some() {
+            return self.dnd_move(x, y);
+        }
+        if let Some((node, sx, sy)) = self.dnd_candidate {
+            if self.pressed.is_some() && (x - sx).hypot(y - sy) >= 4.0 {
+                return self.dnd_start(node, sx, sy);
+            }
+        }
         if self.image_drag.is_some() {
             return self.image_drag_to(x, y);
         }
@@ -2279,10 +2703,16 @@ impl Page {
         let mut keep_focus = false;
         // A press on empty canvas still reaches the document (popups close on it).
         let event_target = target.or_else(|| self.doc.borrow().body());
+        self.dnd_candidate = None;
         if let Some(t) = event_target {
             let (proceed, c) = self.emit(t, self.mouse_event("mousedown"));
             changed |= c;
             keep_focus = !proceed;
+            if proceed {
+                if let (Some(source), Some((x, y))) = (self.draggable_at_or_above(t), self.pointer) {
+                    self.dnd_candidate = Some((source, x, y));
+                }
+            }
         }
         let next = InteractionState {
             active: target,
@@ -2437,6 +2867,10 @@ impl Page {
     }
 
     fn release_here(&mut self) -> bool {
+        self.dnd_candidate = None;
+        if self.dnd.is_some() {
+            return self.dnd_end(true);
+        }
         if self.bar_drag.take().is_some() {
             return true;
         }
@@ -2516,6 +2950,15 @@ impl Page {
                 c0 = self.refresh_hover();
             } else {
                 n0 = Some(due - now);
+            }
+        }
+        if let Some(p) = self.snap_due {
+            let now = Instant::now();
+            if now >= p.due {
+                self.snap_due = None;
+                c0 |= self.view.borrow_mut().snap_settle(p);
+            } else {
+                n0 = Some(n0.map_or(p.due - now, |d| d.min(p.due - now)));
             }
         }
         let (c1, n1) = self.run_timers();
@@ -3649,6 +4092,11 @@ impl Page {
     /// A key event goes to the focused element, or `<body>`. Returns whether
     /// the page should keep its default handling (no `preventDefault`).
     pub fn key(&mut self, kind: &'static str, key: String, mods: ModifiersState) -> (bool, bool) {
+        if self.dnd.is_some() {
+            // Escape cancels a drag; other keys wait for it to end.
+            let cancel = kind == "keydown" && key == "Escape";
+            return (false, cancel && self.dnd_end(false));
+        }
         self.tooltip_hide();
         if let Some(r) = self.frames_key(kind, &key, mods) {
             return r;
@@ -3809,6 +4257,23 @@ impl Page {
                 &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret, selection, viewport: view.viewport, page_selection: &page_selection, dom_caret, preedit: ime_underline, only, skip: &skip, selected_image, bar },
             )
         });
+        // A drag in progress: the dragged element, translucent, following the pointer.
+        if let (Some(d), Some((px, py)), None) = (&self.dnd, self.pointer, portal) {
+            if let (Some(range), Some(rect)) = (tree.subtree_range(d.source), tree.node_rect_scrolled(d.source, &view.scroll_offsets)) {
+                let (dx, dy) = (px - d.grab.0 - rect.x, py - d.grab.1 - (rect.y - scroll));
+                canvas.save();
+                canvas.translate((dx, dy));
+                canvas.save_layer_alpha_f(None, 0.65);
+                self.renderer.paint(
+                    canvas,
+                    tree,
+                    &view.styles,
+                    &Overlay { scroll_y: scroll, offsets: &view.scroll_offsets, caret: None, selection: None, viewport: view.viewport, page_selection: &[], dom_caret: None, preedit: None, only: Some(range), skip: &[], selected_image: None, bar: None },
+                );
+                canvas.restore();
+                canvas.restore();
+            }
+        }
         canvas.restore();
         }
         if portal.is_none() {
@@ -4920,6 +5385,29 @@ cd</textarea>
     fn offset(p: &Page, id: &str) -> (f32, f32) {
         let n = p.doc.borrow().find(|n| n.attr("id") == Some(id)).unwrap();
         p.view.borrow().scroll_offsets.get(&n).copied().unwrap_or_default()
+    }
+
+    #[test]
+    fn scroll_snap_settles_on_the_next_snap_point_after_the_wheel_pauses() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="box" style="width:200px; height:60px; overflow-x:auto; overflow-y:hidden; display:flex; scroll-snap-type:x mandatory">
+                 <div style="flex:none; width:200px; scroll-snap-align:start">a</div><div style="flex:none; width:200px; scroll-snap-align:start">b</div>
+                 <div style="flex:none; width:200px; scroll-snap-align:start">c</div></div></body>"#,
+            "snap",
+        );
+        let (x, y) = center(&p, "box");
+        p.pointer_moved(x, y);
+        p.wheel(-30.0, 0.0);
+        assert_eq!(offset(&p, "box"), (30.0, 0.0), "the wheel moves freely while it is running");
+        std::thread::sleep(Duration::from_millis(200));
+        p.tick();
+        assert_eq!(offset(&p, "box"), (200.0, 0.0), "then it settles on the next item");
+        // A small nudge back goes back to the item it came from.
+        p.wheel(10.0, 0.0);
+        std::thread::sleep(Duration::from_millis(200));
+        p.tick();
+        assert_eq!(offset(&p, "box"), (0.0, 0.0));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -6081,14 +6569,99 @@ cd</textarea>
     }
 
     #[test]
-    fn observers_location_and_history_follow_the_page() {
+    fn scripts_read_and_write_the_clipboard() {
+        let (mut p, path) = page(
+            r#"<body><script>
+                 window.out = [];
+                 out.push(Clipboard.has("text"), Clipboard.readText() === undefined);
+                 Clipboard.writeText("plain");
+                 out.push(Clipboard.readText(), Clipboard.has("html"));
+                 Clipboard.write({ html: "<b>x</b>", text: "x" });
+                 const r = Clipboard.read();
+                 out.push(r.html, r.text);
+                 const px = new ImageData(new Uint8ClampedArray([255, 0, 0, 255, 0, 255, 0, 255]), 2, 1);
+                 out.push(Clipboard.write({ image: px }), Clipboard.has("image"), Clipboard.has("text"));
+                 const im = Clipboard.read().image;
+                 out.push(im.width, im.height, Array.from(im.data).join(" "));
+                 Clipboard.write({ json: { a: [1, 2] }, text: "tag" });
+                 out.push(JSON.stringify(Clipboard.read().json), Clipboard.readText());
+                 Clipboard.writeText("other");
+                 out.push(Clipboard.has("json"));
+                 Clipboard.write({ file: ["/a/b.txt", "/c.png"] });
+                 out.push(Clipboard.read().file.join("|"));
+               </script></body>"#,
+            "clipboardjs",
+        );
+        p.sync();
+        assert_eq!(
+            js(&mut p, "out.join(';')"),
+            "false;true;plain;false;<b>x</b>;x;true;true;false;2;1;255 0 0 255 0 255 0 255;{\"a\":[1,2]};tag;false;/a/b.txt|/c.png"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tray_and_badge_requests_reach_the_shell() {
+        let (mut p, path) = page(
+            r#"<body><menu id="t"><li id="a">One</li><li id="b" disabled>Two</li></menu><script>
+                 Window.this.tray = { icon: "none.png", tooltip: "Tip", menu: document.getElementById("t"), template: true };
+                 application.badge = 4;
+               </script></body>"#,
+            "tray",
+        );
+        p.sync();
+        let info = p.tray().expect("tray");
+        assert_eq!((info.tooltip.as_str(), info.template, info.items.len()), ("Tip", true, 2));
+        assert_eq!(p.badge().as_deref(), Some("4"));
+        assert_eq!(p.progress(), nile_script::Progress::None);
+        js(&mut p, "application.progress = 0.25; 0");
+        assert_eq!(p.progress(), nile_script::Progress::Value(0.25));
+        js(&mut p, "application.progress = 7; 0");
+        assert_eq!(p.progress(), nile_script::Progress::Value(1.0));
+        js(&mut p, "application.progress = 'indeterminate'; 0");
+        assert_eq!(p.progress(), nile_script::Progress::Indeterminate);
+        js(&mut p, "application.progress = null; 0");
+        assert_eq!(p.progress(), nile_script::Progress::None);
+        js(&mut p, "application.badge = null; Window.this.tray = null; 0");
+        assert!(p.tray().is_none() && p.badge().is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_in_window_menu_bar_runs_items_like_a_native_one() {
+        let (mut p, path) = page(
+            r#"<body><menu id="m" style="display:none"><li>File <menu><li id="a">Alpha</li><li id="b" disabled>Beta</li><hr><li id="q" role="quit">Quit</li></menu></li><li>Help</li></menu>
+               <script>window.log = []; document.getElementById("a").addEventListener("click", () => log.push("a")); document.getElementById("b").addEventListener("click", () => log.push("b"));</script></body>"#,
+            "menubar",
+        );
+        p.set_native_menu(false);
+        js(&mut p, "Window.this.menu = document.getElementById('m'); 0");
+        p.sync();
+        assert_eq!(js(&mut p, "document.querySelectorAll('.nile-menubar-item').length"), "2");
+        js(&mut p, "document.querySelector('.nile-menubar-item').click(); 0");
+        assert_eq!(js(&mut p, "[...document.querySelectorAll('.nile-menu-row')].map(r => r.textContent).join('|')"), "Alpha|Beta|Quit");
+        // A disabled row does nothing; an enabled one closes the menu and fires `click` on its <li>.
+        js(&mut p, "document.querySelectorAll('.nile-menu-row')[1].click(); 0");
+        p.sync();
+        assert_eq!(js(&mut p, "log.join()"), "");
+        js(&mut p, "document.querySelectorAll('.nile-menu-row')[0].click(); 0");
+        p.sync();
+        assert_eq!(js(&mut p, "log.join() + document.querySelectorAll('.nile-menu').length"), "a0");
+        // A window role comes back as a window command.
+        js(&mut p, "document.querySelector('.nile-menubar-item').click(); document.querySelectorAll('.nile-menu-row')[2].click(); 0");
+        p.sync();
+        assert!(p.view.borrow().window_requests.iter().any(|c| matches!(c, WindowCommand::Quit(0))));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn observers_and_location_follow_the_page() {
         let (mut p, path) = page(
             r#"<body style="margin:0"><div id="top" style="height:100px"></div><div style="height:600px"></div><div id="far" style="height:50px"></div>
                <script>
                  window.log = [];
                  new ResizeObserver(es => es.forEach(e => log.push('ro ' + e.target.id + ' ' + e.contentRect.height))).observe(document.getElementById('top'));
                  new IntersectionObserver(es => es.forEach(e => log.push('io ' + e.target.id + ' ' + e.isIntersecting))).observe(document.getElementById('far'));
-                 window.addEventListener('hashchange', e => log.push('hash ' + location.hash));
                </script>"#,
             "observers",
         );
@@ -6101,13 +6674,12 @@ cd</textarea>
         p.wheel(0.0, -700.0);
         p.sync();
         assert_eq!(log(&mut p), "ro top 100,io far false,ro top 120,io far true");
-        // location and history.
+        // location.
         assert!(js(&mut p, "location.href").starts_with("file://"));
         assert_eq!(js(&mut p, "location.pathname.endsWith('observers.html') + ',' + devicePixelRatio"), "true,1");
-        js(&mut p, "location.hash = 'two'; 0");
-        assert!(js(&mut p, "log.join(',')").ends_with("hash #two"));
-        js(&mut p, "history.pushState({ a: 1 }, '', '?q=1#three'); 0");
-        assert_eq!(js(&mut p, "location.search + location.hash + history.state.a + history.length"), "?q=1#three12");
+        // Nothing navigates: `location` is read-only and there is no `history`.
+        js(&mut p, "location.hash = 'two'; location.href = 'x.html'; 0");
+        assert_eq!(js(&mut p, "location.hash + typeof history"), "undefined");
         let _ = std::fs::remove_file(path);
     }
 
@@ -7032,6 +7604,322 @@ cd</textarea>
         assert!(p.selected_image().is_some());
         press_key(&mut p, "Backspace", none);
         assert_eq!(js(&mut p, "document.querySelectorAll('#h img').length + ':' + document.getElementById('a').textContent"), "0:before  after");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn media_query_lists_fire_change_when_the_system_theme_flips() {
+        use nile_style::{set_system_theme, Color, SystemTheme};
+        set_system_theme(SystemTheme { dark: false, accent: Color::rgb(10, 20, 30) });
+        let (mut p, path) = page(
+            r#"<body><script>
+                 window.log = [];
+                 const m = matchMedia('(prefers-color-scheme: dark)');
+                 m.addEventListener('change', (e) => log.push('listener:' + e.matches + ':' + e.media + ':' + (e instanceof MediaQueryListEvent)));
+                 m.onchange = (e) => log.push('onchange:' + e.matches);
+                 window.unwatched = matchMedia('(prefers-color-scheme: dark)');
+                 window.old = matchMedia('(prefers-color-scheme: dark)');
+                 old.addListener((e) => log.push('old:' + e.matches));
+               </script></body>"#,
+            "mql-change",
+        );
+        assert_eq!(js(&mut p, "log.length"), "0");
+        p.system_theme_changed();
+        assert_eq!(js(&mut p, "log.length"), "0", "nothing flipped, nothing fires");
+        set_system_theme(SystemTheme { dark: true, accent: Color::rgb(10, 20, 30) });
+        p.system_theme_changed();
+        assert_eq!(
+            js(&mut p, "log.slice().sort().join('|')"),
+            "listener:true:(prefers-color-scheme: dark):true|old:true|onchange:true"
+        );
+        assert_eq!(js(&mut p, "unwatched.matches"), "true");
+        p.system_theme_changed();
+        assert_eq!(js(&mut p, "log.length"), "3", "an unchanged answer doesn't fire again");
+        set_system_theme(SystemTheme { dark: false, accent: Color::rgb(10, 20, 30) });
+        p.system_theme_changed();
+        assert_eq!(js(&mut p, "log.filter((l) => l.includes(':false')).length"), "3");
+        set_system_theme(SystemTheme::default());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_canvas_paints_what_scripts_draw_and_repaints_without_a_new_layout() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><canvas id="c" width="40" height="20"></canvas><script>
+                 window.ctx = document.getElementById('c').getContext('2d');
+                 ctx.fillStyle = '#ff0000'; ctx.fillRect(0, 0, 40, 20);
+               </script></body>"#,
+            "canvas",
+        );
+        assert_eq!(js(&mut p, "document.getElementById('c').width + 'x' + document.getElementById('c').height"), "40x20");
+        let rect = p.view.borrow_mut().layout().node_rect(p.doc.borrow().find(|n| n.attr("id") == Some("c")).unwrap()).unwrap();
+        assert_eq!((rect.width, rect.height), (40.0, 20.0));
+        let (reds, blues) = count_colored(&mut p);
+        assert_eq!((reds, blues), (40 * 20, 0), "the canvas shows its red fill");
+        // Drawing again changes the picture and asks for a repaint, but not a new document version.
+        p.sync();
+        let version = p.doc.borrow().version;
+        let (_, repaint) = p.eval("ctx.fillStyle = '#0000ff'; ctx.fillRect(0, 0, 20, 20);");
+        assert_eq!(p.doc.borrow().version, version, "drawing doesn't touch the document");
+        assert!(repaint, "a canvas drawn on makes the page repaint");
+        assert!(!p.sync(), "and only once");
+        let (reds, blues) = count_colored(&mut p);
+        assert_eq!((reds, blues), (20 * 20, 20 * 20));
+        // Resizing clears the canvas and re-lays-out the box.
+        js(&mut p, "document.getElementById('c').width = 10;");
+        assert_eq!(count_colored(&mut p), (0, 0));
+        let rect = p.view.borrow_mut().layout().node_rect(p.doc.borrow().find(|n| n.attr("id") == Some("c")).unwrap()).unwrap();
+        assert_eq!(rect.width, 10.0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn inline_svg_paints_follows_color_and_changes_with_scripts() {
+        let (mut p, path) = page(
+            r##"<style>.t { fill: #ff0000 } #cur { color: #0000ff }</style><body style="margin:0">
+                 <svg id="a" width="20" height="10" viewBox="0 0 20 10"><rect class="t" width="20" height="10" fill="#00ff00"/></svg>
+                 <svg id="cur" width="10" height="10"><rect id="c" width="10" height="10" fill="currentColor"/></svg>
+               </body>"##,
+            "svg-inline",
+        );
+        let rect = p.view.borrow_mut().layout().node_rect(p.doc.borrow().find(|n| n.attr("id") == Some("a")).unwrap()).unwrap();
+        assert_eq!((rect.width, rect.height), (20.0, 10.0), "sized by its width and height");
+        let (reds, blues) = count_colored(&mut p);
+        // The page rule beats the fill attribute (20x10 red) and currentColor takes the CSS colour (10x10 blue).
+        assert_eq!((reds, blues), (200, 100));
+        // A script changes the SVG: it repaints with the new picture.
+        js(&mut p, "document.getElementById('c').setAttribute('fill', '#ff0000');");
+        let (reds, blues) = count_colored(&mut p);
+        assert_eq!((reds, blues), (300, 0));
+        // An SVG made by script (createElementNS keeps the camel-case names the format needs).
+        js(
+            &mut p,
+            r##"const ns = 'http://www.w3.org/2000/svg';
+               const s = document.createElementNS(ns, 'svg'); s.setAttribute('width', 30); s.setAttribute('height', 10); s.setAttribute('viewBox', '0 0 3 1');
+               const r = document.createElementNS(ns, 'rect'); r.setAttribute('width', 3); r.setAttribute('height', 1); r.setAttribute('fill', '#0000ff');
+               s.appendChild(r); document.body.appendChild(s);"##,
+        );
+        let (_, blues) = count_colored(&mut p);
+        // 30x10 blue (the viewBox is scaled up), give or take the antialiased edges of a fractional position.
+        assert!((280..=300).contains(&blues), "the new svg is painted blue: {blues}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn img_and_backgrounds_take_svg_files() {
+        let svg = "data:image/svg+xml;utf8,<svg%20xmlns=%22http://www.w3.org/2000/svg%22%20width=%2210%22%20height=%2210%22><rect%20width=%2210%22%20height=%2210%22%20fill=%22%23ff0000%22/></svg>";
+        let (mut p, path) = page(
+            &format!(r#"<body style="margin:0"><img id="i" src="{svg}"><div style="width:10px;height:10px;background:url({svg})"></div></body>"#),
+            "svg-img",
+        );
+        let rect = p.view.borrow_mut().layout().node_rect(p.doc.borrow().find(|n| n.attr("id") == Some("i")).unwrap()).unwrap();
+        assert_eq!((rect.width, rect.height), (10.0, 10.0), "an svg image has its own size");
+        assert_eq!(count_colored(&mut p).0, 200, "both the <img> and the background show it");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn filters_clip_paths_masks_and_blend_modes_change_the_pixels() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0;background:#ffffff">
+               <div style="position:absolute;left:0;top:0;width:40px;height:40px;background:#ff0000;filter:grayscale(1)"></div>
+               <div style="position:absolute;left:50px;top:0;width:40px;height:40px;background:#ff0000;clip-path:circle(50%)"></div>
+               <div style="position:absolute;left:100px;top:0;width:40px;height:40px;background:#000000;mask-image:linear-gradient(90deg,#000,transparent)"></div>
+               <div style="position:absolute;left:150px;top:0;width:40px;height:40px;background:#ffff00"></div>
+               <div style="position:absolute;left:150px;top:0;width:40px;height:40px;background:#00ffff;mix-blend-mode:multiply"></div>
+               <div style="position:absolute;left:200px;top:0;width:40px;height:40px;background:#ff0000;visibility:hidden"></div>
+               </body>"#,
+            "effects",
+        );
+        let mut buf = vec![0u8; 300 * 60 * 4];
+        p.paint(&mut buf, 300, 60, 1.0);
+        let px = |x: u32, y: u32| {
+            let at = ((y * 300 + x) * 4) as usize;
+            [buf[at + 2], buf[at + 1], buf[at]]
+        };
+        let gray = px(20, 20);
+        assert!(gray[0].abs_diff(gray[1]) < 3 && gray[1].abs_diff(gray[2]) < 3 && gray[0] > 30 && gray[0] < 120, "grayscale: {gray:?}");
+        assert_eq!(px(70, 20), [255, 0, 0], "inside the circle");
+        assert_eq!(px(51, 1), [255, 255, 255], "the circle's corner is clipped");
+        let (left, right) = (px(101, 20), px(138, 20));
+        assert!(left[0] < 40 && right[0] > 215, "the mask fades the black box out to the right: {left:?} {right:?}");
+        assert_eq!(px(170, 20), [0, 255, 0], "yellow multiplied by cyan is green");
+        assert_eq!(px(220, 20), [255, 255, 255], "visibility: hidden draws nothing");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A mono 8 kHz, 16-bit WAV of `ms` milliseconds of silence.
+    fn silent_wav(ms: u32) -> Vec<u8> {
+        let data = 8 * ms * 2;
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&(36 + data).to_le_bytes());
+        v.extend_from_slice(b"WAVEfmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&[1, 0, 1, 0]);
+        v.extend_from_slice(&8000u32.to_le_bytes());
+        v.extend_from_slice(&16000u32.to_le_bytes());
+        v.extend_from_slice(&[2, 0, 16, 0]);
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&data.to_le_bytes());
+        v.resize(v.len() + data as usize, 0);
+        v
+    }
+
+    #[test]
+    fn html5_drag_and_drop_fires_the_events_and_carries_data() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="src" draggable="true" style="width:60px;height:40px;background:#c33">drag me</div>
+               <div id="ok" style="position:absolute;left:200px;top:0;width:80px;height:80px;background:#3a3"></div>
+               <div id="no" style="position:absolute;left:300px;top:0;width:80px;height:80px;background:#999"></div>
+               <div id="plain" style="width:60px;height:20px">not draggable</div>
+               <script>
+                 window.log = [];
+                 const note = (e) => log.push(e.type + ':' + e.target.id);
+                 const src = document.getElementById('src'), ok = document.getElementById('ok'), no = document.getElementById('no');
+                 src.addEventListener('dragstart', (e) => { note(e); e.dataTransfer.setData('text/plain', 'payload'); e.dataTransfer.effectAllowed = 'copy'; });
+                 src.addEventListener('dragend', (e) => { note(e); log.push('effect=' + e.dataTransfer.dropEffect); });
+                 for (const t of ['dragenter', 'dragleave']) { ok.addEventListener(t, note); no.addEventListener(t, note); }
+                 ok.addEventListener('dragover', (e) => { e.preventDefault(); });
+                 ok.addEventListener('drop', (e) => { note(e); log.push('got=' + e.dataTransfer.getData('text/plain') + ',' + e.dataTransfer.types.join()); });
+                 no.addEventListener('dragover', () => {});
+                 no.addEventListener('drop', note);
+               </script></body>"#,
+            "dnd",
+        );
+        let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+        let (sx, sy) = center(&p, "src");
+        // Over a plain element nothing starts, however far the pointer goes.
+        let (px, py) = center(&p, "plain");
+        p.pointer_moved(px, py);
+        p.press();
+        p.pointer_moved(px + 50.0, py + 50.0);
+        p.release();
+        assert_eq!(ev(&mut p, "log.join()"), "");
+        // Accepted drop.
+        p.pointer_moved(sx, sy);
+        p.press();
+        p.pointer_moved(sx + 2.0, sy);
+        assert!(p.dnd.is_none(), "a tiny move is still a click");
+        p.pointer_moved(sx + 20.0, sy);
+        assert!(p.dnd.is_some());
+        let (ox, oy) = center(&p, "ok");
+        p.pointer_moved(ox, oy);
+        assert_eq!(p.cursor(), nile_style::Cursor::Move);
+        p.release();
+        let log = ev(&mut p, "log.join()");
+        assert!(log.starts_with("dragstart:src,dragenter:ok"), "{log}");
+        assert!(log.contains("drop:ok") && log.contains("got=payload,text/plain"), "{log}");
+        assert!(log.ends_with("dragend:src,effect=copy"), "{log}");
+        assert!(p.dnd.is_none());
+        // A zone that doesn't accept: no drop, and the drag ends with no effect.
+        ev(&mut p, "log.length = 0");
+        p.pointer_moved(sx, sy);
+        p.press();
+        p.pointer_moved(sx + 20.0, sy);
+        let (nx, ny) = center(&p, "no");
+        p.pointer_moved(nx, ny);
+        assert_eq!(p.cursor(), nile_style::Cursor::NotAllowed);
+        p.release();
+        let log = ev(&mut p, "log.join()");
+        assert!(!log.contains("drop:no") && log.contains("dragleave:no") && log.ends_with("effect=none"), "{log}");
+        // Escape cancels.
+        ev(&mut p, "log.length = 0");
+        p.pointer_moved(sx, sy);
+        p.press();
+        p.pointer_moved(sx + 20.0, sy);
+        p.pointer_moved(ox, oy);
+        p.key("keydown", "Escape".to_string(), ModifiersState::default());
+        p.release();
+        let log = ev(&mut p, "log.join()");
+        assert!(!log.contains("drop:ok") && log.ends_with("effect=none"), "{log}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn audio_elements_and_the_sciter_audio_class_play_and_end() {
+        std::env::set_var("NILE_AUDIO", "off");
+        let dir = std::env::temp_dir().join(format!("nile-audio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("beep.wav"), silent_wav(250)).unwrap();
+        let path = dir.join("index.html");
+        std::fs::write(
+            &path,
+            r#"<body><audio id="a" src="beep.wav"></audio><script>
+                 window.log = [];
+                 const a = document.getElementById('a');
+                 for (const t of ['loadedmetadata', 'play', 'pause', 'ended']) a.addEventListener(t, () => log.push(t));
+                 window.dur = a.duration;
+                 a.volume = 0.5;
+                 a.play().then(() => log.push('started'));
+                 Audio.load(__DIR__ + '/beep.wav').then(async (s) => { log.push('loaded'); await s.play(); log.push('sciter-done'); });
+                 window.missing = 'pending';
+                 Audio.load('nope.wav').catch((e) => { window.missing = 'rejected'; });
+               </script></body>"#,
+        )
+        .unwrap();
+        let mut p = Page::load(path, (600.0, 300.0), 0.0);
+        p.layout(600.0, 300.0);
+        assert!((js(&mut p, "dur").parse::<f64>().unwrap() - 0.25).abs() < 0.01, "duration from the file");
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until && !js(&mut p, "log.join()").contains("sciter-done") {
+            std::thread::sleep(Duration::from_millis(30));
+            p.tick();
+        }
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(10));
+            p.tick();
+        }
+        let log = js(&mut p, "log.join()");
+        // One `error:` line, so CI's failure annotation shows what happened.
+        eprintln!("error: audio test log: {log}");
+        for expect in ["loadedmetadata", "play", "started", "ended", "loaded", "sciter-done"] {
+            assert!(log.contains(expect), "{expect} in {log}");
+        }
+        let ended_at = log.find("ended").unwrap();
+        assert!(log.find("sciter-done").unwrap() > log.find("loaded").unwrap(), "{log}");
+        assert!(ended_at > log.find("play").unwrap(), "{log}");
+        assert_eq!(js(&mut p, "a.ended + ',' + a.paused + ',' + a.volume"), "true,true,0.5");
+        assert_eq!(js(&mut p, "missing"), "rejected");
+        assert_eq!(js(&mut p, "(new Audio(__DIR__ + '/beep.wav')) instanceof Audio && !(a instanceof HTMLElement === false)"), "true");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn canvas_draws_an_img_by_its_src() {
+        // A 1x1 red PNG as a data URL.
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+        let (mut p, path) = page(
+            &format!(
+                r#"<body style="margin:0"><img id="i" src="data:image/png;base64,{png}" style="display:none"><canvas id="c" width="10" height="10"></canvas><script>
+                     const c = document.getElementById('c').getContext('2d');
+                     c.drawImage(document.getElementById('i'), 0, 0, 10, 10);
+                     window.info = document.getElementById('i').naturalWidth + 'x' + document.getElementById('i').naturalHeight;
+                   </script></body>"#
+            ),
+            "canvas-img",
+        );
+        assert_eq!(js(&mut p, "info"), "1x1");
+        let (reds, _) = count_colored(&mut p);
+        assert!(reds >= 90, "the image fills the canvas: {reds}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn media_query_lists_fire_change_when_the_window_resizes() {
+        let (mut p, path) = page(
+            r#"<body><script>
+                 window.log = [];
+                 matchMedia('(min-width: 700px)').addEventListener('change', (e) => log.push(e.matches));
+               </script></body>"#,
+            "mql-resize",
+        );
+        p.layout(800.0, 300.0);
+        p.run_timers();
+        p.layout(500.0, 300.0);
+        p.run_timers();
+        assert_eq!(js(&mut p, "log.join(',')"), "true,false");
         let _ = std::fs::remove_file(path);
     }
 

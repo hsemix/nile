@@ -32,9 +32,19 @@ impl ScriptHost {
         );
         Ok(())
     }
-    /// Nearest ancestor nile.json supplies application-relative extension configuration.
+    /// The nearest `nile.json` in the page's folder or above supplies the application's extension
+    /// configuration. The search never reaches the filesystem root, the user's home folder or a
+    /// folder above it, so a stray `nile.json` there cannot load native code into every page below.
     pub fn discover_extensions(&self, page: &Path) -> Result<(), String> {
-        for dir in page.parent().unwrap_or(Path::new(".")).ancestors() {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from);
+        let home = home.map(|h| nile_dom::vfs::canonicalize(&h).unwrap_or(h));
+        // Absolute, so a page given as a bare file name still finds the folder's configuration.
+        let start = page.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let start = nile_dom::vfs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
+        for dir in start.ancestors() {
+            if too_broad(dir, home.as_deref()) {
+                break;
+            }
             let file = dir.join("nile.json");
             if nile_dom::vfs::exists(&file) {
                 return self.configure_extensions(&file);
@@ -115,5 +125,28 @@ impl ScriptHost {
                 f.call::<_, ()>((packet,))
             });
         }
+    }
+}
+
+/// A folder too general to hold one application's configuration: a filesystem root, the home
+/// folder, or one of its parents.
+fn too_broad(dir: &Path, home: Option<&Path>) -> bool {
+    dir.parent().is_none() || home.is_some_and(|h| h.starts_with(dir))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::too_broad;
+    use std::path::Path;
+
+    #[test]
+    fn the_search_stops_at_roots_and_the_home_folder() {
+        let home = Path::new("/Users/ada");
+        assert!(too_broad(Path::new("/"), Some(home)));
+        assert!(too_broad(Path::new("/Users"), Some(home)));
+        assert!(too_broad(home, Some(home)));
+        assert!(!too_broad(Path::new("/Users/ada/app"), Some(home)));
+        assert!(!too_broad(Path::new("/opt/app"), Some(home)));
+        assert!(!too_broad(Path::new("/opt"), None));
     }
 }

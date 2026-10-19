@@ -4,6 +4,12 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 fn success(output: Output) -> Output {
+    if !output.status.success() {
+        // One `error:` line per output line, so CI's failure annotation shows the cause.
+        for line in String::from_utf8_lossy(&output.stdout).lines().chain(String::from_utf8_lossy(&output.stderr).lines()) {
+            eprintln!("error: packed test command: {line}");
+        }
+    }
     assert!(
         output.status.success(),
         "stdout={} stderr={}",
@@ -59,7 +65,7 @@ fn app(root: &Path, id: &str, version: &str, external: bool) {
         sys.fs.writeFileSync(sys.getenv('NILE_TEST_REPORT'), JSON.stringify({ok:true, rows:rows.length, events, dataPath:application.dataPath, asset:__FILE__}));
         // Context disposal must stop both an active event source and active SQL VM.
         db.query('WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<1000000000) SELECT sum(x) FROM c').catch(() => {});
-      })().catch(error => { sys.fs.writeFileSync(sys.getenv('NILE_TEST_REPORT'), JSON.stringify({error:String(error.stack||error)})); });
+      })().catch(error => { sys.fs.writeFileSync(sys.getenv('NILE_TEST_REPORT'), JSON.stringify({error:String(error)+' '+String(error.stack||'')})); });
     </script></body></html>"#).unwrap();
 }
 fn pack(root: &Path, output: &Path) {
@@ -78,7 +84,8 @@ fn launch(exe: &Path, root: &Path, report: &str) -> std::process::Child {
         .current_dir(root.join("other-cwd"))
         .args(["--png"])
         .arg(root.join(format!("{report}.png")))
-        .args(["--wait", "1200"])
+        // A slow CI runner needs seconds, not one: the script ends the wait early only once it has no work pending.
+        .args(["--wait", "5000"])
         .env("NILE_NATIVE_CACHE_HOME", root.join("cache"))
         .env("NILE_APP_DATA_HOME", root.join("data"))
         .env("NILE_TEST_REPORT", root.join(report))
@@ -93,6 +100,12 @@ fn report(root: &Path, name: &str) -> Value {
             .expect("packed script must execute and write exact results"),
     )
     .unwrap();
+    if value["ok"] != true {
+        // `error:` lines reach CI's failure annotations; the panic message does not.
+        for line in format!("packed test report {name}: {value:#}").lines() {
+            eprintln!("error: {line}");
+        }
+    }
     assert_eq!(value["ok"], true, "{value}");
     assert!(value["events"].as_u64().unwrap() >= 2);
     assert!(
@@ -125,7 +138,7 @@ fn objects(root: &Path) -> Vec<PathBuf> {
 #[test]
 fn produced_executable_runs_packed_modules_persists_data_and_rebuilds_cache_safely() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = support::canonical(temp.path());
     let source = root.join("source");
     app(&source, "org.nile.packed-test", "1", false);
     std::fs::create_dir(root.join("other-cwd")).unwrap();
@@ -187,7 +200,7 @@ fn produced_executable_runs_packed_modules_persists_data_and_rebuilds_cache_safe
 #[test]
 fn explicit_external_mode_loads_verified_native_files_beside_packed_executable() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = support::canonical(temp.path());
     let source = root.join("source");
     app(&source, "org.nile.external-test", "1", true);
     std::fs::create_dir(root.join("other-cwd")).unwrap();
@@ -335,7 +348,7 @@ EXPORT NileStatus nile_extension_init(const NileExtensionApi *host,NileExtension
 #[test]
 fn packed_companion_dependency_is_loaded_from_preserved_native_layout() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = support::canonical(temp.path());
     let source = root.join("source");
     companion_package(&source.join("extension"));
     std::fs::write(source.join("nile.json"), json!({"application":{"id":"org.nile.companion-test","version":"1"},"extensions":{"@companion":"extension"}}).to_string()).unwrap();
@@ -373,7 +386,7 @@ fn packed_companion_dependency_is_loaded_from_preserved_native_layout() {
 #[test]
 fn missing_native_dependency_fails_before_writing_executable() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = support::canonical(temp.path());
     let source = root.join("source");
     companion_package(&source.join("extension"));
     std::fs::write(source.join("nile.json"), json!({"application":{"id":"org.nile.missing-test","version":"1"},"extensions":{"@companion":"extension"}}).to_string()).unwrap();
@@ -405,7 +418,7 @@ fn missing_native_dependency_fails_before_writing_executable() {
 #[test]
 fn explicit_bundle_resources_mode_keeps_native_files_in_application_bundle() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = support::canonical(temp.path());
     let source = root.join("source");
     app(&source, "org.nile.bundle-test", "1", true);
     let config = source.join("nile.json");

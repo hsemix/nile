@@ -1,0 +1,41 @@
+<!doctype html><meta charset="utf-8"><title>drag and drop</title>
+<style>
+body{margin:16px;font:14px sans-serif;background:#f4f2ee}
+.board{display:flex;gap:14px}
+.col{width:200px;min-height:230px;background:#e6e3dc;border-radius:8px;padding:8px}
+.col h4{margin:2px 4px 8px;color:#555}
+.col.over{background:#d6e4f5;outline:2px dashed #36c}
+.card{background:#fff;border-radius:6px;padding:9px 10px;margin-bottom:8px;box-shadow:0 1px 2px #0003;cursor:grab}
+.drop{margin-top:16px;width:420px;height:70px;border:2px dashed #999;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#777}
+.drop.over{border-color:#3a3;background:#e6f5e6}
+#log{margin-top:10px;font:12px monospace;color:#555;white-space:pre-wrap;min-height:48px}
+</style>
+<p>Drag cards between columns. The page below also accepts files dropped from the desktop.</p>
+<div class="board">
+ <div class="col" id="todo"><h4>To do</h4><div class="card" draggable="true" id="a">Write the guide</div><div class="card" draggable="true" id="b">Fix the layout bug</div><div class="card" draggable="true" id="c">Ship 0.2</div></div>
+ <div class="col" id="doing"><h4>Doing</h4><div class="card" draggable="true" id="d">Review drag and drop</div></div>
+ <div class="col" id="done"><h4>Done</h4></div>
+</div>
+<div class="drop" id="files">Drop files here</div>
+<div id="log"></div>
+<script>
+const $ = (s) => document.querySelector(s), log = (m) => { $('#log').textContent = m + '\n' + $('#log').textContent.split('\n').slice(0, 3).join('\n'); };
+for (const card of document.querySelectorAll('.card')) {
+  card.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', card.id); e.dataTransfer.effectAllowed = 'move'; card.style.opacity = '.4'; });
+  card.addEventListener('dragend', () => { card.style.opacity = ''; });
+}
+for (const col of document.querySelectorAll('.col')) {
+  col.addEventListener('dragenter', () => col.classList.add('over'));
+  col.addEventListener('dragleave', (e) => { if (!col.contains(e.relatedTarget)) col.classList.remove('over'); });
+  col.addEventListener('dragover', (e) => e.preventDefault());
+  col.addEventListener('drop', (e) => {
+    e.preventDefault(); col.classList.remove('over');
+    const card = document.getElementById(e.dataTransfer.getData('text/plain'));
+    if (card) { col.appendChild(card); log('moved "' + card.textContent + '" to ' + col.querySelector('h4').textContent); }
+  });
+}
+const files = $('#files');
+files.addEventListener('dragover', (e) => { e.preventDefault(); files.classList.add('over'); });
+files.addEventListener('dragleave', () => files.classList.remove('over'));
+files.addEventListener('drop', (e) => { e.preventDefault(); files.classList.remove('over'); log('dropped ' + [...e.dataTransfer.files].map((f) => f.name).join(', ')); });
+</script>

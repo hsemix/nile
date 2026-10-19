@@ -25,6 +25,7 @@ Put window attributes on `<html>`:
 | `window-alignment` | Numeric-keypad 1–9; 5 center, 7 top-left |
 | `window-frame` | default/standard, extended, solid/solid-with-shadow, transparent |
 | `window-icon` | Supported image resource for window icon |
+| `window-remember` | Nile extension: remember size, position and maximized state between runs under this name (bare = `main`; `false` = off) |
 
 Extended titlebar content is platform-dependent. Solid frames require your own
 chrome; solid-with-shadow does not add a native shadow. Desktop alpha depends
@@ -166,7 +167,8 @@ Examples: [popups](../../examples/popups.html), [menubar](../../examples/menubar
 ## Native application menus
 
 Assign a hidden `<menu>` tree to `Window.this.menu`. Native menu bars are
-supported on macOS/Windows; Linux needs an application-drawn menu.
+supported on macOS/Windows; on Linux the same markup is drawn as a bar in the window
+(see the controls guide).
 
 ```html
 <menu id="app" style="display:none">

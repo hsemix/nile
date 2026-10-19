@@ -8,14 +8,17 @@
 //! - inheritance of text properties
 
 mod anim;
+mod color;
 mod colors;
 mod gradient;
 mod grid;
 mod page;
 mod parse;
 mod selector;
+mod effects;
 mod shape;
 mod system;
+pub use effects::{parse_filter, Blend, FilterFn, ObjectFit};
 pub use shape::{Dim as ShapeDim, RefBox as ShapeBox, Resolved as ResolvedShape, Shape, ShapeOutside};
 
 use nile_dom::{Document, NodeId, NodeKind};
@@ -32,8 +35,16 @@ pub use page::{resolve as resolve_page, MarginBox, MarginPlace, PageStyle, Piece
 pub use grid::{area_lines, Breadth, GridAutoFlow, GridLine, GridPlace, Track, TrackItem, TrackRepeat};
 pub use gradient::{TransformFn, ColorStop, Extent, Gradient, GradientKind, LinearDir, StopPos};
 pub use parse::{color_from_hex, Declaration, FontFace, Rule, Stylesheet, Value};
+
+/// A CSS colour written as text (`#f80`, `rgb(...)`, `tomato`, a system colour...), for embedders
+/// and scripts that take colours as strings (the canvas's `fillStyle`).
+pub fn parse_color(css: &str) -> Option<Color> {
+    let used = Cell::new(false);
+    let cx = parse::Cx { viewport: (0.0, 0.0), uses_viewport: &used };
+    parse::parse_values(css.trim(), &cx).first().and_then(Value::color)
+}
 use parse::Cx;
-pub use system::{default_accent, parse_hex, set_system_theme, system_color, system_theme, text_on, ColorScheme, Palette, SystemTheme};
+pub use system::{default_accent, parse_hex, set_system_theme, system_color, system_theme, text_on, used_dark, ColorScheme, Palette, SystemTheme};
 pub use selector::{ElementRef, InteractionState, NileImpl, PseudoClass, PseudoElement, Query};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -116,6 +127,81 @@ pub enum BorderStyle {
     Solid,
     Dashed,
     Dotted,
+}
+
+/// `scroll-snap-type`: which axes snap and whether it is `mandatory` (else `proximity`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScrollSnap {
+    pub x: bool,
+    pub y: bool,
+    pub mandatory: bool,
+}
+
+/// `scroll-snap-align` on one axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SnapAlign {
+    #[default]
+    None,
+    Start,
+    Center,
+    End,
+}
+
+/// `word-break`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WordBreak {
+    #[default]
+    Normal,
+    BreakAll,
+    KeepAll,
+}
+
+/// `overflow-wrap` / `word-wrap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverflowWrap {
+    #[default]
+    Normal,
+    Anywhere,
+    BreakWord,
+}
+
+/// `text-decoration-style`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecoStyle {
+    #[default]
+    Solid,
+    Double,
+    Dotted,
+    Dashed,
+    Wavy,
+}
+
+/// `text-wrap`: `balance` evens the lines of a short paragraph out; `pretty` is read as `wrap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextWrap {
+    #[default]
+    Wrap,
+    Balance,
+}
+
+/// How underline and line-through are drawn: `color: None` is the text color, `thickness`/`offset`
+/// `None` is the font's own.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DecoLook {
+    pub style: DecoStyle,
+    pub color: Option<Color>,
+    pub thickness: Option<f32>,
+    pub offset: Option<f32>,
+}
+
+/// `outline`: a line drawn outside the border box that takes no space. `color: None` is
+/// `currentColor`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Outline {
+    pub width: f32,
+    pub style: BorderStyle,
+    pub color: Option<Color>,
+    pub offset: f32,
 }
 
 /// `background-size`. `None` in `Explicit` is `auto` for that axis.
@@ -537,6 +623,55 @@ pub struct ComputedStyle {
     pub width_fit: bool,
     /// `cursor`; inherited.
     pub cursor: Cursor,
+    /// `visibility` (inherited): false for `hidden`/`collapse`, which keep the box's space but
+    /// draw and hit-test nothing of its own.
+    pub visible: bool,
+    /// `pointer-events` (inherited): false for `none`.
+    pub pointer_events: bool,
+    /// `order` of a flex or grid item.
+    pub order: i32,
+    pub outline: Outline,
+    /// `filter` functions, applied to the element and its subtree.
+    pub filter: Vec<FilterFn>,
+    /// `backdrop-filter`: applied to what is behind the element, inside its border box.
+    pub backdrop_filter: Vec<FilterFn>,
+    /// `clip-path` basic shape (its reference box defaults to the border box).
+    pub clip_path: Option<ShapeOutside>,
+    pub blend: Blend,
+    /// `isolation: isolate`.
+    pub isolate: bool,
+    /// `mask-image` / `-webkit-mask-image` gradient, over the border box.
+    pub mask_image: Option<Gradient>,
+    pub object_fit: ObjectFit,
+    pub object_position: (StopPos, StopPos),
+    /// `counter-reset`, `counter-increment`, `counter-set`: (name, value) in declaration order.
+    pub counter_reset: Vec<(String, i32)>,
+    pub counter_increment: Vec<(String, i32)>,
+    pub counter_set: Vec<(String, i32)>,
+    pub scroll_snap_type: ScrollSnap,
+    /// `scroll-snap-align` as (horizontal, vertical).
+    pub scroll_snap_align: (SnapAlign, SnapAlign),
+    /// `scroll-padding`: the part of a scroll container's edges snapping ignores.
+    pub scroll_padding: Edges<f32>,
+    /// `word-spacing` in px (inherited).
+    pub word_spacing: f32,
+    pub word_break: WordBreak,
+    pub overflow_wrap: OverflowWrap,
+    /// `text-decoration-style`/`-color`/`-thickness` and `text-underline-offset`.
+    pub deco: DecoLook,
+    /// `text-shadow` (inherited); `blur` is the blur radius, `spread` and `inset` are unused.
+    pub text_shadow: Vec<BoxShadow>,
+    /// `text-indent` in px: the first line of a block starts this far in (inherited).
+    pub text_indent: f32,
+    /// `caret-color`; `None` is `auto` (the text color).
+    pub caret_color: Option<Color>,
+    /// `-webkit-line-clamp`: lines shown before an ellipsis.
+    pub line_clamp: Option<u32>,
+    pub text_wrap: TextWrap,
+    /// OpenType feature tags from `font-variant*` (`"smcp" 1, "tnum" 1`), inherited.
+    pub font_variant: String,
+    /// `aspect-ratio` (width / height); `None` is `auto`.
+    pub aspect_ratio: Option<f32>,
     /// `color-scheme`; inherited. Only the root's counts for the user-agent sheet.
     pub color_scheme: ColorScheme,
     /// `accent-color` (`None` = auto: the system accent); inherited.
@@ -683,6 +818,35 @@ impl Default for ComputedStyle {
             table_fixed: false,
             vertical_align: VerticalAlign::Baseline,
             cursor: Cursor::Auto,
+            visible: true,
+            pointer_events: true,
+            order: 0,
+            outline: Outline::default(),
+            counter_reset: Vec::new(),
+            counter_increment: Vec::new(),
+            counter_set: Vec::new(),
+            filter: Vec::new(),
+            backdrop_filter: Vec::new(),
+            clip_path: None,
+            blend: Blend::Normal,
+            isolate: false,
+            mask_image: None,
+            object_fit: ObjectFit::Fill,
+            object_position: (StopPos::Fraction(0.5), StopPos::Fraction(0.5)),
+            scroll_snap_type: ScrollSnap::default(),
+            scroll_snap_align: (SnapAlign::None, SnapAlign::None),
+            scroll_padding: Edges::default(),
+            word_spacing: 0.0,
+            word_break: WordBreak::Normal,
+            overflow_wrap: OverflowWrap::Normal,
+            deco: DecoLook::default(),
+            text_shadow: Vec::new(),
+            text_indent: 0.0,
+            caret_color: None,
+            line_clamp: None,
+            text_wrap: TextWrap::Wrap,
+            font_variant: String::new(),
+            aspect_ratio: None,
             width_fit: false,
             color_scheme: ColorScheme::Light,
             accent_color: None,
@@ -932,6 +1096,17 @@ impl ComputedStyle {
             border_collapse: parent.border_collapse,
             caption_bottom: parent.caption_bottom,
             cursor: parent.cursor,
+            visible: parent.visible,
+            pointer_events: parent.pointer_events,
+            word_spacing: parent.word_spacing,
+            word_break: parent.word_break,
+            overflow_wrap: parent.overflow_wrap,
+            deco: parent.deco,
+            text_shadow: parent.text_shadow.clone(),
+            text_indent: parent.text_indent,
+            caret_color: parent.caret_color,
+            text_wrap: parent.text_wrap,
+            font_variant: parent.font_variant.clone(),
             color_scheme: parent.color_scheme,
             accent_color: parent.accent_color,
             selection_bg: parent.selection_bg,
@@ -946,7 +1121,7 @@ pub(crate) const ROOT_FONT_SIZE: f32 = 16.0;
 
 const UA_STYLESHEET: &str = r#"
 head, script, style, title, meta, link, option, optgroup { display: none }
-img { display: inline-block }
+img, canvas, svg { display: inline-block }
 [selectable] { user-select: text }
 [contenteditable]:not([contenteditable=false]) { user-select: text; cursor: text }
 html, body, div, p, h1, h2, h3, section, header, footer, main, nav, ul { display: block }
@@ -972,6 +1147,18 @@ popup > menu, popup > menu.popup, popup > menu.context { display: block; border:
 menu.popup > li, menu.context > li, popup > menu > li { display: block; list-style: none; padding: 4px 18px; cursor: default }
 menu.popup > li.nile-hover, menu.context > li.nile-hover, popup > menu > li.nile-hover { background: @ACCENT@; color: @ACCENT_TEXT@ }
 menu.popup > li[disabled], menu.context > li[disabled], popup > menu > li[disabled] { color: #999; background: transparent !important }
+.nile-menubar { display: flex; flex-direction: row; position: sticky; top: 0; z-index: 2147482000; margin: 0; padding: 0 4px; background: Canvas; color: CanvasText; border-bottom: 1px solid rgba(128,128,128,0.35); font: 13px sans-serif; user-select: none; -webkit-user-select: none }
+.nile-menubar-item { display: block; padding: 5px 10px; cursor: default }
+.nile-menubar-item.nile-open { background: @ACCENT@; color: @ACCENT_TEXT@ }
+.nile-menubar-item.nile-disabled, .nile-menu-row.nile-disabled { color: GrayText }
+.nile-menu { display: block; position: fixed; z-index: 2147483000; min-width: 160px; padding: 4px 0; background: Canvas; color: CanvasText; border: 1px solid rgba(128,128,128,0.5); border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,0.28); font: 13px sans-serif; user-select: none; -webkit-user-select: none }
+.nile-menu-row { display: flex; flex-direction: row; align-items: center; padding: 4px 12px 4px 6px; cursor: default; white-space: nowrap }
+.nile-menu-row.nile-hover { background: @ACCENT@; color: @ACCENT_TEXT@ }
+.nile-mi-mark { width: 18px; text-align: center }
+.nile-mi-label { flex: 1; padding-right: 24px }
+.nile-mi-key { color: GrayText; font-size: 12px }
+.nile-menu-row.nile-hover .nile-mi-key { color: inherit }
+.nile-menu-sep { height: 1px; margin: 4px 0; background: rgba(128,128,128,0.35) }
 .nile-picker { display: block; background: #fff; color: #222; border: 1px solid #b4b8c0; border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,0.25); padding: 8px; font: 13px sans-serif }
 .nile-picker button { font: inherit; color: inherit; background: transparent; border: 0; border-radius: 4px; padding: 0; margin: 0; box-shadow: none; min-height: 0; cursor: default }
 .nile-picker .np-head { display: flex; align-items: center; margin-bottom: 4px }
@@ -1019,6 +1206,8 @@ frame { display: block; height: 150px; border: 0 }
 frameset { display: grid; height: 100%; min-height: 150px }
 frameset > * { min-width: 0; min-height: 0 }
 frameset > frame { height: auto }
+audio { display: none }
+[hidden] { display: none }
 splitter { display: block; background: #c8c8c8; cursor: col-resize }
 frameset[rows] > splitter { cursor: row-resize }
 iframe { display: inline-block; width: 300px; height: 150px; border: 0 }
@@ -1292,8 +1481,11 @@ pub struct StyleMap {
     page_bar: ScrollbarLook,
     /// Some element has a `prototype` (a script class bound from CSS).
     pub has_prototypes: bool,
-    /// The dark user-agent sheet is in use (the system is dark and the page supports it).
+    /// The page (its root element) is dark: its `color-scheme` allows it and the system agrees, or
+    /// it asks for dark only. Elements with their own `color-scheme` can differ.
     pub dark: bool,
+    /// The scheme a `<meta name="color-scheme">` asks for, the root element's default.
+    meta_scheme: ColorScheme,
     /// `@keyframes` by name.
     pub(crate) keyframes: HashMap<String, Vec<parse::Frame>>,
     /// `@page` rules (selector, body) in source order.
@@ -1346,6 +1538,85 @@ struct Generated {
     contents: HashMap<NodeId, String>,
     markers: HashMap<NodeId, MarkerStyle>,
     scrollbars: HashMap<NodeId, ScrollbarParts>,
+    /// The CSS counters in scope while the cascade walks the tree (see `Counter`).
+    counters: Vec<Counter>,
+    /// Depth of the element being cascaded, the scope level new counters belong to.
+    depth: usize,
+}
+
+/// One instance of a CSS counter; it lives until its parent's subtree ends.
+struct Counter {
+    name: String,
+    value: i32,
+    depth: usize,
+}
+
+impl Generated {
+    /// `counter-reset`, `counter-set` and `counter-increment` of an element, in that order.
+    fn count(&mut self, s: &ComputedStyle) {
+        for (name, v) in &s.counter_reset {
+            // A reset replaces an instance made by an earlier sibling.
+            let depth = self.depth;
+            self.counters.retain(|c| !(c.name == *name && c.depth == depth));
+            self.counters.push(Counter { name: name.clone(), value: *v, depth });
+        }
+        for (name, v) in &s.counter_set {
+            match self.counters.iter_mut().rev().find(|c| c.name == *name) {
+                Some(c) => c.value = *v,
+                None => self.counters.push(Counter { name: name.clone(), value: *v, depth: self.depth }),
+            }
+        }
+        for (name, by) in &s.counter_increment {
+            match self.counters.iter_mut().rev().find(|c| c.name == *name) {
+                Some(c) => c.value = c.value.saturating_add(*by),
+                None => self.counters.push(Counter { name: name.clone(), value: *by, depth: self.depth }),
+            }
+        }
+    }
+}
+
+/// A counter value in a `counter-style` (`decimal`, `decimal-leading-zero`, `lower-alpha`, `upper-roman`...).
+fn format_counter(n: i32, style: &str) -> String {
+    let alpha = |mut n: i32, upper: bool| {
+        if n <= 0 {
+            return n.to_string();
+        }
+        let base = if upper { b'A' } else { b'a' };
+        let mut out = Vec::new();
+        while n > 0 {
+            n -= 1;
+            out.push(base + (n % 26) as u8);
+            n /= 26;
+        }
+        out.reverse();
+        String::from_utf8(out).unwrap_or_default()
+    };
+    let roman = |n: i32, upper: bool| {
+        if !(1..4000).contains(&n) {
+            return n.to_string();
+        }
+        let table = [(1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"), (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")];
+        let (mut n, mut out) = (n, String::new());
+        for (v, r) in table {
+            while n >= v {
+                out.push_str(r);
+                n -= v;
+            }
+        }
+        if upper { out.to_uppercase() } else { out }
+    };
+    match style {
+        "decimal-leading-zero" if (0..10).contains(&n) => format!("0{n}"),
+        "lower-alpha" | "lower-latin" => alpha(n, false),
+        "upper-alpha" | "upper-latin" => alpha(n, true),
+        "lower-roman" => roman(n, false),
+        "upper-roman" => roman(n, true),
+        "disc" => "\u{2022}".into(),
+        "circle" => "\u{25e6}".into(),
+        "square" => "\u{25aa}".into(),
+        "none" => String::new(),
+        _ => n.to_string(),
+    }
 }
 
 /// What a `::marker` rule sets for a list item's marker.
@@ -1363,6 +1634,12 @@ impl ComputedStyle {
     /// Whether `other` differs from `self` only in properties that change how a box is painted,
     /// not where it goes or how it is shaped: colors, shadows, radius, backgrounds, transforms
     /// and opacity. Laid-out boxes stay valid across such a change (see `LayoutTree::refresh_paint`).
+    /// The box is painted as a unit through a layer or clip: a filter, blend mode, mask,
+    /// `clip-path` or isolation. Like `opacity < 1` it confines its descendants.
+    pub fn layered(&self) -> bool {
+        !self.filter.is_empty() || self.blend != Blend::Normal || self.isolate || self.mask_image.is_some() || self.clip_path.is_some()
+    }
+
     pub fn same_layout(&self, other: &ComputedStyle) -> bool {
         self.same_layout_with(other, false)
     }
@@ -1397,6 +1674,25 @@ impl ComputedStyle {
         a.animations = other.animations.clone();
         a.transform_origin = other.transform_origin;
         a.cursor = other.cursor;
+        a.visible = other.visible;
+        a.pointer_events = other.pointer_events;
+        a.outline = other.outline;
+        a.text_shadow = other.text_shadow.clone();
+        a.scroll_snap_type = other.scroll_snap_type;
+        a.scroll_snap_align = other.scroll_snap_align;
+        a.scroll_padding = other.scroll_padding;
+        a.backdrop_filter = other.backdrop_filter.clone();
+        a.object_fit = other.object_fit;
+        a.object_position = other.object_position;
+        // Whether a box is layered (filter, blend, mask, clip) decides its paint order; which one doesn't.
+        if a.layered() == other.layered() {
+            a.filter = other.filter.clone();
+            a.clip_path = other.clip_path.clone();
+            a.blend = other.blend;
+            a.isolate = other.isolate;
+            a.mask_image = other.mask_image.clone();
+        }
+        a.caret_color = other.caret_color;
         a.popup_position = other.popup_position;
         a.break_before = other.break_before;
         a.break_after = other.break_after;
@@ -1453,20 +1749,22 @@ impl StyleMap {
         if self.styles.len() != doc.nodes.len() || !self.pseudo.is_empty() || !self.markers.is_empty() || !self.scrollbars.is_empty() {
             return None;
         }
-        let (ua, author) = sheets_of(doc, viewport, self.dark);
+        let (ua_light, ua_dark) = (ua_sheet(false), ua_sheet(true));
+        let author = sheets_of(doc, viewport);
         let mut caches = SelectorCaches::default();
         let mut ctx = MatchingContext::new(MatchingMode::Normal, None, &mut caches, QuirksMode::NoQuirks, NeedsSelectorFlags::No, MatchingForInvalidation::No);
         let uses_viewport = Cell::new(self.uses_viewport);
-        let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo: false };
+        let cx = CascadeInput { doc, state, ua_light: &ua_light, ua_dark: &ua_dark, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo: false };
         let mut before = Vec::new();
         let mut generated = Generated::default();
         for &root in roots {
             before.extend(doc.descendants(root).into_iter().chain(std::iter::once(root)).map(|n| (n, self.styles[n.0].clone())));
             let inherited = match doc.node(root).parent {
                 Some(p) => self.styles[p.0].clone(),
-                None => ComputedStyle::default(),
+                None => ComputedStyle { color_scheme: self.meta_scheme, ..ComputedStyle::default() },
             };
-            cascade(&cx, &mut ctx, root, &inherited, &mut self.styles, &mut generated);
+            let dark = used_dark(inherited.color_scheme);
+            cascade(&cx, &mut ctx, root, &inherited, dark, &mut self.styles, &mut generated);
         }
         Some(before)
     }
@@ -1567,32 +1865,26 @@ pub fn compute_styles_with(doc: &Document, state: &InteractionState) -> StyleMap
 /// Like [`compute_styles_with`], with `@media` queries and `vw`/`vh` units resolved
 /// against a `viewport` of the given size in px.
 pub fn compute_styles_in(doc: &Document, state: &InteractionState, viewport: (f32, f32)) -> StyleMap {
-    let map = compute_with_scheme(doc, state, viewport, false);
-    // A dark system and a page that supports dark (the root's `color-scheme`, or a `<meta>`): the
-    // dark user-agent sheet replaces the light one, so everything is computed again, only for such pages.
-    if system_theme().dark {
-        let root_dark = doc.find(|n| n.tag() == Some("html")).is_some_and(|h| map.styles[h.0].color_scheme.allows_dark());
-        if root_dark || meta_allows_dark(doc) {
-            return compute_with_scheme(doc, state, viewport, true);
-        }
-    }
-    map
+    compute_with_scheme(doc, state, viewport)
 }
 
-/// `<meta name="color-scheme" content="light dark">`.
-fn meta_allows_dark(doc: &Document) -> bool {
-    doc.nodes.iter().any(|n| {
-        n.tag() == Some("meta")
-            && n.attr("name").is_some_and(|v| v.trim().eq_ignore_ascii_case("color-scheme"))
-            && n.attr("content").is_some_and(|c| ColorScheme::parse(c.split_whitespace().map(|w| w.to_ascii_lowercase()).collect::<Vec<_>>().iter().map(String::as_str)).allows_dark())
-    })
+/// What `<meta name="color-scheme" content="light dark">` asks for (the root element's default).
+fn meta_scheme(doc: &Document) -> ColorScheme {
+    doc.nodes
+        .iter()
+        .find(|n| n.tag() == Some("meta") && n.attr("name").is_some_and(|v| v.trim().eq_ignore_ascii_case("color-scheme")))
+        .and_then(|n| n.attr("content"))
+        .map(|c| ColorScheme::parse(c.split_whitespace().map(|w| w.to_ascii_lowercase()).collect::<Vec<_>>().iter().map(String::as_str)))
+        .unwrap_or_default()
 }
 
-fn compute_with_scheme(doc: &Document, state: &InteractionState, viewport: (f32, f32), dark: bool) -> StyleMap {
-    let (ua, author) = sheets_of(doc, viewport, dark);
+fn compute_with_scheme(doc: &Document, state: &InteractionState, viewport: (f32, f32)) -> StyleMap {
+    let (ua_light, ua_dark) = (ua_sheet(false), ua_sheet(true));
+    let author = sheets_of(doc, viewport);
 
     let mut styles = vec![ComputedStyle::default(); doc.nodes.len()];
-    let root_style = ComputedStyle::default();
+    let meta_scheme = meta_scheme(doc);
+    let root_style = ComputedStyle { color_scheme: meta_scheme, ..ComputedStyle::default() };
     let mut caches = SelectorCaches::default();
     let mut ctx = MatchingContext::new(
         MatchingMode::Normal,
@@ -1612,10 +1904,11 @@ fn compute_with_scheme(doc: &Document, state: &InteractionState, viewport: (f32,
     let pages: Vec<(String, String)> = author.iter().flat_map(|s| s.pages.iter().cloned()).collect();
     let font_faces: Vec<FontFace> = author.iter().flat_map(|s| s.font_faces.iter().cloned()).collect();
     let has_pseudo = author.iter().any(|s| s.rules.iter().any(|r| r.selectors.slice().iter().any(|sel| sel.has_pseudo_element())));
-    let state_deps = StateDeps::of(author.iter().map(|s| &**s).chain(std::iter::once(&*ua)));
-    let cx = CascadeInput { doc, state, ua: &ua, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo };
+    let state_deps = StateDeps::of(author.iter().map(|s| &**s).chain([&*ua_light, &*ua_dark]));
+    let cx = CascadeInput { doc, state, ua_light: &ua_light, ua_dark: &ua_dark, author: &author, viewport, uses_viewport: &uses_viewport, has_pseudo };
     let mut generated = Generated::default();
-    cascade(&cx, &mut ctx, Document::ROOT, &root_style, &mut styles, &mut generated);
+    cascade(&cx, &mut ctx, Document::ROOT, &root_style, used_dark(root_style.color_scheme), &mut styles, &mut generated);
+    let dark = doc.find(|n| n.tag() == Some("html")).map_or_else(|| used_dark(meta_scheme), |h| used_dark(styles[h.0].color_scheme));
     let mut map = StyleMap {
         styles,
         uses_viewport: uses_viewport.get(),
@@ -1631,6 +1924,7 @@ fn compute_with_scheme(doc: &Document, state: &InteractionState, viewport: (f32,
         page_bar: ScrollbarLook { thickness: scrollbar_auto(), thumb: None, thumb_radius: None, track: None },
         has_prototypes: false,
         dark,
+        meta_scheme,
     };
     map.has_prototypes = map.styles.iter().any(|s| s.prototype.is_some());
     let default = map.page_bar;
@@ -1648,9 +1942,8 @@ thread_local! {
 }
 
 /// The user-agent sheet and the document's `<style>` sheets, parsed (or taken from the cache).
-fn sheets_of(doc: &Document, viewport: (f32, f32), dark_scheme: bool) -> (Rc<Stylesheet>, Vec<Rc<Stylesheet>>) {
-    let ua = ua_sheet(dark_scheme);
-    let author = doc
+fn sheets_of(doc: &Document, viewport: (f32, f32)) -> Vec<Rc<Stylesheet>> {
+    doc
         .nodes
         .iter()
         .filter(|n| n.tag() == Some("style"))
@@ -1678,14 +1971,15 @@ fn sheets_of(doc: &Document, viewport: (f32, f32), dark_scheme: bool) -> (Rc<Sty
                 sheet
             })
         })
-        .collect();
-    (ua, author)
+        .collect()
 }
 
 struct CascadeInput<'a> {
     doc: &'a Document,
     state: &'a InteractionState,
-    ua: &'a Stylesheet,
+    ua_light: &'a Stylesheet,
+    /// The user-agent sheet with the dark layer, for elements whose used `color-scheme` is dark.
+    ua_dark: &'a Stylesheet,
     author: &'a [Rc<Stylesheet>],
     viewport: (f32, f32),
     uses_viewport: &'a Cell<bool>,
@@ -1701,9 +1995,11 @@ fn matching_decls<'a>(
     el: &ElementRef,
     ctx: &mut MatchingContext<NileImpl>,
     pseudo: bool,
+    dark: bool,
 ) -> Vec<&'a Declaration> {
     let mut decls = Vec::new();
-    for sheet in std::iter::once(cx.ua).chain(cx.author.iter().map(|s| &**s)) {
+    let ua = if dark { cx.ua_dark } else { cx.ua_light };
+    for sheet in std::iter::once(ua).chain(cx.author.iter().map(|s| &**s)) {
         let mut matched: Vec<(u32, usize, &Rule)> = sheet
             .rules
             .iter()
@@ -1718,7 +2014,9 @@ fn matching_decls<'a>(
                     .map(|spec| (spec, i, rule))
             })
             .collect();
-        matched.sort_by_key(|(spec, i, _)| (*spec, *i));
+        // Unlayered rules beat layered ones; among layers the later one wins; then specificity and order.
+        let rank = |r: &Rule| if r.layer == 0 { u32::MAX } else { r.layer };
+        matched.sort_by_key(|(spec, i, r)| (rank(r), *spec, *i));
         decls.extend(matched.iter().flat_map(|(_, _, r)| r.declarations.iter()));
     }
     decls
@@ -1853,7 +2151,7 @@ fn apply_declarations(
 }
 
 /// The text a `content` value generates; `None` for `none`/`normal` or nothing usable.
-fn content_text(decls: &[Declaration], doc: &Document, id: NodeId) -> Option<String> {
+fn content_text(decls: &[Declaration], doc: &Document, id: NodeId, counters: &[Counter]) -> Option<String> {
     let values = &decls.iter().rev().find(|d| d.name == "content")?.values;
     if values.is_empty() || matches!(values.first().and_then(Value::ident), Some("none" | "normal")) {
         return None;
@@ -1868,6 +2166,18 @@ fn content_text(decls: &[Declaration], doc: &Document, id: NodeId) -> Option<Str
             }
             Value::Attr(name) => {
                 out.push_str(doc.node(id).attr(name).unwrap_or(""));
+                any = true;
+            }
+            Value::Counter(c) => {
+                let (name, sep, style) = (&c.0, &c.1, &c.2);
+                let mut chain = counters.iter().filter(|k| k.name == *name);
+                match sep {
+                    None => out.push_str(&format_counter(chain.next_back().map_or(0, |k| k.value), style)),
+                    Some(sep) => {
+                        let parts: Vec<String> = chain.map(|k| format_counter(k.value, style)).collect();
+                        out.push_str(&if parts.is_empty() { format_counter(0, style) } else { parts.join(sep) });
+                    }
+                }
                 any = true;
             }
             Value::Ident(i) if i == "open-quote" => {
@@ -1900,7 +2210,7 @@ fn marker_style(cx: &CascadeInput, id: NodeId, element: &ComputedStyle, extra: &
     );
     let wanted = |p: &PseudoElement| *p == PseudoElement::Marker;
     ctx.pseudo_element_matching_fn = Some(&wanted);
-    let decls = matching_decls(cx, &el, &mut ctx, true);
+    let decls = matching_decls(cx, &el, &mut ctx, true, used_dark(element.color_scheme));
     if decls.is_empty() {
         return;
     }
@@ -1910,7 +2220,7 @@ fn marker_style(cx: &CascadeInput, id: NodeId, element: &ComputedStyle, extra: &
     let color_set = decls.iter().any(|d| d.name == "color");
     let applied = apply_declarations(&mut style, decls, element.font_size, &pcx);
     let declared = applied.iter().rev().find(|d| d.name == "content");
-    let content = declared.map(|_| content_text(&applied, cx.doc, id).unwrap_or_default());
+    let content = declared.map(|_| content_text(&applied, cx.doc, id, &extra.counters).unwrap_or_default());
     let color = color_set.then_some(style.color);
     extra.markers.insert(id, MarkerStyle { style, color, content });
 }
@@ -1925,7 +2235,7 @@ fn scrollbar_parts(cx: &CascadeInput, id: NodeId, element: &ComputedStyle, extra
         let mut ctx = MatchingContext::new(MatchingMode::ForStatelessPseudoElement, None, &mut caches, QuirksMode::NoQuirks, NeedsSelectorFlags::No, MatchingForInvalidation::No);
         let wanted = |p: &PseudoElement| *p == kind;
         ctx.pseudo_element_matching_fn = Some(&wanted);
-        let decls = matching_decls(cx, &el, &mut ctx, true);
+        let decls = matching_decls(cx, &el, &mut ctx, true, used_dark(element.color_scheme));
         if decls.is_empty() {
             continue;
         }
@@ -1972,7 +2282,7 @@ fn pseudo_style(
     );
     let wanted = move |p: &PseudoElement| *p == kind;
     ctx.pseudo_element_matching_fn = Some(&wanted);
-    let decls = matching_decls(cx, &el, &mut ctx, true);
+    let decls = matching_decls(cx, &el, &mut ctx, true, used_dark(element.color_scheme));
     if decls.is_empty() {
         return;
     }
@@ -1980,7 +2290,9 @@ fn pseudo_style(
     style.display = Display::Inline;
     let pcx = Cx { viewport: cx.viewport, uses_viewport: cx.uses_viewport };
     let applied = apply_declarations(&mut style, decls, element.font_size, &pcx);
-    let Some(content) = content_text(&applied, cx.doc, id) else { return };
+    // TODO: `::after` is styled before the element's children, so it can't see their increments.
+    extra.count(&style);
+    let Some(content) = content_text(&applied, cx.doc, id, &extra.counters) else { return };
     let new = NodeId(out.len());
     out.push(style);
     extra.pseudo.insert((id, kind), new);
@@ -2029,26 +2341,43 @@ fn cascade(
     ctx: &mut MatchingContext<NileImpl>,
     id: NodeId,
     parent: &ComputedStyle,
+    parent_dark: bool,
     out: &mut Vec<ComputedStyle>,
     extra: &mut Generated,
 ) {
     let doc = cx.doc;
     let node = doc.node(id);
     let mut style = ComputedStyle::inherit(parent);
+    let mut dark = parent_dark;
 
     if let NodeKind::Element { .. } = &node.kind {
         let el = ElementRef::new(doc, id, cx.state);
-        let mut decls = matching_decls(cx, &el, ctx, false);
         let pcx = Cx { viewport: cx.viewport, uses_viewport: cx.uses_viewport };
         let inline = node.attr("style").map(|css| parse::parse_declarations(css, &pcx)).unwrap_or_default();
-        decls.extend(inline.iter());
-        style.checked = doc.has_state(id, "checked");
-        (style.control_fraction, style.meter_warn) = control_fraction(doc, id);
-        style.swatch = swatch_color(doc, id);
-        apply_declarations(&mut style, decls, parent.font_size, &pcx);
+        // The element's own `color-scheme` (author or inherited) decides which user-agent sheet and
+        // which system colours apply to it. It is only known once the cascade has run, so start from
+        // the parent's scheme and go again if the element turns out to differ (rare).
+        for attempt in 0..2 {
+            style = ComputedStyle::inherit(parent);
+            let mut decls = matching_decls(cx, &el, ctx, false, dark);
+            decls.extend(inline.iter());
+            style.checked = doc.has_state(id, "checked");
+            (style.control_fraction, style.meter_warn) = control_fraction(doc, id);
+            style.swatch = swatch_color(doc, id);
+            system::with_scheme(dark, || apply_declarations(&mut style, decls, parent.font_size, &pcx));
+            let used = used_dark(style.color_scheme);
+            if used == dark || attempt == 1 {
+                dark = used;
+                break;
+            }
+            dark = used;
+        }
     }
 
     out[id.0] = style.clone();
+    if matches!(node.kind, NodeKind::Element { .. }) {
+        extra.count(&style);
+    }
     if cx.has_pseudo && matches!(node.kind, NodeKind::Element { .. }) {
         if style.display == Display::ListItem {
             marker_style(cx, id, &style, extra);
@@ -2059,9 +2388,14 @@ fn cascade(
         pseudo_style(cx, id, &style, PseudoElement::Before, out, extra);
         pseudo_style(cx, id, &style, PseudoElement::After, out, extra);
     }
+    // Counters made inside this element's subtree end with it; the ones it made itself stay for its siblings.
+    let scope = extra.counters.len();
+    extra.depth += 1;
     for child in &node.children {
-        cascade(cx, ctx, *child, &style, out, extra);
+        cascade(cx, ctx, *child, &style, dark, out, extra);
     }
+    extra.depth -= 1;
+    extra.counters.truncate(scope);
 }
 
 /// Replaces every `var(--name[, fallback])` in `text`. `None` if a variable is
@@ -2165,6 +2499,17 @@ fn bg_repeat(v: &[Value]) -> Option<(bool, bool)> {
         [x, y] => Some((*x != "no-repeat", *y != "no-repeat")),
         _ => None,
     }
+}
+
+fn deco_style(i: &str) -> Option<DecoStyle> {
+    Some(match i {
+        "solid" => DecoStyle::Solid,
+        "double" => DecoStyle::Double,
+        "dotted" => DecoStyle::Dotted,
+        "dashed" => DecoStyle::Dashed,
+        "wavy" => DecoStyle::Wavy,
+        _ => return None,
+    })
 }
 
 fn color_of(x: &Value, current: Color) -> Option<Color> {
@@ -2272,7 +2617,63 @@ pub(crate) fn supports_declaration(name: &str, value: &str, viewport: (f32, f32)
     !UNRECOGNISED.with(Cell::get)
 }
 
+/// Logical properties (`margin-inline`, `padding-block-start`, `inset-inline`, `border-block-end-color`,
+/// `inline-size`...) as the physical declarations they mean in a left-to-right, horizontal page.
+/// TODO: follow `direction` and `writing-mode` once they exist.
+fn logical(d: &Declaration) -> Option<Vec<Declaration>> {
+    let n = d.name.as_str();
+    let make = |name: String, values: Vec<Value>| Declaration { name, values, important: d.important, raw: d.raw.clone() };
+    let size = match n {
+        "inline-size" => Some("width"),
+        "block-size" => Some("height"),
+        "min-inline-size" => Some("min-width"),
+        "max-inline-size" => Some("max-width"),
+        "min-block-size" => Some("min-height"),
+        "max-block-size" => Some("max-height"),
+        _ => None,
+    };
+    if let Some(size) = size {
+        return Some(vec![make(size.into(), d.values.clone())]);
+    }
+    let (p, rest) = ["margin", "padding", "inset", "border"].iter().find_map(|p| n.strip_prefix(p).map(|r| (*p, r)))?;
+    let (inline, rest) = match rest.strip_prefix("-inline") {
+        Some(r) => (true, r),
+        None => (false, rest.strip_prefix("-block")?),
+    };
+    let (start, end) = if inline { ("left", "right") } else { ("top", "bottom") };
+    let (sides, suffix): (Vec<&str>, &str) = if let Some(r) = rest.strip_prefix("-start") {
+        (vec![start], r)
+    } else if let Some(r) = rest.strip_prefix("-end") {
+        (vec![end], r)
+    } else {
+        (vec![start, end], rest)
+    };
+    let valid = if p == "border" { matches!(suffix, "" | "-width" | "-style" | "-color") } else { suffix.is_empty() };
+    if !valid {
+        return None;
+    }
+    // `margin-inline: a b` is start then end; the border shorthand takes the same tokens for both.
+    let split = sides.len() == 2 && d.values.len() == 2 && !(p == "border" && suffix.is_empty());
+    Some(
+        sides
+            .iter()
+            .enumerate()
+            .map(|(i, side)| {
+                let name = if p == "inset" { (*side).to_string() } else { format!("{p}-{side}{suffix}") };
+                let values = if split { vec![d.values[i].clone()] } else { d.values.clone() };
+                make(name, values)
+            })
+            .collect(),
+    )
+}
+
 fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
+    if let Some(list) = logical(d) {
+        for physical in &list {
+            apply(s, physical, parent_font_size);
+        }
+        return;
+    }
     let fs = if d.name == "font-size" { parent_font_size } else { s.font_size };
     let v = &d.values;
     let first = v.first();
@@ -2293,7 +2694,7 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
     match d.name.as_str() {
         "display" => {
             s.display = match first.and_then(Value::ident) {
-                Some("block") => Display::Block,
+                Some("block" | "-webkit-box") => Display::Block,
                 Some("inline") => Display::Inline,
                 Some("inline-block") => Display::InlineBlock,
                 Some("flex") | Some("inline-flex") => Display::Flex,
@@ -2845,6 +3246,141 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         "text-decoration" | "text-decoration-line" => {
             s.underline = v.iter().any(|x| x.ident() == Some("underline"));
             s.line_through = v.iter().any(|x| x.ident() == Some("line-through"));
+            // The shorthand also resets and sets the look: `underline wavy red 2px`.
+            if d.name == "text-decoration" {
+                s.deco = DecoLook { offset: s.deco.offset, ..DecoLook::default() };
+                for x in v {
+                    if let Some(w) = px(x, fs) {
+                        s.deco.thickness = Some(w);
+                    } else if let Some(c) = color_of(x, current) {
+                        s.deco.color = Some(c);
+                    } else if let Some(st) = x.ident().and_then(deco_style) {
+                        s.deco.style = st;
+                    }
+                }
+            }
+        }
+        "text-decoration-style" => {
+            if let Some(st) = first.and_then(Value::ident).and_then(deco_style) {
+                s.deco.style = st;
+            }
+        }
+        "text-decoration-color" => {
+            if let Some(c) = first.and_then(|x| color_of(x, current)) {
+                s.deco.color = Some(c);
+            }
+        }
+        "text-decoration-thickness" => match first.and_then(Value::ident) {
+            Some("auto" | "from-font") => s.deco.thickness = None,
+            _ => {
+                if let Some(w) = p(first) {
+                    s.deco.thickness = Some(w);
+                }
+            }
+        },
+        "text-underline-offset" => match first.and_then(Value::ident) {
+            Some("auto") => s.deco.offset = None,
+            _ => {
+                if let Some(o) = p(first) {
+                    s.deco.offset = Some(o);
+                }
+            }
+        },
+        "word-spacing" => match first {
+            Some(Value::Ident(i)) if i == "normal" => s.word_spacing = 0.0,
+            other => s.word_spacing = p(other).unwrap_or(s.word_spacing),
+        },
+        "word-break" => match first.and_then(Value::ident) {
+            Some("normal") => s.word_break = WordBreak::Normal,
+            Some("break-all") => s.word_break = WordBreak::BreakAll,
+            Some("keep-all") => s.word_break = WordBreak::KeepAll,
+            // The deprecated value: break anywhere if the word doesn't fit.
+            Some("break-word") => s.overflow_wrap = OverflowWrap::Anywhere,
+            _ => {}
+        },
+        "overflow-wrap" | "word-wrap" => match first.and_then(Value::ident) {
+            Some("normal") => s.overflow_wrap = OverflowWrap::Normal,
+            Some("anywhere") => s.overflow_wrap = OverflowWrap::Anywhere,
+            Some("break-word") => s.overflow_wrap = OverflowWrap::BreakWord,
+            _ => {}
+        },
+        "text-indent" => {
+            if let Some(n) = p(first) {
+                s.text_indent = n;
+            }
+        }
+        "caret-color" => match first {
+            Some(x) if x.ident() == Some("auto") => s.caret_color = None,
+            Some(x) => {
+                if let Some(c) = color_of(x, current) {
+                    s.caret_color = Some(c);
+                }
+            }
+            None => {}
+        },
+        "text-wrap" | "text-wrap-style" => match first.and_then(Value::ident) {
+            Some("balance") => s.text_wrap = TextWrap::Balance,
+            Some("wrap" | "pretty" | "stable") => s.text_wrap = TextWrap::Wrap,
+            _ => {}
+        },
+        "-webkit-line-clamp" | "line-clamp" => match first {
+            Some(Value::Number(n)) if *n >= 1.0 => s.line_clamp = Some(*n as u32),
+            Some(x) if x.ident() == Some("none") => s.line_clamp = None,
+            _ => {}
+        },
+        // `text-shadow: <x> <y> [<blur>] [<color>], ...`
+        "text-shadow" => {
+            let mut shadows = Vec::new();
+            for group in v.split(|x| *x == Value::Comma) {
+                let mut lens = Vec::new();
+                let mut color = current;
+                for x in group {
+                    if let Some(n) = px(x, fs) {
+                        lens.push(n);
+                    } else if let Some(c) = color_of(x, current) {
+                        color = c;
+                    }
+                }
+                if let [dx, dy, rest @ ..] = lens.as_slice() {
+                    shadows.push(BoxShadow { dx: *dx, dy: *dy, blur: rest.first().copied().unwrap_or(0.0).max(0.0), spread: 0.0, color, inset: false });
+                }
+            }
+            if !shadows.is_empty() || first.and_then(Value::ident) == Some("none") {
+                s.text_shadow = shadows;
+            }
+        }
+        "font-variant" | "font-variant-caps" | "font-variant-numeric" | "font-variant-ligatures" | "font-variant-position" => {
+            let tags: Vec<&str> = v
+                .iter()
+                .filter_map(Value::ident)
+                .filter_map(|i| match i {
+                    "small-caps" => Some("\"smcp\" 1"),
+                    "all-small-caps" => Some("\"smcp\" 1, \"c2sc\" 1"),
+                    "petite-caps" => Some("\"pcap\" 1"),
+                    "tabular-nums" => Some("\"tnum\" 1"),
+                    "proportional-nums" => Some("\"pnum\" 1"),
+                    "lining-nums" => Some("\"lnum\" 1"),
+                    "oldstyle-nums" => Some("\"onum\" 1"),
+                    "slashed-zero" => Some("\"zero\" 1"),
+                    "ordinal" => Some("\"ordn\" 1"),
+                    "diagonal-fractions" => Some("\"frac\" 1"),
+                    "no-common-ligatures" => Some("\"liga\" 0, \"clig\" 0"),
+                    "common-ligatures" => Some("\"liga\" 1"),
+                    "sub" => Some("\"subs\" 1"),
+                    "super" => Some("\"sups\" 1"),
+                    _ => None,
+                })
+                .collect();
+            // `normal` (or `none`) clears the list; the longhands add to it.
+            if first.and_then(Value::ident) == Some("normal") || d.name == "font-variant" {
+                s.font_variant.clear();
+            }
+            for t in tags {
+                if !s.font_variant.is_empty() {
+                    s.font_variant.push_str(", ");
+                }
+                s.font_variant.push_str(t);
+            }
         }
         "text-align" => {
             s.text_align = match first.and_then(Value::ident) {
@@ -2864,7 +3400,191 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 _ => return,
             }
         }
-        "flex-wrap" => s.flex_wrap = first.and_then(Value::ident) == Some("wrap"),
+        "flex-wrap" => s.flex_wrap = matches!(first.and_then(Value::ident), Some("wrap" | "wrap-reverse")),
+        // `flex-flow: <direction> || <wrap>`
+        "flex-flow" => {
+            for x in v {
+                match x.ident() {
+                    Some("row") => s.flex_direction = FlexDirection::Row,
+                    Some("column") => s.flex_direction = FlexDirection::Column,
+                    Some("row-reverse") => s.flex_direction = FlexDirection::RowReverse,
+                    Some("column-reverse") => s.flex_direction = FlexDirection::ColumnReverse,
+                    Some("wrap" | "wrap-reverse") => s.flex_wrap = true,
+                    Some("nowrap") => s.flex_wrap = false,
+                    _ => {}
+                }
+            }
+        }
+        "order" => {
+            if let Some(Value::Number(n)) = first {
+                s.order = *n as i32;
+            }
+        }
+        "visibility" => match first.and_then(Value::ident) {
+            Some("visible") => s.visible = true,
+            Some("hidden" | "collapse") => s.visible = false,
+            _ => {}
+        },
+        "pointer-events" => match first.and_then(Value::ident) {
+            Some("none") => s.pointer_events = false,
+            Some(_) => s.pointer_events = true,
+            None => {}
+        },
+        "aspect-ratio" => {
+            let nums: Vec<f32> = v.iter().filter_map(|x| if let Value::Number(n) = x { Some(*n) } else { None }).collect();
+            s.aspect_ratio = match nums.as_slice() {
+                [a] if *a > 0.0 => Some(*a),
+                [a, b] if *a > 0.0 && *b > 0.0 && v.iter().any(|x| matches!(x, Value::Slash)) => Some(a / b),
+                _ if first.and_then(Value::ident) == Some("auto") && nums.is_empty() => None,
+                _ => s.aspect_ratio,
+            };
+        }
+        "counter-reset" | "counter-increment" | "counter-set" => {
+            // `name [integer]` pairs; `none` clears. Resets default to 0, increments to 1.
+            let default = if d.name == "counter-increment" { 1 } else { 0 };
+            let mut list: Vec<(String, i32)> = Vec::new();
+            for x in v {
+                match x {
+                    Value::Number(n) => {
+                        if let Some(last) = list.last_mut() {
+                            last.1 = *n as i32;
+                        }
+                    }
+                    Value::Ident(i) if i != "none" => list.push((i.clone(), default)),
+                    _ => {}
+                }
+            }
+            match d.name.as_str() {
+                "counter-reset" => s.counter_reset = list,
+                "counter-increment" => s.counter_increment = list,
+                _ => s.counter_set = list,
+            }
+        }
+        // `scroll-snap-type: none | [x | y | block | inline | both] [mandatory | proximity]`
+        "scroll-snap-type" => {
+            let mut snap = ScrollSnap::default();
+            for x in v {
+                match x.ident() {
+                    Some("x" | "inline") => snap.x = true,
+                    Some("y" | "block") => snap.y = true,
+                    Some("both") => (snap.x, snap.y) = (true, true),
+                    Some("mandatory") => snap.mandatory = true,
+                    _ => {}
+                }
+            }
+            s.scroll_snap_type = snap;
+        }
+        // `scroll-snap-align: <block> [<inline>]`
+        "scroll-snap-align" => {
+            let align = |x: &Value| match x.ident() {
+                Some("start") => Some(SnapAlign::Start),
+                Some("center") => Some(SnapAlign::Center),
+                Some("end") => Some(SnapAlign::End),
+                Some("none") => Some(SnapAlign::None),
+                _ => None,
+            };
+            if let Some(block) = first.and_then(align) {
+                let inline = v.get(1).and_then(align).unwrap_or(block);
+                s.scroll_snap_align = (inline, block);
+            }
+        }
+        "scroll-padding" => {
+            let vals: Option<Vec<f32>> = v.iter().map(|x| px(x, fs)).collect();
+            if let Some(e) = vals.as_deref().and_then(edges) {
+                s.scroll_padding = e;
+            }
+        }
+        "scroll-padding-top" => s.scroll_padding.top = p(first).unwrap_or(s.scroll_padding.top),
+        "scroll-padding-right" => s.scroll_padding.right = p(first).unwrap_or(s.scroll_padding.right),
+        "scroll-padding-bottom" => s.scroll_padding.bottom = p(first).unwrap_or(s.scroll_padding.bottom),
+        "scroll-padding-left" => s.scroll_padding.left = p(first).unwrap_or(s.scroll_padding.left),
+        "filter" => s.filter = parse_filter(&d.raw, s.color),
+        "backdrop-filter" | "-webkit-backdrop-filter" => s.backdrop_filter = parse_filter(&d.raw, s.color),
+        "clip-path" => {
+            // A shape alone (`circle(40%)`) refers to the border box; `none` and url()s clear it.
+            s.clip_path = ShapeOutside::parse(&d.raw).map(|mut c| {
+                if c.reference == ShapeBox::MarginBox {
+                    c.reference = ShapeBox::BorderBox;
+                }
+                c
+            });
+        }
+        "mix-blend-mode" => {
+            if let Some(b) = first.and_then(Value::ident).and_then(Blend::parse) {
+                s.blend = b;
+            }
+        }
+        "isolation" => match first.and_then(Value::ident) {
+            Some("isolate") => s.isolate = true,
+            Some("auto") => s.isolate = false,
+            _ => {}
+        },
+        "mask-image" | "-webkit-mask-image" | "mask" | "-webkit-mask" => {
+            s.mask_image = v.iter().find_map(|x| match x {
+                Value::Gradient(g) => Some((**g).clone()),
+                _ => None,
+            });
+        }
+        "object-fit" => {
+            s.object_fit = match first.and_then(Value::ident) {
+                Some("fill") => ObjectFit::Fill,
+                Some("contain") => ObjectFit::Contain,
+                Some("cover") => ObjectFit::Cover,
+                Some("none") => ObjectFit::None,
+                Some("scale-down") => ObjectFit::ScaleDown,
+                _ => s.object_fit,
+            }
+        }
+        "object-position" => {
+            if let Some(pos) = bg_position(v, fs) {
+                s.object_position = pos;
+            }
+        }
+        "outline" => {
+            let mut o = Outline { width: 3.0, style: BorderStyle::None, color: None, offset: s.outline.offset };
+            for x in v {
+                if let Some(w) = px(x, fs) {
+                    o.width = w;
+                } else if let Some(c) = spec(x) {
+                    o.color = c;
+                } else {
+                    match x.ident() {
+                        Some("none" | "hidden") => o.style = BorderStyle::None,
+                        Some("dashed") => o.style = BorderStyle::Dashed,
+                        Some("dotted") => o.style = BorderStyle::Dotted,
+                        Some("solid" | "auto" | "double" | "groove" | "ridge" | "inset" | "outset") => o.style = BorderStyle::Solid,
+                        Some("thin") => o.width = 1.0,
+                        Some("medium") => o.width = 3.0,
+                        Some("thick") => o.width = 5.0,
+                        _ => {}
+                    }
+                }
+            }
+            s.outline = o;
+        }
+        "outline-width" => {
+            s.outline.width = match first.and_then(Value::ident) {
+                Some("thin") => 1.0,
+                Some("medium") => 3.0,
+                Some("thick") => 5.0,
+                _ => p(first).unwrap_or(s.outline.width),
+            }
+        }
+        "outline-style" => {
+            s.outline.style = match first.and_then(Value::ident) {
+                Some("none" | "hidden") => BorderStyle::None,
+                Some("dashed") => BorderStyle::Dashed,
+                Some("dotted") => BorderStyle::Dotted,
+                Some(_) => BorderStyle::Solid,
+                None => s.outline.style,
+            }
+        }
+        "outline-color" => {
+            if let Some(c) = first.and_then(spec) {
+                s.outline.color = c;
+            }
+        }
+        "outline-offset" => s.outline.offset = p(first).unwrap_or(s.outline.offset),
         "flex-grow" => {
             if let Some(Value::Number(n)) = first {
                 s.flex_grow = *n;
@@ -3489,6 +4209,164 @@ mod tests {
     }
 
     #[test]
+    fn flow_and_box_properties_parse_and_inherit() {
+        let doc = Document::parse(r#"<div id="p" style="visibility:hidden;pointer-events:none;outline:2px dashed red;outline-offset:3px;order:-2;aspect-ratio:16/9;flex-flow:column wrap"><span id="c" style="visibility:visible"></span><b id="d"></b></div>"#);
+        let st = |id: &str| compute_styles(&doc).get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        let p = st("p");
+        assert!(!p.visible && !p.pointer_events);
+        assert_eq!((p.outline.width, p.outline.style, p.outline.offset), (2.0, BorderStyle::Dashed, 3.0));
+        assert_eq!(p.order, -2);
+        assert!((p.aspect_ratio.unwrap() - 16.0 / 9.0).abs() < 1e-5);
+        assert!(p.flex_wrap && p.flex_direction == FlexDirection::Column);
+        assert!(st("c").visible && !st("c").pointer_events, "visibility is overridden, pointer-events inherited");
+        assert!(!st("d").visible);
+        assert_eq!(st("d").outline, Outline::default(), "outline and order are not inherited");
+    }
+
+    #[test]
+    fn text_properties_parse() {
+        let doc = Document::parse(r#"<p id="p" style="word-spacing:3px;word-break:break-all;overflow-wrap:anywhere;text-indent:20px;caret-color:red;text-wrap:balance;-webkit-line-clamp:3;text-shadow:1px 2px 3px red, 0 0 5px blue;text-decoration:underline wavy blue 2px;text-underline-offset:4px;font-variant:small-caps;font-variant-numeric:tabular-nums"><span id="c">x</span></p>"#);
+        let styles = compute_styles(&doc);
+        let st = |id: &str| styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        let p = st("p");
+        assert_eq!((p.word_spacing, p.word_break, p.overflow_wrap, p.text_indent), (3.0, WordBreak::BreakAll, OverflowWrap::Anywhere, 20.0));
+        assert_eq!(p.caret_color, Some(Color::rgb(255, 0, 0)));
+        assert_eq!((p.text_wrap, p.line_clamp), (TextWrap::Balance, Some(3)));
+        assert_eq!(p.text_shadow.len(), 2);
+        assert_eq!((p.text_shadow[0].dx, p.text_shadow[0].dy, p.text_shadow[0].blur), (1.0, 2.0, 3.0));
+        assert!(p.underline);
+        assert_eq!((p.deco.style, p.deco.thickness, p.deco.offset, p.deco.color), (DecoStyle::Wavy, Some(2.0), Some(4.0), Some(Color::rgb(0, 0, 255))));
+        assert!(p.font_variant.contains("tnum") && p.font_variant.contains("smcp"), "the longhand adds to the shorthand: {}", p.font_variant);
+        let c = st("c");
+        assert_eq!((c.word_spacing, c.text_indent, c.text_shadow.len(), c.line_clamp), (3.0, 20.0, 2, None), "inherited except line-clamp");
+    }
+
+    #[test]
+    fn effect_properties_parse_and_do_not_inherit() {
+        let doc = Document::parse(r#"<div id="p" style="filter:blur(3px) sepia(50%);backdrop-filter:blur(8px);clip-path:circle(40%);mix-blend-mode:multiply;isolation:isolate;mask-image:linear-gradient(#000,transparent);object-fit:cover;object-position:left top"><i id="c"></i></div>"#);
+        let styles = compute_styles(&doc);
+        let st = |id: &str| styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        let p = st("p");
+        assert_eq!(p.filter, vec![FilterFn::Blur(3.0), FilterFn::Sepia(0.5)]);
+        assert_eq!(p.backdrop_filter, vec![FilterFn::Blur(8.0)]);
+        assert!(p.clip_path.is_some() && p.mask_image.is_some() && p.layered());
+        assert_eq!((p.blend, p.isolate, p.object_fit), (Blend::Multiply, true, ObjectFit::Cover));
+        assert_eq!(p.object_position, (StopPos::Fraction(0.0), StopPos::Fraction(0.0)));
+        let c = st("c");
+        assert!(c.filter.is_empty() && c.clip_path.is_none() && c.blend == Blend::Normal && !c.layered());
+    }
+
+    #[test]
+    fn logical_properties_map_to_the_physical_ones() {
+        let doc = Document::parse(r#"<div id="a" style="margin-inline:4px 8px;padding-block:2px;inset-inline-start:5px;inline-size:100px;min-block-size:10px;border-inline-start:3px solid red;border-block-end-color:blue;margin-block-start:7px"></div>"#);
+        let styles = compute_styles(&doc);
+        let a = styles.get(doc.find(|n| n.attr("id") == Some("a")).unwrap()).clone();
+        assert_eq!((a.margin.left, a.margin.right), (Length::Px(4.0), Length::Px(8.0)));
+        assert_eq!((a.padding.top, a.padding.bottom), (2.0, 2.0));
+        assert_eq!(a.inset.left, Length::Px(5.0));
+        assert_eq!((a.width, a.min_height), (Length::Px(100.0), Length::Px(10.0)));
+        assert_eq!((a.border_width.left, a.border_style.left), (3.0, BorderStyle::Solid));
+        assert_eq!(a.border_color_set.bottom, Some(Color::rgb(0, 0, 255)));
+        assert_eq!(a.margin.top, Length::Px(7.0));
+    }
+
+    #[test]
+    fn css_counters_number_headings_and_nest() {
+        let doc = Document::parse(
+            r#"<style>
+                 body { counter-reset: chapter }
+                 h2 { counter-reset: sec; counter-increment: chapter }
+                 h2::before { content: "Chapter " counter(chapter, upper-roman) ": " }
+                 h3 { counter-increment: sec }
+                 h3::before { content: counter(chapter) "." counter(sec, lower-alpha) " " }
+                 ol { counter-reset: item }
+                 li { counter-increment: item }
+                 li::before { content: counters(item, ".") " " }
+               </style><body><h2 id="a">A</h2><h3 id="a1">x</h3><h3 id="a2">y</h3><h2 id="b">B</h2><h3 id="b1">z</h3>
+               <ol><li id="l1">one<ol><li id="l2">two</li><li id="l3">three</li></ol></li><li id="l4">four</li></ol></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let before = |id: &str| {
+            let n = doc.find(|n| n.attr("id") == Some(id)).unwrap();
+            let p = styles.pseudo(n, PseudoElement::Before).unwrap();
+            styles.content(p).to_string()
+        };
+        assert_eq!(before("a"), "Chapter I: ");
+        assert_eq!(before("a1"), "1.a ");
+        assert_eq!(before("a2"), "1.b ");
+        assert_eq!(before("b"), "Chapter II: ");
+        assert_eq!(before("b1"), "2.a ", "sec restarts under each h2");
+        assert_eq!(before("l1"), "1 ");
+        assert_eq!(before("l2"), "1.1 ");
+        assert_eq!(before("l3"), "1.2 ");
+        assert_eq!(before("l4"), "2 ");
+    }
+
+    #[test]
+    fn css_nesting_builds_rules_from_the_parent_selector() {
+        let doc = Document::parse(
+            r#"<style>
+                 .card { color: rgb(255, 0, 0); padding: 1px;
+                   &.on { color: rgb(0, 128, 0) }
+                   .title { font-size: 20px }
+                   > p { margin-top: 7px }
+                   @media (min-width: 1px) { padding: 3px }
+                   & + & { margin-bottom: 5px }
+                 }
+                 .a, .b { & .x { width: 11px } }
+               </style>
+               <div class="card on" id="c"><span class="title" id="t">x</span><p id="p">y</p></div>
+               <div class="card" id="d"></div><div class="card" id="e"></div>
+               <div class="a"><i class="x" id="xa"></i></div><div class="b"><i class="x" id="xb"></i></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let st = |id: &str| styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        assert_eq!(st("c").color, Color::rgb(0, 128, 0), "&.on");
+        assert_eq!(st("d").color, Color::rgb(255, 0, 0));
+        assert_eq!(st("c").padding.top, 3.0, "nested @media");
+        assert_eq!(st("t").font_size, 20.0, "a descendant");
+        assert_eq!(st("p").margin.top, Length::Px(7.0), "a child through a leading combinator");
+        assert_eq!(st("e").margin.bottom, Length::Px(5.0), "& + & is a sibling of the same class");
+        assert_eq!((st("xa").width, st("xb").width), (Length::Px(11.0), Length::Px(11.0)), "a selector list parent");
+    }
+
+    #[test]
+    fn layers_order_the_cascade_before_specificity() {
+        let doc = Document::parse(
+            r#"<style>
+                 @layer base, theme;
+                 @layer theme { p { color: rgb(0, 0, 255) } }
+                 @layer base { #x { color: rgb(0, 255, 0) } p { margin-top: 2px } }
+                 .u { margin-top: 9px }
+               </style><p id="x" class="u">a</p><p id="y">b</p>"#,
+        );
+        let styles = compute_styles(&doc);
+        let st = |id: &str| styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        assert_eq!(st("x").color, Color::rgb(0, 0, 255), "the later layer wins over a more specific rule in an earlier one");
+        assert_eq!(st("x").margin.top, Length::Px(9.0), "unlayered beats layered");
+        assert_eq!(st("y").margin.top, Length::Px(2.0));
+    }
+
+    #[test]
+    fn modern_colours_and_math_functions_resolve() {
+        let doc = Document::parse(
+            r#"<div id="a" style="color: color-mix(in srgb, rgb(255, 0, 0), rgb(0, 0, 255)); width: round(52px, 10px); height: calc(pow(2, 3) * 10px); margin-left: mod(130px, 100px); padding-left: 5ch; background: oklch(1 0 0)"></div>
+               <div id="b" style="color: light-dark(rgb(1, 2, 3), rgb(9, 8, 7)); color-scheme: dark; width: 50dvw; margin-top: env(safe-area-inset-top, 4px)"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let st = |id: &str| styles.get(doc.find(|n| n.attr("id") == Some(id)).unwrap()).clone();
+        let a = st("a");
+        assert!(a.color.r.abs_diff(128) <= 1 && a.color.b.abs_diff(128) <= 1);
+        assert_eq!((a.width, a.height, a.margin.left), (Length::Px(50.0), Length::Px(80.0), Length::Px(30.0)));
+        assert_eq!(a.padding.left, 5.0 * 0.5 * 16.0, "ch is half an em");
+        assert_eq!(a.background, Some(Color::rgb(255, 255, 255)));
+        let b = st("b");
+        assert_eq!(b.color, Color::rgb(9, 8, 7), "light-dark follows the element's own color-scheme");
+        assert_eq!(b.margin.top, Length::Px(0.0));
+        assert!(matches!(b.width, Length::Px(w) if w > 0.0));
+    }
+
+    #[test]
     fn same_layout_ignores_paint_properties_only() {
         let doc = Document::parse(
             r#"<div id="a" style="width:10px; transform:scale(1)"></div><div id="b" style="width:10px; background:red; box-shadow:0 0 2px red; transform:rotate(1deg); cursor:pointer"></div>
@@ -3570,6 +4448,7 @@ mod theme_tests {
     #[test]
     fn system_colours_and_prefers_color_scheme_follow_the_theme() {
         let page = r#"<style>
+            :root { color-scheme: light dark }
             #a { color: CanvasText; background: Canvas }
             #b { color: AccentColor }
             @media (prefers-color-scheme: dark) { #c { color: #123456 } }
@@ -3603,6 +4482,42 @@ mod theme_tests {
         set_system_theme(SystemTheme { dark: false, accent: Color::rgb(200, 30, 30) });
         assert_eq!(style_of(opted, "b").color, Color::rgb(0, 0, 0));
         assert_eq!(style_of(opted, "i").background, Some(Color::rgb(200, 30, 30)));
+        set_system_theme(SystemTheme::default());
+    }
+
+    #[test]
+    fn an_element_with_its_own_color_scheme_gets_that_schemes_look() {
+        // A dark island in a light page: its controls and system colours are dark, the rest isn't.
+        set_system_theme(SystemTheme { dark: false, accent: Color::rgb(200, 30, 30) });
+        let island = r#"<style>#d { color-scheme: dark; color: CanvasText }</style><body>
+            <button id="out">x</button><div id="d"><button id="in">x</button><span id="deep"></span></div></body>"#;
+        assert_eq!(style_of(island, "out").color, Color::rgb(0, 0, 0));
+        assert_eq!(style_of(island, "in").color, Color::rgb(255, 255, 255));
+        assert_eq!(style_of(island, "d").color, Color::rgb(240, 240, 240));
+        assert_eq!(style_of(island, "deep").color_scheme, ColorScheme::Dark);
+        // A light island in a dark page.
+        set_system_theme(SystemTheme { dark: true, accent: Color::rgb(200, 30, 30) });
+        let light = r#"<style>:root { color-scheme: light dark } #l { color-scheme: light; color: CanvasText }</style><body>
+            <button id="out">x</button><div id="l"><button id="in">x</button></div></body>"#;
+        assert_eq!(style_of(light, "out").color, Color::rgb(255, 255, 255));
+        assert_eq!(style_of(light, "in").color, Color::rgb(0, 0, 0));
+        assert_eq!(style_of(light, "l").color, Color::rgb(0, 0, 0));
+        // `light dark` inside a forced-light element follows the system again.
+        let nested = r#"<style>#a { color-scheme: light } #b { color-scheme: light dark }</style><body><div id="a"><div id="b"><button id="in">x</button></div></div></body>"#;
+        assert_eq!(style_of(nested, "in").color, Color::rgb(255, 255, 255));
+        set_system_theme(SystemTheme::default());
+    }
+
+    #[test]
+    fn a_page_asking_for_dark_only_is_dark_even_on_a_light_system() {
+        set_system_theme(SystemTheme { dark: false, accent: Color::rgb(200, 30, 30) });
+        let page = "<style>:root { color-scheme: dark }</style><body><button id=\"b\">x</button></body>";
+        let doc = Document::parse(page);
+        let styles = compute_styles(&doc);
+        assert!(styles.dark);
+        assert_eq!(style_of(page, "b").color, Color::rgb(255, 255, 255));
+        let meta = "<meta name=\"color-scheme\" content=\"light dark\"><body><button id=\"b\">x</button></body>";
+        assert!(!compute_styles(&Document::parse(meta)).dark, "`light dark` follows a light system");
         set_system_theme(SystemTheme::default());
     }
 

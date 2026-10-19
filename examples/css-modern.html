@@ -1,0 +1,41 @@
+<!doctype html><meta charset="utf-8"><title>modern colour, math, nesting and layers</title>
+<meta name="color-scheme" content="light dark">
+<style>
+@layer reset, components;
+@layer components { .chip { background: #ddd; color: #000 } }
+@layer reset { .chip { background: red } }          /* earlier layer: loses even with the same specificity */
+.swatches { display: flex; flex-wrap: wrap; gap: 6px; font: 11px sans-serif }
+.swatches div { width: 96px; height: 40px; padding: 3px; color: #000; box-sizing: border-box }
+.card { padding: 10px; margin-top: 12px; width: min(420px, 100%); background: color-mix(in oklab, #36c 15%, white);
+  border-left: 5px solid oklch(0.6 0.2 260);
+  & h3 { margin: 0 0 4px; font: bold 15px sans-serif }
+  & .chip { display: inline-block; padding: 2px 8px; border-radius: 10px; font: 12px sans-serif }
+  &:hover { background: color-mix(in oklab, #36c 30%, white) }
+  @media (min-width: 300px) { font: 13px sans-serif }
+}
+.math { display: flex; gap: 6px; margin-top: 10px; font: 11px sans-serif; color: #fff }
+.math div { background: #36c; height: 24px; padding: 2px 4px; box-sizing: border-box }
+body { margin: 12px; font-family: sans-serif }
+</style>
+<div class="swatches">
+ <div style="background:color-mix(in srgb, red, blue)">srgb 50/50</div>
+ <div style="background:color-mix(in oklab, red, blue)">oklab 50/50</div>
+ <div style="background:color-mix(in oklch, red, blue)">oklch 50/50</div>
+ <div style="background:color-mix(in srgb, red 25%, white)">25% red</div>
+ <div style="background:oklch(0.75 0.15 145)">oklch()</div>
+ <div style="background:oklab(0.7 -0.1 0.1)">oklab()</div>
+ <div style="background:lch(60 50 30)">lch()</div>
+ <div style="background:lab(60 40 30)">lab()</div>
+ <div style="background:hwb(200 10% 10%)">hwb()</div>
+ <div style="background:color(display-p3 0 0.8 0.3)">p3</div>
+ <div style="background:light-dark(#9d9, #363)">light-dark</div>
+</div>
+<div class="card"><h3>Nested rules</h3>A card styled with nesting, <span class="chip">layered chip</span> and mixed colours.</div>
+<div class="math">
+ <div style="width:round(up, 47px, 10px)">round 50</div>
+ <div style="width:mod(135px, 100px)">mod 35</div>
+ <div style="width:calc(pow(2, 3) * 8px)">pow 64</div>
+ <div style="width:calc(sqrt(81) * 10px)">sqrt 90</div>
+ <div style="width:calc(abs(-70px) + 20px * sin(90deg))">abs/sin 90</div>
+ <div style="width:20ch">20ch</div>
+</div>

@@ -1,0 +1,48 @@
+<html window-title="Tray and badge" window-width="480" window-height="320">
+<head>
+<style>
+  body { margin: 0; padding: 20px; font: 14px system-ui; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  button { margin-right: 8px; }
+  #log { margin-top: 14px; padding: 10px; background: #8881; border-radius: 6px; min-height: 80px; white-space: pre-wrap; }
+  menu { display: none; }
+</style>
+</head>
+<body>
+  <h1>Tray icon, badge and progress</h1>
+  <p>The icon appears in the notification area; on Windows 11 new icons may sit behind the ^ arrow at the right of the taskbar. A colour icon is used because a one-colour (template) icon is invisible on a dark taskbar.</p>
+  <p>
+    <button id="show">Show tray icon</button>
+    <button id="hide">Remove</button>
+    <button id="more">Badge +1</button>
+    <button id="clear">Clear badge</button>
+    <button id="prog">Progress +20%</button>
+    <button id="prog-clear">Clear progress</button>
+  </p>
+  <div id="log">Use the buttons, then the icon in the menu bar / notification area.</div>
+  <menu id="tray">
+    <li id="open">Open window</li>
+    <li id="count">Count clicks</li>
+    <hr />
+    <li role="quit">Quit</li>
+  </menu>
+<script>
+  const log = (t) => { document.getElementById("log").textContent += "\n" + t; };
+  let n = 0, clicks = 0;
+  document.getElementById("show").addEventListener("click", () => {
+    Window.this.tray = { icon: "tray.png", tooltip: "Nile tray demo", menu: document.getElementById("tray"), template: false };
+    log("tray shown");
+  });
+  document.getElementById("hide").addEventListener("click", () => { Window.this.tray = null; log("tray removed"); });
+  document.getElementById("more").addEventListener("click", () => { application.badge = ++n; });
+  document.getElementById("clear").addEventListener("click", () => { n = 0; application.badge = null; });
+  let pct = 0;
+  document.getElementById("prog").addEventListener("click", () => { pct = pct >= 1 ? 0.2 : pct + 0.2; application.progress = pct; });
+  document.getElementById("prog-clear").addEventListener("click", () => { pct = 0; application.progress = null; });
+  document.getElementById("open").addEventListener("click", () => { Window.this.focus(); log("open chosen"); });
+  document.getElementById("count").addEventListener("click", () => { application.badge = ++clicks; log("count " + clicks); });
+  document.addEventListener("trayclick", () => log("trayclick"));
+  document.addEventListener("traydoubleclick", () => log("traydoubleclick"));
+</script>
+</body>
+</html>

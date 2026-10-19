@@ -8,6 +8,7 @@ license.workspace = true
 nile-dom.workspace = true
 nile-style.workspace = true
 nile-text.workspace = true
+nile-svg.workspace = true
 taffy.workspace = true
 imagesize.workspace = true
 base64.workspace = true

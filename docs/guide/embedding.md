@@ -29,7 +29,7 @@ Set attributes on the root `<html>` element:
 Widths/heights are logical pixels, or percentages of the desktop. Alignment uses
 numeric-keypad positions: 5 centers, 7 is top-left, 9 is top-right. Other attributes
 include `window-min-*`, `window-max-*`, `window-minimizable`, `window-maximizable`,
-`window-icon`, and `window-state` (`shown`, `minimized`, `maximized`, `full-screen`,
+`window-icon`, `window-remember` (a Nile extension: the window reopens with the size, position and maximized state it was closed with), and `window-state` (`shown`, `minimized`, `maximized`, `full-screen`,
 `hidden`). `<title>` supplies a title when `window-title` is absent.
 
 For frameless chrome:

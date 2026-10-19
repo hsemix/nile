@@ -19,7 +19,13 @@ pub struct AppInfo {
     pub copyright: String,
     /// Desktop-entry categories, `Utility;` style (Linux).
     pub category: String,
+    /// URL schemes the app opens (`myapp` for `myapp://...`): declared in the macOS bundle and the Linux entry.
+    pub protocols: Vec<String>,
+    /// File extensions the app opens (`md`, `txt`), without the dot.
+    pub file_types: Vec<String>,
 }
+
+pub use nile_script::mime_of;
 
 impl AppInfo {
     /// `1.2.3.4` as four numbers (missing parts are 0).
@@ -103,11 +109,18 @@ pub fn desktop_entry(info: &AppInfo, exe: &Path, icon: Option<&Path>) -> String 
     if !info.description.is_empty() {
         out += &format!("Comment={}\n", info.description);
     }
-    out += &format!("Exec={}\n", quote(exe));
+    let opens = !info.protocols.is_empty() || !info.file_types.is_empty();
+    // `%U` hands the URLs and files the system opens with the app to it as arguments.
+    out += &format!("Exec={}{}\n", quote(exe), if opens { " %U" } else { "" });
     if let Some(icon) = icon {
         out += &format!("Icon={}\n", icon.to_string_lossy());
     }
     out += "Terminal=false\n";
+    if opens {
+        let mut mimes: Vec<String> = info.protocols.iter().map(|p| format!("x-scheme-handler/{}", p.to_ascii_lowercase())).collect();
+        mimes.extend(info.file_types.iter().filter_map(|e| mime_of(e)).map(str::to_string));
+        out += &format!("MimeType={};\n", mimes.join(";"));
+    }
     out += &format!("Categories={}\n", if info.category.is_empty() { "Utility;" } else { info.category.as_str() });
     if let Some(stem) = exe.file_name() {
         out += &format!("StartupWMClass={}\n", stem.to_string_lossy());
@@ -185,10 +198,39 @@ pub fn with_resources(runtime: Vec<u8>, icon: Option<&Path>, info: &AppInfo) -> 
     out
 }
 
+/// Encode modern ICNS PNG representations directly, without sips/iconutil.
+#[cfg(any(target_os = "macos", test))]
+fn png_to_icns(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    use skia_safe::{Data, EncodedImageFormat, Image, Paint, Rect};
+    let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidData, "could not decode application icon");
+    let image = Image::from_encoded(Data::new_copy(bytes)).ok_or_else(invalid)?;
+    let mut result = b"icns\0\0\0\0".to_vec();
+    // Standard sizes and their Retina representations. Each element includes
+    // its four-byte type and big-endian length before the PNG payload.
+    for (kind, size) in [
+        (b"icp4", 16), (b"icp5", 32), (b"ic07", 128), (b"ic08", 256),
+        (b"ic09", 512), (b"ic10", 1024), (b"ic11", 32), (b"ic12", 64),
+        (b"ic13", 256), (b"ic14", 512),
+    ] {
+        let mut surface = skia_safe::surfaces::raster_n32_premul((size, size))
+            .ok_or_else(|| std::io::Error::other("could not allocate application icon"))?;
+        surface.canvas().clear(skia_safe::Color::TRANSPARENT);
+        surface.canvas().draw_image_rect(&image, None, Rect::from_wh(size as f32, size as f32), &Paint::default());
+        let png = surface.image_snapshot().encode(None, EncodedImageFormat::PNG, None)
+            .ok_or_else(|| std::io::Error::other("could not encode application icon"))?;
+        result.extend_from_slice(kind);
+        result.extend_from_slice(&((png.size() + 8) as u32).to_be_bytes());
+        result.extend_from_slice(png.as_bytes());
+    }
+    let length = result.len() as u32;
+    result[4..8].copy_from_slice(&length.to_be_bytes());
+    Ok(result)
+}
+
 /// macOS: turn the plain program at `exe` into `<name>.app` (`Contents/MacOS/<name>`, an `Info.plist`,
 /// the icon as `.icns` and the archive at `Contents/Resources/app.nilepack`: a signed executable can't
 /// have an archive appended) and return the bundle's path. `icon` is a `.png` (turned into an
-/// `.icns` with `sips` and `iconutil`) or an `.icns`.
+/// `.icns` with the built-in image renderer) or an `.icns`.
 #[cfg(target_os = "macos")]
 pub fn app_bundle(exe: &Path, archive: &Path, name: &str, icon: Option<&Path>, info: &AppInfo) -> std::io::Result<PathBuf> {
     use std::process::Command;
@@ -213,31 +255,39 @@ pub fn app_bundle(exe: &Path, archive: &Path, name: &str, icon: Option<&Path>, i
         if icon.extension().is_some_and(|e| e == "icns") {
             std::fs::copy(icon, &target)?;
         } else {
-            let set = std::env::temp_dir().join(format!("nile-iconset-{}.iconset", std::process::id()));
-            let _ = std::fs::remove_dir_all(&set);
-            std::fs::create_dir_all(&set)?;
-            for (size, file) in [(16, "icon_16x16"), (32, "icon_16x16@2x"), (32, "icon_32x32"), (64, "icon_32x32@2x"), (128, "icon_128x128"), (256, "icon_128x128@2x"), (256, "icon_256x256"), (512, "icon_256x256@2x"), (512, "icon_512x512"), (1024, "icon_512x512@2x")] {
-                Command::new("sips").args(["-z", &size.to_string(), &size.to_string()]).arg(icon).arg("--out").arg(set.join(format!("{file}.png"))).output()?;
-            }
-            let made = Command::new("iconutil").args(["-c", "icns"]).arg(&set).arg("-o").arg(&target).output()?;
-            let _ = std::fs::remove_dir_all(&set);
-            if !made.status.success() {
-                return Err(std::io::Error::other(String::from_utf8_lossy(&made.stderr).into_owned()));
-            }
+            std::fs::write(&target, png_to_icns(&std::fs::read(icon)?)?)?;
         }
         icon_key = "  <key>CFBundleIconFile</key><string>AppIcon</string>\n".to_string();
     }
     let version = if info.version.is_empty() { "1.0".to_string() } else { info.version.clone() };
     let copyright = if info.copyright.is_empty() { String::new() } else { format!("  <key>NSHumanReadableCopyright</key><string>{}</string>\n", info.copyright) };
     let id: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let mut opens = String::new();
+    if !info.protocols.is_empty() {
+        opens += &format!(
+            "  <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>app.nile.{id}</string><key>CFBundleURLSchemes</key><array>{}</array></dict></array>\n",
+            info.protocols.iter().map(|p| format!("<string>{}</string>", esc(p))).collect::<String>()
+        );
+    }
+    if !info.file_types.is_empty() {
+        opens += &format!(
+            "  <key>CFBundleDocumentTypes</key><array><dict><key>CFBundleTypeName</key><string>{} document</string><key>CFBundleTypeRole</key><string>Editor</string><key>CFBundleTypeExtensions</key><array>{}</array></dict></array>\n",
+            esc(name),
+            info.file_types.iter().map(|e| format!("<string>{}</string>", esc(e.trim_start_matches('.')))).collect::<String>()
+        );
+    }
     std::fs::write(
         app.join("Contents/Info.plist"),
         format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n  <key>CFBundleName</key><string>{name}</string>\n  <key>CFBundleDisplayName</key><string>{name}</string>\n  <key>CFBundleExecutable</key><string>{name}</string>\n  <key>CFBundleIdentifier</key><string>app.nile.{id}</string>\n  <key>CFBundlePackageType</key><string>APPL</string>\n  <key>CFBundleVersion</key><string>{version}</string>\n  <key>CFBundleShortVersionString</key><string>{version}</string>\n{copyright}  <key>NSHighResolutionCapable</key><true/>\n{icon_key}</dict></plist>\n"
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n  <key>CFBundleName</key><string>{name}</string>\n  <key>CFBundleDisplayName</key><string>{name}</string>\n  <key>CFBundleExecutable</key><string>{name}</string>\n  <key>CFBundleIdentifier</key><string>app.nile.{id}</string>\n  <key>CFBundlePackageType</key><string>APPL</string>\n  <key>CFBundleVersion</key><string>{version}</string>\n  <key>CFBundleShortVersionString</key><string>{version}</string>\n{copyright}{opens}  <key>NSHighResolutionCapable</key><true/>\n{icon_key}</dict></plist>\n"
         ),
     )?;
     // The executable was changed after it was built: sign the whole bundle again (ad hoc).
-    let _ = Command::new("codesign").args(["--force", "--deep", "--sign", "-"]).arg(&app).output();
+    let signed = Command::new("codesign").args(["--force", "--deep", "--sign", "-"]).arg(&app).output()?;
+    if !signed.status.success() {
+        return Err(std::io::Error::other(format!("could not sign {}: {}", app.display(), String::from_utf8_lossy(&signed.stderr))));
+    }
     Ok(app)
 }
 
@@ -253,13 +303,40 @@ mod tests {
     use super::*;
 
     fn info() -> AppInfo {
-        AppInfo { name: "Demo".into(), version: "1.2.3".into(), description: "A demo".into(), company: "Acme".into(), copyright: "(c) Acme".into(), category: String::new() }
+        AppInfo { name: "Demo".into(), version: "1.2.3".into(), description: "A demo".into(), company: "Acme".into(), copyright: "(c) Acme".into(), category: String::new(), protocols: Vec::new(), file_types: Vec::new() }
+    }
+
+    #[test]
+    fn the_linux_entry_lists_the_links_and_files_the_app_opens() {
+        let with = AppInfo { protocols: vec!["Notes".into()], file_types: vec!["md".into(), "weird".into()], ..info() };
+        let entry = desktop_entry(&with, Path::new("/opt/demo/demo"), None);
+        assert!(entry.contains("Exec=\"/opt/demo/demo\" %U"), "{entry}");
+        assert!(entry.contains("MimeType=x-scheme-handler/notes;text/markdown;"), "{entry}");
+        let plain = desktop_entry(&info(), Path::new("/opt/demo/demo"), None);
+        assert!(plain.contains("Exec=\"/opt/demo/demo\"\n") && !plain.contains("MimeType"), "{plain}");
     }
 
     #[test]
     fn version_numbers_fill_four_parts() {
         assert_eq!(info().numbers(), [1, 2, 3, 0]);
         assert_eq!(AppInfo { version: "2.0.1-beta".into(), ..info() }.numbers(), [2, 0, 1, 0]);
+    }
+
+    #[test]
+    fn generated_icns_contains_decodable_standard_and_retina_images() {
+        let bytes = png_to_icns(DEFAULT_ICON).unwrap();
+        assert_eq!(&bytes[..4], b"icns");
+        assert_eq!(u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize, bytes.len());
+        let mut offset = 8;
+        for (kind, size) in [(b"icp4", 16), (b"icp5", 32), (b"ic07", 128), (b"ic08", 256), (b"ic09", 512), (b"ic10", 1024), (b"ic11", 32), (b"ic12", 64), (b"ic13", 256), (b"ic14", 512)] {
+            assert_eq!(&bytes[offset..offset + 4], kind);
+            let length = u32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            let image = skia_safe::Image::from_encoded(skia_safe::Data::new_copy(&bytes[offset + 8..offset + length])).unwrap();
+            assert_eq!((image.width(), image.height()), (size, size));
+            offset += length;
+        }
+        assert_eq!(offset, bytes.len());
+        assert!(png_to_icns(b"invalid image").is_err());
     }
 
     #[test]

@@ -56,12 +56,23 @@ pub fn is_virtual(path: &Path) -> bool {
 
 /// Mount the archive appended to the running executable, if there is one. Returns whether there is.
 pub fn mount_self() -> bool {
+    mount_self_with(|_| None)
+}
+
+/// [`mount_self`], but `replacement` may name another archive file to mount instead (an update that
+/// was downloaded and verified); it is given the program's own archive to read its configuration from.
+/// A replacement that can't be opened is ignored.
+pub fn mount_self_with(replacement: impl Fn(&Archive) -> Option<PathBuf>) -> bool {
     let Ok(exe) = std::env::current_exe() else { return false };
     // Behind the executable, or (a macOS `.app` bundle, whose signed executable can't be appended to)
     // as `Contents/Resources/app.nilepack`.
     let beside = exe.parent().and_then(Path::parent).map(|contents| contents.join("Resources/app.nilepack"));
     for file in [Some(exe.clone()), beside].into_iter().flatten() {
         if let Ok(Some(pack)) = open(&file) {
+            let pack = match replacement(&pack).and_then(|path| open(&path).ok().flatten()) {
+                Some(updated) => updated,
+                None => pack,
+            };
             return PACK.set(pack).is_ok();
         }
     }

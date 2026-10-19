@@ -1,0 +1,109 @@
+<!doctype html><meta charset="utf-8" /><title>audio</title>
+<style>
+  body {
+    margin: 20px;
+    font: 14px sans-serif;
+    width: 520px;
+  }
+  h4 {
+    margin: 16px 0 6px;
+    color: #555;
+  }
+  .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 6px 0;
+  }
+  button {
+    padding: 5px 12px;
+  }
+  .bar {
+    flex: 1;
+    height: 8px;
+    background: #ddd;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .bar i {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: #36c;
+  }
+  #log {
+    font: 12px monospace;
+    color: #555;
+    background: #f4f4f4;
+    padding: 6px;
+    border-radius: 4px;
+    min-height: 60px;
+    white-space: pre-wrap;
+  }
+</style>
+<h4>&lt;audio&gt; element / <code>new Audio(url)</code></h4>
+<audio id="a" src="audio/low.wav"></audio>
+<div class="row">
+  <button id="play">Play</button><button id="pause">Pause</button
+  ><button id="stop">Stop</button>
+  <label><input id="loop" type="checkbox" /> loop</label>
+  <label
+    >volume
+    <input id="vol" type="range" min="0" max="1" step="0.05" value="0.8"
+  /></label>
+</div>
+<div class="row">
+  <span id="time">0.0 / 0.0 s</span>
+  <div class="bar"><i id="fill"></i></div>
+</div>
+<h4>
+  Sciter's <code>Audio.load()</code>: <code>await audio.play()</code> returns
+  when the sound ends
+</h4>
+<div class="row">
+  <button id="chime">Chime</button><button id="beeps">Three beeps</button>
+</div>
+<h4>Events</h4>
+<div id="log"></div>
+<script>
+  const $ = (s) => document.querySelector(s),
+    log = (m) => {
+      $("#log").textContent += m + "\n";
+    };
+  const a = $("#a");
+  for (const t of ["loadedmetadata", "play", "pause", "ended"])
+    a.addEventListener(t, () => log(t + " @ " + a.currentTime.toFixed(2)));
+  a.volume = 0.8;
+  const show = () => {
+    const d = isFinite(a.duration) ? a.duration : 0;
+    $("#time").textContent =
+      a.currentTime.toFixed(1) + " / " + d.toFixed(1) + " s";
+    $("#fill").style.width = a.progress * 100 + "%";
+  };
+  a.addEventListener("timeupdate", show);
+  a.addEventListener("ended", show);
+  $("#play").onclick = () => a.play();
+  $("#pause").onclick = () => a.pause();
+  $("#stop").onclick = () => {
+    a.stop();
+    show();
+  };
+  $("#loop").onchange = (e) => {
+    a.loop = e.target.checked;
+  };
+  $("#vol").oninput = (e) => {
+    a.volume = +e.target.value;
+  };
+  $("#chime").onclick = async () => {
+    const s = await Audio.load(__DIR__ + "/audio/chime.wav");
+    await s.play();
+    log("chime finished");
+  };
+  $("#beeps").onclick = async () => {
+    for (let i = 0; i < 3; i++) {
+      const s = await Audio.load(__DIR__ + "/audio/beep.wav");
+      await s.play();
+    }
+    log("three beeps finished");
+  };
+</script>

@@ -223,11 +223,39 @@
       media: { value: String(query) },
       matches: { get: evaluate },
     });
-    mql.onchange = null;
+    const watch = () => { if (!watched.has(mql)) watched.set(mql, evaluate()); };
+    // A list that someone listens to (a listener, `onchange` or the old `addListener`) is
+    // re-evaluated when the window resizes or the system theme changes (`__mediaCheck`) and fires
+    // `change` when its answer differs.
+    let handler = null;
+    Object.defineProperty(mql, "onchange", {
+      get: () => handler,
+      set: (f) => { handler = typeof f === "function" ? f : null; if (handler) watch(); },
+      enumerable: true,
+    });
+    const listen = mql.addEventListener.bind(mql);
+    mql.addEventListener = (type, f, o) => { if (type === "change") watch(); return listen(type, f, o); };
     mql.addListener = (f) => mql.addEventListener("change", f);
     mql.removeListener = (f) => mql.removeEventListener("change", f);
+    Object.defineProperty(mql, "_eval", { value: evaluate });
     return mql;
   };
+  class MediaQueryListEvent extends Event {
+    constructor(type, init = {}) { super(type, init); this.media = init.media ?? ""; this.matches = !!init.matches; }
+  }
+  g.MediaQueryListEvent = MediaQueryListEvent;
+  const watched = new Map(); // MediaQueryList -> last answer
+  Object.defineProperty(g, "__mediaCheck", {
+    value() {
+      for (const [mql, was] of [...watched]) {
+        const now = mql._eval();
+        if (now === was) continue;
+        watched.set(mql, now);
+        mql.dispatchEvent(new MediaQueryListEvent("change", { media: mql.media, matches: now }));
+      }
+    },
+  });
+  g.addEventListener("resize", () => g.__mediaCheck());
 
   // Web Storage. In memory for the life of the page; `sessionStorage` and `localStorage` are alike.
   class Storage {
@@ -753,23 +781,13 @@
   };
   Object.assign(XMLHttpRequest, { UNSENT: 0, OPENED: 1, HEADERS_RECEIVED: 2, LOADING: 3, DONE: 4 });
 
-  // ---- location, history, navigator --------------------------------------------
+  // ---- location, navigator --------------------------------------------
   let here = new URL("about:blank");
   Object.defineProperty(g, "__setLocation", { value(url) { try { here = new URL(url); } catch { here = new URL("about:blank"); } } });
-  const hashChanged = (old) => {
-    if (old !== here.href) {
-      const ev = new Event("hashchange");
-      ev.oldURL = old; ev.newURL = here.href;
-      g.dispatchEvent(ev);
-    }
-  };
+  // Read-only: the page's own URL (for `__DIR__`, `document.URL` and relative paths). A desktop
+  // app has no address bar, back button or history stack, so nothing here navigates.
   const loc = {
     get href() { return here.href; },
-    set href(v) {
-      const old = here.href;
-      const next = new URL(v, here.href);
-      if (next.href.split("#")[0] === old.split("#")[0]) { here = next; hashChanged(old); } // other pages can't be opened from a script
-    },
     get protocol() { return here.protocol; },
     get host() { return here.host; },
     get hostname() { return here.hostname; },
@@ -778,30 +796,11 @@
     get pathname() { return here.pathname; },
     get search() { return here.search; },
     get hash() { return here.hash; },
-    set hash(v) {
-      const old = here.href;
-      here.hash = v ? (String(v).startsWith("#") ? String(v) : "#" + v) : "";
-      hashChanged(old);
-    },
-    assign(u) { loc.href = u; },
-    replace(u) { loc.href = u; },
-    reload() {},
     toString() { return here.href; },
   };
-  Object.defineProperty(g, "location", { get: () => loc, set: (v) => { loc.href = v; } });
+  Object.defineProperty(g, "location", { get: () => loc });
   Object.defineProperty(document, "location", { get: () => loc });
   Object.defineProperty(document, "URL", { get: () => here.href });
-  const states = [null];
-  Object.defineProperty(g, "history", {
-    value: {
-      get length() { return states.length; },
-      get state() { return states[states.length - 1]; },
-      scrollRestoration: "auto",
-      pushState(state, title, url) { states.push(state ?? null); if (url != null) here = new URL(url, here.href); },
-      replaceState(state, title, url) { states[states.length - 1] = state ?? null; if (url != null) here = new URL(url, here.href); },
-      back() {}, forward() {}, go() {},
-    },
-  });
   Object.defineProperty(g, "navigator", {
     value: { userAgent: "Mozilla/5.0 Nile/0.1", appName: "Nile", language: "en-US", languages: ["en-US", "en"], onLine: true, platform: "", hardwareConcurrency: 4, cookieEnabled: false, maxTouchPoints: 0 },
   });
@@ -1004,7 +1003,51 @@
   };
   const LENGTH_UNITS = { px: 1, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, pt: 96 / 72, pc: 16 };
   const unsupported = (what) => () => { throw new Error(what + " is not available in Nile"); };
+  // `Clipboard` (docs.sciter.com/docs/JS.runtime/Clipboard). `image` is an `ImageData` (RGBA) here, where
+  // Sciter has a Graphics.Image; text, html, files and json follow its shapes. `link` is not supported.
+  const Clipboard = {
+    read() {
+      const out = {};
+      const text = N.clipGet("text"), html = N.clipGet("html"), json = N.clipGet("json"), files = N.clipGet("files"), img = N.clipGetImage();
+      if (text != null) out.text = text;
+      if (html != null) out.html = html;
+      if (json != null) { try { out.json = JSON.parse(json); } catch {} }
+      if (files != null) out.file = files.split("\n");
+      if (img != null) {
+        const i1 = img.indexOf(","), i2 = img.indexOf(",", i1 + 1);
+        const w = Number(img.slice(0, i1)), h = Number(img.slice(i1 + 1, i2)), b64 = img.slice(i2 + 1);
+        out.image = new g.ImageData(new Uint8ClampedArray(b64ToBytes(b64).buffer), w, h);
+      }
+      return out;
+    },
+    readText() { const t = N.clipGet("text"); return t == null ? undefined : t; },
+    has(type) {
+      switch (type) {
+        case "text": return N.clipGet("text") != null;
+        case "html": return N.clipGet("html") != null;
+        case "json": return N.clipGet("json") != null;
+        case "file": return N.clipGet("files") != null;
+        case "image": return N.clipGetImage() != null;
+        default: return false;
+      }
+    },
+    writeText(text) { return N.clipPut("text", String(text), undefined); },
+    // A system clipboard holds one primary flavour at a time (a picture, files, or text with its html); the
+    // first of image, file, json, html, text that is given wins, and `text` rides along as the plain form.
+    write(data) {
+      if (data == null || typeof data !== "object") return false;
+      const img = data.image;
+      if (img && img.data && img.width > 0) return N.clipPutImage(img.width, img.height, bytesToB64(new Uint8Array(img.data.buffer, img.data.byteOffset, img.data.byteLength)));
+      if (Array.isArray(data.file) && data.file.length) return N.clipPut("files", data.file.map(String).join("\n"), undefined);
+      if (data.json !== undefined) return N.clipPut("json", JSON.stringify(data.json), data.text == null ? undefined : String(data.text));
+      if (data.html != null) return N.clipPut("html", String(data.html), data.text == null ? "" : String(data.text));
+      if (data.text != null) return N.clipPut("text", String(data.text), undefined);
+      return false;
+    },
+  };
+  g.Clipboard = Clipboard;
   const sciterModule = {
+    Clipboard,
     VERSION: "1.0.0.0", REVISION: "0", QUICKJS_VERSION: "2024-01-13",
     import: unsupported("import() (use `await import(...)`)"),
     setModuleUrlResolver() { /* bare names are not resolved yet */ },
@@ -1175,10 +1218,238 @@
   let appMenu = null;
   // Sciter's `application` (bootstrap scripts, docs.sciter.com scapp): the program's own loop is the shell's,
   // so `run()` returns at once and `quit(code)` ends the program with that exit code.
-  Object.defineProperty(g, "application", { value: { start() {}, run() { return 0; }, quit(code = 0) { N.windowCommand("quit", +code | 0, 0); } }, configurable: true });
+  // `application.arguments` is the program's own arguments (a file the OS opens with the app, a
+  // `myapp://` link). `second-instance`, `open-url` and `open-file` events come to `document` (and `window`).
+  const auUpdate = (name, ...args) => {
+    if (!g.host || !g.host.has(name)) throw new Error("updates are not available in this host");
+    return g.host[name](...args);
+  };
+  let badgeText = null, progressValue = null;
+  Object.defineProperty(g, "application", { value: { start() {}, run() { return 0; }, quit(code = 0) { N.windowCommand("quit", +code | 0, 0); },
+    get arguments() { return g.__envModule.arguments(); },
+    // Make this program the handler of `scheme://` links / `.ext` files, or start it at login. Each
+    // returns whether the system took it (macOS declares schemes and file types in the bundle, see `nile --pack --protocol`).
+    // Signed content updates (see docs/guide/updates.md): `version` is the app's, `checkForUpdates()` fetches the manifest
+    // named by nile.json (`update.url`) and resolves to the update or null, `downloadUpdate(update)` downloads and verifies
+    // it, `updateReady` says one is staged and `restartForUpdate()` starts the new version.
+    get version() { return auUpdate("nileUpdateConfig").version; },
+    get updateReady() { return auUpdate("nileUpdateConfig").ready || false; },
+    async checkForUpdates(manifestUrl) {
+      const cfg = auUpdate("nileUpdateConfig");
+      const where = manifestUrl || cfg.url;
+      if (!where) throw new Error("no update URL (nile.json: update.url)");
+      const r = await g.fetch(String(where));
+      if (!r.ok) throw new Error("update check failed: " + r.status);
+      const m = await r.json();
+      if (!m || !m.version || !m.url || !m.sha256 || !m.signature) throw new Error("the update manifest is incomplete");
+      if (!auUpdate("nileUpdateNewer", String(m.version), String(cfg.version))) return null;
+      return { ...m, url: new g.URL(String(m.url), new g.URL(String(where), g.location.href).href).href, current: cfg.version };
+    },
+    async downloadUpdate(update) {
+      const r = await g.fetch(String(update.url));
+      if (!r.ok) throw new Error("download failed: " + r.status);
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      const { url, current, ...manifest } = update;
+      const res = auUpdate("nileUpdateStage", JSON.stringify(manifest), bytesToB64(bytes));
+      if (res.error) throw new Error(res.error);
+      return res.version;
+    },
+    restartForUpdate() {
+      if (!auUpdate("nileUpdateRestart")) throw new Error("could not start the new version");
+      N.windowCommand("quit", 0, 0);
+    },
+    // A short text on the dock (macOS) or taskbar (Windows) icon: `application.badge = 3`; null or "" clears it.
+    get badge() { return badgeText; },
+    set badge(v) {
+      badgeText = v == null || v === "" || v === 0 ? null : String(v);
+      N.badgeSet(badgeText == null ? "" : badgeText, badgeText != null);
+    },
+    // Progress on the dock icon (macOS) or taskbar button (Windows): `application.progress = 0.4` (0 to 1),
+    // `"indeterminate"` (Windows; macOS shows a full bar), `null` clears it.
+    get progress() { return progressValue; },
+    set progress(v) {
+      if (v == null || v === false || v === "") { progressValue = null; N.progressSet(0, 0); }
+      else if (v === "indeterminate") { progressValue = "indeterminate"; N.progressSet(1, 0); }
+      else { const n = Number(v); if (Number.isNaN(n)) return; progressValue = Math.min(1, Math.max(0, n)); N.progressSet(2, progressValue); }
+    },
+    registerProtocol(scheme) { return N.envCall("registerProtocol", [String(scheme)]) === "1"; },
+    registerFileType(ext) { return N.envCall("registerFileType", [String(ext)]) === "1"; },
+    get loginItem() { return N.envCall("loginItem", []) === "1"; },
+    set loginItem(on) { N.envCall("setLoginItem", [on ? "1" : "0"]); } }, configurable: true });
+  Object.defineProperty(g, "__trayEvent", { value(type) { const e = new Event(type); g.document.dispatchEvent(e); g.dispatchEvent(e); } });
+  Object.defineProperty(g, "__applicationEvent", {
+    value(type, data) {
+      const e = new Event(type, { cancelable: false });
+      Object.assign(e, data || {});
+      g.document.dispatchEvent(e);
+      g.dispatchEvent(e);
+    },
+  });
   // Classic scripts have no module scope: the page's folder.
   Object.defineProperty(g, "__DIR__", { get() { return String(location.href).replace(/[^/]*$/, ""); }, configurable: true });
   Object.defineProperty(g, "__FILE__", { get() { return String(location.href); }, configurable: true });
+  // ---- in-window menu bar ---------------------------------------------------------------------
+  // `Window.this.menu = el` is a system menu bar on macOS and Windows. Where the host has none (Linux, or
+  // `NILE_MENU=inline`) the same <menu> markup is drawn as a bar at the top of the page: Escape, arrows and
+  // Enter work, an item runs through the engine like a native choice (`click` event, `role`s). The bar and
+  // its menus are plain elements (`.nile-menubar`, `.nile-menu`) styled by the UA sheet.
+  let menuBar = null, menuChain = [], menuBarEl = null;
+  const SEP = { sep: true };
+  const menuLabel = (li) => { let t = ""; for (const n of li.childNodes) if (n.nodeType === 3) t += n.nodeValue; return t.replace(/\s+/g, " ").trim(); };
+  const menuItemsOf = (menu) => {
+    const out = [];
+    for (const k of menu.children) {
+      if (k.localName === "hr") { if (out.length && out[out.length - 1] !== SEP) out.push(SEP); continue; }
+      if (k.localName !== "li" || k.hasAttribute("hidden") || getComputedStyle(k).display === "none") continue;
+      const sub = Array.from(k.children).find((c) => c.localName === "menu");
+      const label = k.getAttribute("label");
+      out.push({ id: k._id, label: label == null ? menuLabel(k) : label.trim(), accel: (k.getAttribute("accesskey") || "").replace(/CmdOrCtrl/gi, "Ctrl").replace(/Cmd/gi, "Super"), disabled: k.hasAttribute("disabled"), checked: k.hasAttribute("checked"), items: sub ? menuItemsOf(sub) : null });
+    }
+    while (out.length && out[out.length - 1] === SEP) out.pop();
+    return out;
+  };
+  const closeMenus = () => {
+    for (const m of menuChain) m.el.remove();
+    menuChain = [];
+    if (menuBarEl) for (const b of menuBarEl.children) b.classList.remove("nile-open");
+    document.removeEventListener("mousedown", outsideMenu, true);
+    document.removeEventListener("keydown", menuKey, true);
+  };
+  const outsideMenu = (e) => {
+    const t = e.target;
+    if (t && t.closest && t.closest(".nile-menu, .nile-menubar")) return;
+    closeMenus();
+  };
+  const litRow = (m) => m.el.querySelector(".nile-menu-row.nile-hover");
+  const setLit = (m, row) => { const old = litRow(m); if (old) old.classList.remove("nile-hover"); if (row) row.classList.add("nile-hover"); };
+  function runMenuItem(item) {
+    closeMenus();
+    N.menuInvoke(item.id);
+  }
+  // Open `items` as a menu with its top-left at (x, y); level 0 is the bar's, higher ones submenus.
+  function openMenuAt(items, x, y, level, lead) {
+    for (const m of menuChain.splice(level)) m.el.remove();
+    const el = document.createElement("div");
+    el.className = "nile-menu";
+    el.setAttribute("role", "menu");
+    const rows = [];
+    for (const it of items) {
+      if (it === SEP) { const hr = document.createElement("div"); hr.className = "nile-menu-sep"; el.appendChild(hr); continue; }
+      const row = document.createElement("div");
+      row.className = "nile-menu-row" + (it.disabled ? " nile-disabled" : "");
+      row.setAttribute("role", it.checked ? "menuitemcheckbox" : "menuitem");
+      const mark = document.createElement("span"); mark.className = "nile-mi-mark"; mark.textContent = it.checked ? "\u2713" : "";
+      const text = document.createElement("span"); text.className = "nile-mi-label"; text.textContent = it.label;
+      const key = document.createElement("span"); key.className = "nile-mi-key"; key.textContent = it.items ? "\u203A" : it.accel;
+      row.append(mark, text, key);
+      row._item = it;
+      el.appendChild(row);
+      rows.push(row);
+    }
+    const rec = { el, rows, items };
+    menuChain.push(rec);
+    el.style.setProperty("left", "0px");
+    el.style.setProperty("top", "0px");
+    el.style.setProperty("visibility", "hidden");
+    document.body.appendChild(el);
+    const r = el.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let left = x, top = y;
+    if (left + r.width > vw) left = Math.max(0, level ? (lead ?? x) - r.width : vw - r.width);
+    if (top + r.height > vh) top = Math.max(0, vh - r.height);
+    el.style.setProperty("left", left + "px");
+    el.style.setProperty("top", top + "px");
+    el.style.removeProperty("visibility");
+    el.addEventListener("mousedown", (e) => e.preventDefault());
+    el.addEventListener("mouseover", (e) => {
+      const row = e.target.closest && e.target.closest(".nile-menu-row");
+      if (!row || row.classList.contains("nile-disabled")) return;
+      setLit(rec, row);
+      const at = menuChain.indexOf(rec);
+      if (row._item.items) { const b = row.getBoundingClientRect(); openMenuAt(row._item.items, b.right - 2, b.top - 4, at + 1, b.left + 2); }
+      else for (const m of menuChain.splice(at + 1)) m.el.remove();
+    });
+    el.addEventListener("click", (e) => {
+      const row = e.target.closest && e.target.closest(".nile-menu-row");
+      if (!row || row.classList.contains("nile-disabled")) return;
+      const it = row._item;
+      if (it.items) { const b = row.getBoundingClientRect(); openMenuAt(it.items, b.right - 2, b.top - 4, menuChain.indexOf(rec) + 1, b.left + 2); return; }
+      runMenuItem(it);
+    });
+    return rec;
+  }
+  function openBarMenu(index) {
+    const items = menuBar;
+    if (!menuBarEl || !items) return;
+    const top = items[index];
+    const button = menuBarEl.children[index];
+    for (const b of menuBarEl.children) b.classList.remove("nile-open");
+    button.classList.add("nile-open");
+    const b = button.getBoundingClientRect();
+    if (!top.items || !top.items.length) { closeMenus(); button.classList.add("nile-open"); return; }
+    const had = menuChain.length > 0;
+    openMenuAt(top.items, b.left, b.bottom, 0);
+    menuChain[0].bar = index;
+    if (!had) { document.addEventListener("mousedown", outsideMenu, true); document.addEventListener("keydown", menuKey, true); }
+  }
+  function menuKey(e) {
+    if (!menuChain.length) return;
+    const last = menuChain[menuChain.length - 1];
+    const live = last.rows.filter((r) => !r.classList.contains("nile-disabled"));
+    const cur = litRow(last);
+    const idx = cur ? live.indexOf(cur) : -1;
+    const stop = () => { e.preventDefault(); e.stopPropagation(); };
+    switch (e.key) {
+      case "Escape": stop(); if (menuChain.length > 1) { menuChain.pop().el.remove(); } else closeMenus(); break;
+      case "ArrowDown": stop(); if (live.length) setLit(last, live[(idx + 1) % live.length]); break;
+      case "ArrowUp": stop(); if (live.length) setLit(last, live[(idx - 1 + live.length) % live.length]); break;
+      case "ArrowRight": {
+        stop();
+        if (cur && cur._item.items) { const b = cur.getBoundingClientRect(); const sub = openMenuAt(cur._item.items, b.right - 2, b.top - 4, menuChain.length, b.left + 2); const first = sub.rows.find((r) => !r.classList.contains("nile-disabled")); if (first) setLit(sub, first); }
+        else if (menuChain[0].bar !== undefined) openBarMenu((menuChain[0].bar + 1) % menuBar.length);
+        break;
+      }
+      case "ArrowLeft":
+        stop();
+        if (menuChain.length > 1) menuChain.pop().el.remove();
+        else if (menuChain[0].bar !== undefined) openBarMenu((menuChain[0].bar - 1 + menuBar.length) % menuBar.length);
+        break;
+      case "Enter": case " ":
+        stop();
+        if (cur) { if (cur._item.items) { const b = cur.getBoundingClientRect(); const sub = openMenuAt(cur._item.items, b.right - 2, b.top - 4, menuChain.length, b.left + 2); const first = sub.rows.find((r) => !r.classList.contains("nile-disabled")); if (first) setLit(sub, first); } else runMenuItem(cur._item); }
+        break;
+      default: break;
+    }
+  }
+  function renderMenuBar() {
+    if (!appMenu || N.menuNative()) { removeMenuBar(); return; }
+    if (!document.body) { document.addEventListener("DOMContentLoaded", renderMenuBar, { once: true }); return; }
+    closeMenus();
+    menuBar = menuItemsOf(appMenu).filter((i) => i !== SEP);
+    if (!menuBarEl) {
+      menuBarEl = document.createElement("nav");
+      menuBarEl.className = "nile-menubar";
+      menuBarEl.setAttribute("role", "menubar");
+      menuBarEl.addEventListener("mousedown", (e) => e.preventDefault());
+      document.body.insertBefore(menuBarEl, document.body.firstChild);
+    }
+    menuBarEl.textContent = "";
+    menuBar.forEach((it, i) => {
+      const b = document.createElement("span");
+      b.className = "nile-menubar-item" + (it.disabled ? " nile-disabled" : "");
+      b.setAttribute("role", "menuitem");
+      b.textContent = it.label;
+      b.addEventListener("click", () => { if (it.disabled) return; if (menuChain.length && menuChain[0].bar === i) closeMenus(); else { menuBar = menuItemsOf(appMenu).filter((x) => x !== SEP); openBarMenu(i); } });
+      b.addEventListener("mouseover", () => { if (menuChain.length && menuChain[0].bar !== i && !it.disabled) { menuBar = menuItemsOf(appMenu).filter((x) => x !== SEP); openBarMenu(i); } });
+      menuBarEl.appendChild(b);
+    });
+  }
+  function removeMenuBar() {
+    closeMenus();
+    if (menuBarEl) { menuBarEl.remove(); menuBarEl = null; }
+    menuBar = null;
+  }
+  let trayState = null;
   class Window {
     constructor(params = {}) { openWindow(this, params, false); }
     static get this() { return thisWindow; }
@@ -1238,7 +1509,16 @@
     // The application menu bar of the window: `Window.this.menu = document.$("menu#app")`. The shell shows
     // it as the system menu bar on macOS and Windows (elsewhere the page draws its own); null removes it.
     get menu() { return appMenu; }
-    set menu(el) { appMenu = el || null; N.menuSet(el ? el._id : -1); }
+    // The tray icon (notification area): `Window.this.tray = { icon: "tray.png", tooltip: "My app", menu: $("menu#tray") }`
+    // (`template: true` lets macOS tint a one-colour icon); null removes it. `trayclick` and `traydoubleclick`
+    // fire on the document. Nile extension (Sciter has no tray API); not available on Linux yet.
+    get tray() { return trayState; }
+    set tray(v) {
+      trayState = v || null;
+      if (v) N.traySet(true, String(v.icon || ""), String(v.tooltip || ""), v.menu ? v.menu._id : -1, v.template === true);
+      else N.traySet(false, "", "", -1, false);
+    }
+    set menu(el) { appMenu = el || null; N.menuSet(el ? el._id : -1); renderMenuBar(); }
     get isActive() { return this === thisWindow ? active : this._valid; }
     get isValid() { return this === thisWindow || this._valid; }
     // Asks the window to close; a `closerequest` listener may cancel it. `value` is what the opener's
@@ -2169,16 +2449,118 @@
     },
   });
 
-  // Files dropped on the window (not on a file input): a `drop` event with `dataTransfer.files`.
-  Object.defineProperty(g, "__fileDrop", {
-    value(id, paths) {
-      const target = wrap(id);
-      if (!target) return;
-      const files = paths.map((p) => new File(p));
-      const e = new Event("drop", { bubbles: true, cancelable: true });
-      e.dataTransfer = { files, types: ["Files"], items: files.map((f) => ({ kind: "file", type: f.type, getAsFile: () => f })), dropEffect: "copy" };
-      e.files = files;
-      target.dispatchEvent(e);
+  // ---- HTML5 drag and drop ---------------------------------------------------------------------
+  // The engine decides when a drag starts (`draggable="true"`), where the pointer is and when it ends; the
+  // events and the `DataTransfer` are here. `dragstart` / `drag` / `dragend` go to the source,
+  // `dragenter` / `dragover` / `dragleave` / `drop` to what is under the pointer. A `dragover` that calls
+  // `preventDefault()` accepts the drop.
+  const EFFECTS = { none: [], copy: ["copy"], copyLink: ["copy", "link"], copyMove: ["move", "copy"], link: ["link"], linkMove: ["move", "link"], move: ["move"], all: ["move", "copy", "link"], uninitialized: ["move", "copy", "link"] };
+  class DataTransferItem {
+    constructor(kind, type, data) { this.kind = kind; this.type = type; this._data = data; }
+    getAsString(cb) { if (this.kind === "string" && typeof cb === "function") setTimeout(() => cb(this._data), 0); }
+    getAsFile() { return this.kind === "file" ? this._data : null; }
+  }
+  class DataTransfer {
+    constructor() {
+      this._data = new Map(); this._mode = "rw"; this._image = null;
+      this.dropEffect = "none"; this.effectAllowed = "uninitialized"; this.files = [];
+    }
+    get types() { return [...this._data.keys(), ...(this.files.length ? ["Files"] : [])]; }
+    get items() {
+      const list = [...this._data].map(([t, v]) => new DataTransferItem("string", t, v)).concat(this.files.map((f) => new DataTransferItem("file", f.type, f)));
+      list.add = (data, type) => { if (typeof data === "string") this.setData(type, data); };
+      return list;
+    }
+    setData(type, value) { if (this._mode === "rw") this._data.set(String(type).toLowerCase() === "text" ? "text/plain" : String(type).toLowerCase(), String(value)); }
+    getData(type) {
+      if (this._mode === "protected") return "";
+      const t = String(type).toLowerCase();
+      return this._data.get(t === "text" ? "text/plain" : t) ?? (t === "url" ? (this._data.get("text/uri-list") ?? "") : "");
+    }
+    clearData(type) { if (this._mode !== "rw") return; type === undefined ? this._data.clear() : this._data.delete(String(type).toLowerCase()); }
+    setDragImage(el, x, y) { this._image = { el, x, y }; }
+  }
+  g.DataTransfer = DataTransfer;
+  g.DataTransferItem = DataTransferItem;
+  const dragEvent = (type, target, x, y, dt, related = null) => {
+    const e = new Event(type, { bubbles: true, cancelable: type !== "dragleave" && type !== "dragend" && type !== "drag" });
+    Object.assign(e, { clientX: x, clientY: y, pageX: x + (g.scrollX || 0), pageY: y + (g.scrollY || 0), screenX: x, screenY: y, button: 0, buttons: 1, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false, dataTransfer: dt, relatedTarget: related });
+    return e;
+  };
+  g.DragEvent = class DragEvent extends Event {};
+  let dnd = null;
+  const allowedEffects = (dt) => EFFECTS[dt.effectAllowed] || EFFECTS.uninitialized;
+  Object.defineProperties(g, {
+    __dndStart: {
+      value(id, x, y) {
+        const source = wrap(id);
+        if (!source) return false;
+        const dt = new DataTransfer();
+        const e = dragEvent("dragstart", source, x, y, dt);
+        source.dispatchEvent(e);
+        if (e.defaultPrevented) return false;
+        dt._mode = "protected";
+        dnd = { dt, source, over: null, accept: false, effect: "none" };
+        return true;
+      },
+    },
+    __dndMove: {
+      value(overId, x, y) {
+        if (!dnd) return { accept: false, effect: "none" };
+        const { dt, source } = dnd;
+        const target = overId > 0 ? wrap(overId) : null;
+        if (target !== dnd.over) {
+          if (dnd.over) dnd.over.dispatchEvent(dragEvent("dragleave", dnd.over, x, y, dt, target));
+          if (target) target.dispatchEvent(dragEvent("dragenter", target, x, y, dt, dnd.over));
+          dnd.over = target;
+        }
+        source.dispatchEvent(dragEvent("drag", source, x, y, dt));
+        let accept = false, effect = "none";
+        if (target) {
+          const allowed = allowedEffects(dt);
+          dt.dropEffect = allowed[0] || "none";
+          const e = dragEvent("dragover", target, x, y, dt);
+          target.dispatchEvent(e);
+          effect = allowed.includes(dt.dropEffect) ? dt.dropEffect : "none";
+          accept = e.defaultPrevented && effect !== "none";
+          if (!accept) effect = "none";
+        }
+        dnd.accept = accept; dnd.effect = effect;
+        return { accept, effect };
+      },
+    },
+    __dndEnd: {
+      value(drop, x, y) {
+        if (!dnd) return;
+        const { dt, source, over } = dnd;
+        dnd = null;
+        let effect = "none";
+        if (drop && over && dt.dropEffect !== "none") {
+          dt._mode = "ro";
+          dt.dropEffect = allowedEffects(dt).includes(dt.dropEffect) ? dt.dropEffect : "none";
+          effect = dt.dropEffect;
+          over.dispatchEvent(dragEvent("drop", over, x, y, dt));
+        } else if (over) {
+          over.dispatchEvent(dragEvent("dragleave", over, x, y, dt, null));
+        }
+        dt.dropEffect = effect;
+        source.dispatchEvent(dragEvent("dragend", source, x, y, dt));
+      },
+    },
+    // Files dropped on the window from outside: `dragenter`, `dragover` and `drop` with `dataTransfer.files`.
+    __fileDrop: {
+      value(id, paths) {
+        const target = wrap(id);
+        if (!target) return;
+        const files = paths.map((p) => new File(p));
+        const dt = new DataTransfer();
+        dt.files = files; dt._mode = "ro"; dt.effectAllowed = "all"; dt.dropEffect = "copy";
+        target.dispatchEvent(dragEvent("dragenter", target, 0, 0, dt));
+        target.dispatchEvent(dragEvent("dragover", target, 0, 0, dt));
+        const e = dragEvent("drop", target, 0, 0, dt);
+        e.files = files;
+        target.dispatchEvent(e);
+      },
     },
   });
 
@@ -2736,4 +3118,7 @@
   const fsRead = (p) => b64ToBytes(fsRun("read", String(p)));
   const fsWrite = (p, text) => { fsRun("write", String(p), bytesToB64(new TextEncoder().encode(text))); };
   Object.defineProperty(g, "__storageModule", { value: { open: storageOpen } });
+  
+  /*@CANVAS@*/
+  /*@AUDIO@*/
   }

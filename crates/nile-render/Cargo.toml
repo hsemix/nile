@@ -8,4 +8,6 @@ license.workspace = true
 nile-style.workspace = true
 nile-text.workspace = true
 nile-layout.workspace = true
+nile-canvas.workspace = true
+nile-svg.workspace = true
 skia-safe.workspace = true

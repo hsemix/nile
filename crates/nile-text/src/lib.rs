@@ -16,6 +16,28 @@ use parley::{
     AlignmentOptions, FontContext, FontFamily, FontStyle, FontWeight, LayoutContext, LineHeight, StyleProperty,
 };
 
+/// How a text decoration line is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecoStyle {
+    #[default]
+    Solid,
+    Double,
+    Dotted,
+    Dashed,
+    Wavy,
+}
+
+/// Look of underline and line-through; `None` fields take the text color and the font's metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Decoration {
+    pub style: DecoStyle,
+    pub color: Option<[u8; 4]>,
+    pub thickness: Option<f32>,
+    pub offset: Option<f32>,
+}
+
+pub use parley::{OverflowWrap, WordBreak};
+
 /// Colors carried through shaping so painting knows each run's look.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct TextBrush {
@@ -27,6 +49,7 @@ pub struct TextBrush {
     pub spacer: bool,
     /// Baseline shift in px, positive = up (`vertical-align`).
     pub shift: f32,
+    pub decoration: Decoration,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +68,10 @@ pub struct TextStyle {
     pub underline: bool,
     pub line_through: bool,
     pub letter_spacing: f32,
+    pub word_spacing: f32,
+    pub word_break: WordBreak,
+    pub overflow_wrap: OverflowWrap,
+    pub decoration: Decoration,
     pub align: Alignment,
     /// `font-variation-settings` and `font-feature-settings` in CSS syntax (`"wght" 650, "wdth" 80`); empty for none.
     pub font_variations: String,
@@ -135,6 +162,10 @@ impl TextEngine {
             underline: false,
             line_through: false,
             letter_spacing: 0.0,
+            word_spacing: 0.0,
+            word_break: WordBreak::Normal,
+            overflow_wrap: OverflowWrap::Normal,
+            decoration: Decoration::default(),
             align: Alignment::Start,
             font_variations: String::new(),
             font_features: String::new(),
@@ -174,6 +205,9 @@ impl TextEngine {
         b.push_default(StyleProperty::Underline(base.underline));
         b.push_default(StyleProperty::Strikethrough(base.line_through));
         b.push_default(StyleProperty::LetterSpacing(base.letter_spacing));
+        b.push_default(StyleProperty::WordSpacing(base.word_spacing));
+        b.push_default(StyleProperty::WordBreak(base.word_break));
+        b.push_default(StyleProperty::OverflowWrap(base.overflow_wrap));
         let base_variations = if base.spacer {
             spacer_variations(&base.font_variations, &system_families(&base.font_family))
         } else {
@@ -196,6 +230,9 @@ impl TextEngine {
             b.push(StyleProperty::Underline(s.underline), range.clone());
             b.push(StyleProperty::Strikethrough(s.line_through), range.clone());
             b.push(StyleProperty::LetterSpacing(s.letter_spacing), range.clone());
+            b.push(StyleProperty::WordSpacing(s.word_spacing), range.clone());
+            b.push(StyleProperty::WordBreak(s.word_break), range.clone());
+            b.push(StyleProperty::OverflowWrap(s.overflow_wrap), range.clone());
             // Padding spacers are sized from the font's NBSP advance (`nbsp_ratio`), shaped at one fixed
             // optical size so the two agree whatever size the spacer is.
             if s.spacer {
@@ -321,7 +358,7 @@ fn with_symbol_fallbacks(family: &str) -> String {
 }
 
 fn brush(s: &TextStyle) -> TextBrush {
-    TextBrush { color: s.color, deco: s.deco, spacer: s.spacer, shift: s.shift }
+    TextBrush { color: s.color, deco: s.deco, spacer: s.spacer, shift: s.shift, decoration: s.decoration }
 }
 
 fn font_style(s: &TextStyle) -> FontStyle {
@@ -336,6 +373,27 @@ fn font_style(s: &TextStyle) -> FontStyle {
 pub fn break_lines(layout: &mut TextLayout, max_width: Option<f32>, align: Alignment) {
     layout.break_all_lines(max_width);
     layout.align(align, AlignmentOptions::default());
+}
+
+/// `text-wrap: balance`: the narrowest width (at most `container`) that still breaks `layout` into
+/// as many lines as `container` does. Only for paragraphs of two to six lines, as browsers do.
+pub fn balanced_width(layout: &mut TextLayout, container: f32) -> f32 {
+    layout.break_all_lines(Some(container));
+    let lines = layout.len();
+    if !(2..=6).contains(&lines) {
+        return container;
+    }
+    let (mut lo, mut hi) = (0.0_f32, container);
+    for _ in 0..14 {
+        let mid = (lo + hi) / 2.0;
+        layout.break_all_lines(Some(mid));
+        if layout.len() <= lines {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    (hi + 1.0).min(container)
 }
 
 /// Break lines where each line has its own start and width: `slot(y)` gives `(x, width)` for a line
@@ -395,6 +453,10 @@ mod tests {
             underline: false,
             line_through: false,
             letter_spacing: 0.0,
+            word_spacing: 0.0,
+            word_break: WordBreak::Normal,
+            overflow_wrap: OverflowWrap::Normal,
+            decoration: Decoration::default(),
             align: Alignment::Start,
             font_variations: String::new(),
             font_features: String::new(),
@@ -467,6 +529,10 @@ mod tests {
             underline: false,
             line_through: false,
             letter_spacing: 0.0,
+            word_spacing: 0.0,
+            word_break: WordBreak::Normal,
+            overflow_wrap: OverflowWrap::Normal,
+            decoration: Decoration::default(),
             align: Alignment::Start,
             font_variations: String::new(),
             font_features: String::new(),

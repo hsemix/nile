@@ -53,6 +53,10 @@ pub enum Value {
     Minmax(Box<(Value, Value)>),
     /// `repeat(count, tracks...)`.
     Repeat(Box<(RepeatKind, Vec<Value>)>),
+    /// `light-dark(light, dark)`: picked by the element's colour scheme when the style is applied.
+    LightDark(Color, Color),
+    /// `counter(name, style)` (separator `None`) or `counters(name, separator, style)`.
+    Counter(Box<(String, Option<String>, String)>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,6 +77,7 @@ impl Value {
     pub fn color(&self) -> Option<Color> {
         match self {
             Value::Color(c) => Some(*c),
+            Value::LightDark(light, dark) => Some(if crate::system::current_dark() { *dark } else { *light }),
             Value::Ident(name) => colors::named(name),
             _ => None,
         }
@@ -93,12 +98,15 @@ pub struct Declaration {
 pub struct Rule {
     pub selectors: SelectorList<NileImpl>,
     pub declarations: Vec<Declaration>,
+    /// `@layer` the rule is in: 0 for none, else 1 + the layer's place in `Stylesheet::layers`.
+    /// Unlayered rules beat layered ones whatever their specificity; later layers beat earlier ones.
+    pub layer: u32,
 }
 
 /// Properties whose value is kept as text for the cascade to hand on (scripts read `popup-*`; the
 /// others are parsed by their own modules or the text engine).
 pub(crate) fn keeps_raw(name: &str) -> bool {
-    name.starts_with("popup-") || matches!(name, "shape-outside" | "font-variation-settings" | "font-feature-settings" | "prototype" | "nile-password-char")
+    name.starts_with("popup-") || matches!(name, "filter" | "backdrop-filter" | "-webkit-backdrop-filter" | "clip-path" | "shape-outside" | "font-variation-settings" | "font-feature-settings" | "prototype" | "nile-password-char")
 }
 
 /// An `@keyframes` rule: the declarations at each offset (0..=1), in offset order.
@@ -124,6 +132,31 @@ pub struct Stylesheet {
     pub font_faces: Vec<FontFace>,
     /// Some rule or value depended on the viewport size (`@media`, `vw`, ...).
     pub uses_viewport: bool,
+    /// `@layer` names (nested ones as `outer.inner`) in the order they were first seen.
+    pub layers: Vec<String>,
+    /// The `@layer` blocks being parsed, innermost last.
+    open_layers: Vec<String>,
+}
+
+impl Stylesheet {
+    /// The layer a rule parsed now belongs to.
+    fn current_layer(&self) -> u32 {
+        match self.open_layers.last() {
+            Some(name) => self.layers.iter().position(|l| l == name).map_or(0, |i| i as u32 + 1),
+            None => 0,
+        }
+    }
+
+    fn declare_layer(&mut self, name: &str) -> String {
+        let full = match self.open_layers.last() {
+            Some(outer) => format!("{outer}.{name}"),
+            None => name.to_string(),
+        };
+        if !self.layers.contains(&full) {
+            self.layers.push(full.clone());
+        }
+        full
+    }
 }
 
 /// One `@font-face`: a family name and where its font can be loaded from.
@@ -169,9 +202,8 @@ fn rules_in(p: &mut Parser<'_>, cx: &Cx, sheet: &mut Stylesheet) {
             continue;
         }
         p.reset(&state);
-        match parse_rule(p, cx) {
-            Ok(Some(rule)) => sheet.rules.push(rule),
-            Ok(None) => {}
+        match parse_rule(p, cx, sheet) {
+            Ok(()) => {}
             // Skip the broken rule and keep going, as browsers do.
             Err(_) => {
                 let _ = p.parse_until_after(Delimiter::CurlyBracketBlock, |p| {
@@ -193,7 +225,15 @@ fn at_rule(p: &mut Parser<'_>, cx: &Cx, name: &str, sheet: &mut Stylesheet) {
     });
     let raw_prelude = p.slice_from(start).trim().to_string();
     let prelude = raw_prelude.to_ascii_lowercase();
-    if let Ok(Token::CurlyBracketBlock) = p.next() {
+    let has_block = matches!(p.next(), Ok(Token::CurlyBracketBlock));
+    // `@layer a, b;` only fixes the order of the layers.
+    if name == "layer" && !has_block {
+        for n in prelude.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            sheet.declare_layer(n);
+        }
+        return;
+    }
+    if has_block {
         if name == "keyframes" || name == "-webkit-keyframes" {
             let frames = p.parse_nested_block(|p| Ok::<_, ParseError<()>>(keyframes_in(p, cx))).unwrap_or_default();
             let name = raw_prelude.trim_matches(|c| c == '"' || c == '\'').to_string();
@@ -214,6 +254,17 @@ fn at_rule(p: &mut Parser<'_>, cx: &Cx, name: &str, sheet: &mut Stylesheet) {
             if let Some(face) = face {
                 sheet.font_faces.push(face);
             }
+        } else if name == "layer" {
+            // `@layer name { ... }`: the rules inside belong to the layer (an unnamed block gets its own).
+            let first = prelude.split(',').next().unwrap_or("").trim().to_string();
+            let name = if first.is_empty() { format!("<anonymous {}>", sheet.layers.len()) } else { first };
+            let full = sheet.declare_layer(&name);
+            sheet.open_layers.push(full);
+            let _ = p.parse_nested_block(|p| {
+                rules_in(p, cx, sheet);
+                Ok::<_, ParseError<()>>(())
+            });
+            sheet.open_layers.pop();
         } else if name == "supports" {
             if supports_matches(&prelude, cx.viewport) {
                 let _ = p.parse_nested_block(|p| {
@@ -450,17 +501,142 @@ fn media_feature(f: &str, vw: f32, vh: f32) -> bool {
 
 /// Parses `selector, selector { decls }`. Returns `Ok(None)` for rules we
 /// recognise but don't support (unsupported selectors, at-rules).
-fn parse_rule<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Rule>> {
+fn parse_rule<'i>(p: &mut Parser<'i>, cx: &Cx, sheet: &mut Stylesheet) -> PResult<()> {
+    let start = p.position();
     let selectors = p.parse_until_before(Delimiter::CurlyBracketBlock | Delimiter::Semicolon, |p| {
         SelectorList::parse(&NileParser, p, ParseRelative::No).map_err(|_| ParseError::<()>::custom(()))
     });
+    let selector_text = p.slice_from(start).trim().to_string();
     match p.next()? {
         Token::CurlyBracketBlock => {
-            let declarations = p.parse_nested_block(|p| Ok(declarations_in(p, cx)))?;
+            let body = p.parse_nested_block(|p| {
+                let from = p.position();
+                while p.next().is_ok() {}
+                Ok::<_, ParseError<()>>(p.slice_from(from).to_string())
+            })?;
             // A failed selector list drops the rule (its block is skipped above).
-            Ok(selectors.ok().map(|selectors| Rule { selectors, declarations }))
+            if let Ok(selectors) = selectors {
+                add_rule(&selector_text, selectors, &body, cx, sheet, 0);
+            }
+            Ok(())
         }
-        _ => Ok(None),
+        _ => Ok(()),
+    }
+}
+
+/// One item of a rule's block: declarations, or a nested rule / at-rule with its block.
+enum BodyItem {
+    Declarations(String),
+    Nested(String, String),
+}
+
+/// Splits a style rule's block (CSS nesting) into declarations and nested rules.
+fn split_body(body: &str) -> Vec<BodyItem> {
+    let mut items = Vec::new();
+    let (mut depth, mut start, mut quote) = (0_i32, 0, None::<char>);
+    let mut decls = String::new();
+    let mut prelude: Option<(usize, usize)> = None;
+    let mut chars = body.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if let Some(q) = quote {
+            if c == '\\' {
+                chars.next();
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ';' if depth == 0 => {
+                decls.push_str(&body[start..=i]);
+                start = i + 1;
+            }
+            '{' if depth == 0 => {
+                prelude = Some((start, i));
+                depth = 1_000;
+                start = i + 1;
+            }
+            '{' => depth += 1,
+            '}' if depth > 1_000 => depth -= 1,
+            '}' if depth == 1_000 => {
+                let (a, b) = prelude.take().unwrap_or((0, 0));
+                items.push(BodyItem::Nested(body[a..b].trim().to_string(), body[start..i].to_string()));
+                depth = 0;
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    decls.push_str(&body[start.min(body.len())..]);
+    if !decls.trim().is_empty() {
+        items.insert(0, BodyItem::Declarations(decls));
+    }
+    items
+}
+
+/// Adds a rule for `selectors` with the declarations in `body`, and the rules nested in it.
+fn add_rule(selector_text: &str, selectors: SelectorList<NileImpl>, body: &str, cx: &Cx, sheet: &mut Stylesheet, depth: u32) {
+    let layer = sheet.current_layer();
+    if !body.contains('{') {
+        let declarations = declarations_in(&mut Parser::new(body), cx);
+        sheet.rules.push(Rule { selectors, declarations, layer });
+        return;
+    }
+    let mut nested = Vec::new();
+    let mut declarations = Vec::new();
+    for item in split_body(body) {
+        match item {
+            BodyItem::Declarations(text) => declarations.extend(declarations_in(&mut Parser::new(&text), cx)),
+            BodyItem::Nested(prelude, block) => nested.push((prelude, block)),
+        }
+    }
+    if !declarations.is_empty() {
+        sheet.rules.push(Rule { selectors: selectors.clone(), declarations, layer });
+    }
+    if depth > 16 {
+        return;
+    }
+    for (prelude, block) in nested {
+        let lower = prelude.to_ascii_lowercase();
+        if let Some(at) = lower.strip_prefix('@') {
+            // Conditional rules nested in a rule apply their declarations to the same selector.
+            let (kind, condition) = at.split_once(char::is_whitespace).unwrap_or((at, ""));
+            let holds = match kind {
+                "media" => {
+                    cx.uses_viewport.set(true);
+                    media_matches(condition, cx.viewport)
+                }
+                "supports" => supports_matches(condition, cx.viewport),
+                "layer" | "scope" | "container" => true,
+                _ => false,
+            };
+            if holds {
+                add_rule(selector_text, selectors.clone(), &block, cx, sheet, depth + 1);
+            }
+            continue;
+        }
+        // `&` stands for the parent; without one the nested selector is a descendant of it.
+        let parent = if selector_text.contains(',') { format!(":is({selector_text})") } else { selector_text.to_string() };
+        let combined: Vec<String> = prelude
+            .split(',')
+            .map(|part| {
+                let part = part.trim();
+                if part.contains('&') {
+                    part.replace('&', &parent)
+                } else {
+                    // A descendant, or related through a leading combinator (`> p`).
+                    format!("{parent} {part}")
+                }
+            })
+            .collect();
+        let text = combined.join(", ");
+        let mut parser = Parser::new(&text);
+        if let Ok(list) = SelectorList::parse(&NileParser, &mut parser, ParseRelative::No) {
+            add_rule(&text, list, &block, cx, sheet, depth + 1);
+        }
     }
 }
 
@@ -556,6 +732,11 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
                     "px" => Value::Px(value),
                     "em" => Value::Em(value),
                     "rem" => Value::Rem(value),
+                    // Font-relative units that need font metrics are approximated from the em.
+                    "ch" | "ex" => Value::Em(value * 0.5),
+                    "cap" => Value::Em(value * 0.7),
+                    "ic" => Value::Em(value),
+                    "lh" | "rlh" => Value::Em(value * 1.2),
                     "pt" => Value::Px(value * 4.0 / 3.0),
                     "fr" => Value::Fr(value),
                     "s" => Value::Time(value),
@@ -590,7 +771,59 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
                         None => return Ok(None),
                     }
                 }
-                "calc" | "-webkit-calc" | "min" | "max" | "clamp" => {
+                "oklab" | "oklch" | "lab" | "lch" | "hwb" => {
+                    let args = p.parse_nested_block(color_args)?;
+                    match modern_color(&name, &args) {
+                        Some(c) => Value::Color(c),
+                        None => return Ok(None),
+                    }
+                }
+                "color" => {
+                    let parsed = p.parse_nested_block(|p| {
+                        let space = p.expect_ident()?.to_ascii_lowercase();
+                        Ok::<_, ParseError<()>>((space, color_args(p)?))
+                    })?;
+                    let (space, args) = parsed;
+                    let [r, g, b, rest @ ..] = args.as_slice() else { return Ok(None) };
+                    let ch = |x: &Arg| if x.pct { x.v / 100.0 } else { x.v };
+                    let alpha = rest.first().map_or(1.0, ch);
+                    match crate::color::in_space(&space, [ch(r), ch(g), ch(b)], alpha) {
+                        Some(c) => Value::Color(c),
+                        None => return Ok(None),
+                    }
+                }
+                "color-mix" => {
+                    let items = p.parse_nested_block(|p| gradient_items(p, cx))?;
+                    let [head, a, b] = items.as_slice() else { return Ok(None) };
+                    let space = match head.as_slice() {
+                        [Value::Ident(i), Value::Ident(space), ..] if i == "in" => space.clone(),
+                        _ => return Ok(None),
+                    };
+                    let side = |v: &Vec<Value>| -> Option<(Color, Option<f32>)> {
+                        let color = v.iter().find_map(Value::color)?;
+                        let pct = v.iter().find_map(|x| if let Value::Percent(p) = x { Some(*p) } else { None });
+                        Some((color, pct))
+                    };
+                    match (side(a), side(b)) {
+                        (Some(a), Some(b)) => match crate::color::mix(&space, a, b) {
+                            Some(c) => Value::Color(c),
+                            None => return Ok(None),
+                        },
+                        _ => return Ok(None),
+                    }
+                }
+                "light-dark" => {
+                    let items = p.parse_nested_block(|p| gradient_items(p, cx))?;
+                    match items.as_slice() {
+                        [a, b] => match (a.iter().find_map(Value::color), b.iter().find_map(Value::color)) {
+                            (Some(l), Some(d)) => Value::LightDark(l, d),
+                            _ => return Ok(None),
+                        },
+                        _ => return Ok(None),
+                    }
+                }
+                "calc" | "-webkit-calc" | "min" | "max" | "clamp" | "abs" | "sign" | "sqrt" | "pow" | "hypot" | "log" | "exp" | "sin" | "cos" | "tan" | "asin"
+                | "acos" | "atan" | "atan2" | "round" | "mod" | "rem" => {
                     let q = p.parse_nested_block(|p| math_function(&name, p, cx))?;
                     q.into_value()
                 }
@@ -647,6 +880,33 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
                             let start = args.get(1).and_then(|a| a.first()).and_then(Value::ident).is_some_and(|i| i == "start" || i == "jump-start");
                             Value::Timing(Timing::Steps(*n as u32, start))
                         }
+                        _ => return Ok(None),
+                    }
+                }
+                "counter" | "counters" => {
+                    let plural = name == "counters";
+                    let args = p.parse_nested_block(|p| gradient_items(p, cx))?;
+                    let at = |i: usize| args.get(i).and_then(|a| a.first());
+                    let Some(Value::Ident(counter)) = at(0) else { return Ok(None) };
+                    let (sep, style_at) = if plural {
+                        let Some(Value::Str(sep)) = at(1) else { return Ok(None) };
+                        (Some(sep.clone()), 2)
+                    } else {
+                        (None, 1)
+                    };
+                    let style = match at(style_at) {
+                        Some(Value::Ident(i)) => i.clone(),
+                        _ => "decimal".to_string(),
+                    };
+                    Value::Counter(Box::new((counter.clone(), sep, style)))
+                }
+                // `env(safe-area-inset-top, 0px)`: a desktop window has no insets; other names use the fallback.
+                "env" => {
+                    let items = p.parse_nested_block(|p| gradient_items(p, cx))?;
+                    let known = matches!(items.first().and_then(|i| i.first()), Some(Value::Ident(n)) if n.starts_with("safe-area-inset-"));
+                    match (known, items.get(1).and_then(|i| i.first())) {
+                        (true, _) => Value::Px(0.0),
+                        (false, Some(fallback)) => fallback.clone(),
                         _ => return Ok(None),
                     }
                 }
@@ -876,10 +1136,10 @@ fn transform_fn(name: &str, args: &[Vec<Value>]) -> Option<TransformFn> {
 fn viewport_units(value: f32, unit: &str, cx: &Cx) -> Option<(f32, ())> {
     let (w, h) = cx.viewport;
     let base = match unit {
-        "vw" => w,
-        "vh" => h,
-        "vmin" => w.min(h),
-        "vmax" => w.max(h),
+        "vw" | "dvw" | "svw" | "lvw" => w,
+        "vh" | "dvh" | "svh" | "lvh" => h,
+        "vmin" | "dvmin" | "svmin" | "lvmin" => w.min(h),
+        "vmax" | "dvmax" | "svmax" | "lvmax" => w.max(h),
         _ => return None,
     };
     cx.uses_viewport.set(true);
@@ -913,6 +1173,21 @@ fn color_args(p: &mut Parser<'_>) -> PResult<Vec<Arg>> {
         }
     }
     Ok(args)
+}
+
+/// `oklab()`, `oklch()`, `lab()`, `lch()` and `hwb()`.
+fn modern_color(name: &str, args: &[Arg]) -> Option<Color> {
+    let [a, b, c, rest @ ..] = args else { return None };
+    let alpha = rest.first().map_or(1.0, |x| if x.pct { x.v / 100.0 } else { x.v });
+    let ch = |x: &Arg, full: f32| if x.pct { x.v / 100.0 * full } else { x.v };
+    Some(match name {
+        "oklab" => crate::color::oklab(ch(a, 1.0), ch(b, 0.4), ch(c, 0.4), alpha),
+        "oklch" => crate::color::oklch(ch(a, 1.0), ch(b, 0.4), c.v, alpha),
+        "lab" => crate::color::lab(ch(a, 100.0), ch(b, 125.0), ch(c, 125.0), alpha),
+        "lch" => crate::color::lch(ch(a, 100.0), ch(b, 150.0), c.v, alpha),
+        "hwb" => crate::color::hwb(a.v, b.v / 100.0, c.v / 100.0, (alpha.clamp(0.0, 1.0) * 255.0).round() as u8),
+        _ => return None,
+    })
 }
 
 fn color_function(name: &str, args: &[Arg]) -> Option<Color> {
@@ -1006,6 +1281,17 @@ fn math_function(name: &str, p: &mut Parser<'_>, cx: &Cx) -> PResult<Quantity> {
         p.expect_exhausted()?;
         return Ok(q);
     }
+    // `round(<strategy>, a, b)`.
+    let strategy = if name == "round" {
+        p.try_parse(|p| {
+            let i = p.expect_ident()?.to_ascii_lowercase();
+            p.expect_comma()?;
+            Ok::<_, ParseError<()>>(i)
+        })
+        .ok()
+    } else {
+        None
+    };
     let mut args = Vec::new();
     loop {
         args.push(calc_sum(p, cx)?);
@@ -1014,6 +1300,9 @@ fn math_function(name: &str, p: &mut Parser<'_>, cx: &Cx) -> PResult<Quantity> {
         }
     }
     p.expect_exhausted()?;
+    if let Some(q) = fold_math(name, strategy.as_deref(), &args) {
+        return Ok(q);
+    }
     let pick = |args: &[Quantity], want: std::cmp::Ordering| -> PResult<Quantity> {
         let mut best = args[0];
         for a in &args[1..] {
@@ -1035,6 +1324,58 @@ fn math_function(name: &str, p: &mut Parser<'_>, cx: &Cx) -> PResult<Quantity> {
         }
         _ => bad(),
     }
+}
+
+/// The single number a quantity stands for when it needs no layout: a plain number or a `px` length.
+fn scalar(q: &Quantity) -> Option<f32> {
+    if q.is_num {
+        Some(q.num)
+    } else if q.em == 0.0 && q.pct == 0.0 {
+        Some(q.px)
+    } else {
+        None
+    }
+}
+
+/// `abs`, `sign`, `sqrt`, `pow`, `hypot`, `log`, `exp`, the trigonometric functions, `round`, `mod` and
+/// `rem` of quantities that are known now (numbers or `px`); `None` for anything else.
+fn fold_math(name: &str, strategy: Option<&str>, args: &[Quantity]) -> Option<Quantity> {
+    let vals: Vec<f32> = args.iter().map(scalar).collect::<Option<_>>()?;
+    let kind_num = args.iter().all(|a| a.is_num);
+    let same_kind = args.iter().all(|a| a.is_num == args[0].is_num);
+    let like = |v: f32| if args[0].is_num { Quantity::number(v) } else { Quantity::length(v, 0.0, 0.0) };
+    let number = Quantity::number;
+    Some(match (name, vals.as_slice()) {
+        ("abs", [a]) => like(a.abs()),
+        ("sign", [a]) => number(if *a == 0.0 { 0.0 } else { a.signum() }),
+        ("sqrt", [a]) if kind_num => number(a.sqrt()),
+        ("pow", [a, b]) if kind_num => number(a.powf(*b)),
+        ("hypot", v) if same_kind && !v.is_empty() => like(v.iter().map(|x| x * x).sum::<f32>().sqrt()),
+        ("log", [a]) if kind_num => number(a.ln()),
+        ("log", [a, b]) if kind_num => number(a.ln() / b.ln()),
+        ("exp", [a]) if kind_num => number(a.exp()),
+        ("sin", [a]) if kind_num => number(a.sin()),
+        ("cos", [a]) if kind_num => number(a.cos()),
+        ("tan", [a]) if kind_num => number(a.tan()),
+        ("asin", [a]) if kind_num => number(a.asin()),
+        ("acos", [a]) if kind_num => number(a.acos()),
+        ("atan", [a]) if kind_num => number(a.atan()),
+        ("atan2", [a, b]) if same_kind => number(a.atan2(*b)),
+        ("round", [a]) if kind_num => number(a.round()),
+        ("round", [a, b]) if same_kind && *b != 0.0 => {
+            let q = a / b;
+            let n = match strategy.unwrap_or("nearest") {
+                "up" => q.ceil(),
+                "down" => q.floor(),
+                "to-zero" => q.trunc(),
+                _ => q.round(),
+            };
+            like(n * b)
+        }
+        ("mod", [a, b]) if same_kind && *b != 0.0 => like(a - b * (a / b).floor()),
+        ("rem", [a, b]) if same_kind && *b != 0.0 => like(a - b * (a / b).trunc()),
+        _ => return None,
+    })
 }
 
 fn calc_sum(p: &mut Parser<'_>, cx: &Cx) -> PResult<Quantity> {
@@ -1092,7 +1433,15 @@ fn calc_factor(p: &mut Parser<'_>, cx: &Cx) -> PResult<Quantity> {
                 match unit.as_str() {
                     "px" => Quantity::length(value, 0.0, 0.0),
                     "em" => Quantity::length(0.0, value, 0.0),
+                    "ch" | "ex" => Quantity::length(0.0, value * 0.5, 0.0),
+                    "cap" => Quantity::length(0.0, value * 0.7, 0.0),
+                    "ic" => Quantity::length(0.0, value, 0.0),
+                    "lh" | "rlh" => Quantity::length(0.0, value * 1.2, 0.0),
                     "rem" => Quantity::length(value * crate::ROOT_FONT_SIZE, 0.0, 0.0),
+                    "deg" => Quantity::number(value.to_radians()),
+                    "turn" => Quantity::number(value * std::f32::consts::TAU),
+                    "rad" => Quantity::number(value),
+                    "grad" => Quantity::number(value * std::f32::consts::PI / 200.0),
                     "pt" => Quantity::length(value * 4.0 / 3.0, 0.0, 0.0),
                     u => match ABSOLUTE_UNITS.iter().find(|(n, _)| *n == u) {
                         Some((_, k)) => Quantity::length(value * k, 0.0, 0.0),
@@ -1101,6 +1450,8 @@ fn calc_factor(p: &mut Parser<'_>, cx: &Cx) -> PResult<Quantity> {
                 }
             }
         }
+        Token::Ident(ref i) if i.eq_ignore_ascii_case("pi") => Quantity::number(std::f32::consts::PI),
+        Token::Ident(ref i) if i.eq_ignore_ascii_case("e") => Quantity::number(std::f32::consts::E),
         Token::ParenthesisBlock => p.parse_nested_block(|p| {
             let q = calc_sum(p, cx)?;
             p.expect_exhausted()?;

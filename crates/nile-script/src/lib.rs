@@ -28,6 +28,8 @@ use rquickjs::{
 
 mod extensions;
 mod envmod;
+mod integration;
+pub use integration::mime_of;
 mod jsx;
 mod net;
 mod sys;
@@ -36,9 +38,11 @@ pub use net::{file_url, path_of_url, FetchRequest, FetchResponse, Fetcher, Local
 
 const EDIT: &str = include_str!("edit.js");
 const WEB: &str = include_str!("web.js");
+const CANVAS: &str = include_str!("canvas.js");
+const AUDIO: &str = include_str!("audio.js");
 
 fn prelude() -> String {
-    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", WEB)
+    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", &WEB.replace("/*@CANVAS@*/", CANVAS).replace("/*@AUDIO@*/", AUDIO))
 }
 
 /// Window ids are unique within the process (the main window, then each `new Window()`).
@@ -47,6 +51,18 @@ static NEXT_WINDOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 thread_local! {
     /// `Window.share`: JSON text by key, shared by the windows of one thread.
     static SHARE: RefCell<std::collections::HashMap<String, String>> = RefCell::default();
+}
+
+static APP_ARGUMENTS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+/// The program's own arguments (what is left after the shell took the page and its flags), which
+/// `application.arguments` and `@env`'s `arguments()` return. Unset, they are the process arguments.
+pub fn set_app_arguments(args: Vec<String>) {
+    *APP_ARGUMENTS.lock().unwrap() = Some(args);
+}
+
+pub fn app_arguments() -> Vec<String> {
+    APP_ARGUMENTS.lock().unwrap().clone().unwrap_or_else(|| std::env::args().skip(1).collect())
 }
 
 pub fn next_window_id() -> u32 {
@@ -145,6 +161,28 @@ pub enum WindowCommand {
     ResizeTo(f32, f32),
 }
 
+/// `application.progress`: the progress shown on the dock icon / taskbar button.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Progress {
+    #[default]
+    None,
+    Indeterminate,
+    /// 0.0 to 1.0.
+    Value(f32),
+}
+
+/// `Window.this.tray = {...}`: the notification-area (system tray) icon the page asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraySpec {
+    /// The icon file, as the page wrote it (relative to the page).
+    pub icon: String,
+    pub tooltip: String,
+    /// The `<menu>` shown when the icon is clicked with the secondary button.
+    pub menu: Option<NodeId>,
+    /// A single-colour icon the system may recolour (macOS menu bar).
+    pub template: bool,
+}
+
 /// What scripts can ask of the embedder: layout results and the viewport.
 /// Implementations must bring styles/layout up to date with the document
 /// before answering, since scripts expect to read what they just wrote.
@@ -159,6 +197,10 @@ pub trait Environment {
     /// The system theme is dark (`prefers-color-scheme: dark`).
     fn system_dark(&self) -> bool {
         false
+    }
+    /// The encoded bytes of an image the page names (`<img src>`), for `drawImage` and patterns.
+    fn image_bytes(&self, _src: &str) -> Option<Vec<u8>> {
+        None
     }
     /// Device pixels per logical pixel (`devicePixelRatio`).
     fn scale(&self) -> f32 {
@@ -198,6 +240,22 @@ pub trait Environment {
     fn clear_edit_selection(&self) {}
     /// `execCommand('copy' | 'cut' | 'paste')`: the host does it with its clipboard.
     fn clipboard_request(&self, _kind: &str) {}
+    /// Read one clipboard flavour: `text`, `html`, `json`, or `files` (paths joined by newlines).
+    fn clipboard_get(&self, _kind: &str) -> Option<String> {
+        None
+    }
+    /// The clipboard's picture as (width, height, RGBA bytes).
+    fn clipboard_get_image(&self) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
+    /// Put one flavour on the clipboard: `text` (a), `html` (a, with `b` as its plain text),
+    /// `files` (a: paths joined by newlines) or `json` (a, with `b` as its text form).
+    fn clipboard_put(&self, _kind: &str, _a: &str, _b: Option<&str>) -> bool {
+        false
+    }
+    fn clipboard_put_image(&self, _width: u32, _height: u32, _rgba: &[u8]) -> bool {
+        false
+    }
     /// Close, move, resize, ... the host window. Embedders without a window ignore it.
     fn window_command(&self, _cmd: WindowCommand) {}
     /// Show the popup element `node` in an OS window of its own (`rect`: its border box in viewport
@@ -205,6 +263,18 @@ pub trait Environment {
     fn portal_set(&self, _node: NodeId, _rect: [f32; 4]) {}
     /// The `<menu>` element chosen as the application menu bar, or none.
     fn set_app_menu(&self, _node: Option<NodeId>) {}
+    /// The host shows `Window.this.menu` as a system menu bar (macOS, Windows). When it doesn't, the
+    /// script draws an in-window bar itself.
+    fn native_menu(&self) -> bool {
+        true
+    }
+    /// An item of the in-window menu bar was chosen: run it like a native menu choice.
+    fn menu_invoke(&self, _id: u64) {}
+    /// Show (or with `None` remove) the tray icon.
+    fn set_tray(&self, _spec: Option<TraySpec>) {}
+    /// The text on the dock / taskbar icon (`application.badge`); `None` clears it.
+    fn set_badge(&self, _text: Option<String>) {}
+    fn set_progress(&self, _progress: Progress) {}
     fn portal_clear(&self, _node: NodeId) {}
     /// How this window was opened.
     fn window_info(&self) -> WindowInfo {
@@ -307,7 +377,7 @@ impl Loader for FileLoader {
         let builtin = match name {
             "@sys" => Some("const m = globalThis.__sysModule;\nexport const fs = m.fs;\nexport const TCP = m.TCP;\nexport const UDP = m.UDP;\nexport const Pipe = m.Pipe;\nexport const TTY = m.TTY;\nexport const Process = m.Process;\nexport const spawn = m.spawn;\nexport const hrtime = m.hrtime;\nexport const gettimeofday = m.gettimeofday;\nexport const uname = m.uname;\nexport const isatty = m.isatty;\nexport const environ = m.environ;\nexport const getenv = m.getenv;\nexport const setenv = m.setenv;\nexport const unsetenv = m.unsetenv;\nexport const cwd = m.cwd;\nexport const chdir = m.chdir;\nexport const homedir = m.homedir;\nexport const tmpdir = m.tmpdir;\nexport const exepath = m.exepath;\nexport const random = m.random;\nexport default m;"),
             "@nile" => Some(
-                "const m = globalThis.__sciterModule;\nexport const { VERSION, REVISION, QUICKJS_VERSION, setModuleUrlResolver, loadLibrary, parseValue, devicePixels, on, off, once, onGlobalEvent, offGlobalEvent, $, $$, uuid, encode, decode, compress, decompress, toBase64, fromBase64, md5, crc32 } = m;\nconst imp = m.import;\nexport { imp as import };\nexport default m;",
+                "const m = globalThis.__sciterModule;\nexport const { Clipboard, VERSION, REVISION, QUICKJS_VERSION, setModuleUrlResolver, loadLibrary, parseValue, devicePixels, on, off, once, onGlobalEvent, offGlobalEvent, $, $$, uuid, encode, decode, compress, decompress, toBase64, fromBase64, md5, crc32 } = m;\nconst imp = m.import;\nexport { imp as import };\nexport default m;",
             ),
             "@debug" => Some("const m = globalThis.__debugModule;\nexport const { setUnhandledExceptionHandler, setConsoleOutputHandler, callStackAt, setResourceArrivalHandler, setBreakpointHandler, setBreakpoints, getElementByUID, getUIDofElement, highlightElement, getStyleRulesOfElement, containerId, objectKind, sublimatedValue, sublimatedValueElements, frameVariables } = m;\nexport default m;"),
             "@storage" => Some("const m = globalThis.__storageModule;\nexport const open = m.open;\nexport default m;"),
@@ -595,6 +665,75 @@ fn install_natives(
         let env = env.clone();
         move || -> bool { env.system_dark() }
     });
+    // <canvas>: the surfaces and the 2D operations live in nile-canvas; the page's images come
+    // from the embedder through `Environment::image_bytes`.
+    native!("canvasCreate", |w: f64, h: f64| -> i32 { nile_canvas::create(w as u32, h as u32).map_or(0, |id| id as i32) });
+    native!("canvasResize", |id: i32, w: f64, h: f64| nile_canvas::resize(id as u32, w as u32, h as u32));
+    native!("canvasRemove", |id: i32| nile_canvas::remove(id as u32));
+    native!("canvasCall", {
+        let env = env.clone();
+        move |id: i32, op: String, args: Vec<f64>, text: String| -> String {
+            struct EnvImages<'a>(&'a dyn Environment);
+            impl nile_canvas::Images for EnvImages<'_> {
+                fn bytes(&self, src: &str) -> Option<Vec<u8>> {
+                    self.0.image_bytes(src)
+                }
+            }
+            // An error comes back as "\u{1}Name: message" for the wrapper to throw.
+            match nile_canvas::call(id as u32, &op, &args, &text, &EnvImages(&*env)) {
+                Ok(s) => s,
+                Err(e) => format!("\u{1}{e}"),
+            }
+        }
+    });
+    // Audio: `audioLoad(src)` registers a file as "id,duration" (an error starts with \u{1}), `audioOp` drives it.
+    #[cfg(feature = "audio")]
+    {
+        native!("audioLoad", {
+            let env = env.clone();
+            move |src: String| -> String {
+                let Some(bytes) = env.image_bytes(&src) else { return format!("\u{1}{src}: not found") };
+                match nile_audio::load(bytes) {
+                    Ok((id, duration)) => format!("{id},{}", duration.map_or(String::new(), |d| d.to_string())),
+                    Err(e) => format!("\u{1}{e}"),
+                }
+            }
+        });
+        native!("audioOp", |op: String, id: i32, arg: f64| -> String {
+            let id = id as u32;
+            let done = |r: Result<(), String>| r.map_or_else(|e| format!("\u{1}{e}"), |()| String::new());
+            match op.as_str() {
+                "play" => done(nile_audio::play(id)),
+                "pause" => done(nile_audio::pause(id)),
+                "stop" => done(nile_audio::stop(id)),
+                "seek" => done(nile_audio::seek(id, arg)),
+                "volume" => done(nile_audio::set_volume(id, arg as f32)),
+                "muted" => done(nile_audio::set_muted(id, arg != 0.0)),
+                "loop" => done(nile_audio::set_loop(id, arg != 0.0)),
+                "rate" => done(nile_audio::set_rate(id, arg as f32)),
+                "unload" => {
+                    nile_audio::unload(id);
+                    String::new()
+                }
+                "state" => match nile_audio::state(id) {
+                    Some(s) => format!(
+                        "{{\"position\":{},\"playing\":{},\"ended\":{},\"duration\":{}}}",
+                        s.position,
+                        s.playing,
+                        s.ended,
+                        s.duration.map_or("null".to_string(), |d| d.to_string())
+                    ),
+                    None => "\u{1}no such audio".to_string(),
+                },
+                _ => String::new(),
+            }
+        });
+    }
+    #[cfg(not(feature = "audio"))]
+    {
+        native!("audioLoad", |_src: String| -> String { "\u{1}audio support is not built into this program".to_string() });
+        native!("audioOp", |_op: String, _id: i32, _arg: f64| -> String { String::new() });
+    }
     native!("viewport", {
         let env = env.clone();
         move || -> Vec<f32> {
@@ -624,6 +763,33 @@ fn install_natives(
         let env = env.clone();
         move |kind: String| env.clipboard_request(&kind)
     });
+    native!("clipGet", {
+        let env = env.clone();
+        move |kind: String| env.clipboard_get(&kind)
+    });
+    native!("clipGetImage", {
+        let env = env.clone();
+        move || {
+            env.clipboard_get_image().map(|(w, h, rgba)| {
+                use base64::Engine as _;
+                format!("{w},{h},{}", base64::engine::general_purpose::STANDARD.encode(rgba))
+            })
+        }
+    });
+    native!("clipPut", {
+        let env = env.clone();
+        move |kind: String, a: String, b: Option<String>| env.clipboard_put(&kind, &a, b.as_deref())
+    });
+    native!("clipPutImage", {
+        let env = env.clone();
+        move |w: u32, h: u32, data: String| {
+            use base64::Engine as _;
+            match base64::engine::general_purpose::STANDARD.decode(data.as_bytes()) {
+                Ok(rgba) if rgba.len() == w as usize * h as usize * 4 => env.clipboard_put_image(w, h, &rgba),
+                _ => false,
+            }
+        }
+    });
     native!("selClear", {
         let env = env.clone();
         move || env.clear_edit_selection()
@@ -650,6 +816,35 @@ fn install_natives(
     native!("dialog", {
         let env = env.clone();
         move |kind: String, a: String, b: String, c: String, d: String| -> Option<String> { env.dialog(&kind, [&a, &b, &c, &d]) }
+    });
+    native!("traySet", {
+        let env = env.clone();
+        move |on: bool, icon: String, tooltip: String, menu: i32, template: bool| {
+            env.set_tray(on.then(|| TraySpec { icon, tooltip, menu: node(menu), template }))
+        }
+    });
+    native!("progressSet", {
+        let env = env.clone();
+        // kind: 0 none, 1 indeterminate, 2 a value
+        move |kind: i32, value: f64| {
+            env.set_progress(match kind {
+                1 => Progress::Indeterminate,
+                2 => Progress::Value(value.clamp(0.0, 1.0) as f32),
+                _ => Progress::None,
+            })
+        }
+    });
+    native!("badgeSet", {
+        let env = env.clone();
+        move |text: String, on: bool| env.set_badge(on.then_some(text))
+    });
+    native!("menuNative", {
+        let env = env.clone();
+        move || env.native_menu()
+    });
+    native!("menuInvoke", {
+        let env = env.clone();
+        move |id: f64| env.menu_invoke(id as u64)
     });
     native!("menuSet", {
         let env = env.clone();
@@ -1053,6 +1248,21 @@ impl ScriptHost {
         } else {
             None
         };
+        // Sounds: notice the ones that ended and let the page know; look again soon while any plays.
+        #[cfg(feature = "audio")]
+        let (ended, playing) = {
+            nile_audio::poll();
+            (nile_audio::take_events().into_iter().map(|(id, _)| id as i32).collect::<Vec<i32>>(), nile_audio::busy())
+        };
+        #[cfg(not(feature = "audio"))]
+        let (ended, playing): (Vec<i32>, bool) = (Vec::new(), false);
+        if playing || !ended.is_empty() {
+            self.call_global("__audioTick", |_, f| {
+                f.call::<_, ()>((ended.clone(),))?;
+                Ok(())
+            });
+        }
+        let poll = if playing { Some(poll.map_or(Duration::from_millis(100), |p| p.min(Duration::from_millis(100)))) } else { poll };
         let timer = (next >= 0.0).then(|| Duration::from_secs_f64(next / 1000.0));
         match (timer, poll) {
             (Some(t), Some(p)) => Some(t.min(p)),

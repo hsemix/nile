@@ -26,6 +26,13 @@ static NileStatus dispatch(uint64_t user, const NileRequest *r) {
     char output[32]; snprintf(output, sizeof(output), "%u", overloaded);
     return reply(r->context, r->call, output);
   }
+  if (r->operation.len == strlen("fixture.big") && !memcmp(r->operation.data, "fixture.big", r->operation.len)) {
+    // A reply over the host's size limit, with the completion status deliberately ignored.
+    size_t n = 1100000; char *json = malloc(n + 3);
+    json[0] = '"'; memset(json + 1, 'x', n); json[n + 1] = '"'; json[n + 2] = 0;
+    reply(r->context, r->call, json); free(json);
+    return NILE_OK;
+  }
   if (r->operation.len == strlen("fixture.pending") && !memcmp(r->operation.data, "fixture.pending", r->operation.len)) {
     pending_context = r->context; pending_call = r->call; return NILE_OK;
   }
@@ -80,11 +87,14 @@ EXPORT NileStatus nile_extension_init(const NileExtensionApi *api, NileExtension
 #ifdef FAIL_CONTEXT
   extension->context_init = init_context;
 #endif
+#ifdef FAIL_INIT
+  return NILE_FAILED; /* hooks are set but must never be called after a failed init */
+#endif
 #ifdef BAD_TABLE
   extension->abi_version = 99;
   return NILE_OK;
 #endif
-  const char *ops[] = {"fixture.immediate", "fixture.pending", "fixture.error", "fixture.resource", "fixture.get", "fixture.release", "fixture.flood"};
+  const char *ops[] = {"fixture.immediate", "fixture.pending", "fixture.error", "fixture.resource", "fixture.get", "fixture.release", "fixture.flood", "fixture.big"};
   for (unsigned i = 0; i < sizeof(ops)/sizeof(ops[0]); ++i) {
     NileStatus s = api->register_operation(api->host, str(ops[i]), dispatch, 0);
     if (s != NILE_OK) return s;

@@ -1,0 +1,30 @@
+<!doctype html><meta charset="utf-8"><title>flow and box properties</title>
+<style>
+body{margin:12px;font:14px sans-serif}
+h4{margin:10px 0 4px}
+.row{display:flex;gap:8px;align-items:flex-start}
+.box{background:#dde;padding:8px;width:150px}
+.hid{visibility:hidden;background:#fcc}
+.hid .shown{visibility:visible;background:#cfc}
+.out1{outline:3px solid #e33}
+.out2{outline:2px dashed #36c;outline-offset:6px;border-radius:10px}
+.out3{outline:3px dotted #393;outline-offset:-6px}
+.flex{display:flex;gap:6px}
+.flex i{background:#9bd;padding:6px 10px;font-style:normal}
+.ratio{background:#8c8;width:120px;aspect-ratio:2}
+.ratio2{background:#c88;width:90px;aspect-ratio:16/9}
+.grid{display:grid;grid-template-columns:repeat(3,40px);gap:4px}
+.grid b{background:#fc6;text-align:center}
+</style>
+<h4>visibility (the gap keeps its space; the child shows)</h4>
+<div class="row"><div class="box">before</div><div class="box hid">hidden parent<div class="shown">visible child</div></div><div class="box">after</div></div>
+<h4>outline (no layout space)</h4>
+<div class="row" style="padding:10px"><div class="box out1">solid</div><div class="box out2">dashed, offset, radius</div><div class="box out3">dotted, inset</div></div>
+<h4>order / flex-flow</h4>
+<div class="flex"><i style="order:3">C (3)</i><i style="order:1">A (1)</i><i style="order:2">B (2)</i><i style="order:-1">Z (-1)</i></div>
+<div class="flex" style="flex-flow:column-reverse wrap;height:80px;margin-top:6px"><i>one</i><i>two</i><i>three</i></div>
+<div class="grid" style="margin-top:6px"><b style="order:2">2</b><b style="order:1">1</b><b>0</b></div>
+<h4>aspect-ratio</h4>
+<div class="row"><div class="ratio">2 / 1</div><div class="ratio2">16 / 9</div><img src="images/photo.png" style="width:60px;aspect-ratio:1"></div>
+<h4>pointer-events</h4>
+<div id="pe" style="pointer-events:none;background:#eee;padding:8px;width:200px">pointer-events: none <button style="pointer-events:auto">auto</button></div>

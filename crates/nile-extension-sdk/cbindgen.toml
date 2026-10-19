@@ -2,5 +2,15 @@ language = "C"
 include_guard = "NILE_EXTENSION_H"
 cpp_compat = true
 usize_is_size_t = true
+after_includes = """
+/* Marks the one symbol an extension library exports. */
+#ifndef NILE_EXTENSION_EXPORT
+#  if defined(_WIN32)
+#    define NILE_EXTENSION_EXPORT __declspec(dllexport)
+#  else
+#    define NILE_EXTENSION_EXPORT __attribute__((visibility("default")))
+#  endif
+#endif
+"""
 [export]
 exclude = ["Client", "guard"]

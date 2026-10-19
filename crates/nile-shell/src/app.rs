@@ -21,6 +21,9 @@ use crate::{access, dialogs, material, menu, mods_of};
 /// What other threads (the accessibility layer) send the event loop.
 pub enum UserEvent {
     ExtensionWake,
+    /// Another launch of this app, or the system opening a URL or file with it: `{"type": "second-instance" |
+    /// "open-url" | "open-file", ...}`; the app's first window is raised and scripts are told.
+    Application(String),
     Access(accesskit_winit::Event),
     /// A menu bar item was chosen: a page item's node id, or a negative tag for a standard action.
     #[allow(dead_code)]
@@ -32,6 +35,9 @@ pub enum UserEvent {
     /// the system is hit testing for Snap Layouts.
     #[allow(dead_code)]
     Snap(isize, u8),
+    /// The tray icon was clicked (`trayclick`) or double-clicked (`traydoubleclick`).
+    #[allow(dead_code)]
+    Tray(&'static str),
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -53,6 +59,9 @@ enum Action {
 
 struct Win {
     id: u32,
+    /// `window-remember`: (app key, slot) the geometry is saved under, and when it is next due to be written.
+    remember: Option<(String, String)>,
+    remember_due: Option<Instant>,
     window: Rc<Window>,
     surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
     /// Windows: draws translucent windows (softbuffer's backend loses the alpha channel).
@@ -92,6 +101,10 @@ pub struct App {
     main_id: u32,
     /// The system menu bar (macOS), and the window whose page supplies it.
     menu: Option<menu::NativeMenu>,
+    /// Which window's tray icon and badge are shown, and what they were last built from (spec, document version).
+    tray_owner: Option<(u32, Option<nile_script::TraySpec>, u64)>,
+    badge_owner: Option<(u32, Option<String>)>,
+    progress_owner: Option<(u32, nile_script::Progress)>,
     active: u32,
     /// Started from a `run.js`: the first window is a hidden host for the script, and the program ends
     /// when the windows it opened are all closed.
@@ -109,7 +122,7 @@ impl App {
                 let _ = proxy.send_event(UserEvent::Snap(hwnd, state));
             });
         }
-        App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0, menu: None, active: 0, bootstrap: false, exit_code: 0 }
+        App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0, menu: None, tray_owner: None, badge_owner: None, progress_owner: None, active: 0, bootstrap: false, exit_code: 0 }
     }
 }
 
@@ -331,6 +344,26 @@ impl Win {
         self.window.set_cursor(icon_of(want));
     }
 
+    /// Write the window's geometry for `window-remember` (the last normal rectangle stays when it is
+    /// maximized, minimized or full screen).
+    fn persist(&mut self) {
+        self.remember_due = None;
+        let Some((app, slot)) = &self.remember else { return };
+        let w = &self.window;
+        let mut s = crate::winstate::load(app, slot).unwrap_or_default();
+        let maximized = w.is_maximized();
+        if !maximized && !w.is_minimized().unwrap_or(false) && w.fullscreen().is_none() {
+            if let Ok(p) = w.outer_position() {
+                let size = w.inner_size().to_logical::<f32>(w.scale_factor());
+                (s.x, s.y, s.w, s.h) = (p.x, p.y, size.width, size.height);
+            }
+        }
+        s.maximized = maximized;
+        if s.w >= 50.0 && s.h >= 50.0 {
+            crate::winstate::save(app, slot, &s);
+        }
+    }
+
     /// One winit event for this window. True if the user asked to close it.
     fn handle(&mut self, event: WindowEvent) -> bool {
         let window = self.window.clone();
@@ -341,7 +374,17 @@ impl Win {
                     window.request_redraw();
                 }
             }
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => window.request_redraw(),
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                if self.remember.is_some() {
+                    self.remember_due = Some(Instant::now() + std::time::Duration::from_millis(500));
+                }
+                window.request_redraw()
+            }
+            WindowEvent::Moved(_) => {
+                if self.remember.is_some() {
+                    self.remember_due = Some(Instant::now() + std::time::Duration::from_millis(500));
+                }
+            }
             WindowEvent::DroppedFile(path) => self.dropped.push(path.to_string_lossy().into_owned()),
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = window.scale_factor();
@@ -634,6 +677,16 @@ impl App {
                 parent_align = Some(5);
             }
         }
+        // `window-remember`: the size and maximized state of the last run.
+        let remember = config.remember.clone().map(|slot| (crate::winstate::app_key(&page.path), slot));
+        let saved = remember.as_ref().and_then(|(app, slot)| crate::winstate::load(app, slot));
+        if let Some(s) = saved.filter(|_| explicit_pos.is_none()) {
+            config.width = Some(Size::Px(s.w));
+            config.height = Some(Size::Px(s.h));
+            if s.maximized {
+                config.state = InitialState::Maximized;
+            }
+        }
         let (w, h) = config.inner_size(desktop);
         let mut attrs = Window::default_attributes()
             .with_title(config.title.clone())
@@ -707,10 +760,16 @@ impl App {
             attrs = attrs.with_owner_window(hwnd);
         }
         let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
+        // A remembered position, if it is still on a screen.
+        let screens: Vec<(i32, i32, u32, u32)> = event_loop.available_monitors().map(|m| (m.position().x, m.position().y, m.size().width, m.size().height)).collect();
+        let restored = saved.filter(|s| explicit_pos.is_none() && crate::winstate::on_screen(s.x, s.y, (s.w * window.scale_factor() as f32) as u32, &screens));
+        if let Some(s) = restored {
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(s.x, s.y));
+        }
         let pos = explicit_pos
             .or_else(|| parent_align.zip(opener_rect).map(|(a, r)| align(a, (w, h), (r[0], r[1], r[2], r[3]))))
             .or_else(|| config.position((w, h), desktop));
-        if let Some((x, y)) = pos {
+        if let (Some((x, y)), None) = (pos, restored) {
             window.set_outer_position(LogicalPosition::new(x, y));
         }
         match config.state {
@@ -736,6 +795,8 @@ impl App {
         let title = config.title.clone();
         self.wins.push(Win {
             id,
+            remember,
+            remember_due: None,
             window,
             surface,
             #[cfg(windows)]
@@ -789,7 +850,7 @@ impl App {
             }
             (None, None) => Page::html_window("<body></body>", dir, size, info),
         };
-        page.clipboard = Box::new(SystemClipboard::default());
+        page.set_clipboard(Box::new(SystemClipboard::default()));
         page.set_dialogs(Rc::new(dialogs::NativeDialogs));
         page
     }
@@ -853,6 +914,7 @@ impl App {
         }
         let Some(idx) = self.index(id) else { return };
         self.portals.retain(|p| p.owner != id);
+        self.wins[idx].persist();
         let win = self.wins.remove(idx);
         if let Some(opener) = win.opener.and_then(|o| self.index(o)) {
             self.wins[opener].page.window_closed(id, value);
@@ -872,6 +934,7 @@ impl App {
             }
         }
         self.sync_menu(id);
+        self.sync_tray(id);
     }
 
     /// Show a window's `Window.this.menu` as the system menu bar: the active window's on macOS (one
@@ -885,6 +948,38 @@ impl App {
         let items = self.wins[i].page.app_menu();
         let name = self.wins.first().map(|w| w.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "Nile".into());
         menu.set(&self.wins[i].window, &name, items);
+    }
+
+    /// Show the tray icon and dock/taskbar badge a window's page asked for. The window that set them owns
+    /// them; another window's empty request doesn't remove them.
+    fn sync_tray(&mut self, id: u32) {
+        let Some(menu) = self.menu.as_mut() else { return };
+        let Some(i) = self.wins.iter().position(|w| w.id == id) else { return };
+        let (spec, version) = {
+            let v = self.wins[i].page.view.borrow();
+            (v.tray.clone(), self.wins[i].page.doc.borrow().version)
+        };
+        let owns = self.tray_owner.as_ref().is_some_and(|(o, ..)| *o == id);
+        if spec.is_some() || owns {
+            let unchanged = matches!(&self.tray_owner, Some((o, s, v)) if *o == id && *s == spec && *v == version);
+            if !unchanged {
+                let info = if spec.is_some() { self.wins[i].page.tray() } else { None };
+                menu.set_tray(&self.wins[i].window, info.as_ref());
+                self.tray_owner = spec.is_some().then_some((id, spec, version));
+            }
+        }
+        let badge = self.wins[i].page.badge();
+        let owns = self.badge_owner.as_ref().is_some_and(|(o, _)| *o == id);
+        if (badge.is_some() || owns) && self.badge_owner.as_ref().map(|(_, b)| b) != Some(&badge) {
+            menu.set_badge(&self.wins[i].window, badge.as_deref());
+            self.badge_owner = badge.is_some().then_some((id, badge));
+        }
+        let progress = self.wins[i].page.progress();
+        let owns = self.progress_owner.as_ref().is_some_and(|(o, _)| *o == id);
+        if (progress != nile_script::Progress::None || owns) && self.progress_owner.as_ref().map(|(_, p)| p) != Some(&progress) {
+            menu.set_progress(&self.wins[i].window, progress);
+            self.progress_owner = (progress != nile_script::Progress::None).then_some((id, progress));
+        }
     }
 
     /// A menu item with a standard role that the page didn't handle itself.
@@ -987,12 +1082,23 @@ impl App {
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // The app has finished launching: take the open-documents Apple event back from AppKit's own handler.
+        #[cfg(target_os = "macos")]
+        crate::openevents::install_handlers();
         let Some(page) = self.first.take() else { return };
         let id = page.view.borrow().window_info.id;
         self.main_id = id;
         self.active = id;
         self.menu = menu::NativeMenu::new(self.proxy.clone());
         self.create(event_loop, page, id, None);
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        for w in &mut self.wins {
+            if w.remember.is_some() {
+                w.persist();
+            }
+        }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -1007,6 +1113,14 @@ impl ApplicationHandler<UserEvent> for App {
             if changed {
                 self.wins[i].window.request_redraw();
             }
+            let mut n = n;
+            if let Some(due) = self.wins[i].remember_due {
+                if due <= Instant::now() {
+                    self.wins[i].persist();
+                } else {
+                    n = [n, Some(due - Instant::now())].into_iter().flatten().min();
+                }
+            }
             next = [next, n].into_iter().flatten().min();
             self.after(event_loop, id);
         }
@@ -1019,6 +1133,10 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let event = match event {
             UserEvent::ExtensionWake => return,
+            UserEvent::Application(json) => {
+                self.application_event(event_loop, &json);
+                return;
+            }
             UserEvent::Access(event) => event,
             UserEvent::Snap(hwnd, state) => {
                 let Some(idx) = self.wins.iter().position(|w| w.window.id() == WindowId::from(hwnd as u64)) else { return };
@@ -1049,8 +1167,32 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::Tray(kind) => {
+                let id = self.tray_owner.as_ref().map_or(self.main_id, |(o, ..)| *o);
+                let Some(idx) = self.index(id) else { return };
+                if kind == "traymenu" {
+                    // Windows: the secondary button asks the app to show the menu.
+                    let node = self.menu.as_mut().and_then(|m| m.tray_choice(&self.wins[idx].window));
+                    if let Some(node) = node {
+                        if let Some(role) = self.wins[idx].page.menu_click(node) {
+                            self.menu_role(event_loop, id, &role);
+                        }
+                    }
+                } else {
+                    self.wins[idx].page.tray_event(kind);
+                }
+                self.wins[idx].window.request_redraw();
+                if self.index(id).is_some() {
+                    self.after(event_loop, id);
+                }
+                return;
+            }
             UserEvent::Menu(tag) => {
-                let id = self.active;
+                let (id, tag) = if tag >= menu::TRAY_TAG {
+                    (self.tray_owner.as_ref().map_or(self.main_id, |(o, ..)| *o), tag - menu::TRAY_TAG)
+                } else {
+                    (self.active, tag)
+                };
                 let Some(idx) = self.index(id) else { return };
                 let role = match menu::role_of_tag(tag) {
                     Some(role) => self.wins[idx].page.menu_role(role),
@@ -1118,6 +1260,32 @@ impl ApplicationHandler<UserEvent> for App {
             self.close(event_loop, id, 0, "null");
         }
         self.after(event_loop, id);
+    }
+}
+
+impl App {
+    /// A second launch (or the system opening something with this app): bring the app forward and tell its scripts.
+    fn application_event(&mut self, event_loop: &ActiveEventLoop, json: &str) {
+        let Ok(mut data) = serde_json::from_str::<serde_json::Value>(json) else { return };
+        let Some(kind) = data.get("type").and_then(|t| t.as_str()).map(str::to_string) else { return };
+        if let Some(map) = data.as_object_mut() {
+            map.remove("type");
+        }
+        // The first window that is not the hidden host of a bootstrap script.
+        let target = self.wins.iter().position(|w| !(self.bootstrap && w.id == self.main_id)).or(if self.wins.is_empty() { None } else { Some(0) });
+        let Some(idx) = target else { return };
+        let id = self.wins[idx].id;
+        let window = &self.wins[idx].window;
+        if window.is_minimized() == Some(true) {
+            window.set_minimized(false);
+        }
+        window.set_visible(true);
+        window.focus_window();
+        self.wins[idx].page.application_event(&kind, &data.to_string());
+        self.wins[idx].window.request_redraw();
+        if self.index(id).is_some() {
+            self.after(event_loop, id);
+        }
     }
 }
 
