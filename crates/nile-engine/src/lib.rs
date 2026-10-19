@@ -345,6 +345,12 @@ pub struct View {
     pub window_info: WindowInfo,
     /// The `<menu>` element the page chose as the application menu bar (`Window.this.menu`).
     pub app_menu: Option<NodeId>,
+    /// A system menu bar shows `app_menu` (true on macOS and Windows, where the shell and C hosts can build
+    /// one). False makes scripts draw an in-window bar: the default elsewhere, `NILE_MENU=inline` forces it
+    /// (screenshots), `Page::set_native_menu` lets an embedder choose.
+    pub native_menu: bool,
+    /// Items chosen in the in-window bar, waiting for the page to run them.
+    pub menu_invocations: Vec<u64>,
     /// The tray icon and dock/taskbar badge the page asked for (the shell shows them).
     pub tray: Option<TraySpec>,
     pub badge: Option<String>,
@@ -924,6 +930,14 @@ impl Environment for Env {
         self.0.borrow_mut().badge = text;
     }
 
+    fn native_menu(&self) -> bool {
+        self.0.borrow().native_menu
+    }
+
+    fn menu_invoke(&self, id: u64) {
+        self.0.borrow_mut().menu_invocations.push(id);
+    }
+
     fn set_app_menu(&self, node: Option<NodeId>) {
         let mut v = self.0.borrow_mut();
         v.app_menu = node;
@@ -1303,6 +1317,8 @@ impl Page {
             window_rect: None,
             window_info: info,
             app_menu: None,
+            native_menu: cfg!(any(target_os = "macos", target_os = "windows")) && std::env::var("NILE_MENU").map_or(true, |v| v != "inline"),
+            menu_invocations: Vec::new(),
             tray: None,
             badge: None,
             portals: Vec::new(),
@@ -1435,6 +1451,11 @@ impl Page {
         self.clipboard = clipboard;
     }
 
+    /// Tell scripts whether a system menu bar shows `Window.this.menu` (false: they draw one in the window).
+    pub fn set_native_menu(&mut self, native: bool) {
+        self.view.borrow_mut().native_menu = native;
+    }
+
     /// Replace the system clipboard behind the one this page shares.
     pub fn set_clipboard(&mut self, system: Box<dyn Clipboard>) {
         self.clipboard.replace(system);
@@ -1546,6 +1567,21 @@ impl Page {
         let requests = std::mem::take(&mut self.view.borrow_mut().clipboard_requests);
         for kind in requests {
             self.clipboard_command(&kind);
+        }
+        let chosen = std::mem::take(&mut self.view.borrow_mut().menu_invocations);
+        for id in chosen {
+            if let Some(role) = self.menu_click(id) {
+                let command = match role.as_str() {
+                    "quit" => Some(WindowCommand::Quit(0)),
+                    "close" => Some(WindowCommand::Close),
+                    "minimize" => Some(WindowCommand::Minimize),
+                    "zoom" | "maximize" => Some(WindowCommand::ToggleMaximize),
+                    _ => None,
+                };
+                if let Some(c) = command {
+                    self.view.borrow_mut().window_requests.push(c);
+                }
+            }
         }
         for node in scrolled {
             self.emit(node, UiEvent::Plain("scroll"));
@@ -6573,6 +6609,33 @@ cd</textarea>
         assert_eq!(p.badge().as_deref(), Some("4"));
         js(&mut p, "application.badge = null; Window.this.tray = null; 0");
         assert!(p.tray().is_none() && p.badge().is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_in_window_menu_bar_runs_items_like_a_native_one() {
+        let (mut p, path) = page(
+            r#"<body><menu id="m" style="display:none"><li>File <menu><li id="a">Alpha</li><li id="b" disabled>Beta</li><hr><li id="q" role="quit">Quit</li></menu></li><li>Help</li></menu>
+               <script>window.log = []; document.getElementById("a").addEventListener("click", () => log.push("a")); document.getElementById("b").addEventListener("click", () => log.push("b"));</script></body>"#,
+            "menubar",
+        );
+        p.set_native_menu(false);
+        js(&mut p, "Window.this.menu = document.getElementById('m'); 0");
+        p.sync();
+        assert_eq!(js(&mut p, "document.querySelectorAll('.nile-menubar-item').length"), "2");
+        js(&mut p, "document.querySelector('.nile-menubar-item').click(); 0");
+        assert_eq!(js(&mut p, "[...document.querySelectorAll('.nile-menu-row')].map(r => r.textContent).join('|')"), "Alpha|Beta|Quit");
+        // A disabled row does nothing; an enabled one closes the menu and fires `click` on its <li>.
+        js(&mut p, "document.querySelectorAll('.nile-menu-row')[1].click(); 0");
+        p.sync();
+        assert_eq!(js(&mut p, "log.join()"), "");
+        js(&mut p, "document.querySelectorAll('.nile-menu-row')[0].click(); 0");
+        p.sync();
+        assert_eq!(js(&mut p, "log.join() + document.querySelectorAll('.nile-menu').length"), "a0");
+        // A window role comes back as a window command.
+        js(&mut p, "document.querySelector('.nile-menubar-item').click(); document.querySelectorAll('.nile-menu-row')[2].click(); 0");
+        p.sync();
+        assert!(p.view.borrow().window_requests.iter().any(|c| matches!(c, WindowCommand::Quit(0))));
         let _ = std::fs::remove_file(path);
     }
 

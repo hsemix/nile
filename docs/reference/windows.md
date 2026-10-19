@@ -166,7 +166,8 @@ Examples: [popups](../../examples/popups.html), [menubar](../../examples/menubar
 ## Native application menus
 
 Assign a hidden `<menu>` tree to `Window.this.menu`. Native menu bars are
-supported on macOS/Windows; Linux needs an application-drawn menu.
+supported on macOS/Windows; on Linux the same markup is drawn as a bar in the window
+(see the controls guide).
 
 ```html
 <menu id="app" style="display:none">

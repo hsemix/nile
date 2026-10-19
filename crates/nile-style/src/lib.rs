@@ -1147,6 +1147,18 @@ popup > menu, popup > menu.popup, popup > menu.context { display: block; border:
 menu.popup > li, menu.context > li, popup > menu > li { display: block; list-style: none; padding: 4px 18px; cursor: default }
 menu.popup > li.nile-hover, menu.context > li.nile-hover, popup > menu > li.nile-hover { background: @ACCENT@; color: @ACCENT_TEXT@ }
 menu.popup > li[disabled], menu.context > li[disabled], popup > menu > li[disabled] { color: #999; background: transparent !important }
+.nile-menubar { display: flex; flex-direction: row; position: sticky; top: 0; z-index: 2147482000; margin: 0; padding: 0 4px; background: Canvas; color: CanvasText; border-bottom: 1px solid rgba(128,128,128,0.35); font: 13px sans-serif; user-select: none; -webkit-user-select: none }
+.nile-menubar-item { display: block; padding: 5px 10px; cursor: default }
+.nile-menubar-item.nile-open { background: @ACCENT@; color: @ACCENT_TEXT@ }
+.nile-menubar-item.nile-disabled, .nile-menu-row.nile-disabled { color: GrayText }
+.nile-menu { display: block; position: fixed; z-index: 2147483000; min-width: 160px; padding: 4px 0; background: Canvas; color: CanvasText; border: 1px solid rgba(128,128,128,0.5); border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,0.28); font: 13px sans-serif; user-select: none; -webkit-user-select: none }
+.nile-menu-row { display: flex; flex-direction: row; align-items: center; padding: 4px 12px 4px 6px; cursor: default; white-space: nowrap }
+.nile-menu-row.nile-hover { background: @ACCENT@; color: @ACCENT_TEXT@ }
+.nile-mi-mark { width: 18px; text-align: center }
+.nile-mi-label { flex: 1; padding-right: 24px }
+.nile-mi-key { color: GrayText; font-size: 12px }
+.nile-menu-row.nile-hover .nile-mi-key { color: inherit }
+.nile-menu-sep { height: 1px; margin: 4px 0; background: rgba(128,128,128,0.35) }
 .nile-picker { display: block; background: #fff; color: #222; border: 1px solid #b4b8c0; border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,0.25); padding: 8px; font: 13px sans-serif }
 .nile-picker button { font: inherit; color: inherit; background: transparent; border: 0; border-radius: 4px; padding: 0; margin: 0; box-shadow: none; min-height: 0; cursor: default }
 .nile-picker .np-head { display: flex; align-items: center; margin-bottom: 4px }

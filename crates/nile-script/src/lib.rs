@@ -253,6 +253,13 @@ pub trait Environment {
     fn portal_set(&self, _node: NodeId, _rect: [f32; 4]) {}
     /// The `<menu>` element chosen as the application menu bar, or none.
     fn set_app_menu(&self, _node: Option<NodeId>) {}
+    /// The host shows `Window.this.menu` as a system menu bar (macOS, Windows). When it doesn't, the
+    /// script draws an in-window bar itself.
+    fn native_menu(&self) -> bool {
+        true
+    }
+    /// An item of the in-window menu bar was chosen: run it like a native menu choice.
+    fn menu_invoke(&self, _id: u64) {}
     /// Show (or with `None` remove) the tray icon.
     fn set_tray(&self, _spec: Option<TraySpec>) {}
     /// The text on the dock / taskbar icon (`application.badge`); `None` clears it.
@@ -808,6 +815,14 @@ fn install_natives(
     native!("badgeSet", {
         let env = env.clone();
         move |text: String, on: bool| env.set_badge(on.then_some(text))
+    });
+    native!("menuNative", {
+        let env = env.clone();
+        move || env.native_menu()
+    });
+    native!("menuInvoke", {
+        let env = env.clone();
+        move |id: f64| env.menu_invoke(id as u64)
     });
     native!("menuSet", {
         let env = env.clone();

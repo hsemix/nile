@@ -267,11 +267,12 @@ behavior. Window chrome roles are an exception, handled by the shell as describe
 in [the window guide](embedding.md#configure-the-development-shell-window).
 
 
-## The system menu bar (macOS and Windows)
+## The menu bar (system on macOS and Windows, in the window elsewhere)
 
 `Window.this.menu = element` shows a `<menu>` as the window's real menu bar: the top of the screen on
-macOS, the window's menu bar on Windows. Elsewhere it does nothing, so draw your own menu bar there (see
-`examples/menubar.html`). The markup is Sciter's menu markup:
+macOS, the window's menu bar on Windows. On Linux, where there is no system menu bar to give it to, the same
+markup is drawn as a bar at the top of the page (see below), so one `Window.this.menu = ...` works everywhere.
+The markup is Sciter's menu markup:
 
 ```html
 <menu id="app" style="display:none">
@@ -305,3 +306,16 @@ macOS, the window's menu bar on Windows. Elsewhere it does nothing, so draw your
 
 See [windows reference](../reference/windows.md) for complete handles, arguments,
 return values and current native limitations.
+
+### The in-window menu bar (Linux)
+
+Where the host has no system menu bar, `Window.this.menu = element` inserts a `<nav class="nile-menubar">` as
+the first child of `<body>` (sticky at the top) and draws the submenus as `.nile-menu` popups: labels from
+the `<li>` text or its `label` attribute, shortcuts from `accesskey`, checkmarks, disabled items,
+separators and nested submenus. Mouse (hover to switch menus while one is open), Up/Down/Left/Right, Enter
+and Escape work; an item runs like a native choice (a `click` event on its `<li>`, `role` items such as
+`quit` or `copy` do the standard thing), and shortcuts already work through `accesskey`. Style the
+`.nile-menubar`, `.nile-menubar-item`, `.nile-menu`, `.nile-menu-row`, `.nile-mi-*` classes to taste. If the
+page uses `display: flex` on `<body>` the bar becomes one more flex item; put your content in a wrapper.
+`NILE_MENU=inline` shows it on macOS/Windows too (handy for screenshots) and `Page::set_native_menu(false)`
+makes an embedder's pages use it. Not done: Alt+letter mnemonics.

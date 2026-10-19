@@ -1280,6 +1280,167 @@
   // Classic scripts have no module scope: the page's folder.
   Object.defineProperty(g, "__DIR__", { get() { return String(location.href).replace(/[^/]*$/, ""); }, configurable: true });
   Object.defineProperty(g, "__FILE__", { get() { return String(location.href); }, configurable: true });
+  // ---- in-window menu bar ---------------------------------------------------------------------
+  // `Window.this.menu = el` is a system menu bar on macOS and Windows. Where the host has none (Linux, or
+  // `NILE_MENU=inline`) the same <menu> markup is drawn as a bar at the top of the page: Escape, arrows and
+  // Enter work, an item runs through the engine like a native choice (`click` event, `role`s). The bar and
+  // its menus are plain elements (`.nile-menubar`, `.nile-menu`) styled by the UA sheet.
+  let menuBar = null, menuChain = [], menuBarEl = null;
+  const SEP = { sep: true };
+  const menuLabel = (li) => { let t = ""; for (const n of li.childNodes) if (n.nodeType === 3) t += n.nodeValue; return t.replace(/\s+/g, " ").trim(); };
+  const menuItemsOf = (menu) => {
+    const out = [];
+    for (const k of menu.children) {
+      if (k.localName === "hr") { if (out.length && out[out.length - 1] !== SEP) out.push(SEP); continue; }
+      if (k.localName !== "li" || k.hasAttribute("hidden") || getComputedStyle(k).display === "none") continue;
+      const sub = Array.from(k.children).find((c) => c.localName === "menu");
+      const label = k.getAttribute("label");
+      out.push({ id: k._id, label: label == null ? menuLabel(k) : label.trim(), accel: (k.getAttribute("accesskey") || "").replace(/CmdOrCtrl/gi, "Ctrl").replace(/Cmd/gi, "Super"), disabled: k.hasAttribute("disabled"), checked: k.hasAttribute("checked"), items: sub ? menuItemsOf(sub) : null });
+    }
+    while (out.length && out[out.length - 1] === SEP) out.pop();
+    return out;
+  };
+  const closeMenus = () => {
+    for (const m of menuChain) m.el.remove();
+    menuChain = [];
+    if (menuBarEl) for (const b of menuBarEl.children) b.classList.remove("nile-open");
+    document.removeEventListener("mousedown", outsideMenu, true);
+    document.removeEventListener("keydown", menuKey, true);
+  };
+  const outsideMenu = (e) => {
+    const t = e.target;
+    if (t && t.closest && t.closest(".nile-menu, .nile-menubar")) return;
+    closeMenus();
+  };
+  const litRow = (m) => m.el.querySelector(".nile-menu-row.nile-hover");
+  const setLit = (m, row) => { const old = litRow(m); if (old) old.classList.remove("nile-hover"); if (row) row.classList.add("nile-hover"); };
+  function runMenuItem(item) {
+    closeMenus();
+    N.menuInvoke(item.id);
+  }
+  // Open `items` as a menu with its top-left at (x, y); level 0 is the bar's, higher ones submenus.
+  function openMenuAt(items, x, y, level, lead) {
+    for (const m of menuChain.splice(level)) m.el.remove();
+    const el = document.createElement("div");
+    el.className = "nile-menu";
+    el.setAttribute("role", "menu");
+    const rows = [];
+    for (const it of items) {
+      if (it === SEP) { const hr = document.createElement("div"); hr.className = "nile-menu-sep"; el.appendChild(hr); continue; }
+      const row = document.createElement("div");
+      row.className = "nile-menu-row" + (it.disabled ? " nile-disabled" : "");
+      row.setAttribute("role", it.checked ? "menuitemcheckbox" : "menuitem");
+      const mark = document.createElement("span"); mark.className = "nile-mi-mark"; mark.textContent = it.checked ? "\u2713" : "";
+      const text = document.createElement("span"); text.className = "nile-mi-label"; text.textContent = it.label;
+      const key = document.createElement("span"); key.className = "nile-mi-key"; key.textContent = it.items ? "\u203A" : it.accel;
+      row.append(mark, text, key);
+      row._item = it;
+      el.appendChild(row);
+      rows.push(row);
+    }
+    const rec = { el, rows, items };
+    menuChain.push(rec);
+    el.style.setProperty("left", "0px");
+    el.style.setProperty("top", "0px");
+    el.style.setProperty("visibility", "hidden");
+    document.body.appendChild(el);
+    const r = el.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let left = x, top = y;
+    if (left + r.width > vw) left = Math.max(0, level ? (lead ?? x) - r.width : vw - r.width);
+    if (top + r.height > vh) top = Math.max(0, vh - r.height);
+    el.style.setProperty("left", left + "px");
+    el.style.setProperty("top", top + "px");
+    el.style.removeProperty("visibility");
+    el.addEventListener("mousedown", (e) => e.preventDefault());
+    el.addEventListener("mouseover", (e) => {
+      const row = e.target.closest && e.target.closest(".nile-menu-row");
+      if (!row || row.classList.contains("nile-disabled")) return;
+      setLit(rec, row);
+      const at = menuChain.indexOf(rec);
+      if (row._item.items) { const b = row.getBoundingClientRect(); openMenuAt(row._item.items, b.right - 2, b.top - 4, at + 1, b.left + 2); }
+      else for (const m of menuChain.splice(at + 1)) m.el.remove();
+    });
+    el.addEventListener("click", (e) => {
+      const row = e.target.closest && e.target.closest(".nile-menu-row");
+      if (!row || row.classList.contains("nile-disabled")) return;
+      const it = row._item;
+      if (it.items) { const b = row.getBoundingClientRect(); openMenuAt(it.items, b.right - 2, b.top - 4, menuChain.indexOf(rec) + 1, b.left + 2); return; }
+      runMenuItem(it);
+    });
+    return rec;
+  }
+  function openBarMenu(index) {
+    const items = menuBar;
+    if (!menuBarEl || !items) return;
+    const top = items[index];
+    const button = menuBarEl.children[index];
+    for (const b of menuBarEl.children) b.classList.remove("nile-open");
+    button.classList.add("nile-open");
+    const b = button.getBoundingClientRect();
+    if (!top.items || !top.items.length) { closeMenus(); button.classList.add("nile-open"); return; }
+    const had = menuChain.length > 0;
+    openMenuAt(top.items, b.left, b.bottom, 0);
+    menuChain[0].bar = index;
+    if (!had) { document.addEventListener("mousedown", outsideMenu, true); document.addEventListener("keydown", menuKey, true); }
+  }
+  function menuKey(e) {
+    if (!menuChain.length) return;
+    const last = menuChain[menuChain.length - 1];
+    const live = last.rows.filter((r) => !r.classList.contains("nile-disabled"));
+    const cur = litRow(last);
+    const idx = cur ? live.indexOf(cur) : -1;
+    const stop = () => { e.preventDefault(); e.stopPropagation(); };
+    switch (e.key) {
+      case "Escape": stop(); if (menuChain.length > 1) { menuChain.pop().el.remove(); } else closeMenus(); break;
+      case "ArrowDown": stop(); if (live.length) setLit(last, live[(idx + 1) % live.length]); break;
+      case "ArrowUp": stop(); if (live.length) setLit(last, live[(idx - 1 + live.length) % live.length]); break;
+      case "ArrowRight": {
+        stop();
+        if (cur && cur._item.items) { const b = cur.getBoundingClientRect(); const sub = openMenuAt(cur._item.items, b.right - 2, b.top - 4, menuChain.length, b.left + 2); const first = sub.rows.find((r) => !r.classList.contains("nile-disabled")); if (first) setLit(sub, first); }
+        else if (menuChain[0].bar !== undefined) openBarMenu((menuChain[0].bar + 1) % menuBar.length);
+        break;
+      }
+      case "ArrowLeft":
+        stop();
+        if (menuChain.length > 1) menuChain.pop().el.remove();
+        else if (menuChain[0].bar !== undefined) openBarMenu((menuChain[0].bar - 1 + menuBar.length) % menuBar.length);
+        break;
+      case "Enter": case " ":
+        stop();
+        if (cur) { if (cur._item.items) { const b = cur.getBoundingClientRect(); const sub = openMenuAt(cur._item.items, b.right - 2, b.top - 4, menuChain.length, b.left + 2); const first = sub.rows.find((r) => !r.classList.contains("nile-disabled")); if (first) setLit(sub, first); } else runMenuItem(cur._item); }
+        break;
+      default: break;
+    }
+  }
+  function renderMenuBar() {
+    if (!appMenu || N.menuNative()) { removeMenuBar(); return; }
+    if (!document.body) { document.addEventListener("DOMContentLoaded", renderMenuBar, { once: true }); return; }
+    closeMenus();
+    menuBar = menuItemsOf(appMenu).filter((i) => i !== SEP);
+    if (!menuBarEl) {
+      menuBarEl = document.createElement("nav");
+      menuBarEl.className = "nile-menubar";
+      menuBarEl.setAttribute("role", "menubar");
+      menuBarEl.addEventListener("mousedown", (e) => e.preventDefault());
+      document.body.insertBefore(menuBarEl, document.body.firstChild);
+    }
+    menuBarEl.textContent = "";
+    menuBar.forEach((it, i) => {
+      const b = document.createElement("span");
+      b.className = "nile-menubar-item" + (it.disabled ? " nile-disabled" : "");
+      b.setAttribute("role", "menuitem");
+      b.textContent = it.label;
+      b.addEventListener("click", () => { if (it.disabled) return; if (menuChain.length && menuChain[0].bar === i) closeMenus(); else { menuBar = menuItemsOf(appMenu).filter((x) => x !== SEP); openBarMenu(i); } });
+      b.addEventListener("mouseover", () => { if (menuChain.length && menuChain[0].bar !== i && !it.disabled) { menuBar = menuItemsOf(appMenu).filter((x) => x !== SEP); openBarMenu(i); } });
+      menuBarEl.appendChild(b);
+    });
+  }
+  function removeMenuBar() {
+    closeMenus();
+    if (menuBarEl) { menuBarEl.remove(); menuBarEl = null; }
+    menuBar = null;
+  }
   let trayState = null;
   class Window {
     constructor(params = {}) { openWindow(this, params, false); }
@@ -1349,7 +1510,7 @@
       if (v) N.traySet(true, String(v.icon || ""), String(v.tooltip || ""), v.menu ? v.menu._id : -1, v.template === true);
       else N.traySet(false, "", "", -1, false);
     }
-    set menu(el) { appMenu = el || null; N.menuSet(el ? el._id : -1); }
+    set menu(el) { appMenu = el || null; N.menuSet(el ? el._id : -1); renderMenuBar(); }
     get isActive() { return this === thisWindow ? active : this._valid; }
     get isValid() { return this === thisWindow || this._valid; }
     // Asks the window to close; a `closerequest` listener may cancel it. `value` is what the opener's
