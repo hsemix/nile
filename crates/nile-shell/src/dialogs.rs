@@ -471,8 +471,16 @@ mod win {
         let (text, caption) = (wide(text), wide(caption));
         let owner = owner();
         // Without a usable owner the box is topmost so it can't open behind the application.
-        let placement = if owner.is_some() { 0 } else { MB_TOPMOST };
-        let answer = unsafe { MessageBoxW(owner.unwrap_or(0), text.as_ptr(), caption.as_ptr(), icon | placement | MB_SETFOREGROUND | if question { MB_YESNO } else { MB_OK }) };
+        let styles = icon | MB_SETFOREGROUND | if question { MB_YESNO } else { MB_OK };
+        let mut answer = unsafe { MessageBoxW(owner.unwrap_or(0), text.as_ptr(), caption.as_ptr(), if owner.is_some() { styles } else { styles | MB_TOPMOST }) };
+        if answer == 0 {
+            // 0 means the box could not be shown at all: say why, and try once more with no owner.
+            eprintln!("[dialog] MessageBoxW({kind:?}, owner {owner:?}) failed: {}", std::io::Error::last_os_error());
+            answer = unsafe { MessageBoxW(0, text.as_ptr(), caption.as_ptr(), styles | MB_TOPMOST) };
+        }
+        if std::env::var_os("NILE_TRACE").is_some() {
+            eprintln!("[dialog] {kind:?} owner {owner:?} -> {answer}");
+        }
         answer == IDYES || (!question && answer == IDOK)
     }
 }
