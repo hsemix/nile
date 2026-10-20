@@ -7801,16 +7801,21 @@ cd</textarea>
 
     #[test]
     fn a_drag_with_files_that_leaves_the_window_is_handed_to_the_system() {
+        // Absolute paths look different per platform: build them from the temp folder.
+        let abs = std::env::temp_dir().join("nile drag b.png").to_string_lossy().replace('\\', "/");
+        let url = if abs.starts_with('/') { format!("file://{}", abs.replace(' ', "%20")) } else { format!("file:///{}", abs.replace(' ', "%20")) };
         let (mut p, path) = page(
-            r#"<body style="margin:0"><div id="src" draggable="true" style="width:60px;height:40px">file</div><div id="txt" draggable="true" style="position:absolute;left:100px;top:0;width:60px;height:40px">text</div>
+            &format!(
+                r#"<body style="margin:0"><div id="src" draggable="true" style="width:60px;height:40px">file</div><div id="txt" draggable="true" style="position:absolute;left:100px;top:0;width:60px;height:40px">text</div>
                <script>
                  window.log = [];
                  const src = document.getElementById('src');
-                 src.addEventListener('dragstart', (e) => { e.dataTransfer.setFiles(['out/report.pdf', '/abs/b.png']); });
+                 src.addEventListener('dragstart', (e) => {{ e.dataTransfer.setFiles(['out/report.pdf', '{abs}']); }});
                  src.addEventListener('dragend', (e) => log.push('end:' + e.dataTransfer.dropEffect));
                  const txt = document.getElementById('txt');
-                 txt.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/uri-list', 'file:///tmp/a%20b.txt'); });
-               </script></body>"#,
+                 txt.addEventListener('dragstart', (e) => {{ e.dataTransfer.setData('text/uri-list', '{url}'); }});
+               </script></body>"#
+            ),
             "dragout",
         );
         let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
@@ -7823,8 +7828,8 @@ cd</textarea>
         assert!(p.dnd.is_none(), "the in-page drag ended");
         let files = p.take_drag_out().expect("handed out");
         assert_eq!(files.len(), 2);
-        assert!(files[0].ends_with("out/report.pdf") && std::path::Path::new(&files[0]).is_absolute());
-        assert_eq!(files[1], "/abs/b.png");
+        assert!(files[0].ends_with("out/report.pdf") && std::path::Path::new(&files[0]).is_absolute(), "{}", files[0]);
+        assert_eq!(files[1], abs);
         assert_eq!(ev(&mut p, "log.join()"), "end:copy");
         p.release();
         // A uri-list of file: URLs counts too; a drag without files just stays in the page.
@@ -7833,7 +7838,7 @@ cd</textarea>
         p.press();
         p.pointer_moved(tx + 20.0, ty);
         p.pointer_moved(-5.0, ty);
-        assert_eq!(p.take_drag_out(), Some(vec!["/tmp/a b.txt".to_string()]));
+        assert_eq!(p.take_drag_out(), Some(vec![abs.clone()]));
         p.release();
         let _ = std::fs::remove_file(path);
     }

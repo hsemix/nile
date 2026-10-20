@@ -301,19 +301,25 @@ mod win {
         UI::{
             Controls::Dialogs::{GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW},
             Input::KeyboardAndMouse::GetActiveWindow,
-            WindowsAndMessaging::{GetForegroundWindow, MessageBoxW, SendMessageW, SetForegroundWindow, MB_SETFOREGROUND, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
+            WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible, MessageBoxW, SendMessageW, SetForegroundWindow, MB_SETFOREGROUND, MB_TOPMOST, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
         },
     };
 
-    /// The window a dialog belongs to: the one active on this thread, else the foreground window
-    /// (a dialog with no owner can open behind the application).
-    fn owner() -> isize {
+    /// The window a dialog belongs to: this thread's active window, else the foreground one, but only a window of
+    /// ours that is shown and not minimized. A dialog owned by a hidden or minimized window (a bootstrap script's
+    /// host window, a minimized app) or by another program's window never shows up, so those get no owner at all
+    /// (`None`) and the box is made topmost instead.
+    fn owner() -> Option<isize> {
         // SAFETY: plain queries.
         unsafe {
-            match GetActiveWindow() {
+            let candidate = match GetActiveWindow() {
                 0 => GetForegroundWindow(),
                 active => active,
-            }
+            };
+            let mut process = 0u32;
+            GetWindowThreadProcessId(candidate, &mut process);
+            let ours = candidate != 0 && process == std::process::id();
+            (ours && IsWindowVisible(candidate) != 0 && IsIconic(candidate) == 0).then_some(candidate)
         }
     }
 
@@ -355,7 +361,7 @@ mod win {
         // SAFETY: an all-zero OPENFILENAMEW is a valid empty one; the buffers outlive the call.
         let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
         ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-        ofn.hwndOwner = owner();
+        ofn.hwndOwner = owner().unwrap_or(0);
         ofn.lpstrFilter = list.as_ptr();
         ofn.nFilterIndex = 1;
         ofn.lpstrFile = file.as_mut_ptr();
@@ -435,7 +441,7 @@ mod win {
             // The new-style dialog needs COM; it is fine if the thread already has it.
             CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32);
             let info = BrowseInfo {
-                owner: owner(),
+                owner: owner().unwrap_or(0),
                 root: null_mut(),
                 display_name: null_mut(),
                 title: if caption.is_empty() { null() } else { title.as_ptr() },
@@ -463,7 +469,10 @@ mod win {
             MessageKind::Question => MB_ICONQUESTION,
         };
         let (text, caption) = (wide(text), wide(caption));
-        let answer = unsafe { MessageBoxW(owner(), text.as_ptr(), caption.as_ptr(), icon | MB_SETFOREGROUND | if question { MB_YESNO } else { MB_OK }) };
+        let owner = owner();
+        // Without a usable owner the box is topmost so it can't open behind the application.
+        let placement = if owner.is_some() { 0 } else { MB_TOPMOST };
+        let answer = unsafe { MessageBoxW(owner.unwrap_or(0), text.as_ptr(), caption.as_ptr(), icon | placement | MB_SETFOREGROUND | if question { MB_YESNO } else { MB_OK }) };
         answer == IDYES || (!question && answer == IDOK)
     }
 }
