@@ -1120,6 +1120,10 @@ impl ApplicationHandler<UserEvent> for App {
             if !dropped.is_empty() && self.wins[i].page.drop_files(&dropped) {
                 self.wins[i].window.request_redraw();
             }
+            #[cfg(windows)]
+            if let Some(h) = owner_hwnd(&self.wins[i].window) {
+                crate::dialogs::set_owner(h);
+            }
             let (changed, n) = self.wins[i].page.tick();
             if changed {
                 self.wins[i].window.request_redraw();
@@ -1142,6 +1146,11 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        // Tray, menu and application events run page code too: dialogs it opens belong to the active window.
+        #[cfg(windows)]
+        if let Some(h) = self.index(self.active).and_then(|i| owner_hwnd(&self.wins[i].window)) {
+            crate::dialogs::set_owner(h);
+        }
         let event = match event {
             UserEvent::ExtensionWake => return,
             UserEvent::Application(json) => {
@@ -1248,6 +1257,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let Some(idx) = self.wins.iter().position(|w| w.window.id() == wid) else { return };
         let id = self.wins[idx].id;
+        #[cfg(windows)]
+        if let Some(h) = owner_hwnd(&self.wins[idx].window) {
+            crate::dialogs::set_owner(h);
+        }
         if matches!(event, WindowEvent::Focused(true)) {
             self.active = id;
         }

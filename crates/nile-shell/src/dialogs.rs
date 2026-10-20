@@ -285,6 +285,10 @@ impl Dialogs for NativeDialogs {
     }
 }
 
+/// Tell the dialogs which window they belong to (Windows; elsewhere the helper programs place themselves).
+#[cfg(windows)]
+pub use win::set_owner;
+
 /// The Win32 common dialogs. They are owned by the window that is active on this thread, which
 /// disables it (its parent can't be used or moved around) until the dialog closes, and they open at
 /// once: no helper process is started.
@@ -301,26 +305,47 @@ mod win {
         UI::{
             Controls::Dialogs::{GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW},
             Input::KeyboardAndMouse::GetActiveWindow,
-            WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible, MessageBoxW, SendMessageW, SetForegroundWindow, MB_SETFOREGROUND, MB_TOPMOST, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
+            WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, MessageBoxW, SendMessageW, SetForegroundWindow, MB_SETFOREGROUND, MB_TOPMOST, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
         },
     };
 
-    /// The window a dialog belongs to: this thread's active window, else the foreground one, but only a window of
-    /// ours that is shown and not minimized. A dialog owned by a hidden or minimized window (a bootstrap script's
-    /// host window, a minimized app) or by another program's window never shows up, so those get no owner at all
-    /// (`None`) and the box is made topmost instead.
-    fn owner() -> Option<isize> {
+    /// The window the shell is handling events for (set before page code runs): dialogs belong to it.
+    static OWNER: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+    pub fn set_owner(hwnd: isize) {
+        OWNER.store(hwnd, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Is `hwnd` one of our windows that is shown and not minimized (a dialog owned by anything else
+    /// never shows up)?
+    fn usable(hwnd: isize) -> bool {
         // SAFETY: plain queries.
         unsafe {
-            let candidate = match GetActiveWindow() {
+            if hwnd == 0 || IsWindow(hwnd) == 0 {
+                return false;
+            }
+            let mut process = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut process);
+            process == std::process::id() && IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0
+        }
+    }
+
+    /// The window a dialog belongs to: the one the shell is serving (`set_owner`), else this thread's active
+    /// or the foreground window, but only if it is one of ours that is shown. With no usable owner (`None`) the
+    /// box has none and is made topmost instead, so it can't open behind the application.
+    fn owner() -> Option<isize> {
+        let set = OWNER.load(std::sync::atomic::Ordering::Relaxed);
+        if usable(set) {
+            return Some(set);
+        }
+        // SAFETY: plain queries.
+        let guess = unsafe {
+            match GetActiveWindow() {
                 0 => GetForegroundWindow(),
                 active => active,
-            };
-            let mut process = 0u32;
-            GetWindowThreadProcessId(candidate, &mut process);
-            let ours = candidate != 0 && process == std::process::id();
-            (ours && IsWindowVisible(candidate) != 0 && IsIconic(candidate) == 0).then_some(candidate)
-        }
+            }
+        };
+        usable(guess).then_some(guess)
     }
 
     fn wide(s: &str) -> Vec<u16> {
