@@ -7,6 +7,11 @@
 
 pub mod a11y;
 pub mod dialogs;
+
+type Defaults = (Option<Rc<dyn dialogs::Dialogs>>, Option<fn() -> Box<dyn Clipboard>>);
+thread_local! {
+    static DEFAULTS: std::cell::RefCell<Defaults> = const { std::cell::RefCell::new((None, None)) };
+}
 pub mod editing;
 pub mod frames;
 pub mod menus;
@@ -1220,6 +1225,12 @@ impl Page {
         self.call("__windowClosed", &format!("[{id},{value_json}]")).1
     }
 
+    /// Dialogs and a clipboard every page created on this thread starts with, so they exist before
+    /// the page's own scripts run (`DOMContentLoaded` handlers can show a message box).
+    pub fn set_defaults(dialogs: Option<Rc<dyn dialogs::Dialogs>>, clipboard: Option<fn() -> Box<dyn Clipboard>>) {
+        DEFAULTS.with(|d| *d.borrow_mut() = (dialogs, clipboard));
+    }
+
     /// Let scripts open native file choosers and message boxes.
     pub fn set_dialogs(&mut self, dialogs: Rc<dyn dialogs::Dialogs>) {
         self.view.borrow_mut().dialogs = Some(dialogs);
@@ -1314,12 +1325,12 @@ impl Page {
             page_sel: None,
             edit_sel: None,
             clipboard_requests: Vec::new(),
-            clipboard: SharedClipboard::default(),
+            clipboard: DEFAULTS.with(|d| d.borrow().1.map(|make| SharedClipboard::new(make()))).unwrap_or_default(),
             images: FileImages::new(path.parent().map(PathBuf::from).unwrap_or_default()),
             focus_changes: Vec::new(),
             window_requests: Vec::new(),
             file_request: None,
-            dialogs: None,
+            dialogs: DEFAULTS.with(|d| d.borrow().0.clone()),
             resized: false,
             window_rect: None,
             window_info: info,
@@ -7194,6 +7205,38 @@ cd</textarea>
                 "message Alert Hey Careful now",
             ]
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn default_dialogs_are_there_for_the_first_scripts() {
+        use dialogs::{Dialogs, FileFilter, MessageKind};
+        struct Count(Rc<std::cell::Cell<u32>>);
+        impl Dialogs for Count {
+            fn open_files(&self, _: bool, _: &[FileFilter], _: &str, _: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn save_file(&self, _: &[FileFilter], _: &str, _: &str, _: &str) -> Option<String> {
+                None
+            }
+            fn pick_folder(&self, _: &str, _: &str) -> Option<String> {
+                None
+            }
+            fn message(&self, _: MessageKind, _: &str, _: &str) -> bool {
+                self.0.set(self.0.get() + 1);
+                true
+            }
+        }
+        let shown = Rc::new(std::cell::Cell::new(0));
+        Page::set_defaults(Some(Rc::new(Count(shown.clone()))), None);
+        let (_p, path) = page(
+            r#"<body><script>
+              document.addEventListener('DOMContentLoaded', () => { Window.this.modal(JSX('alert', null, ['Hello'])); });
+            </script></body>"#,
+            "default-dialogs",
+        );
+        Page::set_defaults(None, None);
+        assert_eq!(shown.get(), 1);
         let _ = std::fs::remove_file(path);
     }
 
