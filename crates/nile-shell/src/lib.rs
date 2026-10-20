@@ -27,6 +27,9 @@ mod snap_win;
 #[cfg(windows)]
 mod tray_win;
 mod badge;
+mod dragout;
+#[cfg(windows)]
+mod dragout_win;
 mod access;
 mod app;
 mod bundle;

@@ -285,6 +285,10 @@ impl Dialogs for NativeDialogs {
     }
 }
 
+/// Tell the dialogs which window they belong to (Windows; elsewhere the helper programs place themselves).
+#[cfg(windows)]
+pub use win::set_owner;
+
 /// The Win32 common dialogs. They are owned by the window that is active on this thread, which
 /// disables it (its parent can't be used or moved around) until the dialog closes, and they open at
 /// once: no helper process is started.
@@ -301,20 +305,47 @@ mod win {
         UI::{
             Controls::Dialogs::{GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW},
             Input::KeyboardAndMouse::GetActiveWindow,
-            WindowsAndMessaging::{GetForegroundWindow, MessageBoxW, SendMessageW, SetForegroundWindow, MB_SETFOREGROUND, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
+            WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, MessageBoxW, SendMessageW, SetForegroundWindow, MB_SETFOREGROUND, MB_TOPMOST, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
         },
     };
 
-    /// The window a dialog belongs to: the one active on this thread, else the foreground window
-    /// (a dialog with no owner can open behind the application).
-    fn owner() -> isize {
+    /// The window the shell is handling events for (set before page code runs): dialogs belong to it.
+    static OWNER: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+    pub fn set_owner(hwnd: isize) {
+        OWNER.store(hwnd, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Is `hwnd` one of our windows that is shown and not minimized (a dialog owned by anything else
+    /// never shows up)?
+    fn usable(hwnd: isize) -> bool {
         // SAFETY: plain queries.
         unsafe {
+            if hwnd == 0 || IsWindow(hwnd) == 0 {
+                return false;
+            }
+            let mut process = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut process);
+            process == std::process::id() && IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0
+        }
+    }
+
+    /// The window a dialog belongs to: the one the shell is serving (`set_owner`), else this thread's active
+    /// or the foreground window, but only if it is one of ours that is shown. With no usable owner (`None`) the
+    /// box has none and is made topmost instead, so it can't open behind the application.
+    fn owner() -> Option<isize> {
+        let set = OWNER.load(std::sync::atomic::Ordering::Relaxed);
+        if usable(set) {
+            return Some(set);
+        }
+        // SAFETY: plain queries.
+        let guess = unsafe {
             match GetActiveWindow() {
                 0 => GetForegroundWindow(),
                 active => active,
             }
-        }
+        };
+        usable(guess).then_some(guess)
     }
 
     fn wide(s: &str) -> Vec<u16> {
@@ -355,7 +386,7 @@ mod win {
         // SAFETY: an all-zero OPENFILENAMEW is a valid empty one; the buffers outlive the call.
         let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
         ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-        ofn.hwndOwner = owner();
+        ofn.hwndOwner = owner().unwrap_or(0);
         ofn.lpstrFilter = list.as_ptr();
         ofn.nFilterIndex = 1;
         ofn.lpstrFile = file.as_mut_ptr();
@@ -435,7 +466,7 @@ mod win {
             // The new-style dialog needs COM; it is fine if the thread already has it.
             CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32);
             let info = BrowseInfo {
-                owner: owner(),
+                owner: owner().unwrap_or(0),
                 root: null_mut(),
                 display_name: null_mut(),
                 title: if caption.is_empty() { null() } else { title.as_ptr() },
@@ -463,7 +494,18 @@ mod win {
             MessageKind::Question => MB_ICONQUESTION,
         };
         let (text, caption) = (wide(text), wide(caption));
-        let answer = unsafe { MessageBoxW(owner(), text.as_ptr(), caption.as_ptr(), icon | MB_SETFOREGROUND | if question { MB_YESNO } else { MB_OK }) };
+        let owner = owner();
+        // Without a usable owner the box is topmost so it can't open behind the application.
+        let styles = icon | MB_SETFOREGROUND | if question { MB_YESNO } else { MB_OK };
+        let mut answer = unsafe { MessageBoxW(owner.unwrap_or(0), text.as_ptr(), caption.as_ptr(), if owner.is_some() { styles } else { styles | MB_TOPMOST }) };
+        if answer == 0 {
+            // 0 means the box could not be shown at all: say why, and try once more with no owner.
+            eprintln!("[dialog] MessageBoxW({kind:?}, owner {owner:?}) failed: {}", std::io::Error::last_os_error());
+            answer = unsafe { MessageBoxW(0, text.as_ptr(), caption.as_ptr(), styles | MB_TOPMOST) };
+        }
+        if std::env::var_os("NILE_TRACE").is_some() {
+            eprintln!("[dialog] {kind:?} owner {owner:?} -> {answer}");
+        }
         answer == IDYES || (!question && answer == IDOK)
     }
 }

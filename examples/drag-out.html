@@ -1,0 +1,54 @@
+<html window-title="Drag files out" window-width="520" window-height="320">
+  <head>
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        font: 14px system-ui;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 10px;
+      }
+      #card {
+        display: inline-block;
+        padding: 16px 22px;
+        border-radius: 10px;
+        background: #2b7cf0;
+        color: #fff;
+        cursor: grab;
+        user-select: none;
+      }
+      #log {
+        margin-top: 18px;
+        padding: 10px;
+        background: #8881;
+        border-radius: 6px;
+        min-height: 60px;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Drag files out of the window</h1>
+    <p>
+      Drag the card outside the window and drop it on the desktop or in a
+      folder: you get a copy of <code>drag-out/sample.txt</code>.
+    </p>
+    <div id="card" draggable="true">sample.txt</div>
+    <div id="log"></div>
+    <script>
+      const log = (t) => {
+        document.getElementById("log").textContent += t + "\n";
+      };
+      const card = document.getElementById("card");
+      card.addEventListener("dragstart", (e) => {
+        e.dataTransfer.setFiles(["drag-out/sample.txt"]);
+        log("dragstart");
+      });
+      card.addEventListener("dragend", (e) =>
+        log("dragend, effect " + e.dataTransfer.dropEffect),
+      );
+    </script>
+  </body>
+</html>

@@ -28,7 +28,8 @@ async function runChecks() {
     $('note-title').value = 'Discovery notes'; $('editor').innerHTML = '<h2>What we learned</h2><p><b>Clarity</b> makes work easier. UniqueSearchPhrase</p>';
     captureNote();
     assert(store.drafts().length === 1, 'Editing writes a recovery draft before autosave');
-    await new Promise(resolve => setTimeout(resolve, 1100));
+    // Autosave fires after 700 ms and then writes to SQLite: wait for it (a slow CI runner needs seconds), don't guess a delay.
+    for (let i = 0; i < 200 && dirty; i++) await new Promise(resolve => setTimeout(resolve, 50));
     assert(!dirty, 'Autosave timer commits a document without a manual save');
     assert(!dirty && store.drafts().length === 0 && state.notes[0].title === 'Discovery notes', 'Save commits note and clears recovery draft');
     assert((await store.search('UniqueSearchPhrase')).some(row => row.id === note.id), 'SQLite search finds document body');

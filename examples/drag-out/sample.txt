@@ -1,0 +1,2 @@
+Nile drag-out sample
+Drag the card out of the window and drop it on the desktop.

@@ -2479,6 +2479,16 @@
     }
     clearData(type) { if (this._mode !== "rw") return; type === undefined ? this._data.clear() : this._data.delete(String(type).toLowerCase()); }
     setDragImage(el, x, y) { this._image = { el, x, y }; }
+    // Nile extension: files to hand to the operating system when the drag leaves the window (`dragstart` only).
+    setFiles(paths) { if (this._mode === "rw") this._out = Array.from(paths, String); }
+    // The files this drag carries out: `setFiles`, else `file://` entries of `text/uri-list`.
+    _outFiles() {
+      if (this._out && this._out.length) return this._out;
+      const list = this._data.get("text/uri-list") || "";
+      return list.split(/\r?\n/).filter((l) => l.startsWith("file://")).map((l) => {
+        try { return decodeURIComponent(new URL(l).pathname).replace(/^\/([A-Za-z]:)/, "$1"); } catch { return ""; }
+      }).filter(Boolean);
+    }
   }
   g.DataTransfer = DataTransfer;
   g.DataTransferItem = DataTransferItem;
@@ -2527,6 +2537,21 @@
         }
         dnd.accept = accept; dnd.effect = effect;
         return { accept, effect };
+      },
+    },
+    // The pointer left the window carrying files: end the in-page drag (`dragend`, effect "copy") and return the
+    // paths, one per line, for the host to start a system drag with; "" when this drag has no files.
+    __dndOut: {
+      value(x, y) {
+        if (!dnd) return "";
+        const files = dnd.dt._outFiles();
+        if (!files.length) return "";
+        const { dt, source, over } = dnd;
+        dnd = null;
+        if (over) over.dispatchEvent(dragEvent("dragleave", over, x, y, dt, null));
+        dt.dropEffect = "copy";
+        source.dispatchEvent(dragEvent("dragend", source, x, y, dt));
+        return files.join("\n");
       },
     },
     __dndEnd: {

@@ -344,6 +344,16 @@ impl Win {
         self.window.set_cursor(icon_of(want));
     }
 
+    /// A page drag carrying files left the window: start the system's own drag with them.
+    fn start_file_drag(&mut self) {
+        if let Some(files) = self.page.take_drag_out() {
+            if !crate::dragout::start(&self.window, &files) {
+                eprintln!("[drag] the system drag could not start for {} file(s)", files.len());
+            }
+            self.window.request_redraw();
+        }
+    }
+
     /// Write the window's geometry for `window-remember` (the last normal rectangle stays when it is
     /// maximized, minimized or full screen).
     fn persist(&mut self) {
@@ -402,6 +412,7 @@ impl Win {
                 if self.page.pointer_moved((position.x / scale) as f32, (position.y / scale) as f32) {
                     window.request_redraw();
                 }
+                self.start_file_drag();
             }
             WindowEvent::CursorLeft { .. } => {
                 if self.page.pointer_left() {
@@ -1109,6 +1120,10 @@ impl ApplicationHandler<UserEvent> for App {
             if !dropped.is_empty() && self.wins[i].page.drop_files(&dropped) {
                 self.wins[i].window.request_redraw();
             }
+            #[cfg(windows)]
+            if let Some(h) = owner_hwnd(&self.wins[i].window) {
+                crate::dialogs::set_owner(h);
+            }
             let (changed, n) = self.wins[i].page.tick();
             if changed {
                 self.wins[i].window.request_redraw();
@@ -1131,6 +1146,11 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        // Tray, menu and application events run page code too: dialogs it opens belong to the active window.
+        #[cfg(windows)]
+        if let Some(h) = self.index(self.active).and_then(|i| owner_hwnd(&self.wins[i].window)) {
+            crate::dialogs::set_owner(h);
+        }
         let event = match event {
             UserEvent::ExtensionWake => return,
             UserEvent::Application(json) => {
@@ -1237,6 +1257,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let Some(idx) = self.wins.iter().position(|w| w.window.id() == wid) else { return };
         let id = self.wins[idx].id;
+        #[cfg(windows)]
+        if let Some(h) = owner_hwnd(&self.wins[idx].window) {
+            crate::dialogs::set_owner(h);
+        }
         if matches!(event, WindowEvent::Focused(true)) {
             self.active = id;
         }
