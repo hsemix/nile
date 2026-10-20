@@ -16,6 +16,7 @@ the section becomes that version's.
 - `window-remember` on `<html>` (a Nile extension): the window reopens with the size, position and maximized state it was closed with, saved per app (`nile.json` id, else the program's name) and per name in `<user data>/nile/windows/<app>.json`; saved shortly after a move or resize, on close and at exit; a position that is no longer on any screen is dropped. `examples/window-remember.html`.
 
 #### Fixed
+- Windows: a frameless window (`window-frame="solid"`) could show a system title bar for a moment, in the taskbar hover preview and when maximizing or restoring. Winit keeps `WS_CAPTION` on such windows and only hides the frame, so the system drew it whenever it rendered the frame itself; the style is now removed and kept off (`snap_win`). Written without a Windows machine to test the fix on; type-checked only.
 - Native message boxes (and the system clipboard) did nothing when a page used them while loading, e.g. `Window.this.modal(<alert>Hello</alert>)` in a `DOMContentLoaded` handler: the shell attached them after the page's first scripts had run, so `modal` quietly answered "yes". Pages now start with them (`Page::set_defaults`, `nile_shell::use_native`).
 
 ### 2026-10-19
