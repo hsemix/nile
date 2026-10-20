@@ -344,6 +344,16 @@ impl Win {
         self.window.set_cursor(icon_of(want));
     }
 
+    /// A page drag carrying files left the window: start the system's own drag with them.
+    fn start_file_drag(&mut self) {
+        if let Some(files) = self.page.take_drag_out() {
+            if !crate::dragout::start(&self.window, &files) {
+                eprintln!("[drag] the system drag could not start for {} file(s)", files.len());
+            }
+            self.window.request_redraw();
+        }
+    }
+
     /// Write the window's geometry for `window-remember` (the last normal rectangle stays when it is
     /// maximized, minimized or full screen).
     fn persist(&mut self) {
@@ -402,6 +412,7 @@ impl Win {
                 if self.page.pointer_moved((position.x / scale) as f32, (position.y / scale) as f32) {
                     window.request_redraw();
                 }
+                self.start_file_drag();
             }
             WindowEvent::CursorLeft { .. } => {
                 if self.page.pointer_left() {

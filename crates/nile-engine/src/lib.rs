@@ -1075,6 +1075,8 @@ pub struct Page {
     pub dnd_candidate: Option<(NodeId, f32, f32)>,
     /// The HTML5 drag in progress (see `dnd_start`).
     pub dnd: Option<Dnd>,
+    /// Files the page's drag carries out of the window, for the shell to start a system drag with.
+    drag_out: Option<Vec<String>>,
     /// List box row the shift-range started from, and the row keys moved to last.
     pub list_anchor: Option<(NodeId, usize)>,
     /// A list box being dragged over (the button went down on a row).
@@ -1427,6 +1429,7 @@ impl Page {
             snap_due: None,
             dnd_candidate: None,
             dnd: None,
+            drag_out: None,
             list_anchor: None,
             list_drag: None,
             list_press: None,
@@ -2451,6 +2454,32 @@ impl Page {
         true
     }
 
+    /// The drag left the window: if it carries files, end it here and queue them for the system.
+    fn dnd_out(&mut self, x: f32, y: f32) -> bool {
+        let files = self.call("__dndOut", &format!("[{x},{y}]")).0.ok().and_then(|r| crate::editing::unjson_string(&r)).unwrap_or_default();
+        if files.is_empty() {
+            return false;
+        }
+        let dir = self.path.parent().map(PathBuf::from).unwrap_or_default();
+        let paths: Vec<String> = files
+            .lines()
+            .map(|f| {
+                let p = std::path::Path::new(f);
+                if p.is_absolute() { f.to_string() } else { dir.join(p).to_string_lossy().into_owned() }
+            })
+            .collect();
+        self.dnd = None;
+        self.drag_out = Some(paths);
+        self.refresh_hover();
+        true
+    }
+
+    /// Files a drag took out of the window (`dataTransfer.setFiles`), once: the embedder starts the
+    /// system's own drag session with them.
+    pub fn take_drag_out(&mut self) -> Option<Vec<String>> {
+        self.drag_out.take()
+    }
+
     /// The button was released (`drop`) or Escape pressed: end the drag.
     fn dnd_end(&mut self, drop: bool) -> bool {
         let (x, y) = self.pointer.unwrap_or((0.0, 0.0));
@@ -2507,6 +2536,10 @@ impl Page {
 
     fn pointer_moved_here(&mut self, x: f32, y: f32) -> bool {
         if self.dnd.is_some() {
+            let (vw, vh) = self.view.borrow().viewport;
+            if (x < 0.0 || y < 0.0 || x >= vw || y >= vh) && self.dnd_out(x, y) {
+                return true;
+            }
             return self.dnd_move(x, y);
         }
         if let Some((node, sx, sy)) = self.dnd_candidate {
@@ -7764,6 +7797,45 @@ cd</textarea>
         v.extend_from_slice(&data.to_le_bytes());
         v.resize(v.len() + data as usize, 0);
         v
+    }
+
+    #[test]
+    fn a_drag_with_files_that_leaves_the_window_is_handed_to_the_system() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0"><div id="src" draggable="true" style="width:60px;height:40px">file</div><div id="txt" draggable="true" style="position:absolute;left:100px;top:0;width:60px;height:40px">text</div>
+               <script>
+                 window.log = [];
+                 const src = document.getElementById('src');
+                 src.addEventListener('dragstart', (e) => { e.dataTransfer.setFiles(['out/report.pdf', '/abs/b.png']); });
+                 src.addEventListener('dragend', (e) => log.push('end:' + e.dataTransfer.dropEffect));
+                 const txt = document.getElementById('txt');
+                 txt.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/uri-list', 'file:///tmp/a%20b.txt'); });
+               </script></body>"#,
+            "dragout",
+        );
+        let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+        let (sx, sy) = center(&p, "src");
+        p.pointer_moved(sx, sy);
+        p.press();
+        p.pointer_moved(sx + 20.0, sy);
+        assert!(p.dnd.is_some() && p.take_drag_out().is_none(), "still inside: an in-page drag");
+        p.pointer_moved(-12.0, sy);
+        assert!(p.dnd.is_none(), "the in-page drag ended");
+        let files = p.take_drag_out().expect("handed out");
+        assert_eq!(files.len(), 2);
+        assert!(files[0].ends_with("out/report.pdf") && std::path::Path::new(&files[0]).is_absolute());
+        assert_eq!(files[1], "/abs/b.png");
+        assert_eq!(ev(&mut p, "log.join()"), "end:copy");
+        p.release();
+        // A uri-list of file: URLs counts too; a drag without files just stays in the page.
+        let (tx, ty) = center(&p, "txt");
+        p.pointer_moved(tx, ty);
+        p.press();
+        p.pointer_moved(tx + 20.0, ty);
+        p.pointer_moved(-5.0, ty);
+        assert_eq!(p.take_drag_out(), Some(vec!["/tmp/a b.txt".to_string()]));
+        p.release();
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

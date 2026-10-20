@@ -11,6 +11,7 @@ the section becomes that version's.
 ### 2026-10-20
 
 #### Added
+- Dragging files out of the window: `dataTransfer.setFiles([...])` (or `file://` entries of `text/uri-list`) in `dragstart`; when the pointer leaves the window the page's drag ends (`dragend`, `dropEffect: "copy"`) and the system's own drag starts with the files (macOS `NSDraggingSession`, Windows `DoDragDrop` over a shell data object; written without a Windows machine). Not on Linux. `examples/drag-out.html`.
 - `application.progress` (0 to 1, `"indeterminate"` or `null`): a progress bar on the dock icon (macOS, drawn in the dock tile) or the taskbar button (Windows, `ITaskbarList3`, written without a Windows machine). Not on Linux. In `examples/tray.html`.
 - `window-remember` on `<html>` (a Nile extension): the window reopens with the size, position and maximized state it was closed with, saved per app (`nile.json` id, else the program's name) and per name in `<user data>/nile/windows/<app>.json`; saved shortly after a move or resize, on close and at exit; a position that is no longer on any screen is dropped. `examples/window-remember.html`.
 

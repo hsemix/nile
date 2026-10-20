@@ -50,10 +50,29 @@ zone.addEventListener("drop", async (e) => {
 });
 ```
 
+## Files out to the desktop
+
+A drag that carries files can leave the window and be dropped on the desktop, in a file manager or in another
+app. List the files in `dragstart` (a Nile extension: `setFiles`, or `file://` URLs in `text/uri-list`):
+
+```js
+card.addEventListener("dragstart", (e) => {
+  e.dataTransfer.setFiles(["/path/to/report.pdf"]);   // absolute, or relative to the page
+});
+card.addEventListener("dragend", (e) => console.log(e.dataTransfer.dropEffect)); // "copy" once it left
+```
+
+While the pointer is inside the window it is an ordinary in-page drag (your `dragover`/`drop` handlers work).
+The moment it crosses the window's edge the page's drag ends (`dragend` with `dropEffect: "copy"`) and the
+system takes over with the files, as copies. macOS uses an `NSDraggingSession` with each file's icon; Windows
+uses `DoDragDrop` with a shell data object. Linux isn't supported yet (X11 and Wayland each need their own
+drag protocol). The page can't learn where the files were dropped. The Windows side was written without a
+Windows machine: check it on one.
+
 ## Not there yet
 
-Dragging text selections, links and images by default (add `draggable="true"` yourself), dragging *out* of the
-window to another application, dropping data from another application other than files, and the modifier keys
+Dragging text selections, links and images by default (add `draggable="true"` yourself), dragging anything but
+files out of the window, dropping data from another application other than files, and the modifier keys
 (Ctrl for copy) changing the effect.
 
 Try it: `examples/drag-drop.html` (`nile examples/drag-drop.html --png out.png --drag 100,100,360,130` renders a drag in
