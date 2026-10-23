@@ -402,6 +402,8 @@ pub struct MenuItem {
     pub header: bool,
     /// Inside an `<optgroup>`.
     pub indent: bool,
+    /// The option's own `background`, when the page sets one (`option { background: ... }`).
+    pub background: Option<Color>,
 }
 
 /// An open `<select>` list in document coordinates.
@@ -415,6 +417,12 @@ pub struct MenuBox {
     /// Pixels scrolled; the list is taller than its panel when `max_scroll > 0`.
     pub scroll: f32,
     pub max_scroll: f32,
+    /// The select's own look, so a styled select opens a list that matches it: its `background`, border
+    /// colour, corner radius and `accent-color` (None = the platform palette's).
+    pub background: Option<Color>,
+    pub border: Option<Color>,
+    pub radius: f32,
+    pub accent: Option<Color>,
 }
 
 impl MenuBox {
@@ -1981,12 +1989,14 @@ fn build(
             if node.tag() == Some("select") && style.width == Length::Auto {
                 // Wide enough for the longest option, whichever is showing.
                 // A list box has no chevron but needs room for its row padding and scroll bar.
-                let extra = if list_rows(doc, id).is_some() { 22.0 } else { 0.0 };
+                // The chevron needs room even when the page's own `padding` took the platform's away.
+                let extra = if list_rows(doc, id).is_some() { 22.0 } else { (24.0 - style.padding.right).max(0.0) };
                 ts.min_size.width = LengthPercentageAuto::length(widest_option(doc, style, text, id) + extra);
             }
             // A button's label sits in the middle of its box, however tall the page makes it.
             // (Not when the author made the button a flex or grid container: then its children are theirs to lay out.)
-            let children = if node.tag() == Some("button") && !children.is_empty() && !matches!(style.display, Display::Flex | Display::Grid) {
+            let centred = node.tag() == Some("button") || (node.tag() == Some("select") && list_rows(doc, id).is_none());
+            let children = if centred && !children.is_empty() && !matches!(style.display, Display::Flex | Display::Grid) {
                 ts.display = taffy::Display::Flex;
                 ts.flex_direction = taffy::FlexDirection::Column;
                 vec![anonymous_aligned(tree, &children, true)?]
@@ -2783,7 +2793,8 @@ fn build_menu(
             let header = is_group(doc, o);
             let mut l = text.shape(&option_label(doc, o), &if header { TextStyle { font_weight: 700.0, ..ts.clone() } } else { ts.clone() }, 1.0);
             break_lines(&mut l, None, Alignment::Start);
-            MenuItem { text: l, disabled: option_disabled(doc, o), header, indent: option_indented(doc, o) }
+            let background = styles.try_get(o).and_then(|st| st.background).filter(|c| c.a > 0);
+            MenuItem { text: l, disabled: option_disabled(doc, o), header, indent: option_indented(doc, o), background }
         })
         .collect();
     if items.is_empty() {
@@ -2814,6 +2825,10 @@ fn build_menu(
         scroll: req.scroll.clamp(0.0, max_scroll),
         max_scroll,
         items,
+        background: style.background.filter(|c| c.a > 0),
+        border: (style.border_width.top > 0.0 && style.border_style.top != nile_style::BorderStyle::None).then_some(style.border_color.top),
+        radius: style.border_radius.tl,
+        accent: style.accent_color,
     })
 }
 
@@ -4703,6 +4718,35 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
 
     fn rect_of(doc: &Document, tree: &LayoutTree, id: &str) -> Rect {
         tree.node_rect(doc.find(|n| n.attr("id") == Some(id)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn an_open_select_list_takes_the_selects_own_styling() {
+        let doc = Document::parse(
+            r#"<body style="margin:0"><select id="s" style="background:#102030; border:2px solid #3040a0; border-radius:12px; accent-color:#ff8800; padding:0 20px">
+                 <option>One</option><option style="background:#405060">Two</option></select>
+               <select id="plain"><option>One</option></select></body>"#,
+        );
+        let styles = compute_styles(&doc);
+        let id = |s: &str| doc.find(|n| n.attr("id") == Some(s)).unwrap();
+        let mut text = TextEngine::new();
+        let menu_of = |select: &str, text: &mut TextEngine| {
+            let opts = LayoutOptions { preedit: None, menu: Some(MenuRequest { select: id(select), highlight: None, scroll: 0.0 }), scroll_y: 0.0, offsets: None, images: None };
+            layout_with(&doc, &styles, text, 800.0, 400.0, &opts).menu.unwrap()
+        };
+        let m = menu_of("s", &mut text);
+        assert_eq!(m.background.map(|c| (c.r, c.g, c.b)), Some((0x10, 0x20, 0x30)));
+        assert_eq!(m.border.map(|c| (c.r, c.g, c.b)), Some((0x30, 0x40, 0xa0)));
+        assert_eq!((m.radius, m.accent.map(|c| (c.r, c.g, c.b))), (12.0, Some((0xff, 0x88, 0x00))));
+        assert_eq!(m.items[0].background, None);
+        assert_eq!(m.items[1].background.map(|c| (c.r, c.g, c.b)), Some((0x40, 0x50, 0x60)), "an option's own background colours its row");
+        // A select with no styling of its own gets its list from the platform theme's colours, so no row has one of its own.
+        let plain = menu_of("plain", &mut text);
+        assert!(plain.items.iter().all(|i| i.background.is_none()));
+        // The closed select is wide enough for its text plus the chevron, whatever padding the page chose.
+        let tree = layout(&doc, &styles, &mut text, 800.0, 400.0);
+        let r = tree.node_rect(id("s")).unwrap();
+        assert!(r.width >= m.items[0].text.full_width().max(m.items[1].text.full_width()) + 40.0 + 4.0 + 4.0, "{r:?}");
     }
 
     #[test]

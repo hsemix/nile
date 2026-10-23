@@ -424,29 +424,37 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
     /// The open `<select>` list: white panel, highlighted row, a mark on the chosen one.
     fn paint_menu(&mut self, canvas: &Canvas, m: &MenuBox) {
         let r = m.rect;
-        let panel = RRect::new_rect_xy(skia_rect(r), 3.0, 3.0);
-        canvas.draw_rrect(panel, &fill(self.pal.panel));
-        let mut border = fill(self.pal.panel_border);
+        let radius = m.radius.max(0.0).min(r.height / 2.0).max(3.0);
+        let panel = RRect::new_rect_xy(skia_rect(r), radius, radius);
+        canvas.draw_rrect(panel, &fill(m.background.unwrap_or(self.pal.panel)));
+        let mut border = fill(m.border.unwrap_or(self.pal.panel_border));
         border.set_style(skia_safe::PaintStyle::Stroke);
         border.set_stroke_width(1.0);
-        canvas.draw_rrect(RRect::new_rect_xy(Rect::from_xywh(r.x + 0.5, r.y + 0.5, r.width - 1.0, r.height - 1.0), 3.0, 3.0), &border);
+        canvas.draw_rrect(RRect::new_rect_xy(Rect::from_xywh(r.x + 0.5, r.y + 0.5, r.width - 1.0, r.height - 1.0), radius, radius), &border);
+        let (accent, accent_text) = match m.accent {
+            Some(a) => (a, if (a.r as u32 * 299 + a.g as u32 * 587 + a.b as u32 * 114) / 1000 > 150 { CssColor { r: 0, g: 0, b: 0, a: 255 } } else { CssColor { r: 255, g: 255, b: 255, a: 255 } }),
+            None => (self.pal.accent, self.pal.accent_text),
+        };
         canvas.save();
-        canvas.clip_rect(Rect::from_xywh(r.x + 1.0, r.y + 1.0, r.width - 2.0, r.height - 2.0), None, false);
+        canvas.clip_rrect(RRect::new_rect_xy(Rect::from_xywh(r.x + 1.0, r.y + 1.0, r.width - 2.0, r.height - 2.0), (radius - 1.0).max(0.0), (radius - 1.0).max(0.0)), None, false);
         for (i, item) in m.items.iter().enumerate() {
             let top = r.y + 1.0 - m.scroll + m.row_height * i as f32;
             if top + m.row_height < r.y || top > r.y + r.height {
                 continue;
             }
             let on = m.highlight == Some(i) && !item.disabled;
+            if let (Some(bg), false) = (item.background, on) {
+                canvas.draw_rect(Rect::from_xywh(r.x + 1.0, top, r.width - 2.0, m.row_height), &fill(bg));
+            }
             if on {
-                canvas.draw_rect(Rect::from_xywh(r.x + 1.0, top, r.width - 2.0, m.row_height), &fill(self.pal.accent));
+                canvas.draw_rect(Rect::from_xywh(r.x + 1.0, top, r.width - 2.0, m.row_height), &fill(accent));
             }
             let line_h = item.text.height();
             let at = LRect { x: r.x + m.pad_x + if item.indent { 12.0 } else { 0.0 }, y: top + (m.row_height - line_h) / 2.0, width: r.width, height: line_h };
             // Text carries its own color; selected-row and disabled rows are tinted by an overlay.
-            self.paint_text_tinted(canvas, at, &item.text, if on { Some([self.pal.accent_text.r, self.pal.accent_text.g, self.pal.accent_text.b, 255]) } else if item.header { Some(if self.pal.dark { [190, 190, 190, 255] } else { [70, 70, 70, 255] }) } else if item.disabled { Some([150, 150, 150, 255]) } else { None });
+            self.paint_text_tinted(canvas, at, &item.text, if on { Some([accent_text.r, accent_text.g, accent_text.b, 255]) } else if item.header { Some(if self.pal.dark { [190, 190, 190, 255] } else { [70, 70, 70, 255] }) } else if item.disabled { Some([150, 150, 150, 255]) } else { None });
             if m.selected == Some(i) && !on {
-                canvas.draw_rect(Rect::from_xywh(r.x + 2.0, top + 2.0, 2.0, m.row_height - 4.0), &fill(self.pal.accent));
+                canvas.draw_rect(Rect::from_xywh(r.x + 2.0, top + 2.0, 2.0, m.row_height - 4.0), &fill(accent));
             }
         }
         canvas.restore();

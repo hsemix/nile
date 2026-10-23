@@ -43,7 +43,7 @@
     const money = (n) => n.toFixed(2);
     receipt.columns = [
       { key: "name", title: "Product name" },
-      { key: "qty", title: "Quantity", width: 86, type: "number" },
+      { key: "qty", title: "Quantity", width: 86, type: "number", editable: true, validate: (v) => (v !== null && v >= 0 && Number.isInteger(v)) || "Whole number, 0 or more" },
       { key: "price", title: "Price", width: 80, type: "number", format: money },
       { key: "amount", title: "Amount", width: 90, type: "number", value: (r) => r.qty * r.price, format: money },
     ];
@@ -54,7 +54,7 @@
       total();
     });
     $("#drop").on("click", () => { receipt.selected.forEach((r) => receipt.remove(r)); total(); });
-    receipt.on("rowactivate", (e) => { e.detail.row.qty++; receipt.refresh(); total(); });
+    receipt.on("cellchange", total);   // F2, Enter, a double-click or typing edits Quantity
 
     // Catalogue
     const groups = ["Coffee", "Dairy", "Bakery", "Drinks", "Snacks", "Frozen"];

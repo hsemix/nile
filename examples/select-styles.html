@@ -1,0 +1,24 @@
+<!doctype html>
+<html window-width="560" window-height="300">
+<meta charset="utf-8">
+<title>Styled selects</title>
+<style>
+  body { margin: 0; padding: 20px 24px; font: 14px system-ui, sans-serif; background: #f8fafc; color: #1e293b }
+  h1 { margin: 0 0 14px; font-size: 18px }
+  .row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap }
+  /* The closed select and its list follow the page's styles. */
+  select.dark { background: #1e293b; color: #fff; border: 2px solid #38bdf8; border-radius: 12px; padding: 8px 14px; font-size: 16px; accent-color: #38bdf8 }
+  select.flat { appearance: none; background: #fef3c7; color: #78350f; border: 0; border-bottom: 2px solid #d97706; border-radius: 0; padding: 8px 12px }
+  select.tall { width: 220px; height: 46px; padding: 0 12px; border-radius: 8px; border: 1px solid #94a3b8; background: #fff }
+  select.dark option { background: #1e293b; color: #fff }
+  select.flat option { background: #fffbeb; color: #78350f }
+</style>
+<body>
+  <h1>Styled selects</h1>
+  <div class="row">
+    <select class="dark"><option>Dark select</option><option>Second choice</option><option>Third choice</option></select>
+    <select class="flat"><option>Flat, appearance none</option><option>Second</option><option>Third</option></select>
+    <select class="tall"><option>Tall select</option><option>Another</option></select>
+  </div>
+</body>
+</html>
