@@ -44,3 +44,6 @@ export function lengthAttr(el, name, fallback) {
   if (v === null || v === "") return fallback;
   return /^\d+(\.\d+)?$/.test(v) ? v + "px" : v;
 }
+
+/** How many modal layers (dialogs) are open; shortcuts stay quiet while it is above 0. */
+export const modal = { depth: 0 };

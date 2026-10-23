@@ -1985,7 +1985,8 @@ fn build(
                 ts.min_size.width = LengthPercentageAuto::length(widest_option(doc, style, text, id) + extra);
             }
             // A button's label sits in the middle of its box, however tall the page makes it.
-            let children = if node.tag() == Some("button") && !children.is_empty() {
+            // (Not when the author made the button a flex or grid container: then its children are theirs to lay out.)
+            let children = if node.tag() == Some("button") && !children.is_empty() && !matches!(style.display, Display::Flex | Display::Grid) {
                 ts.display = taffy::Display::Flex;
                 ts.flex_direction = taffy::FlexDirection::Column;
                 vec![anonymous_aligned(tree, &children, true)?]
@@ -1996,7 +1997,9 @@ fn build(
             tree.set_node_context(n, Some(NodeCtx::Element(id))).ok()?;
             // `width: fit-content`: size the box on its own at max-content and give it that width,
             // never wider than its container.
-            if style.width_fit && matches!(style.display, Display::Block | Display::Flex | Display::ListItem) {
+            // Buttons shrink to their content even when block-level, as in browsers.
+            let button_fit = node.tag() == Some("button") && style.width == Length::Auto && style.star_w == 0.0 && matches!(style.display, Display::Block | Display::Flex);
+            if (style.width_fit || button_fit) && matches!(style.display, Display::Block | Display::Flex | Display::ListItem) {
                 tree.compute_layout_with_measure(n, Size { width: AvailableSpace::MaxContent, height: AvailableSpace::MaxContent }, |inputs, _id, ctx, st| measure_node(inputs, ctx, st)).ok()?;
                 let outer = tree.layout(n).ok()?.size.width;
                 let frame = style.padding.left + style.padding.right + style.border_width.left + style.border_width.right;
@@ -4700,6 +4703,19 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
 
     fn rect_of(doc: &Document, tree: &LayoutTree, id: &str) -> Rect {
         tree.node_rect(doc.find(|n| n.attr("id") == Some(id)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_flex_button_lays_out_its_own_children_and_block_buttons_shrink_to_fit() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><button id="f" style="display:flex; gap:10px; padding:0; border:0"><span id="a" style="width:30px; height:10px"></span><span id="b" style="width:40px; height:10px"></span></button>
+               <button id="k" style="display:block; padding:0; border:0"><span style="display:block; width:50px; height:10px"></span></button></body>"#,
+        );
+        let (a, b, f, k) = (rect_of(&doc, &t, "a"), rect_of(&doc, &t, "b"), rect_of(&doc, &t, "f"), rect_of(&doc, &t, "k"));
+        assert_eq!(a.y, b.y, "the children sit in a row");
+        assert_eq!(b.x - a.x, 40.0, "30px wide plus the 10px gap");
+        assert_eq!(f.width, 80.0, "the button is as wide as its content, not the page");
+        assert_eq!(k.width, 50.0, "a block button shrinks to fit too");
     }
 
     #[test]

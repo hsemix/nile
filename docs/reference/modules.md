@@ -249,7 +249,7 @@ Nile's own optional component library (a Nile extension, not part of Sciter), wr
 embedded in the program: [crates/nile-script/src/ui](../../crates/nile-script/src/ui). Each
 module registers its custom elements when imported. Modules so far: `barcode` (Code 128, Code 39,
 EAN-13, EAN-8, UPC-A, QR; `<nile-barcode>`, `svg`, `encode`, `dataUrl`), `drawer` (`<nile-drawer>`),
-`splitter` (`<nile-splitter>`) and `grid` (`<nile-grid>`, `<nile-column>`). Options and details:
+`splitter` (`<nile-splitter>`), `grid` (`<nile-grid>`, `<nile-column>`), `dialog` (`<nile-dialog>`, `confirm`, `prompt`, `alert`, `dialog`), `toast` (`toast`), `shortcuts` (`shortcuts`), `tabs` (`<nile-tabs>`, `<nile-tab>`), `accordion` (`<nile-accordion>`, `<nile-section>`), `combobox` (`<nile-combobox>`), `ribbon` (`ribbon(config)`, `<nile-ribbon>`), `tiles` (`<nile-tiles>`, `<nile-tile>`) and `chart` (`<nile-chart>`, `niceScale`). Options and details:
 [ui-components guide](../guide/ui-components.md).
 
 ## `@debug`

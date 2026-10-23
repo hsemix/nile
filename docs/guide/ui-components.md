@@ -7,7 +7,7 @@ install or ship: import what you use. A module that isn't imported costs nothing
 ```js
 import { svg, encode, dataUrl } from "@nile/ui";   // everything
 import { svg } from "@nile/ui/barcode";            // one module
-//   modules: barcode, drawer, splitter, grid
+//   modules: barcode, drawer, splitter, grid, dialog, toast, shortcuts, tabs, accordion, combobox, ribbon, tiles, chart
 ```
 
 Importing a module registers its elements, so after `import "@nile/ui"` the tags below work in
@@ -134,6 +134,159 @@ elsewhere, load it in pages into `rows` and handle the `sort` event yourself. St
 `--nile-grid-color`, `--nile-grid-head-bg`, `--nile-grid-border`, `--nile-grid-hover`, `--nile-grid-stripe`,
 `--nile-grid-selected-bg` and `--nile-grid-selected-color`. Not included: editing cells in place, variable
 row heights, column reordering, grouping. See `examples/data-grid.html`.
+
+## Dialogs
+
+Promise-based message boxes drawn in the page (`Window.this.modal` shows native ones). They trap Tab, close on
+Escape, press the primary button on Enter, restore focus, and keep [shortcuts](#shortcuts) quiet while open.
+
+```js
+import { confirm, prompt, alert, dialog } from "@nile/ui";
+
+if (await confirm("Void this order?", { title: "Void", ok: "Void", danger: true })) voidOrder();
+const name = await prompt("Customer name", { value: "Walk-in", validate: (t) => (t.trim() ? "" : "Enter a name") }); // string or null
+await alert("Saved.");
+const choice = await dialog({ title: "Print", message: "Print the receipt?",
+  buttons: [{ label: "No", value: "no", cancel: true }, { label: "Print", value: "yes", primary: true }] });
+```
+
+`dialog(options)`: `title`, `message` (plain text), `body` (a node, or `{ html }`), `buttons` (`label`, `value` or a
+function returning one, `primary`, `danger`, `cancel`), `width`, `dismissible: false`, and `check(value, button)` (return
+`false` or an error text to keep it open). It resolves the pressed button's value, or `undefined` when dismissed.
+For markup, `<nile-dialog heading="Edit item" width="420">...<footer>buttons</footer></nile-dialog>` with
+`await el.showModal()` (buttons with `data-dialog-close="value"` close it), `show()`, `close(value)`, events `open`,
+`close`, cancelable `beforeclose`. Style: `--nile-dialog-bg/-color/-shadow/-radius/-backdrop`, `.nile-dialog-panel`.
+See `examples/ui-dialogs.html`.
+
+## Toasts
+
+```js
+import { toast } from "@nile/ui";
+toast("Receipt saved");
+toast.success("Payment received", { duration: 2500 });
+toast.error("Printer is offline", { action: { label: "Retry", onClick: retry } });
+const t = toast("Sending...", { duration: 0 }); t.update("Sent"); t.close();
+```
+
+Options: `type` (`info`, `success`, `warning`, `error`), `duration` (ms, default 3500, `0` = until closed), `position`
+(`bottom-right`, `bottom`, `bottom-left`, `top-right`, `top`, `top-left`), `action`, `closable`, `html`. Hovering
+pauses the timer; at most five show at once (`toast.max`); `toast.clear()` closes all. Screen readers hear them
+(`role=status`, errors `role=alert`).
+
+## Shortcuts
+
+```js
+import { shortcuts } from "@nile/ui";
+const off = shortcuts.on("F3", openSearch);                  // returns a function that removes it
+shortcuts.on("Mod+S", save, { label: "Save" });              // Mod = Ctrl, or Cmd on a Mac
+shortcuts.on("Ctrl+Shift+K, Alt+K", clear);                  // several keys, one action
+```
+```html
+<button data-shortcut="F8">New sale</button>                 <!-- pressing F8 clicks it; data-hint="F8" for styling -->
+```
+
+Names: letters, digits, `F1`-`F12`, `Enter`, `Escape`, `Delete`, arrows, `Home`/`End`, `PageUp`/`PageDown`, with
+`Ctrl`, `Alt`, `Shift`, `Meta`, `Mod`. A plain printable key is left to the text field you are typing in; shortcuts
+stay quiet while a dialog is open unless registered with `{ always: true }`. Options `when()`, `prevent: false`,
+`typing: true`. `shortcuts.list()`, `shortcuts.format("Mod+S")` (`Ctrl+S` or the Mac symbols), `shortcuts.refresh()`.
+
+## Tabs and accordion
+
+```html
+<nile-tabs selected="terms">
+  <nile-tab label="General" name="general">...</nile-tab>
+  <nile-tab label="Terms" name="terms" badge="3">...</nile-tab>
+  <nile-tab label="Houses" disabled>...</nile-tab>
+</nile-tabs>
+
+<nile-accordion exclusive>
+  <nile-section heading="General" open>...links...</nile-section>
+  <nile-section heading="Message center">...</nile-section>
+</nile-accordion>
+```
+
+Tabs: `position` (`top`, `bottom`, `left`, `right`), `align`; tab attributes `label`, `name`, `badge`, `icon`, `disabled`;
+`select(indexOrName)`, `refresh()`, `selectedIndex`; events `tabchange`, cancelable `beforetabchange`; arrows, Home and
+End move between tabs. Accordion: sections work alone too; `open()`/`close()`/`toggle()`, `expandAll()`, event
+`sectionchange`; `exclusive` keeps one open. See `examples/ui-navigation.html`.
+
+## Combobox
+
+```html
+<nile-combobox id="product" placeholder="Search products" allow-custom></nile-combobox>
+```
+```js
+product.items = [{ value: 1, label: "Whole milk", hint: "2.50", group: "Dairy" }, "Plain string"];
+product.source = async (query) => await db.search(query);       // loaded as the user types (debounced)
+product.on("change", (e) => add(e.detail.item));
+```
+
+`<option>` children work too. Typing filters (prefix matches first, the match is marked); Down/Up/Enter/Escape/Tab behave
+as in a desktop combo; a blur keeps an exact label, or the text with `allow-custom`, and reverts anything else. Attributes:
+`placeholder`, `value`, `disabled`, `allow-custom`, `open-on-focus`, `limit`, `empty`, `min-chars`, `delay`. Properties:
+`items`, `source`, `value`, `text`, `selectedItem`, `renderItem(item, query)`. Events `change`, `input`, `open`, `close`.
+See `examples/ui-combobox.html`.
+
+## Ribbon
+
+A Microsoft-style ribbon you describe as data and restyle freely.
+
+```js
+import { ribbon } from "@nile/ui";
+const r = ribbon({
+  file: { label: "File", onClick: openBackstage },
+  quick: [{ icon: SAVE_SVG, label: "Save", command: "save", iconOnly: true, shortcut: "Mod+S" }],
+  tabs: [{ label: "Home", groups: [
+    { label: "Clipboard", items: [
+      { label: "Paste", size: "large", icon: PASTE_SVG, command: "paste", menu: [{ label: "Paste special", command: "pasteSpecial" }] },
+      { type: "stack", items: [{ label: "Cut", icon: CUT_SVG, command: "cut" }, { label: "Copy", icon: COPY_SVG, command: "copy" }] } ] },
+    { label: "Font", items: [{ type: "row", items: [{ type: "toggle", html: true, label: "<b>B</b>", command: "bold", shortcut: "Mod+B" }] }] },
+  ] },
+  { label: "Table tools", contextual: true, accent: "#7e3fb4", hidden: true, groups: [...] }],
+});
+document.body.prepend(r);
+r.on("command", (e) => run(e.detail.command, e.detail));
+r.setState("bold", { checked: true }); r.showTab("Table tools", true); r.collapse();
+```
+
+Items: `button` (default), `toggle`, `select` (`options`, `value`), `stack` / `row` (small items), `separator`, `custom`
+(`element`). Fields: `label`, `icon` (inline SVG or an image URL), `size` (`large`/`small`), `command`, `menu`, `split`,
+`disabled`, `checked`, `title`, `shortcut`, `onClick`, `html`, `iconOnly`, `className`, `hidden`. Events `command`
+(`detail.command`, `item`, `checked`, `value`) and `tabchange`; methods `select`, `showTab`, `hideTab`, `collapse`,
+`expand`, `setState(command, patch)`, `config`. Double-click a tab or press Ctrl+F1 to collapse; a collapsed ribbon pops a
+tab open until you pick a command. Everything is a class (`.nile-ribbon-tab`, `.nile-ribbon-group`,
+`.nile-ribbon-button.nile-large`, `.nile-ribbon-menu`, ...) and a variable (`--nile-ribbon-bg/-tab-bg/-accent/-text/-border/
+-hover/-pressed/-group-label/-file-bg`); `theme="dark"` swaps the palette. Not included: key tips, a backstage view,
+responsive group collapsing. See `examples/ui-ribbon.html`.
+
+## Tiles
+
+```html
+<nile-tiles columns="4" gap="6">
+  <nile-tile label="Search" shortcut="F3" icon="<svg ...>"></nile-tile>
+  <nile-tile label="Payment" shortcut="F10" variant="success" span="2"></nile-tile>
+</nile-tiles>
+```
+
+A grid of large focusable buttons (a POS F-key pad, a launcher). `shortcut` shows in the corner and presses the tile;
+`variant` (`primary`, `success`, `danger`, `warning`), `span`, `row-span`, `badge`, `disabled`, `command`. Or
+`tiles.items = [{ label, shortcut, icon, command, variant, span, badge }]`. Event `tile` (`detail.command`); arrows move
+between tiles. Style with `--nile-tile-bg/-color/-border/-hover/-radius`.
+
+## Charts
+
+```html
+<nile-chart id="sales" type="bar" height="260"></nile-chart>
+```
+```js
+sales.data = { labels: ["Jan", "Feb"], series: [{ name: "2026", values: [120, 90] }, { name: "2025", values: [80, 110] }] };
+sales.format = (v) => "$" + v.toLocaleString();
+donut.data = [{ label: "Cash", value: 62 }, { label: "Card", value: 31 }];       // one series, labelled slices
+```
+
+`type`: `bar`, `line`, `area`, `pie`, `donut`; `stacked` (bar, area), `smooth` (line, area), `legend` (`bottom`, `top`,
+`none`), `min`/`max`, `grid`, `points`, `colors`. Hover shows a tooltip, a legend entry hides or shows its series,
+a click raises `chartclick`. The chart redraws on resize. See `examples/ui-charts.html`.
 
 ## Barcodes
 

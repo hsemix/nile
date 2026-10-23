@@ -1,0 +1,31 @@
+<!doctype html>
+<html window-width="900" window-height="620">
+<meta charset="utf-8">
+<title>Charts: @nile/ui</title>
+<style>
+  body { margin: 0; padding: 20px 24px; font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b }
+  h1 { margin: 0 0 14px; font-size: 20px }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px }
+  .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px }
+  .card h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #64748b }
+</style>
+<body>
+  <h1>Charts</h1>
+  <div class="grid">
+    <div class="card"><h3>Sales by month (bar)</h3><nile-chart id="bar" type="bar" height="220"></nile-chart></div>
+    <div class="card"><h3>Visitors (line, smooth)</h3><nile-chart id="line" type="line" smooth height="220"></nile-chart></div>
+    <div class="card"><h3>Revenue (stacked area)</h3><nile-chart id="area" type="area" stacked height="220"></nile-chart></div>
+    <div class="card"><h3>Payment types (donut)</h3><nile-chart id="donut" type="donut" height="220"></nile-chart></div>
+  </div>
+  <script type="module">
+    import "@nile/ui";
+    const $ = (id) => document.getElementById(id);
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug"];
+    $("bar").data = { labels: months, series: [{ name: "2026", values: [12000, 9500, 15000, 18000, 14000, 16500, 11000, 19500] }, { name: "2025", values: [8000, 10500, 9000, 12000, 13000, 9800, 10200, 12500] }] };
+    $("bar").format = (v) => "$" + v.toLocaleString();
+    $("line").data = { labels: months, series: [{ name: "Visitors", values: [320, 410, 380, 520, 610, 580, 700, 690] }] };
+    $("area").data = { labels: months, series: [{ name: "Retail", values: [30, 35, 32, 45, 50, 48, 60, 58] }, { name: "Online", values: [10, 14, 18, 20, 26, 31, 33, 40] }] };
+    $("donut").data = [{ label: "Cash", value: 62 }, { label: "Card", value: 31 }, { label: "Voucher", value: 7 }];
+  </script>
+</body>
+</html>
