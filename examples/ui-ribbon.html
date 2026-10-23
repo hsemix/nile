@@ -1,0 +1,60 @@
+<!doctype html>
+<html window-width="980" window-height="420">
+<meta charset="utf-8">
+<title>Ribbon: @nile/ui</title>
+<style>
+  body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #e9e9e9; color: #222 }
+  .page { margin: 24px auto; width: 640px; min-height: 180px; background: #fff; padding: 28px 36px; box-shadow: 0 1px 6px rgba(0,0,0,.25) }
+  .page p { margin: 0 0 10px }
+  #status { position: fixed; left: 0; right: 0; bottom: 0; padding: 4px 10px; background: #2b579a; color: #fff; font-size: 12px }
+</style>
+<body>
+  <div id="host"></div>
+  <div class="page" id="doc" contenteditable="true"><p><b>Quarterly report</b></p><p>Click in the ribbon: Paste has a menu, Table has a split button, Bold is a toggle, and double-clicking a tab (or Ctrl+F1) collapses the ribbon.</p></div>
+  <div id="status">Ready</div>
+  <script type="module">
+    import { ribbon } from "@nile/ui";
+    const svg = (d) => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="' + d + '"/></svg>';
+    const PASTE = svg("M8 4h8v3H8zM6 5H5v16h14V5h-1M9 11h6M9 15h6");
+    const CUT = svg("M6 4l8 11M18 4l-8 11M7 17a2.5 2.5 0 1 0 .1 0zM17 17a2.5 2.5 0 1 0 .1 0z");
+    const COPY = svg("M8 8h11v13H8zM5 16V3h11");
+    const SAVE = svg("M4 4h13l3 3v13H4zM8 4v6h8V4M8 20v-6h8v6");
+    const TABLE = svg("M3 5h18v14H3zM3 10h18M3 15h18M9 5v14M15 5v14");
+    const IMAGE = svg("M3 5h18v14H3zM3 16l5-5 4 4 3-3 6 6M15 9h.01");
+    const ROW = svg("M3 8h18v8H3zM12 3v5M12 16v5");
+    const r = ribbon({
+      file: { label: "File", onClick: () => say("File menu") },
+      quick: [{ icon: SAVE, label: "Save", command: "save", iconOnly: true, shortcut: "Mod+S" }],
+      title: "Quarterly report.docx",
+      tabs: [
+        { label: "Home", groups: [
+          { label: "Clipboard", items: [
+            { label: "Paste", size: "large", icon: PASTE, command: "paste", menu: [{ label: "Paste special...", command: "pasteSpecial" }, { separator: true }, { label: "Keep text only", command: "pasteText", checked: true }] },
+            { type: "stack", items: [{ label: "Cut", icon: CUT, command: "cut" }, { label: "Copy", icon: COPY, command: "copy" }] },
+          ] },
+          { label: "Font", items: [
+            { type: "stack", items: [
+              { type: "select", command: "font", options: ["Segoe UI", "Arial", "Georgia"], value: "Segoe UI" },
+              { type: "row", items: [{ type: "toggle", html: true, label: "<b>B</b>", command: "bold", title: "Bold", shortcut: "Mod+B" }, { type: "toggle", html: true, label: "<i>I</i>", command: "italic", title: "Italic" }, { type: "toggle", html: true, label: "<u>U</u>", command: "underline" }] },
+            ] },
+          ] },
+        ] },
+        { label: "Insert", groups: [
+          { label: "Tables", items: [{ label: "Table", size: "large", icon: TABLE, command: "table", split: true, menu: [{ label: "2 x 2", command: "t22" }, { label: "3 x 3", command: "t33" }] }] },
+          { label: "Illustrations", items: [{ label: "Picture", size: "large", icon: IMAGE, command: "picture" }] },
+        ] },
+        { label: "Table tools", contextual: true, accent: "#7e3fb4", hidden: true, groups: [
+          { label: "Rows", items: [{ label: "Add row", size: "large", icon: ROW, command: "addRow" }] },
+        ] },
+      ],
+    });
+    document.getElementById("host").appendChild(r);
+    const say = (t) => { document.getElementById("status").textContent = t; };
+    r.on("command", (e) => {
+      const d = e.detail;
+      say(d.command + (d.checked !== undefined ? " = " + d.checked : "") + (d.value !== undefined ? " = " + d.value : ""));
+      if (d.command === "table") r.showTab("Table tools", true);
+    });
+  </script>
+</body>
+</html>

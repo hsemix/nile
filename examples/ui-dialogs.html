@@ -1,0 +1,61 @@
+<!doctype html>
+<html window-width="720" window-height="460">
+<meta charset="utf-8">
+<title>Dialogs, toasts and shortcuts: @nile/ui</title>
+<style>
+  body { margin: 0; padding: 24px; font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b }
+  h1 { margin: 0 0 4px; font-size: 20px }
+  p.lead { margin: 0 0 16px; color: #64748b; font-size: 13px }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px }
+  button { padding: 8px 14px; font-size: 14px }
+  button[data-hint]::after { content: attr(data-hint); margin-left: 8px; padding: 1px 5px; border-radius: 3px; background: #e2e8f0; color: #475569; font-size: 11px }
+  #log { font-size: 13px; color: #475569; margin-top: 8px; min-height: 18px }
+</style>
+<body>
+  <h1>Dialogs, toasts and shortcuts</h1>
+  <p class="lead">Promise-based <code>confirm</code>, <code>prompt</code>, <code>alert</code> and <code>dialog</code>; <code>toast</code>; <code>shortcuts</code>.</p>
+  <div class="row">
+    <button id="confirm" data-shortcut="F2">Void order</button>
+    <button id="prompt" data-shortcut="F3">Customer name</button>
+    <button id="custom" data-shortcut="Mod+P">Print</button>
+    <button id="markup">Edit item</button>
+  </div>
+  <div class="row">
+    <button id="t1">Info toast</button>
+    <button id="t2">Success</button>
+    <button id="t3">Error with action</button>
+  </div>
+  <div id="log">Press F2, F3 or Ctrl/Cmd+P.</div>
+
+  <nile-dialog id="edit" heading="Edit item" width="380">
+    <label>Quantity <input id="qty" value="2" style="width:80px"></label>
+    <footer><button data-dialog-close>Cancel</button><button class="nile-primary" data-dialog-close="ok">Save</button></footer>
+  </nile-dialog>
+
+  <script type="module">
+    import { confirm, prompt, dialog, toast, shortcuts } from "@nile/ui";
+    const log = (t) => { document.getElementById("log").textContent = t; };
+    const ask = async () => {
+      const yes = await confirm("This clears the receipt and cannot be undone.", { title: "Void order?", ok: "Void", danger: true });
+      log(yes ? "Voided" : "Kept");
+      if (yes) toast.success("Order voided");
+    };
+    const name = async () => {
+      const v = await prompt("Customer name", { title: "Customer", value: "Walk-in", validate: (t) => (t.trim() ? "" : "Enter a name") });
+      log(v === null ? "Cancelled" : "Customer: " + v);
+    };
+    const print = async () => {
+      const v = await dialog({ title: "Print", message: "Print the receipt?", buttons: [{ label: "No", value: "no", cancel: true }, { label: "Print", value: "yes", primary: true }] });
+      log("Print: " + v);
+    };
+    document.getElementById("confirm").on("click", ask);
+    document.getElementById("prompt").on("click", name);
+    document.getElementById("custom").on("click", print);
+    document.getElementById("markup").on("click", async () => log("Edit: " + (await document.getElementById("edit").showModal())));
+    document.getElementById("t1").on("click", () => toast("Receipt saved"));
+    document.getElementById("t2").on("click", () => toast.success("Payment received"));
+    document.getElementById("t3").on("click", () => toast.error("Printer is offline", { action: { label: "Retry", onClick: () => toast("Retrying...") } }));
+    shortcuts.refresh();
+  </script>
+</body>
+</html>

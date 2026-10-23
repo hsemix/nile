@@ -99,6 +99,13 @@ browser compatibility.
 | [splitter.html](../../examples/splitter.html) | `@nile/ui` splitter: drag, keyboard, collapse, remembered sizes |
 | [data-grid.html](../../examples/data-grid.html) | `@nile/ui` data grid: 100,000 virtual rows, sorting, selection, resize |
 | [barcodes.html](../../examples/barcodes.html) | `@nile/ui` Code 128/39, EAN-13/8, UPC-A and QR |
+| [ui-dialogs.html](../../examples/ui-dialogs.html) | `@nile/ui` confirm/prompt/dialog, toasts and keyboard shortcuts |
+| [ui-navigation.html](../../examples/ui-navigation.html) | `@nile/ui` tabs, accordion and a tile grid with shortcut keys |
+| [ui-combobox.html](../../examples/ui-combobox.html) | `@nile/ui` combobox: markup options, script items with groups and hints, async source |
+| [ui-ribbon.html](../../examples/ui-ribbon.html) | `@nile/ui` Microsoft-style ribbon: tabs, groups, drop-downs, toggles, contextual tab, collapse |
+| [ui-charts.html](../../examples/ui-charts.html) | `@nile/ui` bar, line, stacked area and donut charts with tooltips |
+| [sciter-flow.html](../../examples/sciter-flow.html) | Sciter layout CSS: `flow:`, `*` units, `size:`, `dip`, `flow: grid(...)`, tag shortcuts |
+| [sciter-paths.html](../../examples/sciter-paths.html) | Sciter `url(path:...)` images, `foreground-image`, `var(name)`, window constants |
 | [windows.html](../../examples/windows.html) | Multiple windows, modal result and shared messages |
 | [word-ribbon.html](../../examples/word-ribbon.html) | Word-style editing ribbon |
 

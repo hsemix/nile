@@ -4460,6 +4460,410 @@ mod tests {
     }
 
     #[test]
+    fn the_ui_dialog_toast_and_shortcuts_work_together() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><input id="field"><button id="b" data-shortcut="F8" onclick="window.pressed = (window.pressed || 0) + 1">New</button>
+            <script type="module">
+              import { confirm, prompt, alert, dialog, toast, shortcuts } from "@nile/ui";
+              window.ui = { confirm, prompt, alert, dialog, toast, shortcuts };
+              window.hits = [];
+              shortcuts.on("F3", () => hits.push("F3"));
+              shortcuts.on("Mod+S, Alt+S", () => hits.push("save"), { label: "Save" });
+              shortcuts.on("a", () => hits.push("a"));
+              shortcuts.on("Escape", () => hits.push("esc-always"), { always: true });
+            </script></body>"##,
+            "ui-dialog",
+        );
+        let settle = |p: &mut Page, ms: u64| {
+            std::thread::sleep(Duration::from_millis(ms));
+            p.run_timers();
+            p.run_timers();
+        };
+        p.run_timers();
+        let key = |p: &mut Page, k: &str, m: ModifiersState| p.key("keydown", k.into(), m);
+        let ctrl = if cfg!(target_os = "macos") { ModifiersState::SUPER } else { ModifiersState::CONTROL };
+
+        // Shortcuts: a function key, a modified key, an alias list, a data-shortcut button.
+        key(&mut p, "F3", ModifiersState::default());
+        key(&mut p, "s", ctrl);
+        key(&mut p, "s", ModifiersState::ALT);
+        assert_eq!(js(&mut p, "hits.join()"), "F3,save,save");
+        key(&mut p, "F8", ModifiersState::default());
+        assert_eq!(js(&mut p, "window.pressed"), "1", "data-shortcut clicks the button");
+        assert_eq!(js(&mut p, "document.getElementById('b').getAttribute('data-hint')"), "F8");
+        // A plain letter fires from the page, not while typing in a field.
+        key(&mut p, "a", ModifiersState::default());
+        js(&mut p, "document.getElementById('field').focus()");
+        key(&mut p, "a", ModifiersState::default());
+        assert_eq!(js(&mut p, "hits.slice(3).join()"), "a");
+        assert_eq!(js(&mut p, "ui.shortcuts.format('Alt+S')"), if cfg!(target_os = "macos") { "\u{2325}S" } else { "Alt+S" }.to_string());
+        assert_eq!(js(&mut p, "ui.shortcuts.list().length"), "4");
+
+        // confirm(): resolves true on OK, false on Escape; Escape reaches an `always` shortcut only when it isn't dialog-handled.
+        js(&mut p, "window.r = []; ui.confirm('Void this order?', { title: 'Void', ok: 'Void', danger: true }).then((v) => r.push(v));");
+        settle(&mut p, 40);
+        assert_eq!(js(&mut p, "document.querySelectorAll('nile-dialog.nile-open').length"), "1");
+        assert_eq!(js(&mut p, "document.querySelector('.nile-dialog-head').textContent"), "Void");
+        assert_eq!(js(&mut p, "document.querySelector('.nile-dialog-text').textContent"), "Void this order?");
+        assert_eq!(js(&mut p, "document.activeElement.className"), "nile-primary nile-danger", "the primary button has focus");
+        // Shortcuts are quiet while the dialog is open.
+        key(&mut p, "F3", ModifiersState::default());
+        assert_eq!(js(&mut p, "hits.filter((h) => h === 'F3').length"), "1");
+        key(&mut p, "Enter", ModifiersState::default());
+        settle(&mut p, 220);
+        assert_eq!(js(&mut p, "r.join()"), "true", "Enter presses the primary button");
+        assert_eq!(js(&mut p, "document.querySelectorAll('nile-dialog').length"), "0", "the temporary dialog removes itself");
+        assert_eq!(js(&mut p, "document.activeElement.id"), "field", "focus goes back");
+        js(&mut p, "ui.confirm('again?').then((v) => r.push(v));");
+        settle(&mut p, 40);
+        key(&mut p, "Escape", ModifiersState::default());
+        settle(&mut p, 220);
+        assert_eq!(js(&mut p, "r.join()"), "true,false");
+
+        // prompt(): validation keeps it open with the message, a good value resolves, cancel gives null.
+        js(&mut p, "window.q = []; ui.prompt('Name?', { value: 'x', validate: (t) => t.length < 3 ? 'Too short' : '' }).then((v) => q.push(v));");
+        settle(&mut p, 40);
+        assert_eq!(js(&mut p, "document.activeElement.tagName + ':' + document.activeElement.value"), "INPUT:x");
+        js(&mut p, "document.querySelector('nile-dialog button.nile-primary').click()");
+        settle(&mut p, 30);
+        assert_eq!(js(&mut p, "document.querySelector('.nile-dialog-error').textContent"), "Too short");
+        assert_eq!(js(&mut p, "q.length"), "0");
+        js(&mut p, "document.querySelector('nile-dialog input').value = 'Ada Lovelace'; document.querySelector('nile-dialog button.nile-primary').click()");
+        settle(&mut p, 220);
+        assert_eq!(js(&mut p, "q.join()"), "Ada Lovelace");
+        js(&mut p, "ui.prompt('Name?').then((v) => q.push(v === null ? 'null' : v));");
+        settle(&mut p, 40);
+        js(&mut p, "document.querySelector('nile-dialog button:not(.nile-primary)').click()");
+        settle(&mut p, 220);
+        assert_eq!(js(&mut p, "q.join()"), "Ada Lovelace,null");
+
+        // dialog(): custom buttons, a function value, tab stays inside.
+        js(&mut p, "window.d = []; ui.dialog({ title: 'Print', message: 'Print now?', buttons: [{ label: 'No', value: 'no', cancel: true }, { label: 'Yes', value: 'yes', primary: true }] }).then((v) => d.push(v));");
+        settle(&mut p, 40);
+        key(&mut p, "Tab", ModifiersState::default());
+        assert_eq!(js(&mut p, "document.activeElement.textContent"), "No", "Tab wraps around inside the dialog");
+        js(&mut p, "document.querySelector('nile-dialog button').click()");
+        settle(&mut p, 220);
+        assert_eq!(js(&mut p, "d.join()"), "no");
+
+        // toast(): shows, picks its type and role, closes by itself, and is capped.
+        js(&mut p, "window.t = ui.toast.error('Printer offline', { duration: 60 })");
+        settle(&mut p, 30);
+        assert_eq!(js(&mut p, "[document.querySelector('.nile-toast').getAttribute('data-type'), document.querySelector('.nile-toast').getAttribute('role'), document.querySelector('.nile-toast-text').textContent].join()"), "error,alert,Printer offline");
+        assert_eq!(js(&mut p, "document.querySelector('.nile-toast').classList.contains('nile-in')"), "true");
+        settle(&mut p, 100);
+        settle(&mut p, 250);
+        assert_eq!(js(&mut p, "document.querySelectorAll('.nile-toast').length"), "0", "it goes away on its own");
+        js(&mut p, "for (let i = 0; i < 8; i++) ui.toast('m' + i, { duration: 0 });");
+        settle(&mut p, 250);
+        settle(&mut p, 250);
+        assert_eq!(js(&mut p, "document.querySelectorAll('.nile-toast').length"), "5", "at most five at a time");
+        js(&mut p, "window.acted = 0; ui.toast.clear(); ui.toast('Deleted', { duration: 0, action: { label: 'Undo', onClick: () => acted++ } })");
+        settle(&mut p, 250);
+        js(&mut p, "document.querySelector('.nile-toast-action').click()");
+        settle(&mut p, 250);
+        assert_eq!(js(&mut p, "acted + ':' + document.querySelectorAll('.nile-toast').length"), "1:0");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_tabs_accordion_and_tiles_behave() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0">
+              <nile-tabs id="t" selected="b">
+                <nile-tab label="One" name="a"><p id="pa">A</p></nile-tab>
+                <nile-tab label="Two" name="b" badge="3"><p id="pb">B</p></nile-tab>
+                <nile-tab label="Three" name="c" disabled><p>C</p></nile-tab>
+                <nile-tab label="Four" name="d"><p>D</p></nile-tab>
+              </nile-tabs>
+              <nile-accordion id="acc" exclusive>
+                <nile-section heading="S1" open><i id="s1">x</i></nile-section>
+                <nile-section heading="S2"><i id="s2">y</i></nile-section>
+              </nile-accordion>
+              <nile-tiles id="tiles" columns="2" gap="4" style="width:300px">
+                <nile-tile id="k1" label="Search" shortcut="F3" command="search"></nile-tile>
+                <nile-tile id="k2" label="Pay" shortcut="F10" variant="success" badge="2"></nile-tile>
+                <nile-tile id="k3" label="Wide" span="2" disabled></nile-tile>
+              </nile-tiles>
+            <script type="module">
+              import "@nile/ui";
+              for (const id of ["t", "acc", "tiles", "pa", "pb", "s1", "s2", "k1", "k2", "k3"]) window[id] = document.getElementById(id);
+              window.log = [];
+              t.addEventListener("tabchange", (e) => log.push("tab:" + e.detail.name));
+              acc.addEventListener("sectionchange", (e) => log.push("sec:" + e.detail.index + (e.detail.open ? "+" : "-")));
+              tiles.addEventListener("tile", (e) => log.push("tile:" + e.detail.command));
+              window.vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+            </script></body>"##,
+            "ui-tabs",
+        );
+        p.run_timers();
+        p.run_timers();
+        let key = |p: &mut Page, k: &str| p.key("keydown", k.into(), ModifiersState::default());
+
+        // Tabs: `selected` takes a name; the strip has a button per tab with a badge; only one panel is shown.
+        assert_eq!(js(&mut p, "t.selectedIndex"), "1");
+        assert_eq!(js(&mut p, "document.querySelectorAll('.nile-tab-button').length"), "4");
+        assert_eq!(js(&mut p, "document.querySelector('.nile-tab-badge').textContent"), "3");
+        assert_eq!(js(&mut p, "[vis(pa), vis(pb)].join()"), "false,true");
+        js(&mut p, "document.querySelectorAll('.nile-tab-button')[0].click()");
+        assert_eq!(js(&mut p, "[t.selectedIndex, vis(pa), vis(pb)].join()"), "0,true,false");
+        // Arrow keys skip the disabled tab; Home/End jump; a disabled tab can't be selected.
+        js(&mut p, "document.querySelectorAll('.nile-tab-button')[0].focus()");
+        key(&mut p, "ArrowRight");
+        key(&mut p, "ArrowRight");
+        assert_eq!(js(&mut p, "t.selectedIndex"), "3", "Right from Two goes to Four, skipping Three");
+        key(&mut p, "Home");
+        assert_eq!(js(&mut p, "t.selectedIndex"), "0");
+        js(&mut p, "t.select('c')");
+        assert_eq!(js(&mut p, "t.selectedIndex"), "0");
+        // beforetabchange can veto; select(name) works.
+        js(&mut p, "window.hold = true; t.addEventListener('beforetabchange', (e) => { if (hold) e.preventDefault(); }); t.select('d')");
+        assert_eq!(js(&mut p, "t.selectedIndex"), "0");
+        js(&mut p, "hold = false; t.select('d')");
+        assert_eq!(js(&mut p, "t.selectedTab.getAttribute('name')"), "d");
+        assert_eq!(js(&mut p, "log.join()"), "tab:a,tab:b,tab:d,tab:a,tab:d");
+
+        // Accordion: exclusive keeps one section open; the event says which.
+        assert_eq!(js(&mut p, "[acc.sections[0].opened, acc.sections[1].opened, vis(s1), vis(s2)].join()"), "true,false,true,false");
+        js(&mut p, "log.length = 0; document.querySelectorAll('.nile-section-head')[1].click()");
+        assert_eq!(js(&mut p, "[acc.sections[0].opened, acc.sections[1].opened, vis(s1), vis(s2)].join()"), "false,true,false,true");
+        assert_eq!(js(&mut p, "log.join()"), "sec:0-,sec:1+");
+        js(&mut p, "document.querySelectorAll('.nile-section-head')[1].click()");
+        assert_eq!(js(&mut p, "acc.sections[1].opened"), "false", "a click on an open heading closes it");
+        assert_eq!(js(&mut p, "document.querySelectorAll('.nile-section-head')[0].getAttribute('aria-expanded')"), "false");
+
+        // Tiles: a shortcut presses the tile; a click does too; the corner key text and span show; disabled does nothing.
+        js(&mut p, "log.length = 0");
+        key(&mut p, "F3");
+        click(&mut p, "k2");
+        click(&mut p, "k3");
+        assert_eq!(js(&mut p, "log.join()"), "tile:search,tile:Pay");
+        assert_eq!(js(&mut p, "k1.querySelector('.nile-tile-key').textContent"), "F3");
+        assert_eq!(js(&mut p, "k2.querySelector('.nile-tile-badge').textContent"), "2");
+        assert_eq!(js(&mut p, "k3.style.gridColumn"), "span 2");
+        let w = |p: &mut Page, id: &str| js(p, &format!("Math.round(document.getElementById('{id}').getBoundingClientRect().width)"));
+        assert_eq!(w(&mut p, "k1"), "148", "two columns of (300 - 4) / 2");
+        assert_eq!(w(&mut p, "k3"), "300", "span 2 fills the row");
+        js(&mut p, "k1.focus()");
+        key(&mut p, "ArrowRight");
+        assert_eq!(js(&mut p, "document.activeElement.id"), "k2");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_combobox_filters_picks_and_loads_from_a_source() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0;height:300px"><input id="before"><nile-combobox id="c" placeholder="Product" style="width:240px">
+                <option value="1" data-hint="2.50">Whole milk</option><option value="2">Sourdough loaf</option><option value="3" disabled>Sold out</option><option value="4">Soda water</option>
+              </nile-combobox>
+            <script type="module">
+              import "@nile/ui";
+              window.c = document.getElementById("c");
+              window.log = [];
+              c.addEventListener("change", (e) => log.push("change:" + e.detail.value));
+              window.rows = () => Array.from(document.querySelectorAll('.nile-combo-option')).map((r) => r.textContent.replace(/\d\.\d\d$/, '')).join('|');
+              window.listOpen = () => document.querySelector('.nile-combo-list').classList.contains('nile-open');
+            </script></body>"##,
+            "ui-combo",
+        );
+        p.run_timers();
+        p.run_timers();
+        let settle = |p: &mut Page, ms: u64| {
+            std::thread::sleep(Duration::from_millis(ms));
+            p.run_timers();
+            p.run_timers();
+        };
+        let key = |p: &mut Page, k: &str| p.key("keydown", k.into(), ModifiersState::default());
+        assert_eq!(js(&mut p, "document.querySelector('.nile-combo-input').getAttribute('placeholder')"), "Product");
+        assert_eq!(js(&mut p, "listOpen()"), "false");
+        // Focus opens it with everything listed (the hint shows beside the label).
+        js(&mut p, "c.focus()");
+        assert_eq!(js(&mut p, "listOpen()"), "true");
+        assert_eq!(js(&mut p, "rows()"), "Whole milk|Sourdough loaf|Sold out|Soda water");
+        // Typing filters: prefix matches first, the matching text is marked.
+        p.insert_text("so");
+        assert_eq!(js(&mut p, "rows()"), "Sourdough loaf|Sold out|Soda water");
+        assert_eq!(js(&mut p, "document.querySelector('.nile-combo-match').textContent"), "So");
+        // The first usable row is highlighted; Down skips the disabled one; Enter picks.
+        assert_eq!(js(&mut p, "document.querySelector('.nile-combo-option.nile-active').textContent"), "Sourdough loaf");
+        key(&mut p, "ArrowDown");
+        assert_eq!(js(&mut p, "document.querySelector('.nile-combo-option.nile-active').textContent"), "Soda water");
+        key(&mut p, "Enter");
+        assert_eq!(js(&mut p, "[c.value, c.text, listOpen(), c.selectedItem && c.selectedItem.label, log.join()].join()"), "4,Soda water,false,Soda water,change:4");
+        // Escape reverts typed text to the chosen item.
+        p.insert_text("x");
+        assert_eq!(js(&mut p, "rows()"), "", "nothing matches \"Soda waterx\" (the list shows the empty row)");
+        key(&mut p, "Escape");
+        assert_eq!(js(&mut p, "[c.text, listOpen()].join()"), "Soda water,false");
+        // Blur with text that isn't an item reverts it; with an exact (case-insensitive) label it picks it.
+        js(&mut p, "c.focus(); c.text = 'whole MILK'; document.getElementById('before').focus()");
+        settle(&mut p, 20);
+        assert_eq!(js(&mut p, "[c.value, c.text].join()"), "1,Whole milk");
+        js(&mut p, "c.focus(); c.text = 'zzz'; document.getElementById('before').focus()");
+        settle(&mut p, 20);
+        assert_eq!(js(&mut p, "c.text"), "Whole milk");
+        // value setter, allow-custom.
+        js(&mut p, "c.value = '2'");
+        assert_eq!(js(&mut p, "c.text"), "Sourdough loaf");
+        js(&mut p, "c.setAttribute('allow-custom', ''); c.focus(); c.text = 'Gift card'; document.getElementById('before').focus()");
+        settle(&mut p, 20);
+        assert_eq!(js(&mut p, "[c.value, c.selectedItem, log[log.length - 1]].join()"), "Gift card,,change:Gift card");
+
+        // source: loaded as the user types, only the newest answer is used.
+        js(&mut p, "c.clear(); window.asked = []; c.source = (q) => { asked.push(q); return new Promise((ok) => setTimeout(() => ok(q === 'a' ? [{ value: 9, label: 'Apple' }] : [{ value: 7, label: 'Apricot', hint: 'kg' }, 'Avocado']), q === 'a' ? 120 : 10)); }; c.focus();");
+        settle(&mut p, 200);
+        p.insert_text("a");
+        p.insert_text("p");
+        settle(&mut p, 200);
+        settle(&mut p, 40);
+        assert_eq!(js(&mut p, "asked.join()"), ",ap", "opening asks for the initial list, then typing is debounced: only the settled text is asked for");
+        assert_eq!(js(&mut p, "rows()"), "Apricotkg|Avocado");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_ribbon_builds_tabs_groups_menus_and_state() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0;width:900px"><div id="host"></div>
+            <script type="module">
+              import { ribbon } from "@nile/ui";
+              window.log = [];
+              const cfg = {
+                file: { label: "File", onClick: () => log.push("file") },
+                quick: [{ label: "Save", command: "save", shortcut: "Mod+S", iconOnly: true, icon: '<svg viewBox="0 0 16 16"><rect width="16" height="16"/></svg>' }],
+                tabs: [
+                  { label: "Home", groups: [
+                    { label: "Clipboard", items: [
+                      { label: "Paste", size: "large", command: "paste", menu: [{ label: "Paste special", command: "pasteSpecial" }, { separator: true }, { label: "Plain", command: "plain", checked: true }] },
+                      { type: "stack", items: [{ label: "Cut", command: "cut" }, { label: "Copy", command: "copy", disabled: true }] },
+                    ] },
+                    { label: "Font", items: [
+                      { type: "stack", items: [{ type: "select", command: "font", options: ["Segoe UI", { value: "a", label: "Arial" }], value: "Segoe UI" },
+                        { type: "row", items: [{ type: "toggle", label: "B", command: "bold" }] }] },
+                    ] },
+                  ] },
+                  { label: "Insert", groups: [{ label: "Tables", items: [{ label: "Table", size: "large", command: "table", split: true, menu: [{ label: "Quick table", command: "quick" }] }] }] },
+                  { label: "Table tools", contextual: true, accent: "#7e3fb4", hidden: true, groups: [{ label: "Rows", items: [{ label: "Add row", command: "addRow" }] }] },
+                ],
+              };
+              window.r = ribbon(cfg);
+              document.getElementById("host").appendChild(r);
+              r.addEventListener("command", (e) => log.push(e.detail.command + (e.detail.checked !== undefined ? ":" + e.detail.checked : "") + (e.detail.value !== undefined ? "=" + e.detail.value : "")));
+              r.addEventListener("tabchange", (e) => log.push("tab:" + e.detail.label));
+              window.q = (s) => document.querySelector(s);
+              window.qa = (s) => document.querySelectorAll(s).length;
+              window.vis = (el) => { const b = el.getBoundingClientRect(); return b.width > 0 && b.height > 0; };
+            </script></body>"##,
+            "ui-ribbon",
+        );
+        p.run_timers();
+        p.run_timers();
+        let key = |p: &mut Page, k: &str, m: ModifiersState| p.key("keydown", k.into(), m);
+        // Built: a file tab, three tab buttons (the contextual one hidden), one panel with its groups and labels.
+        assert_eq!(js(&mut p, "qa('.nile-ribbon-tab')"), "4");
+        assert_eq!(js(&mut p, "Array.from(document.querySelectorAll('.nile-ribbon-tab')).filter(vis).map((t) => t.textContent).join()"), "File,Home,Insert");
+        assert_eq!(js(&mut p, "Array.from(document.querySelectorAll('.nile-ribbon-group-label')).map((t) => t.textContent).join()"), "Clipboard,Font");
+        assert_eq!(js(&mut p, "q('.nile-ribbon-button.nile-large').textContent"), "Paste\u{25be}");
+        assert_eq!(js(&mut p, "q('[data-command=copy]').disabled"), "true");
+        assert_eq!(js(&mut p, "q('[data-command=save]').getAttribute('title')"), if cfg!(target_os = "macos") { "Save (\u{2318}S)" } else { "Save (Ctrl+S)" }.to_string());
+        // Buttons raise `command`; toggles flip; a select reports its value; the file tab runs its handler.
+        js(&mut p, "q('[data-command=cut]').click(); q('[data-command=bold]').click(); q('[data-command=bold]').click()");
+        let sel = js(&mut p, "const s = q('.nile-ribbon-select'); s.value = 'a'; s.dispatchEvent(new Event('change', { bubbles: true })); log.join()");
+        assert_eq!(sel, "cut,bold:true,bold:false,font=a");
+        assert_eq!(js(&mut p, "q('[data-command=bold]').getAttribute('aria-pressed')"), "false");
+        js(&mut p, "log.length = 0; q('.nile-ribbon-tab.nile-file').click()");
+        assert_eq!(js(&mut p, "log.join()"), "file,file", "the file tab runs its onClick and raises a `command` event");
+        // The Mod+S shortcut presses the quick-access button.
+        js(&mut p, "log.length = 0");
+        key(&mut p, "s", if cfg!(target_os = "macos") { ModifiersState::SUPER } else { ModifiersState::CONTROL });
+        assert_eq!(js(&mut p, "log.join()"), "save");
+        // A drop-down opens a menu; a row runs its command and closes it; the checkmark shows.
+        js(&mut p, "log.length = 0; q('.nile-ribbon-button.nile-large').click()");
+        assert_eq!(js(&mut p, "qa('.nile-ribbon-menu')"), "1");
+        assert_eq!(js(&mut p, "Array.from(document.querySelectorAll('.nile-ribbon-menu-item')).map((i) => i.textContent).join('|')"), "Paste special|\u{2713}Plain");
+        key(&mut p, "ArrowDown", ModifiersState::default());
+        key(&mut p, "Enter", ModifiersState::default());
+        assert_eq!(js(&mut p, "log.join() + ':' + qa('.nile-ribbon-menu')"), "pasteSpecial:0");
+        js(&mut p, "q('.nile-ribbon-button.nile-large').click()");
+        key(&mut p, "Escape", ModifiersState::default());
+        assert_eq!(js(&mut p, "qa('.nile-ribbon-menu')"), "0", "Escape closes the menu");
+        // Tabs: selecting swaps the panel; a split button's two halves act separately; the contextual tab shows on demand.
+        js(&mut p, "log.length = 0; r.select('Insert')");
+        assert_eq!(js(&mut p, "Array.from(document.querySelectorAll('.nile-ribbon-group-label')).map((t) => t.textContent).join() + '|' + r.selectedIndex + '|' + log.join()"), "Tables|1|tab:Insert");
+        js(&mut p, "log.length = 0; q('[data-command=table]').click()");
+        assert_eq!(js(&mut p, "log.join() + ':' + qa('.nile-ribbon-menu')"), "table:0", "the main half just acts");
+        js(&mut p, "q('.nile-ribbon-drop').click()");
+        assert_eq!(js(&mut p, "qa('.nile-ribbon-menu')"), "1", "the arrow half opens the menu");
+        js(&mut p, "document.dispatchEvent(new Event('keydown'))");
+        key(&mut p, "Escape", ModifiersState::default());
+        js(&mut p, "r.showTab('Table tools', true)");
+        assert_eq!(js(&mut p, "r.selectedIndex + ',' + q('.nile-ribbon-group-label').textContent + ',' + vis(document.querySelectorAll('.nile-ribbon-tab')[3])"), "2,Rows,true");
+        js(&mut p, "r.hideTab('Table tools')");
+        assert_eq!(js(&mut p, "r.selectedIndex"), "0", "hiding the active tab goes back to the first");
+        // setState reaches items by command; collapsing hides the panel and a tab click pops it open.
+        js(&mut p, "r.setState('copy', { disabled: false }); r.setState('bold', { checked: true })");
+        assert_eq!(js(&mut p, "q('[data-command=copy]').disabled + ',' + q('[data-command=bold]').getAttribute('aria-pressed')"), "false,true");
+        js(&mut p, "r.collapse()");
+        assert_eq!(js(&mut p, "vis(q('.nile-ribbon-panel'))"), "false");
+        js(&mut p, "document.querySelectorAll('.nile-ribbon-tab')[2].click()");
+        assert_eq!(js(&mut p, "vis(q('.nile-ribbon-panel')) + ',' + q('.nile-ribbon-group-label').textContent"), "true,Tables");
+        js(&mut p, "q('[data-command=table]').click()");
+        assert_eq!(js(&mut p, "vis(q('.nile-ribbon-panel'))"), "false", "a command closes the pop-up panel");
+        js(&mut p, "r.expand()");
+        assert_eq!(js(&mut p, "vis(q('.nile-ribbon-panel'))"), "true");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_chart_draws_series_hovers_and_toggles_from_the_legend() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><nile-chart id="ch" type="bar" height="200" style="width:400px"></nile-chart>
+            <script type="module">
+              import { niceScale } from "@nile/ui";
+              window.niceScale = niceScale;
+              window.ch = document.getElementById("ch");
+              window.hits = [];
+              ch.addEventListener("chartclick", (e) => hits.push(e.detail.label + ":" + e.detail.series.map((s) => s.name + "=" + s.value).join("+")));
+              ch.data = { labels: ["A", "B", "C"], series: [{ name: "One", values: [10, 40, 25] }, { name: "Two", values: [5, 20, 35] }] };
+              window.count = (needle) => (ch.innerHTML.match(new RegExp(needle, "g")) || []).length;
+            </script></body>"##,
+            "ui-chart",
+        );
+        p.run_timers();
+        p.run_timers();
+        assert_eq!(js(&mut p, "JSON.stringify(niceScale(0, 18000, 5).ticks)"), "[0,5000,10000,15000,20000]");
+        assert_eq!(js(&mut p, "niceScale(0, 40, 5).max"), "40");
+        // Two series x three categories: six bars; the legend names both series.
+        assert_eq!(js(&mut p, "count('<rect')"), "6");
+        assert_eq!(js(&mut p, "Array.from(document.querySelectorAll('.nile-chart-key')).map((k) => k.textContent).join()"), "One,Two");
+        // Clicking a legend entry hides that series (and the value axis rescales).
+        js(&mut p, "document.querySelectorAll('.nile-chart-key')[1].click()");
+        assert_eq!(js(&mut p, "count('<rect')"), "3");
+        assert_eq!(js(&mut p, "document.querySelectorAll('.nile-chart-key')[1].classList.contains('nile-off')"), "true");
+        js(&mut p, "document.querySelectorAll('.nile-chart-key')[1].click()");
+        assert_eq!(js(&mut p, "count('<rect')"), "6");
+        // Hover over category B: tooltip with both values; click raises chartclick.
+        let at = js(&mut p, "const g = ch._geo; (g.left + g.w * 1.5 / g.n) + ',' + (g.top + g.h / 2)");
+        let mut it = at.split(',').map(|v| v.parse::<f32>().unwrap());
+        let (x, y) = (it.next().unwrap(), it.next().unwrap());
+        p.pointer_moved(x, y);
+        assert_eq!(js(&mut p, "const t = document.querySelector('.nile-chart-tooltip'); t.style.display + '|' + t.textContent"), "block|BOne: 40Two: 20");
+        p.press();
+        p.release();
+        assert_eq!(js(&mut p, "hits.join()"), "B:One=40+Two=20");
+        p.pointer_moved(x, 150.0 + 40.0);
+        // Pie: slices from the first series, legend by label, a slice's tooltip shows its share.
+        js(&mut p, "ch.setAttribute('type', 'pie'); ch.data = [{ label: 'Cash', value: 75 }, { label: 'Card', value: 25 }];");
+        assert_eq!(js(&mut p, "count('<path')"), "2");
+        assert_eq!(js(&mut p, "Array.from(document.querySelectorAll('.nile-chart-key')).map((k) => k.textContent).join()"), "Cash,Card");
+        let g = js(&mut p, "ch._geo.cx + ',' + ch._geo.cy + ',' + ch._geo.r");
+        let v: Vec<f32> = g.split(',').map(|n| n.parse().unwrap()).collect();
+        p.pointer_moved(v[0] - v[2] * 0.35, v[1] - v[2] * 0.35);
+        assert_eq!(js(&mut p, "document.querySelector('.nile-chart-tooltip').textContent"), "Card25%: 25", "10:30 is inside the last quarter");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn the_ui_splitter_drags_collapses_and_remembers() {
         let key = format!("splitter-test-{}", std::process::id());
         let (mut p, path) = page(

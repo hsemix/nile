@@ -1,0 +1,58 @@
+<!doctype html>
+<html window-width="860" window-height="520">
+<meta charset="utf-8">
+<title>Tabs, accordion and tiles: @nile/ui</title>
+<style>
+  body { margin: 0; padding: 20px 24px; font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b }
+  h1 { margin: 0 0 14px; font-size: 20px }
+  .cols { display: flex; gap: 20px }
+  .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden }
+  .card h3 { margin: 0; padding: 10px 14px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #64748b; border-bottom: 1px solid #e2e8f0 }
+  nile-tabs { height: 200px }
+  nile-tab { padding: 14px }
+  nile-accordion a { display: block; padding: 4px 0; color: #2563eb }
+  nile-tiles { padding: 12px; background: #2b2b2b }
+  .pad { width: 330px }
+  #out { margin-top: 12px; font-size: 13px; color: #475569 }
+</style>
+<body>
+  <h1>Tabs, accordion and tiles</h1>
+  <div class="cols">
+    <div class="card" style="width: 340px">
+      <h3>Tabs</h3>
+      <nile-tabs id="tabs">
+        <nile-tab label="General" name="general"><b>School profile</b><p>Name, address and logo.</p></nile-tab>
+        <nile-tab label="Terms" name="terms" badge="3">Three open terms.</nile-tab>
+        <nile-tab label="Houses" name="houses" disabled>Not available.</nile-tab>
+        <nile-tab label="Campuses" name="campuses">Main campus, Annex.</nile-tab>
+      </nile-tabs>
+    </div>
+    <div class="card" style="width: 260px">
+      <h3>Accordion</h3>
+      <nile-accordion exclusive>
+        <nile-section heading="General" open><a>School profile</a><a>Assessment settings</a><a>School terms</a></nile-section>
+        <nile-section heading="Message center"><a>Message settings</a><a>Send messages</a></nile-section>
+        <nile-section heading="Reports"><a>Termly report</a></nile-section>
+      </nile-accordion>
+    </div>
+    <div class="card pad">
+      <h3>Tiles</h3>
+      <nile-tiles id="pad" columns="3" gap="5">
+        <nile-tile label="Search" shortcut="F3" command="search"></nile-tile>
+        <nile-tile label="Quantity" shortcut="F4" command="qty"></nile-tile>
+        <nile-tile label="New sale" shortcut="F8" command="new"></nile-tile>
+        <nile-tile label="Payment" shortcut="F10" variant="success" span="2" command="pay"></nile-tile>
+        <nile-tile label="Void" variant="danger" badge="2" command="void"></nile-tile>
+        <nile-tile label="Locked" disabled></nile-tile>
+      </nile-tiles>
+    </div>
+  </div>
+  <div id="out">Press F3, F4, F8 or F10, or click a tile.</div>
+  <script type="module">
+    import "@nile/ui";
+    const out = document.getElementById("out");
+    document.getElementById("pad").on("tile", (e) => { out.textContent = "tile: " + e.detail.command; });
+    document.getElementById("tabs").on("tabchange", (e) => { out.textContent = "tab: " + e.detail.name; });
+  </script>
+</body>
+</html>

@@ -48,6 +48,15 @@ const UI_MODULES: &[(&str, &str)] = &[
     ("@nile/ui/drawer", include_str!("ui/drawer.js")),
     ("@nile/ui/splitter", include_str!("ui/splitter.js")),
     ("@nile/ui/grid", include_str!("ui/grid.js")),
+    ("@nile/ui/dialog", include_str!("ui/dialog.js")),
+    ("@nile/ui/toast", include_str!("ui/toast.js")),
+    ("@nile/ui/shortcuts", include_str!("ui/shortcuts.js")),
+    ("@nile/ui/tabs", include_str!("ui/tabs.js")),
+    ("@nile/ui/accordion", include_str!("ui/accordion.js")),
+    ("@nile/ui/combobox", include_str!("ui/combobox.js")),
+    ("@nile/ui/ribbon", include_str!("ui/ribbon.js")),
+    ("@nile/ui/tiles", include_str!("ui/tiles.js")),
+    ("@nile/ui/chart", include_str!("ui/chart.js")),
 ];
 
 fn prelude() -> String {

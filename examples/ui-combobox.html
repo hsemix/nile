@@ -1,0 +1,37 @@
+<!doctype html>
+<html window-width="640" window-height="420">
+<meta charset="utf-8">
+<title>Combobox: @nile/ui</title>
+<style>
+  body { margin: 0; padding: 24px; font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b }
+  h1 { margin: 0 0 14px; font-size: 20px }
+  label { display: block; margin: 14px 0 4px; font-size: 13px; color: #475569 }
+  nile-combobox { width: 300px }
+  #out { margin-top: 18px; font-size: 13px; color: #475569 }
+</style>
+<body>
+  <h1>Combobox</h1>
+  <label>Category (options in markup)</label>
+  <nile-combobox id="category" placeholder="Choose a category">
+    <option value="bakery">Bakery</option><option value="dairy">Dairy</option><option value="drinks">Drinks</option><option value="produce">Produce</option>
+  </nile-combobox>
+  <label>Product (items from script, with prices)</label>
+  <nile-combobox id="product" placeholder="Search products" allow-custom></nile-combobox>
+  <label>Customer (loaded as you type)</label>
+  <nile-combobox id="customer" placeholder="Type a name..."></nile-combobox>
+  <div id="out">Nothing chosen yet.</div>
+  <script type="module">
+    import "@nile/ui";
+    const $ = (id) => document.getElementById(id);
+    const out = $("out");
+    $("product").items = [
+      { value: 1, label: "Whole milk 1 l", hint: "2.50", group: "Dairy" }, { value: 2, label: "Butter 250 g", hint: "3.20", group: "Dairy" },
+      { value: 3, label: "Sourdough loaf", hint: "3.80", group: "Bakery" }, { value: 4, label: "Butter croissant", hint: "2.40", group: "Bakery" },
+      { value: 5, label: "Mineral water", hint: "1.20", group: "Drinks", disabled: true },
+    ];
+    const people = ["Ada Lovelace", "Alan Turing", "Grace Hopper", "Barbara Liskov", "Donald Knuth", "Edsger Dijkstra", "Margaret Hamilton"];
+    $("customer").source = (q) => new Promise((ok) => setTimeout(() => ok(people.filter((p) => p.toLowerCase().includes(q.toLowerCase())).map((p, i) => ({ value: p, label: p, hint: "#" + (100 + i) }))), 120));
+    for (const id of ["category", "product", "customer"]) $(id).on("change", (e) => { out.textContent = id + ": " + JSON.stringify(e.detail.value); });
+  </script>
+</body>
+</html>
