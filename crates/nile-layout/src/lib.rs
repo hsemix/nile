@@ -19,6 +19,7 @@ use std::rc::Rc;
 mod affine;
 pub use affine::Affine;
 mod images;
+mod pathimg;
 mod svg;
 mod pagination;
 mod paged;
@@ -163,6 +164,8 @@ pub struct LayoutBox {
     pub image: Option<Rc<ImageData>>,
     /// The picture of `background-image: url(...)`.
     pub bg_image: Option<Rc<ImageData>>,
+    /// Sciter's `foreground-image`, painted over the box's content.
+    pub fg_image: Option<Rc<ImageData>>,
     /// `transform` of the element, as layout coordinates to layout coordinates (the
     /// origin is already folded in). Applies to the box and its subtree.
     pub transform: Option<Affine>,
@@ -1795,6 +1798,19 @@ fn load_images(doc: &Document, styles: &StyleMap, loader: Option<&dyn ImageLoade
     IMAGES.with(|m| {
         let mut m = m.borrow_mut();
         m.clear();
+        // Sciter's `url(path:...)`: drawn from the element's fill and stroke, not loaded.
+        for s in &styles.styles {
+            for (url, key) in [(&s.background_url, bg_key(s)), (&s.fg_url, fg_key(s))] {
+                // Sciter's `url(path:...)`: drawn from the element's fill and stroke, not loaded.
+                if let Some(url) = url.as_deref().filter(|u| pathimg::path_of(u).is_some()) {
+                    if let std::collections::hash_map::Entry::Vacant(slot) = m.entry(key) {
+                        if let Some(img) = pathimg::image(url, s) {
+                            slot.insert(Rc::new(img));
+                        }
+                    }
+                }
+            }
+        }
         let Some(loader) = loader else { return };
         let mut want = |src: &str| {
             if !m.contains_key(src) {
@@ -1811,9 +1827,13 @@ fn load_images(doc: &Document, styles: &StyleMap, loader: Option<&dyn ImageLoade
             }
         }
         for s in &styles.styles {
-            if let Some(url) = &s.background_url {
+            if let Some(url) = s.background_url.as_deref().filter(|u| pathimg::path_of(u).is_none()) {
                 want(url);
             }
+            if let Some(url) = s.fg_url.as_deref().filter(|u| pathimg::path_of(u).is_none()) {
+                want(url);
+            }
+
             if let Some(url) = &s.list_style_image {
                 want(url);
             }
@@ -1823,6 +1843,29 @@ fn load_images(doc: &Document, styles: &StyleMap, loader: Option<&dyn ImageLoade
 
 fn image_for(src: &str) -> Option<Rc<ImageData>> {
     IMAGES.with(|m| m.borrow().get(src).cloned())
+}
+
+/// Keys of `url(path:...)` pictures: the path plus what colours it.
+fn path_key(url: &str, s: &ComputedStyle) -> String {
+    format!("{url}\u{1}{:?}{:?}{:?}{:?}", s.fill, s.stroke, s.stroke_width, s.color)
+}
+
+fn bg_key(s: &ComputedStyle) -> String {
+    s.background_url.as_deref().map_or_else(String::new, |u| path_key(u, s))
+}
+
+fn fg_key(s: &ComputedStyle) -> String {
+    s.fg_url.as_deref().map_or_else(String::new, |u| path_key(u, s))
+}
+
+fn bg_image_of(s: &ComputedStyle) -> Option<Rc<ImageData>> {
+    let url = s.background_url.as_deref()?;
+    image_for(&if pathimg::path_of(url).is_some() { bg_key(s) } else { url.to_string() })
+}
+
+fn fg_image_of(s: &ComputedStyle) -> Option<Rc<ImageData>> {
+    let url = s.fg_url.as_deref()?;
+    image_for(&if pathimg::path_of(url).is_some() { fg_key(s) } else { url.to_string() })
 }
 
 /// An inline `<svg>` as a picture: its subtree written out as a document, sized by its
@@ -3353,16 +3396,18 @@ fn flatten(
     };
     match tree.get_node_context_mut(n) {
         Some(NodeCtx::Element(id)) => {
-            let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
+            let bg_image = bg_image_of(styles.get(*id));
+            let fg_image = fg_image_of(styles.get(*id));
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, inert: is_inert(styles.get(*id)), border_hidden: Edges::default() })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: None, bg_image, fg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, inert: is_inert(styles.get(*id)), border_hidden: Edges::default() })
         }
         Some(NodeCtx::Replaced { id, image, .. }) => {
-            let bg_image = styles.get(*id).background_url.as_deref().and_then(image_for);
+            let bg_image = bg_image_of(styles.get(*id));
+            let fg_image = fg_image_of(styles.get(*id));
             let transform = box_transform(styles.get(*id), rect, persp);
             let fixed = styles.get(*id).position == Position::Fixed;
-            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, inert: is_inert(styles.get(*id)), border_hidden: Edges::default() })
+            out.push(LayoutBox { node: *id, rect, content: BoxContent::Element, subtree_end: 0, scroll: None, image: image.clone(), bg_image, fg_image, transform, persp, fixed, sticky, border_gap: None, backface_hidden: styles.get(*id).backface_hidden, inert: is_inert(styles.get(*id)), border_hidden: Edges::default() })
         }
         Some(NodeCtx::Text { node, layout, align, kids, decos, owners, text, spacers, control, user_select, ellipsis, nodes, marks, nowrap, flow }) => {
             // Final line breaking at the resolved width, so alignment is right.
@@ -3430,6 +3475,7 @@ fn flatten(
                 scroll: None,
                 image: None,
                 bg_image: None,
+                fg_image: None,
                 transform: None,
                 persp: None,
                 fixed: false,

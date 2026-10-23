@@ -109,12 +109,12 @@ pub fn system_color(name: &str) -> Option<Color> {
         Some(Color::rgb(r, g, b))
     };
     match name {
-        "canvas" => pick((255, 255, 255), (31, 31, 31)),
-        "canvastext" => pick((0, 0, 0), (240, 240, 240)),
+        "canvas" | "window" => pick((255, 255, 255), (31, 31, 31)),
+        "canvastext" | "windowtext" => pick((0, 0, 0), (240, 240, 240)),
         "linktext" => pick((0, 0, 238), (138, 180, 248)),
         "visitedtext" => pick((85, 26, 139), (197, 138, 249)),
         "activetext" => pick((238, 0, 0), (255, 107, 107)),
-        "buttonface" => pick((239, 239, 239), (58, 58, 58)),
+        "buttonface" | "threedface" => pick((239, 239, 239), (58, 58, 58)),
         "buttontext" => pick((0, 0, 0), (255, 255, 255)),
         "buttonborder" => pick((118, 118, 118), (138, 138, 138)),
         "field" => pick((255, 255, 255), (43, 43, 43)),
@@ -122,7 +122,7 @@ pub fn system_color(name: &str) -> Option<Color> {
         "graytext" => pick((109, 109, 109), (160, 160, 160)),
         "mark" => pick((255, 255, 0), (102, 92, 0)),
         "marktext" => pick((0, 0, 0), (255, 255, 255)),
-        "highlight" | "selecteditem" | "accentcolor" => Some(accent),
+        "highlight" | "selecteditem" | "accentcolor" | "window-accent-color" => Some(accent),
         "highlighttext" | "selecteditemtext" | "accentcolortext" => Some(text_on(accent)),
         _ => None,
     }

@@ -1,0 +1,29 @@
+<!doctype html>
+<html window-width="640" window-height="360">
+<meta charset="utf-8">
+<title>Sciter flow and * units</title>
+<style>
+  body { margin: 0; padding: 12px; font: 13px system-ui, sans-serif; flow: vertical }
+  .bar { flow: horizontal; width: *; height: 40dip; background: #3498db; color: white; padding: 8dip; margin-bottom: 12dip }
+  .bar > span:last-child { margin-left: *; background: #f56e6e; padding: 0 8dip }
+  .form { flow: horizontal; width: *; margin-bottom: 12dip }
+  .form > label { width: 1*; background: #e2e8f0 }
+  .form > input { width: 2* }
+  .panes { flow: horizontal; width: *; height: 120dip; border: 1px solid #94a3b8 }
+  .panes > div:nth-child(1) { width: 120dip; background: #fde68a }
+  .panes > div:nth-child(2) { size: *; background: #bbf7d0 }
+  .panes > div:nth-child(3) { width: 2*; background: #bfdbfe }
+  .menu { flow: grid(1 2 3, 4 4 4); width: *; margin-top: 12dip; border-spacing: 4dip }
+  .menu > div > button { width: *; margin: 2dip; padding: 14dip 6dip }
+</style>
+<body>
+  <div class="bar"><span>Back</span><span>Logout</span></div>
+  <div class="form"><label>Username</label><input value="hsemix"></div>
+  <div class="panes"><div>120dip</div><div>size: *</div><div>2*</div></div>
+  <div .menu>
+    <div #a><button>One</button></div><div #b><button>Two</button></div><div #c><button>Three</button></div>
+    <div #wide><button>Four spans the row</button></div>
+  </div>
+  <form><input|text(user) value="shortcut tags"> <button|submit .go>OK</button></form>
+</body>
+</html>
