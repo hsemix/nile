@@ -47,3 +47,7 @@ export function lengthAttr(el, name, fallback) {
 
 /** How many modal layers (dialogs) are open; shortcuts stay quiet while it is above 0. */
 export const modal = { depth: 0 };
+
+/** A small down chevron as inline SVG (follows the text colour), so no font has to carry an arrow glyph. */
+export const CHEVRON =
+  '<svg viewBox="0 0 10 6" width="10" height="6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 1l4 4 4-4"/></svg>';

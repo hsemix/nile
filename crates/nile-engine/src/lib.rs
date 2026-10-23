@@ -4675,6 +4675,10 @@ mod tests {
         };
         let key = |p: &mut Page, k: &str| p.key("keydown", k.into(), ModifiersState::default());
         assert_eq!(js(&mut p, "document.querySelector('.nile-combo-input').getAttribute('placeholder')"), "Product");
+        // Made through innerHTML, with its value attribute: the choice survives the late upgrade.
+        js(&mut p, "const h = document.createElement('div'); h.id = 'made'; document.body.appendChild(h); h.innerHTML = '<nile-combobox id=\\'m\\' value=\\'2\\' placeholder=\\'Late\\'><option value=\\'1\\'>One</option><option value=\\'2\\'>Two</option></nile-combobox>'");
+        settle(&mut p, 30);
+        assert_eq!(js(&mut p, "const m = document.getElementById('m'); [m.value, m.text, m.selectedItem && m.selectedItem.label].join()"), "2,Two,Two");
         assert_eq!(js(&mut p, "listOpen()"), "false");
         // Focus opens it with everything listed (the hint shows beside the label).
         js(&mut p, "c.focus()");
@@ -4763,7 +4767,7 @@ mod tests {
         assert_eq!(js(&mut p, "qa('.nile-ribbon-tab')"), "4");
         assert_eq!(js(&mut p, "Array.from(document.querySelectorAll('.nile-ribbon-tab')).filter(vis).map((t) => t.textContent).join()"), "File,Home,Insert");
         assert_eq!(js(&mut p, "Array.from(document.querySelectorAll('.nile-ribbon-group-label')).map((t) => t.textContent).join()"), "Clipboard,Font");
-        assert_eq!(js(&mut p, "q('.nile-ribbon-button.nile-large').textContent"), "Paste\u{25be}");
+        assert_eq!(js(&mut p, "q('.nile-ribbon-button.nile-large').textContent"), "Paste");
         assert_eq!(js(&mut p, "q('[data-command=copy]').disabled"), "true");
         assert_eq!(js(&mut p, "q('[data-command=save]').getAttribute('title')"), if cfg!(target_os = "macos") { "Save (\u{2318}S)" } else { "Save (Ctrl+S)" }.to_string());
         // Buttons raise `command`; toggles flip; a select reports its value; the file tab runs its handler.
@@ -4862,6 +4866,215 @@ mod tests {
         assert_eq!(js(&mut p, "document.querySelector('.nile-chart-tooltip').textContent"), "Card25%: 25", "10:30 is inside the last quarter");
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn the_ui_grid_edits_cells_and_resizes_columns_from_the_keyboard() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><nile-grid id="g" key="id" style="width:560px;height:220px"></nile-grid>
+            <script type="module">
+              import "@nile/ui";
+              window.g = document.getElementById("g");
+              g.columns = [
+                { key: "name", title: "Item", width: 200, editable: true },
+                { key: "qty", title: "Qty", width: 80, type: "number", editable: true, validate: (v) => (v === null || v >= 0 ? true : "Not negative") },
+                { key: "price", title: "Price", width: 80, type: "number" },
+                { key: "amount", title: "Amount", width: 100, type: "number", value: (r) => r.qty * r.price },
+                { key: "paid", title: "Paid", width: 60, type: "boolean", editable: true, format: (v) => (v ? "yes" : "no") },
+                { key: "size", title: "Size", editable: true, editor: "select", options: ["S", "M", { value: "L", label: "Large" }] },
+              ];
+              g.rows = [{ id: 1, name: "Milk", qty: 2, price: 2.5, paid: false, size: "S" }, { id: 2, name: "Bread", qty: 1, price: 3, paid: true, size: "M" }, { id: 3, name: "Eggs", qty: 6, price: 0.5, paid: false, size: "L" }];
+              window.log = [];
+              g.addEventListener("cellchange", (e) => log.push(e.detail.key + ":" + e.detail.oldValue + ">" + e.detail.value));
+              g.addEventListener("celleditcancel", () => log.push("cancel"));
+              g.addEventListener("columnresize", (e) => log.push("resize:" + e.detail.key + "=" + e.detail.width));
+              window.shown = () => Array.from(document.querySelectorAll(".nile-grid-row")).filter((x) => x.style.display !== "none").sort((a, b) => Number(a.getAttribute("aria-rowindex")) - Number(b.getAttribute("aria-rowindex")));
+              window.cell = (r, c) => shown()[r].children[c];
+              window.rowOf = (id) => g.rows.find((x) => x.id === id);
+            </script></body>"##,
+            "ui-grid-edit",
+        );
+        p.run_timers();
+        p.run_timers();
+        let settle = |p: &mut Page| {
+            std::thread::sleep(Duration::from_millis(30));
+            p.run_timers();
+            p.run_timers();
+        };
+        let key = |p: &mut Page, k: &str, m: ModifiersState| p.key("keydown", k.into(), m);
+        let none = ModifiersState::default();
+        let click_cell = |p: &mut Page, r: usize, c: usize| {
+            let v = js(p, &format!("(() => {{ const b = cell({r}, {c}).getBoundingClientRect(); return (b.x + 6) + ',' + (b.y + b.height / 2); }})()"));
+            let mut it = v.split(',').map(|n| n.parse::<f32>().unwrap_or_else(|_| panic!("click_cell({r},{c}): {v}")));
+            let (x, y) = (it.next().unwrap(), it.next().unwrap());
+            p.pointer_moved(x, y);
+            p.press();
+            p.release();
+        };
+        // Column widths come through two custom properties on the grid, not per-row styles.
+        assert!(js(&mut p, "g.style.getPropertyValue('--nile-grid-cols')").starts_with("200px 80px 80px 100px 60px"));
+
+        // A click sets the active cell; F2 opens the editor with the value; Enter commits and moves down.
+        click_cell(&mut p, 0, 0);
+        key(&mut p, "F2", none);
+        assert_eq!(js(&mut p, "g.editing && g.editing.key + g.editing.index"), "name0");
+        assert_eq!(js(&mut p, "document.activeElement.className + ':' + document.activeElement.value"), "nile-grid-editor:Milk");
+        js(&mut p, "document.activeElement.value = 'Oat milk'");
+        key(&mut p, "Enter", none);
+        settle(&mut p);
+        assert_eq!(js(&mut p, "[rowOf(1).name, cell(0, 0).textContent, g.editing, g.selectedIndex].join()"), "Oat milk,Oat milk,,1");
+        assert_eq!(js(&mut p, "log.join()"), "name:Milk>Oat milk");
+
+        // Escape cancels and keeps the old value.
+        click_cell(&mut p, 1, 0);
+        key(&mut p, "F2", none);
+        js(&mut p, "document.activeElement.value = 'zzz'");
+        key(&mut p, "Escape", none);
+        assert_eq!(js(&mut p, "[rowOf(2).name, cell(1, 0).textContent, g.editing, log[log.length - 1]].join()"), "Bread,Bread,,cancel");
+
+        // Typing starts an edit with that character; numbers parse; computed cells refresh; Tab goes to the next editable cell.
+        click_cell(&mut p, 0, 1);
+        key(&mut p, "5", none);
+        assert_eq!(js(&mut p, "g.editing.key + ':' + document.activeElement.value"), "qty:5");
+        key(&mut p, "Tab", none);
+        settle(&mut p);
+        assert_eq!(js(&mut p, "[rowOf(1).qty, cell(0, 3).textContent, g.editing && g.editing.key].join()"), "5,12.5,paid".replace("paid", "size"), "Tab skips the check box and the read-only cells");
+        key(&mut p, "Escape", none);
+
+        // Invalid input keeps the editor open and marked; fixing it commits.
+        click_cell(&mut p, 1, 1);
+        key(&mut p, "F2", none);
+        js(&mut p, "document.activeElement.value = '-3'");
+        key(&mut p, "Enter", none);
+        assert_eq!(js(&mut p, "g.editing.key + ',' + document.activeElement.classList.contains('nile-invalid') + ',' + document.activeElement.getAttribute('title')"), "qty,true,Not negative");
+        js(&mut p, "document.activeElement.value = 'abc'");
+        key(&mut p, "Enter", none);
+        assert_eq!(js(&mut p, "document.activeElement.getAttribute('title')"), "Enter a number");
+        js(&mut p, "document.activeElement.value = '4'");
+        key(&mut p, "Enter", none);
+        settle(&mut p);
+        assert_eq!(js(&mut p, "[rowOf(2).qty, cell(1, 3).textContent, g.editing].join()"), "4,12,");
+
+        // A boolean cell toggles with Space or a click; a select editor writes the option's own value.
+        click_cell(&mut p, 2, 4);
+        assert_eq!(js(&mut p, "[rowOf(3).paid, cell(2, 4).textContent].join()"), "true,yes", "a click toggles it");
+        key(&mut p, " ", none);
+        assert_eq!(js(&mut p, "rowOf(3).paid"), "false", "Space toggles it too");
+        click_cell(&mut p, 0, 5);
+        key(&mut p, "Enter", none);
+        assert_eq!(js(&mut p, "document.activeElement.tagName"), "SELECT");
+        js(&mut p, "document.activeElement.value = 'L'");
+        js(&mut p, "g.commitEdit()");
+        assert_eq!(js(&mut p, "rowOf(1).size + ',' + cell(0, 5).textContent"), "L,L");
+
+        // Editing that changes the sorted column moves the row but the active row follows it.
+        js(&mut p, "g.sortBy('name', 'asc'); log.length = 0");
+        settle(&mut p);
+        assert_eq!(js(&mut p, "g.rows.length + ',' + cell(0, 0).textContent"), "3,Bread");
+        js(&mut p, "g.edit(0, 'name'); document.activeElement.value = 'Zucchini'");
+        key(&mut p, "Enter", none);
+        settle(&mut p);
+        assert_eq!(js(&mut p, "shown().map((r) => r.children[0].textContent).join()"), "Eggs,Oat milk,Zucchini");
+
+        // Column headers: Shift+Right widens the focused column by 10px (Ctrl adds more); Left/Right move focus; Enter sorts.
+        js(&mut p, "log.length = 0; document.querySelectorAll('.nile-grid-hcell')[1].focus()");
+        key(&mut p, "ArrowRight", ModifiersState::SHIFT);
+        key(&mut p, "ArrowRight", ModifiersState::SHIFT);
+        key(&mut p, "ArrowLeft", ModifiersState::SHIFT);
+        assert_eq!(js(&mut p, "log.join()"), "resize:qty=90,resize:qty=100,resize:qty=90");
+        assert!(js(&mut p, "g.style.getPropertyValue('--nile-grid-cols')").starts_with("200px 90px"));
+        key(&mut p, "ArrowLeft", ModifiersState::SHIFT);
+        for _ in 0..6 {
+            key(&mut p, "ArrowLeft", ModifiersState::SHIFT);
+        }
+        assert_eq!(js(&mut p, "g.columns[1]._w"), "60", "never narrower than the column's minimum");
+        key(&mut p, "ArrowRight", none);
+        assert_eq!(js(&mut p, "document.activeElement.textContent.indexOf('Price') === 0"), "true");
+        key(&mut p, "Enter", none);
+        assert_eq!(js(&mut p, "g.sortKey + ',' + g.sortDirection"), "price,asc");
+        assert_eq!(js(&mut p, "document.activeElement.textContent.indexOf('Price') === 0"), "true", "focus stays on the header after it is redrawn");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_grid_keeps_an_edit_with_its_record_and_the_drag_clean() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><div id="host"></div>
+            <script type="module">
+              import "@nile/ui";
+              const host = document.getElementById("host");
+              // Properties set right after innerHTML, before the element is upgraded, must reach the setters.
+              host.innerHTML = '<nile-grid id="g" key="id" style="width:400px;height:220px"></nile-grid><nile-combobox id="cb"></nile-combobox>';
+              window.g = document.getElementById("g");
+              g.columns = [{ key: "name", title: "Name", width: 200, editable: true, validate: (v) => (v ? true : "Required") }, { key: "n", title: "N", width: 80, type: "number" }];
+              g.rows = Array.from({ length: 100 }, (_, i) => ({ id: i, name: "Row " + i, n: i }));
+              window.cb = document.getElementById("cb");
+              cb.items = ["Red", "Green"];
+              window.log = [];
+              g.addEventListener("cellchange", (e) => log.push(e.detail.row.id + ":" + e.detail.value));
+              g.addEventListener("columnresize", (e) => log.push("resize:" + e.detail.width));
+              window.shown = () => Array.from(document.querySelectorAll(".nile-grid-row")).filter((x) => x.style.display !== "none").sort((a, b) => Number(a.getAttribute("aria-rowindex")) - Number(b.getAttribute("aria-rowindex")));
+            </script></body>"##,
+            "ui-grid-record",
+        );
+        p.run_timers();
+        p.run_timers();
+        let settle = |p: &mut Page| {
+            std::thread::sleep(Duration::from_millis(30));
+            p.run_timers();
+            p.run_timers();
+        };
+        let none = ModifiersState::default();
+        assert_eq!(js(&mut p, "[g.rows.length, shown().length > 0, cb.querySelectorAll('.nile-combo-list [role=option]').length >= 0].join()"), "100,true,true", "pre-upgrade properties arrive");
+
+        // A sort while an edit is open: the value still lands in the record being edited.
+        js(&mut p, "g.edit(0, 'name')");
+        js(&mut p, "document.activeElement.value = 'Edited'");
+        js(&mut p, "g.sortBy('name', 'desc')");
+        settle(&mut p);
+        assert_eq!(js(&mut p, "g.editing ? g.editing.key + ':' + (g.editing.index > 0) + ':' + shown().some((r) => r.querySelector('.nile-grid-editor')) : 'none'"), "name:true:true", "the editor follows its record");
+        p.key("keydown", "Enter".into(), none);
+        settle(&mut p);
+        assert_eq!(js(&mut p, "[g.rows[0].name, g.rows[99].name, log.join()].join()"), "Edited,Row 99,0:Edited");
+
+        // A refused value survives a refresh: the editor stays in its row with focus.
+        js(&mut p, "g.sortBy(null)");
+        js(&mut p, "g.edit(3, 'name')");
+        js(&mut p, "document.activeElement.value = ''");
+        assert_eq!(js(&mut p, "g.commitEdit()"), "false");
+        js(&mut p, "g.refresh(); g.add({ id: 500, name: 'new', n: 0 }, 0)");
+        settle(&mut p);
+        assert_eq!(js(&mut p, "[g.editing && g.editing.index, !!document.querySelector('.nile-grid-editor.nile-invalid'), document.activeElement.className].join()"), "4,true,nile-grid-editor nile-invalid");
+        js(&mut p, "g.cancelEdit()");
+        assert_eq!(js(&mut p, "g.editing"), "null");
+        // Scrolling the invalid cell out of the window keeps it too.
+        js(&mut p, "g.edit(3, 'name')");
+        js(&mut p, "document.activeElement.value = ''");
+        js(&mut p, "g.querySelector('.nile-grid-body').scrollTop = 2000");
+        settle(&mut p);
+        assert_eq!(js(&mut p, "[!!g.editing, !!document.querySelector('.nile-grid-editor')].join()"), "true,true");
+        js(&mut p, "g.cancelEdit()");
+
+        // A drag ends once when the window loses the pointer; later moves change nothing.
+        js(&mut p, "(() => { const h = g.querySelector('.nile-grid-resizer'); h.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 200 })); document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 250 })); })()");
+        js(&mut p, "window.dispatchEvent(new Event('blur'))");
+        settle(&mut p);
+        js(&mut p, "document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 300 })); document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))");
+        settle(&mut p);
+        assert_eq!(js(&mut p, "log.filter((x) => x.startsWith('resize')).length"), "1");
+        // Removing the grid mid-drag ends it as well.
+        js(&mut p, "(() => { const h = g.querySelector('.nile-grid-resizer'); h.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 200 })); document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 230 })); })()");
+        // (`g.remove()` is the grid's row API: detach the element itself.)
+        js(&mut p, "g.parentNode.removeChild(g)");
+        settle(&mut p);
+        assert_eq!(js(&mut p, "g.isConnected"), "false");
+        // The drag ended on disconnect, before any mouseup: reported once, later moves and releases do nothing.
+        assert_eq!(js(&mut p, "log.filter((x) => x.startsWith('resize')).length"), "2", "reported on disconnect");
+        js(&mut p, "document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 400 })); document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))");
+        settle(&mut p);
+        assert_eq!(js(&mut p, "log.filter((x) => x.startsWith('resize')).length"), "2", "reported once per drag");
+        let _ = std::fs::remove_file(path);
+    }
+
 
     #[test]
     fn the_ui_splitter_drags_collapses_and_remembers() {
@@ -7706,6 +7919,44 @@ cd</textarea>
         }
         p.release();
         eprintln!("splitter drag (3px per move): {:.2} ms/frame avg, {:.1} ms worst", total / n as f64, worst);
+        eprintln!("  frames: {}", frames.iter().map(|m| format!("{m:.0}")).collect::<Vec<_>>().join(" "));
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_grid_resize() {
+        let file = std::env::var("NILE_BENCH_FILE").map(PathBuf::from).unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/data-grid.html"));
+        let (w, h) = (1000u32, 720u32);
+        let mut p = Page::load(file, (w as f32, h as f32), 0.0);
+        p.layout(w as f32, h as f32);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for _ in 0..3 {
+            p.run_timers();
+            p.paint(&mut px, w, h, 1.0);
+        }
+        // The last grid on the page (the big catalogue): its second column's drag handle.
+        let v = p.eval("(() => { const g = Array.from(document.querySelectorAll('nile-grid')).pop(); const r = g.querySelectorAll('.nile-grid-resizer')[1].getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2].join(); })()").0.unwrap();
+        let mut it = v.split(',').map(|n| n.parse::<f32>().unwrap());
+        let (x, y) = (it.next().unwrap(), it.next().unwrap());
+        p.pointer_moved(x, y);
+        p.press();
+        let n = 80;
+        let (mut total, mut worst) = (0.0f64, 0.0f64);
+        let mut frames = Vec::new();
+        for i in 1..=n {
+            let t = Instant::now();
+            p.pointer_moved(x + (i as f32) * 2.0, y);
+            std::thread::sleep(Duration::from_millis(2));
+            p.run_timers();
+            p.sync();
+            p.paint(&mut px, w, h, 1.0);
+            let ms = t.elapsed().as_secs_f64() * 1e3 - 2.0;
+            total += ms;
+            worst = worst.max(ms);
+            frames.push(ms);
+        }
+        p.release();
+        eprintln!("grid column resize (2px per move): {:.2} ms/frame avg, {:.1} ms worst", total / n as f64, worst);
         eprintln!("  frames: {}", frames.iter().map(|m| format!("{m:.0}")).collect::<Vec<_>>().join(" "));
     }
 

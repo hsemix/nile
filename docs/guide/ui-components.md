@@ -129,11 +129,44 @@ Ctrl/Cmd-click toggles, Space toggles and Ctrl/Cmd+A selects all. Arrow keys, Pa
 move, and the grid scrolls to keep the row visible. Drag a header's right edge to resize the column. Clicks
 on buttons, links and inputs inside a cell don't change the selection.
 
+### Editing cells
+
+Give a column `editable: true` (or `editable(row) -> boolean`, or the `editable` attribute on `<nile-column>`) and the grid
+gets an active cell: Left/Right move it, a click sets it. **F2, Enter, a double-click, or typing a character** starts
+editing; **Enter** commits and moves down (Shift+Enter up), **Tab** commits and moves to the next editable cell,
+**Escape** cancels, and leaving the cell commits.
+
+```js
+grid.columns = [
+  { key: "name", title: "Item", editable: true },
+  { key: "qty", title: "Qty", type: "number", editable: true, validate: (v) => (v >= 0 ? true : "Not negative") },
+  { key: "amount", title: "Amount", type: "number", value: (r) => r.qty * r.price },       // refreshed after each commit
+  { key: "paid", title: "Paid", type: "boolean", editable: true },                          // a check box: click or Space
+  { key: "size", title: "Size", editable: true, editor: "select", options: ["S", "M", { value: "L", label: "Large" }] },
+];
+grid.on("cellchange", (e) => save(e.detail.row, e.detail.key, e.detail.value));
+```
+
+Column fields: `editor` (`"text"` default, `"number"` for `type: "number"`, `"select"`, `"checkbox"`, or a function
+`(row, value, cell) -> { element, value() }`), `options`, `parse(text, row)`, `validate(value, row)` (return `false` or an
+error text: the editor stays open, marked `.nile-invalid` with the text as its tooltip), `set(row, value)` (to write
+somewhere other than `row[key]`). Events: cancelable `beforecelledit`, `cellchange` (`row`, `index`, `key`, `value`,
+`oldValue`), `celleditcancel`. Methods: `edit(index, key)`, `commitEdit()`, `cancelEdit()`; `editing` is `{ index, key }`
+or `null`. Editing the column the grid is sorted by moves the row, and the active row follows it. Style the editor with
+`.nile-grid-editor`, the active cell with `.nile-active-cell`, and `--nile-grid-focus` / `--nile-grid-invalid`.
+
+### Column widths from the keyboard
+
+Column headers are focusable: Left/Right move between them, Enter or Space sorts, **Shift+Left/Right** makes the focused
+column 10px narrower or wider (Ctrl/Cmd+Shift: 50px), Home/End jump to the first or last header. Dragging a header's edge
+does the same, with one style change per frame however many rows are drawn (the widths are two custom properties on the
+grid, `--nile-grid-cols` and `--nile-grid-min`).
+
 Sorting happens in memory (100,000 rows take about half a second the first time). For data that lives
 elsewhere, load it in pages into `rows` and handle the `sort` event yourself. Style with `--nile-grid-bg`,
 `--nile-grid-color`, `--nile-grid-head-bg`, `--nile-grid-border`, `--nile-grid-hover`, `--nile-grid-stripe`,
-`--nile-grid-selected-bg` and `--nile-grid-selected-color`. Not included: editing cells in place, variable
-row heights, column reordering, grouping. See `examples/data-grid.html`.
+`--nile-grid-selected-bg` and `--nile-grid-selected-color`. Not included: variable row heights, column reordering, grouping,
+pasting ranges. See `examples/data-grid.html`.
 
 ## Dialogs
 

@@ -2111,13 +2111,28 @@
   const ceUpgrade = (el, d) => {
     if (el._ce) return;
     el._ce = 1;
-    if (!(el instanceof d.Cls)) protoBind(el, d.Cls);
+    // Properties assigned before the upgrade are own data properties that would hide the class's setters:
+    // take them off and assign them again once the class is in place (the web's "upgrade property" pattern).
+    const early = [];
+    if (!(el instanceof d.Cls)) {
+      for (const k of Object.keys(el)) {
+        for (let p = d.Cls.prototype; p && p !== Object.prototype; p = Object.getPrototypeOf(p)) {
+          const desc = Object.getOwnPropertyDescriptor(p, k);
+          if (!desc) continue;
+          if (desc.set) early.push([k, el[k]]);
+          break;
+        }
+      }
+      for (const [k] of early) delete el[k];
+      protoBind(el, d.Cls);
+    }
     if (d.attrs.length && typeof el.attributeChangedCallback === "function") {
       for (const n of d.attrs) {
         const v = el.getAttribute(n);
         if (v !== null) { try { el.attributeChangedCallback(n, null, v); } catch (e) { report(e); } }
       }
     }
+    for (const [k, v] of early) { try { el[k] = v; } catch (e) { report(e); } }
   };
   const ceConnect = (el) => {
     const d = ceDefOf(el);

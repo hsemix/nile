@@ -20,7 +20,7 @@
 // moved to. Style with --nile-combo-bg, --nile-combo-border, --nile-combo-hover, --nile-combo-selected or the
 // .nile-combo-input, .nile-combo-list, .nile-combo-option ([aria-selected]), .nile-combo-hint classes.
 
-import { style, emit, flagAttr, numberAttr } from "@nile/ui/base";
+import { style, emit, flagAttr, numberAttr, CHEVRON } from "@nile/ui/base";
 
 const CSS = `
 :where(nile-combobox) { display: inline-block; position: relative; vertical-align: middle; min-width: 160px; }
@@ -94,7 +94,7 @@ export function defineCombobox() {
       toggle.setAttribute("type", "button");
       toggle.setAttribute("tabindex", "-1");
       toggle.setAttribute("aria-label", "Show options");
-      toggle.textContent = "▾";
+      toggle.innerHTML = CHEVRON;
       box.appendChild(input);
       box.appendChild(toggle);
       const list = document.createElement("div");
@@ -123,15 +123,17 @@ export function defineCombobox() {
         if (row) this._pick(Number(row.getAttribute("data-at")));
       });
       input.addEventListener("blur", () => setTimeout(() => this._left(), 0));
+      // An element made through innerHTML is upgraded after its attributes were already set: read `value` now.
+      if (this._wanted === null && this.getAttribute("value") !== null) this._wanted = this.getAttribute("value");
       this._syncAttrs();
       this._resolve();
     }
     attributeChangedCallback(attr, was, now) {
-      if (!this._input || was === now) return;
+      if (was === now) return;
       if (attr === "value") {
         this._wanted = now;
-        this._resolve();
-      } else this._syncAttrs();
+        if (this._input) this._resolve();
+      } else if (this._input) this._syncAttrs();
     }
     _syncAttrs() {
       this._input.setAttribute("placeholder", this.getAttribute("placeholder") || "");

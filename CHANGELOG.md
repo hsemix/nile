@@ -11,6 +11,7 @@ the section becomes that version's.
 ### 2026-10-23
 
 #### Added
+- `<nile-grid>` cell editing (`editable` columns; F2/Enter/double-click/typing, Enter/Tab/Escape, text, number, select and check-box editors, `validate`, `parse`, `set`, `cellchange` events, computed columns refreshed) and keyboard column resizing (focusable headers, Shift+Left/Right, Enter to sort).
 - More `@nile/ui` components, each with an example page and tests: promise **dialogs** (`confirm`, `prompt`, `alert`, `dialog`, `<nile-dialog>`: focus trap, Escape/Enter, validation), **toasts**, **shortcuts** (`shortcuts.on("Mod+S", fn)`, `data-shortcut` buttons, quiet while a dialog is open), **tabs** and **accordion**, a **combobox** (filtering, groups, hints, async `source`, `allow-custom`), a restylable Microsoft-style **ribbon** (`ribbon(config)`: tabs, groups, large/small/stack/row items, toggles, selects, drop-down and split menus, contextual tabs, quick-access bar, collapse), a **tile grid** for F-key pads and launchers, and **charts** (`<nile-chart>`: bar, line, stacked area, pie, donut, tooltips, legend toggling). `examples/ui-dialogs.html`, `ui-navigation.html`, `ui-combobox.html`, `ui-ribbon.html`, `ui-charts.html`, [guide](docs/guide/ui-components.md).
 - Sciter's layout CSS: `flow: horizontal|vertical|horizontal-wrap|vertical-wrap` (also `row`/`column`), `*` and `N*` lengths (`width: *`, `width: 2*`, `height: *`, `margin-left: *`: shares of the leftover space along a flow, stretch across it, an auto margin), the `size: <w> [<h>]` shorthand and the `dip` unit. Needed by the soft-school app port. `examples/sciter-flow.html`.
 - Sciter's `flow: grid(1 2 3, 4 4 4)` (cells numbered by child position, repeated numbers span) and Sciter's HTML tag shortcuts: `<div #id>`, `<tag .class>`, `<input (name)>`, `<button|radio(group).first>` (`|type`, `#id`, `.class`, `(name)`, glued to the tag or standing alone), which sit beside the existing `<menu.context>`.
@@ -19,6 +20,13 @@ the section becomes that version's.
 - `width: *` on an inline-block (a button) in ordinary flow fills its container, margins and padding included.
 
 #### Fixed
+- `<nile-grid>`: an open editor belongs to its record. Sorting, adding, removing or refreshing no longer writes the value to whichever record now sits at the old position, a refused (invalid) value keeps its editor through a refresh or a scroll instead of losing it, and a record that moves is scrolled into view. A column drag now also ends when the window loses focus or the grid is removed, reporting `columnresize` once.
+- Author style sheets compete as one set in the cascade: a later `<style>` with a weaker selector (a component's `:where(...)` rule) no longer beats a stronger rule from an earlier sheet; equal strength still follows source order.
+- Custom elements: properties assigned before an element is upgraded (e.g. `grid.rows = ...` right after `innerHTML`) no longer hide the class's setters; they are replayed through them on upgrade.
+- The combobox and ribbon drop-down arrows are inline SVG chevrons, not the `▾` glyph some fonts lack.
+- `@nile/ui` combobox made through `innerHTML` lost its initial `value` attribute (the element is upgraded after its attributes are set; the choice is now read when it is built).
+- Styled `<select>`s: the open list now follows the select's `background`, border colour, `border-radius` and `accent-color` (and an `option`'s own `background`), where it was always drawn in the platform colours (white text on a white list for a dark select); a select keeps room for its chevron whatever `padding` the page sets and centres its label in a tall box. `examples/select-styles.html`.
+- `<nile-grid>` column dragging does one style write per frame instead of one per row per mouse move (the widths are now two custom properties on the grid): 6.3 ms to 2.8 ms per move on the 100,000-row page. `bench_grid_resize` (ignored test) measures it.
 - `url(...)` in a linked or `@import`ed style sheet is now relative to the sheet, not the page (a `@font-face` or background image next to the CSS file used to be missed).
 - A `<button>` with `display: flex` or `grid` now lays out its own children (it wrapped them all in one centred column, so icon-and-label buttons stacked), and block/flex buttons shrink to their content like in browsers instead of filling the line.
 

@@ -40,7 +40,7 @@
 // .nile-ribbon-panel, .nile-ribbon-group, .nile-ribbon-button.nile-large, .nile-ribbon-menu ...). theme="dark" on the
 // element switches to a dark palette.
 
-import { style, emit } from "@nile/ui/base";
+import { style, emit, CHEVRON } from "@nile/ui/base";
 import { shortcuts } from "@nile/ui/shortcuts";
 
 const CSS = `
@@ -297,7 +297,7 @@ export function defineRibbon() {
       const arrow = () => {
         const a = document.createElement("span");
         a.className = "nile-ribbon-arrow";
-        a.textContent = "▾";
+        a.innerHTML = CHEVRON;
         return a;
       };
       const main = make();

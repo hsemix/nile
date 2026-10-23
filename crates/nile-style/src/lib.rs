@@ -2041,26 +2041,34 @@ fn matching_decls<'a>(
 ) -> Vec<&'a Declaration> {
     let mut decls = Vec::new();
     let ua = if dark { cx.ua_dark } else { cx.ua_light };
-    for sheet in std::iter::once(ua).chain(cx.author.iter().map(|s| &**s)) {
-        let mut matched: Vec<(u32, usize, &Rule)> = sheet
-            .rules
-            .iter()
-            .enumerate()
-            .filter_map(|(i, rule)| {
-                rule.selectors
-                    .slice()
-                    .iter()
-                    .filter(|s| s.has_pseudo_element() == pseudo && matches_selector(s, 0, None, el, ctx))
-                    .map(|s| s.specificity())
-                    .max()
-                    .map(|spec| (spec, i, rule))
-            })
-            .collect();
-        // Unlayered rules beat layered ones; among layers the later one wins; then specificity and order.
-        let rank = |r: &Rule| if r.layer == 0 { u32::MAX } else { r.layer };
-        matched.sort_by_key(|(spec, i, r)| (rank(r), *spec, *i));
-        decls.extend(matched.iter().flat_map(|(_, _, r)| r.declarations.iter()));
+    // Unlayered rules beat layered ones; among layers the later one wins; then specificity and order.
+    let rank = |r: &Rule| if r.layer == 0 { u32::MAX } else { r.layer };
+    let mut matches = |sheet: &'a Stylesheet, n: usize, out: &mut Vec<(u32, u32, usize, usize, &'a Rule)>| {
+        for (i, rule) in sheet.rules.iter().enumerate() {
+            let spec = rule
+                .selectors
+                .slice()
+                .iter()
+                .filter(|s| s.has_pseudo_element() == pseudo && matches_selector(s, 0, None, el, ctx))
+                .map(|s| s.specificity())
+                .max();
+            if let Some(spec) = spec {
+                out.push((rank(rule), spec, n, i, rule));
+            }
+        }
+    };
+    // The user-agent origin first, on its own.
+    let mut matched = Vec::new();
+    matches(ua, 0, &mut matched);
+    matched.sort_by_key(|&(r, spec, n, i, _)| (r, spec, n, i));
+    decls.extend(matched.iter().flat_map(|m| m.4.declarations.iter()));
+    // Author sheets compete as one set: a later sheet's low-specificity rule must not beat an earlier, stronger one.
+    let mut matched = Vec::new();
+    for (n, sheet) in cx.author.iter().enumerate() {
+        matches(sheet, n, &mut matched);
     }
+    matched.sort_by_key(|&(r, spec, n, i, _)| (r, spec, n, i));
+    decls.extend(matched.iter().flat_map(|m| m.4.declarations.iter()));
     decls
 }
 
@@ -3913,6 +3921,22 @@ mod tests {
         let styles = compute_styles(&doc);
         let p = styles.get(doc.find(|n| n.attr("id") == Some("p")).unwrap());
         assert_eq!(p.font_family, r#""Segoe UI", "Helvetica Neue", "arial black", sans-serif"#);
+    }
+
+    #[test]
+    fn specificity_is_compared_across_author_stylesheets() {
+        // A later sheet's weak rule must not beat an earlier, stronger one; equal strength follows source order.
+        let doc = Document::parse(
+            r#"<style>#app .b { color: red; width: 10px }</style><style>:where(.b) { color: blue } .b { width: 20px }</style>
+               <div id="app"><i class="b" id="x"></i></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let x = style_of(&doc, &styles, "x");
+        assert_eq!(x.color, Color { r: 255, g: 0, b: 0, a: 255 });
+        assert_eq!(x.width, Length::Px(10.0));
+        let doc = Document::parse(r#"<style>.b { width: 10px }</style><style>.b { width: 20px }</style><i class="b" id="x"></i>"#);
+        let styles = compute_styles(&doc);
+        assert_eq!(style_of(&doc, &styles, "x").width, Length::Px(20.0));
     }
 
     #[test]
