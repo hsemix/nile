@@ -792,7 +792,7 @@ impl App {
         #[cfg(windows)]
         if config.frameless() {
             if let Some(hwnd) = owner_hwnd(&window) {
-                crate::snap_win::install(hwnd);
+                crate::snap_win::install(hwnd, config.shadow());
             }
         }
         let access = accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());

@@ -13,7 +13,7 @@ pages to look up features, arguments, return values and limitations.
 | [CSS](css.md) | Selectors, cascade, units, layout, painting, text, animations and supported property names |
 | [DOM and events](dom.md) | Documents, nodes, attributes, queries, measurements, event phases, controls, JSX and timers |
 | [Web APIs](web-api.md) | Fetch/XHR, binary data, streams, WebSocket, storage, observers, URLs and navigation |
-| [Built-in modules](modules.md) | `@nile`, `@sciter`, `@env`, `@sys`, `@storage`, `@debug` and application bootstrap |
+| [Built-in modules](modules.md) | `@nile`, `@sciter`, `@env`, `@sys`, `@storage`, `@debug`, `@nile/ui` and application bootstrap |
 | [Windows and menus](windows.md) | Window configuration, multiple windows, messages, dialogs, native menus, popups and tooltips |
 | [Editing](editing.md) | Rich-text command arguments, selection, ranges, tables, images and clipboard |
 | [Native integration](native-api.md) | Rust host lifecycle and every exported C function, with ownership and safety contracts |

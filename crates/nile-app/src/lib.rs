@@ -91,6 +91,7 @@ pub unsafe extern "C" fn nile_run_html(html: *const c_char, base_dir: *const c_c
     guard(|| {
         nile_dom::vfs::mount_self();
         let info = nile_script::WindowInfo { id: nile_script::next_window_id(), ..Default::default() };
+        nile_shell::use_native();
         nile_shell::run_page(nile_engine::Page::html_window(html, dir, size, info))
     })
 }

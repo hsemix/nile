@@ -52,6 +52,12 @@ use winit::{event_loop::EventLoop, keyboard::ModifiersState};
 /// winit's modifier state as the engine's.
 /// Opens `page` in a window and runs the event loop until the last window closes; returns the
 /// exit code (`application.quit(code)`).
+/// Make the system clipboard and native dialogs the starting point of every page created on this
+/// thread, so even a page's first scripts can use them.
+pub fn use_native() {
+    Page::set_defaults(Some(Rc::new(dialogs::NativeDialogs)), Some(|| Box::new(SystemClipboard::default())));
+}
+
 pub fn run_page(mut page: Page) -> i32 {
     page.set_clipboard(Box::new(SystemClipboard::default()));
     page.set_dialogs(Rc::new(dialogs::NativeDialogs));
@@ -610,6 +616,9 @@ pub fn run(argv: Vec<String>) -> i32 {
         _ => None,
     };
     // A `.js` start file is a bootstrap script (Sciter's `run.js`): it runs in a hidden window and opens the real ones.
+    if !headless {
+        use_native();
+    }
     let bootstrap = !headless && file.extension().is_some_and(|e| e == "js");
     let mut page = if bootstrap {
         let dir = file.parent().map(PathBuf::from).unwrap_or_default();

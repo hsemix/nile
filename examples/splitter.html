@@ -1,0 +1,65 @@
+<!doctype html>
+<html window-width="1000" window-height="760">
+<meta charset="utf-8">
+<title>Splitter: @nile/ui</title>
+<style>
+  html, body { height: 100%; margin: 0 }
+  body { font-family: system-ui, sans-serif; background: #f1f5f9; color: #1e293b; display: flex; flex-direction: column; padding: 12px; gap: 12px; box-sizing: border-box }
+  h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #64748b }
+  .box { border: 1px solid #cbd5e1; border-radius: 6px; overflow: hidden; background: white; display: flex }
+  .pane { padding: 12px; font-size: 13px }
+  .pane.dark { background: #0f172a; color: #e2e8f0 }
+  .a { flex: 1.2 }
+  .b { flex: 1 }
+  .c { flex: 1.2 }
+  .d { flex: .8 }
+  nile-splitter { flex: 1 }
+  .row { display: flex; flex-direction: column; gap: 4px }
+  .keys { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-content: start; background: #202020 }
+  .keys button { height: 48px }
+  .receipt { background: #1b1b1b; color: #888; display: flex; align-items: center; justify-content: center }
+  #info { font-size: 12px; color: #64748b }
+</style>
+<body>
+  <div class="row a"><h3>Sidebar (remembered, drag or use the arrow keys when the grip is focused)</h3>
+    <div class="box" style="flex:1">
+      <nile-splitter persist="splitter-demo-sidebar">
+        <div class="pane" size="200" min="120" max="320" collapsible>Sidebar<br>click the grip to collapse</div>
+        <div class="pane">Content</div>
+      </nile-splitter>
+    </div>
+  </div>
+
+  <div class="row b"><h3>Stacked, three panes</h3>
+    <div class="box" style="flex:1">
+      <nile-splitter orientation="vertical">
+        <div class="pane" size="90" min="40">Editor</div>
+        <div class="pane dark" min="40">Console</div>
+        <div class="pane" size="60" min="30" collapsible>Status</div>
+      </nile-splitter>
+    </div>
+  </div>
+
+  <div class="row c"><h3>POS: the keypad collapses from the grip</h3>
+    <div class="box" style="flex:1">
+      <nile-splitter id="pos">
+        <div class="pane receipt">No items</div>
+        <div class="pane keys" size="260" min="200" collapsible><button>Cash</button><button>Card</button><button>Discount</button><button>Save sale</button></div>
+      </nile-splitter>
+    </div>
+  </div>
+  <div class="row d"><h3>Frameset-style sizes: <code>cols="180px 1* 2*"</code> (px, %, N* shares, like &lt;frameset&gt;)</h3>
+    <div class="box" style="flex:1">
+      <nile-splitter cols="180px 1* 2*">
+        <div class="pane">180px</div><div class="pane">1*</div><div class="pane">2*</div>
+      </nile-splitter>
+    </div>
+  </div>
+  <div id="info"></div>
+
+  <script type="module">
+    import "@nile/ui";
+    document.on("splitterchange", (e) => { $("#info").textContent = "splitterchange: " + JSON.stringify(e.detail); });
+  </script>
+</body>
+</html>

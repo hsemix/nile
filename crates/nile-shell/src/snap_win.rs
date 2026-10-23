@@ -11,11 +11,17 @@ use std::{
 
 use windows_sys::Win32::{
     Foundation::POINT,
-    Graphics::Gdi::ScreenToClient,
+    Graphics::{
+        Dwm::{DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY},
+        Gdi::ScreenToClient,
+    },
     UI::{
         Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT},
         Shell::{DefSubclassProc, SetWindowSubclass},
-        WindowsAndMessaging::{IsZoomed, PostMessageW, HTMAXBUTTON, SC_MAXIMIZE, SC_RESTORE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND},
+        WindowsAndMessaging::{
+            GetWindowLongW, IsZoomed, PostMessageW, SetWindowLongW, SetWindowPos, GWL_STYLE, HTMAXBUTTON, SC_MAXIMIZE, SC_RESTORE, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+            SWP_NOSIZE, SWP_NOZORDER, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_STYLECHANGING, WM_SYSCOMMAND, WS_CAPTION,
+        },
     },
 };
 
@@ -36,10 +42,27 @@ pub fn set_notify(f: impl Fn(isize, u8) + Send + Sync + 'static) {
 }
 
 /// Start answering hit tests for `hwnd`. Call once, after the window exists.
-pub fn install(hwnd: isize) {
+///
+/// Winit makes a frameless window by keeping `WS_CAPTION` and emptying the non-client area in
+/// `WM_NCCALCSIZE`, so the system still thinks it has a title bar and draws one whenever it renders the
+/// frame itself (the taskbar's hover preview, the maximize/restore transition). The style is dropped
+/// here, and again each time winit rewrites it (`WM_STYLECHANGING`); resizing and maximizing only need
+/// the sizing border, which stays.
+pub fn install(hwnd: isize, shadow: bool) {
     // SAFETY: the window belongs to this thread and outlives the subclass (it is removed with it).
     unsafe {
         SetWindowSubclass(hwnd, Some(proc), SUBCLASS_ID, 0);
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        if style & WS_CAPTION != 0 {
+            SetWindowLongW(hwnd, GWL_STYLE, (style & !WS_CAPTION) as i32);
+            SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        // The window has no frame of its own to render: this stops the system drawing one while it shows,
+        // hides and previews the window (that also takes its drop shadow, which `solid-with-shadow` keeps).
+        if !shadow {
+            let policy = DWMNCRP_DISABLED;
+            DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY as u32, std::ptr::from_ref(&policy).cast(), std::mem::size_of_val(&policy) as u32);
+        }
     }
 }
 
@@ -71,6 +94,10 @@ fn notify(hwnd: isize, state: u8) {
 
 unsafe extern "system" fn proc(hwnd: isize, msg: u32, wparam: usize, lparam: isize, _id: usize, _data: usize) -> isize {
     match msg {
+        WM_STYLECHANGING if wparam as i32 == GWL_STYLE => {
+            // SAFETY: for this message `lparam` points at the STYLESTRUCT the system is about to apply.
+            unsafe { (*(lparam as *mut STYLESTRUCT)).styleNew &= !WS_CAPTION };
+        }
         WM_NCHITTEST => {
             if let Some((l, t, r, b)) = rect_of(hwnd) {
                 // The point comes in screen coordinates, packed as two signed 16-bit halves.

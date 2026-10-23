@@ -1,0 +1,80 @@
+<!doctype html>
+<html window-width="1000" window-height="720">
+<meta charset="utf-8">
+<title>Data grid: @nile/ui</title>
+<style>
+  html, body { height: 100%; margin: 0 }
+  body { font-family: system-ui, sans-serif; background: #f1f5f9; color: #1e293b; display: flex; gap: 14px; padding: 14px; box-sizing: border-box }
+  .col { display: flex; flex-direction: column; gap: 8px; min-width: 0 }
+  .col.left { width: 440px; flex: none }
+  .col.right { flex: 1 }
+  h3 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #64748b }
+  nile-grid { flex: 1; --nile-grid-bg: white; --nile-grid-color: #1e293b; --nile-grid-selected-bg: #2563eb; --nile-grid-selected-color: white }
+  .receipt { --nile-grid-bg: #1b1b1b; --nile-grid-color: #e5e5e5; --nile-grid-head-bg: #262626; --nile-grid-border: #333; --nile-grid-row-border: #2a2a2a; --nile-grid-hover: #262626 }
+  .bar { display: flex; gap: 8px; align-items: center }
+  .total { margin-left: auto; font-size: 22px; font-weight: 700 }
+  #info { font-size: 12px; color: #64748b }
+</style>
+<body>
+  <div class="col left">
+    <h3>Receipt (empty state, edit buttons, totals)</h3>
+    <nile-grid id="receipt" class="receipt" key="id" empty="No items" empty-hint="Add products using barcode, code or search">
+      <nile-column key="name" title="Product name"></nile-column>
+      <nile-column key="qty" title="Quantity" width="86" type="number"></nile-column>
+      <nile-column key="price" title="Price" width="80" type="number"></nile-column>
+      <nile-column key="amount" title="Amount" width="90" type="number"></nile-column>
+    </nile-grid>
+    <div class="bar"><button id="add">Add item</button><button id="drop">Remove selected</button><span class="total" id="total">0.00</span></div>
+  </div>
+
+  <div class="col right">
+    <h3>Catalogue: 100,000 rows, click a header to sort, Shift/Ctrl-click to select several</h3>
+    <nile-grid id="catalogue" key="id" select="multiple" striped sort="name"></nile-grid>
+    <div id="info"></div>
+  </div>
+
+  <script type="module">
+    import "@nile/ui";
+
+    // Receipt
+    const receipt = $("#receipt");
+    const sample = [["Espresso beans 1 kg", 18.5], ["Oat milk 1 l", 2.2], ["Croissant", 1.8], ["Sparkling water", 0.9], ["Dark chocolate", 3.4]];
+    let next = 1;
+    const money = (n) => n.toFixed(2);
+    receipt.columns = [
+      { key: "name", title: "Product name" },
+      { key: "qty", title: "Quantity", width: 86, type: "number" },
+      { key: "price", title: "Price", width: 80, type: "number", format: money },
+      { key: "amount", title: "Amount", width: 90, type: "number", value: (r) => r.qty * r.price, format: money },
+    ];
+    function total() { $("#total").textContent = money(receipt.rows.reduce((s, r) => s + r.qty * r.price, 0)); }
+    $("#add").on("click", () => {
+      const [name, price] = sample[(next - 1) % sample.length];
+      receipt.add({ id: next++, name, qty: 1 + (next % 3), price });
+      total();
+    });
+    $("#drop").on("click", () => { receipt.selected.forEach((r) => receipt.remove(r)); total(); });
+    receipt.on("rowactivate", (e) => { e.detail.row.qty++; receipt.refresh(); total(); });
+
+    // Catalogue
+    const groups = ["Coffee", "Dairy", "Bakery", "Drinks", "Snacks", "Frozen"];
+    const rows = [];
+    for (let i = 1; i <= 100000; i++) rows.push({ id: i, name: "Item " + ((i * 7919) % 100000), group: groups[i % groups.length], price: ((i * 37) % 4000) / 100, stock: (i * 13) % 250 });
+    const grid = $("#catalogue");
+    grid.columns = [
+      { key: "id", title: "#", width: 70, type: "number" },
+      { key: "name", title: "Name" },
+      { key: "group", title: "Group", width: 110 },
+      { key: "price", title: "Price", width: 90, type: "number", format: money },
+      { key: "stock", title: "Stock", width: 80, type: "number" },
+    ];
+    const t0 = Date.now();
+    grid.rows = rows;
+    const info = $("#info");
+    const report = () => { info.textContent = rows.length.toLocaleString() + " rows, " + grid.mountedCount + " drawn, " + grid.selectedCount + " selected (set up in " + (Date.now() - t0) + " ms)"; };
+    grid.on("selectionchange", report);
+    grid.on("sort", report);
+    report();
+  </script>
+</body>
+</html>

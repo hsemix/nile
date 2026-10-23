@@ -1,0 +1,74 @@
+<!doctype html>
+<html window-width="960" window-height="680">
+<meta charset="utf-8">
+<title>Barcodes: @nile/ui</title>
+<style>
+  body { margin: 0; padding: 20px 24px; font-family: system-ui, sans-serif; color: #1e293b; background: #f8fafc }
+  h1 { margin: 0 0 4px; font-size: 20px }
+  p.lead { margin: 0 0 16px; color: #64748b; font-size: 13px }
+  .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px }
+  .card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 6px; align-items: flex-start }
+  .card h3 { margin: 0; font-size: 12px; font-weight: 600; color: #475569; text-transform: uppercase; letter-spacing: .04em }
+  .card code { font-size: 11px; color: #64748b }
+  .tag { width: 250px; background: white; border: 1px solid #cbd5e1; border-radius: 4px; padding: 10px; text-align: center }
+  .tag .name { font-size: 13px; font-weight: 600 }
+  .tag .price { font-size: 22px; font-weight: 700; margin: 2px 0 6px }
+  .row { display: flex; gap: 12px; align-items: center; margin-top: 16px; flex-wrap: wrap }
+  input { padding: 6px 8px; font-size: 14px; min-width: 260px }
+  select { padding: 6px 8px; font-size: 14px }
+</style>
+<body>
+  <h1>Barcodes</h1>
+  <p class="lead">Generated in JavaScript by <code>@nile/ui</code>: <code>&lt;nile-barcode&gt;</code> or <code>svg(type, value, options)</code>.</p>
+
+  <div class="grid">
+    <div class="card"><h3>Code 128</h3>
+      <nile-barcode type="code128" value="ORDER-1042" height="54"></nile-barcode>
+      <code>type="code128"</code></div>
+    <div class="card"><h3>EAN-13</h3>
+      <nile-barcode type="ean13" value="590123412345" height="54"></nile-barcode>
+      <code>12 digits: the check digit is added</code></div>
+    <div class="card"><h3>EAN-8</h3>
+      <nile-barcode type="ean8" value="9638507" height="54"></nile-barcode>
+      <code>type="ean8"</code></div>
+    <div class="card"><h3>UPC-A</h3>
+      <nile-barcode type="upca" value="03600029145" height="54"></nile-barcode>
+      <code>type="upca"</code></div>
+    <div class="card"><h3>Code 39</h3>
+      <nile-barcode type="code39" value="NILE" height="54"></nile-barcode>
+      <code>type="code39"</code></div>
+    <div class="card"><h3>QR code</h3>
+      <nile-barcode type="qr" value="https://example.com/orders/1042" module-width="3"></nile-barcode>
+      <code>type="qr" ecc="M"</code></div>
+  </div>
+
+  <div class="row">
+    <div class="tag" id="tag"></div>
+    <div style="display:flex; flex-direction:column; gap:8px">
+      <label>Value <input id="value" value="5901234123457"></label>
+      <label>Type
+        <select id="type"><option>ean13</option><option>code128</option><option>code39</option><option>ean8</option><option>upca</option><option>qr</option></select></label>
+      <div id="status" style="font-size:12px; color:#64748b"></div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { svg, encode } from "@nile/ui";
+
+    const tag = $("#tag"), value = $("#value"), type = $("#type"), status = $("#status");
+    function draw() {
+      try {
+        const picture = svg(type.value, value.value, { height: 44, moduleWidth: 2 });
+        tag.innerHTML = '<div class="name">Espresso beans 1 kg</div><div class="price">$18.50</div>' + picture;
+        status.textContent = "";
+      } catch (e) {
+        tag.innerHTML = "";
+        status.textContent = e.message;
+      }
+    }
+    value.on("input", draw);
+    type.on("change", draw);
+    draw();
+  </script>
+</body>
+</html>

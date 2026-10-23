@@ -17,6 +17,8 @@ jobs:
       # makes the .pdb files small; the other platforms keep Cargo.toml's settings.
       CARGO_PROFILE_DEV_DEBUG: ${{ matrix.os == 'windows-latest' && '0' || '1' }}
       CARGO_PROFILE_TEST_DEBUG: ${{ matrix.os == 'windows-latest' && '0' || '1' }}
+      # ... and no .pdb at all: LNK1201 can still happen while writing one (it was intermittent), so the linker skips it.
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C link-arg=/DEBUG:NONE' || '' }}
     strategy:
       fail-fast: false
       matrix:

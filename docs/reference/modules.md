@@ -3,7 +3,7 @@
 [Reference index](README.md) · [Data tutorial](../guide/data-and-services.md)
 
 Use modules from `<script type="module">` or imported JS/JSX files. Available
-names are `@nile`, `@sciter`, `@env`, `@sys`, `@debug`, `@storage`; bare npm names
+names are `@nile`, `@sciter`, `@env`, `@sys`, `@debug`, `@storage`, `@nile/ui` (and `@nile/ui/<module>`); bare npm names
 are not resolved. This page describes Nile's implementation, not every export
 of Sciter's similarly named modules.
 
@@ -237,6 +237,20 @@ This is not SQLite or Sciter's storage format; it has no indexes, encryption,
 transactions or concurrent-writer guarantees. `createIndex()` returns null.
 Use [localStorage](web-api.md#storage) for string preferences and host services
 for transactional business data.
+
+## `@nile/ui`
+
+```js
+import { svg, encode, dataUrl, types } from '@nile/ui';   // everything
+import { svg } from '@nile/ui/barcode';                 // one module
+```
+
+Nile's own optional component library (a Nile extension, not part of Sciter), written in JS and
+embedded in the program: [crates/nile-script/src/ui](../../crates/nile-script/src/ui). Each
+module registers its custom elements when imported. Modules so far: `barcode` (Code 128, Code 39,
+EAN-13, EAN-8, UPC-A, QR; `<nile-barcode>`, `svg`, `encode`, `dataUrl`), `drawer` (`<nile-drawer>`),
+`splitter` (`<nile-splitter>`) and `grid` (`<nile-grid>`, `<nile-column>`). Options and details:
+[ui-components guide](../guide/ui-components.md).
 
 ## `@debug`
 
