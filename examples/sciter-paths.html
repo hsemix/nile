@@ -1,0 +1,22 @@
+<!doctype html>
+<html window-width="560" window-height="260">
+<meta charset="utf-8">
+<title>Sciter path images, constants and variables</title>
+<style>
+  html:theme(dark) { var(text-color): #fff; var(back-color): #333 }
+  html { var(text-color): #1e293b; var(back-color): #f1f5f9; background: color(back-color); color: color(text-color); font: 13px system-ui, sans-serif }
+  body { margin: 0; padding: 16px }
+  .row { flow: horizontal; margin-bottom: 14dip }
+  .row > * { margin-right: 14dip }
+  .icon { size: 34dip; background-repeat: no-repeat; background-position: 50% 50%; background-size: 22dip; border: 1px solid #94a3b8 }
+  .folder { background-image: url(path:M 4 4 L 4 23 L 6 21 L 6 6 L 26 6 L 26 10 L 6 10 L 6 12 L 26 12 L 26 26 L 12 26 L 8 28 L 28 28 L 28 4 z); fill: #3498db }
+  .cross { background-image: url(path:M0 0 L10 10 M10 0 L0 10); stroke: #e81123; stroke-width: 1.5dip; background-size: 12dip }
+  .box { background-image: url(path:M0 0 H10 V10 H0 Z); stroke: color(text-color); background-size: 12dip }
+  .fg { size: 46dip window-button-height; background: #475569; foreground-image: url(path:M0 5 H10); stroke: #fff; foreground-size: 11dip; foreground-repeat: no-repeat; foreground-position: 50% 50% }
+  .fg:hover { background: #e81123 }
+</style>
+<body>
+  <div class="row"><div class="icon folder"></div><div class="icon cross"></div><div class="icon box"></div><div class="fg"></div></div>
+  <p>Variables: <b style="color: color(text-color)">var(text-color)</b>, window constants: caption 32, button 46 x 32.</p>
+</body>
+</html>

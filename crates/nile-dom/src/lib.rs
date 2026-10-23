@@ -65,6 +65,7 @@ pub struct Document {
 }
 
 mod include;
+mod sciter;
 mod stylelink;
 pub mod vfs;
 pub use include::expand as expand_includes;
@@ -75,7 +76,7 @@ impl Document {
     pub const ROOT: NodeId = NodeId(0);
 
     pub fn parse(html: &str) -> Document {
-        let html = rewrite_frames(html);
+        let html = sciter::hoist_before_body(&sciter::expand_entities(&rewrite_frames(html)));
         let dom = html5ever::parse_document(RcDom::default(), Default::default())
             .from_utf8()
             .read_from(&mut html.as_bytes())
@@ -95,6 +96,24 @@ impl Document {
                 if attrs.borrow().iter().any(|a| &*a.name.local == "media" && !media_matches(&a.value)) =>
             {
                 return
+            }
+            // `sciter::hoist_before_body`: the children belong to `<html>`, in front of the body.
+            NodeData::Element { name, .. } if &*name.local == "nile-hoist" => {
+                let html = std::iter::successors(parent, |p| self.nodes[p.0].parent).find(|p| self.nodes[p.0].parent.is_some_and(|g| self.nodes[g.0].parent.is_none()) && self.nodes[p.0].tag() == Some("html"));
+                if let Some(h) = html {
+                    for child in handle.children.borrow().iter() {
+                        let before = self.nodes.len();
+                        self.convert(child, Some(h));
+                        if self.nodes.len() > before {
+                            // In front of the body, behind what was hoisted before.
+                            let body = self.nodes[h.0].children.iter().position(|c| self.nodes[c.0].tag() == Some("body"));
+                            if let (Some(moved), Some(b)) = (self.nodes[h.0].children.pop(), body) {
+                                self.nodes[h.0].children.insert(b, moved);
+                            }
+                        }
+                    }
+                }
+                return;
             }
             NodeData::Element { name, attrs, .. } => NodeKind::Element {
                 // `rewrite_frames` hid `<frame>` from the HTML parser behind this name.

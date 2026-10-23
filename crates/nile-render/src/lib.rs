@@ -499,6 +499,15 @@ fn paint_selected_image(canvas: &Canvas, r: LRect) {
             self.paint_picture(canvas, data, s, b.rect);
         }
         paint_control_mark(canvas, s, b.rect, &styles.palette());
+        if let Some(fg) = &b.fg_image {
+            // Sciter's `foreground-image`: the same placement rules as a background, painted on top.
+            let mut t = s.clone();
+            (t.background_size, t.background_position, t.background_repeat) = (s.fg_size, s.fg_position, s.fg_repeat);
+            if let Some(shader) = self.background_shader(fg, &t, b.rect, device_scale(canvas)) {
+                let none = Border { width: nile_style::Edges::all(0.0), color: s.border_color, style: nile_style::Edges::all(BorderStyle::None) };
+                paint_decorated(canvas, skia_rect(b.rect), None, None, Some(shader), &none, radii);
+            }
+        }
         paint_outline(canvas, skia_rect(b.rect), s, radii);
     }
 

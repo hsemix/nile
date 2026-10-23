@@ -357,7 +357,7 @@ float, tables, transforms, transitions and animations, and opt-in page text sele
    `::before`/`::after`, or for inline elements' backgrounds. `NILE_TRACE=1` prints per-phase timings.
 2. **Embedding API** (C ABI done; see above) — still to do: a GPU surface path, multi-button and touch input. Language bindings (Go, C#, Python) come last, once the engine covers nearly everything.
 3. **Sciter compatibility** — `@sys`, `@debug`, `@storage`, class components and
-   `componentUpdate`, `this://` URLs and `prototype:` (a script class bound from CSS, `examples/prototype/`) and `customElements.define` (without shadow DOM) are in; remaining: `aspect:`, `behavior:` CSS, `flow:`/`*` units, `Element.value` behaviors.
+   `componentUpdate`, `this://` URLs and `prototype:` (a script class bound from CSS, `examples/prototype/`) and `customElements.define` (without shadow DOM) are in; `flow:` (`horizontal`, `vertical`, `-wrap`, `grid(...)`), `*`/`N*` lengths (width/height/margin), `size:`, `dip`, the `#id`/`.class`/`(name)`/`|type` tag shortcuts, `var(name)`/`color(name)`, `:theme()`, `url(path:...)` images with `fill`/`stroke`, `foreground-image` and the `window-*` constants are in (not `url(stock:...)`, `@const`, `morph()`, `aspect:`) (`examples/sciter-flow.html`); remaining: `flow: stack`/`row(...)`, `flow-rows`/`flow-columns`, `*` in padding/`border-spacing`, `height: *` in ordinary flow, `aspect:`, `behavior:` CSS, `Element.value` behaviors.
 4. **GPU** — Skia on Metal
    (macOS), D3D (Windows), Vulkan/GL (Linux) instead of the CPU raster path.
 5. **Accessibility** — `accesskit`.

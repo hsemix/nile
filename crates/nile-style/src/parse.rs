@@ -57,6 +57,8 @@ pub enum Value {
     LightDark(Color, Color),
     /// `counter(name, style)` (separator `None`) or `counters(name, separator, style)`.
     Counter(Box<(String, Option<String>, String)>),
+    /// Sciter's `*` / `2*` flex length (a share of the leftover space).
+    Star(f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -106,7 +108,7 @@ pub struct Rule {
 /// Properties whose value is kept as text for the cascade to hand on (scripts read `popup-*`; the
 /// others are parsed by their own modules or the text engine).
 pub(crate) fn keeps_raw(name: &str) -> bool {
-    name.starts_with("popup-") || matches!(name, "filter" | "backdrop-filter" | "-webkit-backdrop-filter" | "clip-path" | "shape-outside" | "font-variation-settings" | "font-feature-settings" | "prototype" | "nile-password-char")
+    name.starts_with("popup-") || matches!(name, "filter" | "backdrop-filter" | "-webkit-backdrop-filter" | "clip-path" | "shape-outside" | "font-variation-settings" | "font-feature-settings" | "prototype" | "nile-password-char" | "flow")
 }
 
 /// An `@keyframes` rule: the declarations at each offset (0..=1), in offset order.
@@ -181,7 +183,8 @@ impl Stylesheet {
     pub fn parse_with(css: &str, viewport: (f32, f32)) -> Stylesheet {
         let used = Cell::new(false);
         let cx = Cx { viewport, uses_viewport: &used };
-        let mut parser = Parser::new(css);
+        let css = crate::sciter::rewrite(css);
+        let mut parser = Parser::new(&css);
         let mut sheet = Stylesheet::default();
         rules_in(&mut parser, &cx, &mut sheet);
         sheet.uses_viewport = used.get();
@@ -642,7 +645,8 @@ fn add_rule(selector_text: &str, selectors: SelectorList<NileImpl>, body: &str, 
 
 /// Parses the contents of a `style="..."` attribute.
 pub fn parse_declarations(css: &str, cx: &Cx) -> Vec<Declaration> {
-    let mut parser = Parser::new(css);
+    let css = crate::sciter::rewrite(css);
+    let mut parser = Parser::new(&css);
     declarations_in(&mut parser, cx)
 }
 
@@ -721,7 +725,16 @@ const ABSOLUTE_UNITS: [(&str, f32); 5] = [("cm", 96.0 / 2.54), ("mm", 96.0 / 25.
 fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
     let token = p.next()?.clone();
     Ok(Some(match token {
-        Token::Number { value, .. } => Value::Number(value),
+        Token::Number { value, .. } => {
+            // `2*` (no space): a share of the leftover space, Sciter's flex unit.
+            let before = p.state();
+            let star = matches!(p.next_including_whitespace(), Ok(Token::Delim('*')));
+            if !star {
+                p.reset(&before);
+            }
+            if star { Value::Star(value) } else { Value::Number(value) }
+        }
+        Token::Delim('*') => Value::Star(1.0),
         Token::Percentage { unit_value, .. } => Value::Percent(unit_value * 100.0),
         Token::Dimension { value, ref unit, .. } => {
             let unit = unit.to_ascii_lowercase();
@@ -729,7 +742,7 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
                 Value::Px(px)
             } else {
                 match unit.as_str() {
-                    "px" => Value::Px(value),
+                    "px" | "dip" => Value::Px(value),
                     "em" => Value::Em(value),
                     "rem" => Value::Rem(value),
                     // Font-relative units that need font metrics are approximated from the em.
@@ -755,7 +768,10 @@ fn parse_value<'i>(p: &mut Parser<'i>, cx: &Cx) -> PResult<Option<Value>> {
         Token::Comma => Value::Comma,
         Token::UnquotedUrl(ref u) => Value::Url(u.to_string()),
         Token::Delim('/') => Value::Slash,
-        Token::Ident(ref s) => Value::Ident(s.to_ascii_lowercase()),
+        Token::Ident(ref s) => match crate::sciter::window_constant(&s.to_ascii_lowercase()) {
+            Some(px) => Value::Px(px),
+            None => Value::Ident(s.to_ascii_lowercase()),
+        },
         Token::QuotedString(ref s) => Value::Str(s.to_string()),
         Token::Hash(ref h) | Token::IDHash(ref h) => match hex_color(h) {
             Some(c) => Value::Color(c),

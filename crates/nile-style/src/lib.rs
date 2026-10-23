@@ -14,6 +14,7 @@ mod gradient;
 mod grid;
 mod page;
 mod parse;
+mod sciter;
 mod selector;
 mod effects;
 mod shape;
@@ -401,6 +402,20 @@ pub enum Appearance {
     Clock,
 }
 
+/// Sciter's `flow:`: `default` (block), `horizontal`/`vertical` (a flex row/column), the `-wrap`
+/// forms (`row`/`column` are sciter-js's names for the same).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Flow {
+    #[default]
+    Default,
+    Horizontal,
+    Vertical,
+    HorizontalWrap,
+    VerticalWrap,
+    /// `grid(1 2 3, 4 4 4)`: the cells are in `ComputedStyle::flow_grid`.
+    Grid,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum FlexDirection {
     #[default]
@@ -546,6 +561,13 @@ pub enum TextAlign {
 pub struct ComputedStyle {
     // Box model
     pub display: Display,
+    /// Sciter `flow:` (a container laid out as a row or column of its children).
+    pub flow: Flow,
+    /// The cell numbers of `flow: grid(...)`, row by row (0 = an empty cell).
+    pub flow_grid: Vec<Vec<u16>>,
+    /// Sciter `width: N*` / `height: N*` shares of the leftover space (0 = not a star).
+    pub star_w: f32,
+    pub star_h: f32,
     pub width: Length,
     pub height: Length,
     pub min_width: Length,
@@ -705,6 +727,15 @@ pub struct ComputedStyle {
     pub background_image: Option<Gradient>,
     /// `background-image: url(...)`, as written.
     pub background_url: Option<String>,
+    /// Sciter's `foreground-image` (above the content) and its `foreground-size/-position/-repeat`.
+    pub fg_url: Option<String>,
+    pub fg_size: BgSize,
+    pub fg_position: (StopPos, StopPos),
+    pub fg_repeat: (bool, bool),
+    /// Sciter's `fill`, `stroke` and `stroke-width`: how a `url(path:...)` image is drawn.
+    pub fill: Option<Color>,
+    pub stroke: Option<Color>,
+    pub stroke_width: f32,
     pub background_size: BgSize,
     /// Where the image sits in the box: (x, y), a fraction of the free space or px.
     pub background_position: (StopPos, StopPos),
@@ -770,6 +801,10 @@ impl Default for ComputedStyle {
     fn default() -> Self {
         ComputedStyle {
             display: Display::Block,
+            flow: Flow::Default,
+            flow_grid: Vec::new(),
+            star_w: 0.0,
+            star_h: 0.0,
             width: Length::Auto,
             height: Length::Auto,
             min_width: Length::Auto,
@@ -868,6 +903,13 @@ impl Default for ComputedStyle {
             background: None,
             background_image: None,
             background_url: None,
+            fg_url: None,
+            fg_size: BgSize::Auto,
+            fg_position: (StopPos::Fraction(0.0), StopPos::Fraction(0.0)),
+            fg_repeat: (true, true),
+            fill: None,
+            stroke: None,
+            stroke_width: 1.0,
             background_size: BgSize::Auto,
             background_position: (StopPos::Fraction(0.0), StopPos::Fraction(0.0)),
             background_repeat: (true, true),
@@ -2336,6 +2378,98 @@ pub fn control_fraction(doc: &Document, id: NodeId) -> (Option<f32>, bool) {
     }
 }
 
+/// Sciter's `flow:` and `*` lengths, turned into the flex properties layout already knows.
+/// A container with `flow: horizontal|vertical` becomes a flex row/column (children keep their
+/// own height in a row, as in Sciter, instead of stretching); in a flex parent a child with
+/// `width|height: N*` along the main axis grows by N from a zero basis, and across it stretches.
+fn sciter_flow(style: &mut ComputedStyle, parent: &ComputedStyle, cell: usize) {
+    if style.flow == Flow::Grid && style.display == Display::Block {
+        style.display = Display::Grid;
+        let columns = style.flow_grid.iter().map(Vec::len).max().unwrap_or(1) as u16;
+        let track = grid::Track { min: grid::Breadth::Px(0.0), max: grid::Breadth::Fr(1.0) };
+        style.grid_template_columns = vec![grid::TrackItem::Repeat(grid::TrackRepeat::Count(columns), vec![track])];
+    }
+    if parent.flow == Flow::Grid && cell > 0 {
+        // The item's cells: the bounding box of the template positions that carry its number.
+        let mut at: Option<(i16, i16, i16, i16)> = None;
+        for (r, row) in parent.flow_grid.iter().enumerate() {
+            for (c, n) in row.iter().enumerate() {
+                if *n as usize == cell {
+                    let (r, c) = (r as i16 + 1, c as i16 + 1);
+                    at = Some(match at {
+                        None => (r, r, c, c),
+                        Some((r0, r1, c0, c1)) => (r0.min(r), r1.max(r), c0.min(c), c1.max(c)),
+                    });
+                }
+            }
+        }
+        if let Some((r0, r1, c0, c1)) = at {
+            style.grid_row = grid::GridPlace { start: grid::GridLine::Line(r0), end: grid::GridLine::Line(r1 + 1) };
+            style.grid_column = grid::GridPlace { start: grid::GridLine::Line(c0), end: grid::GridLine::Line(c1 + 1) };
+        }
+    }
+    if style.flow != Flow::Default && style.display == Display::Block {
+        style.display = Display::Flex;
+        style.flex_direction = match style.flow {
+            Flow::Horizontal | Flow::HorizontalWrap => FlexDirection::Row,
+            _ => FlexDirection::Column,
+        };
+        style.flex_wrap = matches!(style.flow, Flow::HorizontalWrap | Flow::VerticalWrap);
+        if style.align_items == Align::Normal && style.flex_direction == FlexDirection::Row {
+            style.align_items = Align::Start;
+        }
+    }
+    let row = match (parent.display, parent.flow) {
+        (Display::Flex, Flow::Default) => Some(matches!(parent.flex_direction, FlexDirection::Row | FlexDirection::RowReverse)),
+        (Display::Flex, f) => Some(matches!(f, Flow::Horizontal | Flow::HorizontalWrap)),
+        _ => None,
+    };
+    // Sciter's `margin-left: *` pushes an inline-block (a button) to the right edge of its line;
+    // as a block that shrinks to its content, the auto margin does the same.
+    if row.is_none() && style.display == Display::InlineBlock && style.margin.left == Length::Auto && style.margin.right != Length::Auto && style.width == Length::Auto && style.float == Float::None {
+        style.display = Display::Block;
+        style.width_fit = true;
+    }
+    if row.is_none() {
+        // In ordinary flow `*` fills the container (less the box's own margins), as Sciter's
+        // `width: *` on a button or input does.
+        let gap = |a: Length, b: Length| match (a, b) {
+            (Length::Px(a), Length::Px(b)) => Some(a + b),
+            _ => None,
+        };
+        if style.star_w > 0.0 && style.width == Length::Auto && style.position == Position::Static {
+            // An inline-block can't take a percentage of its line (layout sizes it on its own), so
+            // a filling one becomes a block.
+            if style.display == Display::InlineBlock {
+                style.display = Display::Block;
+            }
+            if let Some(m) = gap(style.margin.left, style.margin.right) {
+                let inner = if style.border_box { 0.0 } else { style.padding.left + style.padding.right + style.border_width.left + style.border_width.right };
+                style.width = if m + inner == 0.0 { Length::Percent(1.0) } else { Length::Calc { px: -m - inner, pct: 1.0 } };
+            }
+        }
+        if style.star_h > 0.0 && style.height == Length::Auto && style.position == Position::Static {
+            if let Some(m) = gap(style.margin.top, style.margin.bottom) {
+                let inner = if style.border_box { 0.0 } else { style.padding.top + style.padding.bottom + style.border_width.top + style.border_width.bottom };
+                style.height = if m + inner == 0.0 { Length::Percent(1.0) } else { Length::Calc { px: -m - inner, pct: 1.0 } };
+            }
+        }
+        return;
+    }
+    let (main, cross) = match row {
+        Some(true) => (style.star_w, style.star_h),
+        _ => (style.star_h, style.star_w),
+    };
+    if main > 0.0 {
+        style.flex_grow = main;
+        style.flex_shrink = 1.0;
+        style.flex_basis = Length::Px(0.0);
+    }
+    if cross > 0.0 {
+        style.align_self = Align::Stretch;
+    }
+}
+
 fn cascade(
     cx: &CascadeInput,
     ctx: &mut MatchingContext<NileImpl>,
@@ -2372,6 +2506,12 @@ fn cascade(
             }
             dark = used;
         }
+        let cell = if parent.flow == Flow::Grid {
+            node.parent.map_or(0, |p| doc.node(p).children.iter().filter(|c| matches!(doc.node(**c).kind, NodeKind::Element { .. })).position(|c| *c == id).map_or(0, |i| i + 1))
+        } else {
+            0
+        };
+        sciter_flow(&mut style, parent, cell);
     }
 
     out[id.0] = style.clone();
@@ -2396,6 +2536,48 @@ fn cascade(
     }
     extra.depth -= 1;
     extra.counters.truncate(scope);
+    if matches!(node.kind, NodeKind::Element { .. }) {
+        sciter_fill(doc, id, out);
+    }
+}
+
+/// Sciter's windows fill their `html`/`body`, and `height: *` works in plain block flow: once the
+/// children are styled, a block with a `height: *` child (or `html` with a caption/bar next to its
+/// `body`) becomes a flex column whose starred children take the leftover height.
+fn sciter_fill(doc: &Document, id: NodeId, out: &mut [ComputedStyle]) {
+    let own = &out[id.0];
+    if own.display != Display::Block || own.flow != Flow::Default || own.position.out_of_flow() {
+        return;
+    }
+    let kids: Vec<NodeId> = doc.node(id).children.iter().copied().filter(|c| matches!(doc.node(*c).kind, NodeKind::Element { .. }) && out[c.0].display != Display::None).collect();
+    let is_html = doc.node(id).tag() == Some("html");
+    let stars = kids.iter().any(|c| out[c.0].star_h > 0.0 && !out[c.0].position.out_of_flow());
+    let window = is_html && kids.len() > 1 && kids.iter().any(|c| doc.node(*c).tag() == Some("body"));
+    if !stars && !window {
+        return;
+    }
+    out[id.0].display = Display::Flex;
+    out[id.0].flex_direction = FlexDirection::Column;
+    for c in kids {
+        let body = window && doc.node(c).tag() == Some("body");
+        let k = &mut out[c.0];
+        if k.position.out_of_flow() {
+            continue;
+        }
+        if k.star_h > 0.0 || body {
+            k.height = Length::Auto;
+            k.flex_grow = if k.star_h > 0.0 { k.star_h } else { 1.0 };
+            k.flex_shrink = 1.0;
+            k.flex_basis = Length::Px(0.0);
+            if body {
+                k.min_height = Length::Px(0.0);
+            }
+        }
+        if k.star_w > 0.0 {
+            k.width = Length::Auto;
+            k.align_self = Align::Stretch;
+        }
+    }
 }
 
 /// Replaces every `var(--name[, fallback])` in `text`. `None` if a variable is
@@ -2551,6 +2733,8 @@ pub(crate) fn length(v: &Value, font_size: f32) -> Option<Length> {
         Value::Calc { px, em, pct } if *px == 0.0 && *em == 0.0 => Length::Percent(pct / 100.0),
         Value::Calc { px, em, pct } => Length::Calc { px: px + em * font_size, pct: pct / 100.0 },
         Value::Ident(i) if i == "auto" => Length::Auto,
+        // Sciter's `*`: an auto margin absorbs the leftover space (width/height read the share).
+        Value::Star(_) => Length::Auto,
         _ => return None,
     })
 }
@@ -2751,15 +2935,57 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
             }
         }
         "width" => {
-            if matches!(first.and_then(Value::ident), Some("fit-content" | "max-content" | "min-content")) {
+            if let Some(Value::Star(n)) = first {
+                s.star_w = *n;
+                s.width = Length::Auto;
+                s.width_fit = false;
+            } else if matches!(first.and_then(Value::ident), Some("fit-content" | "max-content" | "min-content")) {
                 s.width_fit = true;
                 s.width = Length::Auto;
+                s.star_w = 0.0;
             } else if let Some(v) = l(first) {
                 s.width = v;
                 s.width_fit = false;
+                s.star_w = 0.0;
             }
         }
-        "height" => s.height = l(first).unwrap_or(s.height),
+        "height" => {
+            if let Some(Value::Star(n)) = first {
+                s.star_h = *n;
+                s.height = Length::Auto;
+            } else if let Some(v) = l(first) {
+                s.height = v;
+                s.star_h = 0.0;
+            }
+        }
+        // Sciter's `size: <width> [<height>]`
+        "size" => {
+            let (w, h) = (v.first(), v.get(1).or(v.first()));
+            for (name, x) in [("width", w), ("height", h)] {
+                if let Some(x) = x {
+                    let sub = Declaration { name: name.to_string(), values: vec![x.clone()], ..d.clone() };
+                    apply(s, &sub, parent_font_size);
+                }
+            }
+        }
+        "flow" if d.raw.trim_start().to_ascii_lowercase().starts_with("grid(") => {
+            let body = d.raw.trim_start()[5..].trim_end().trim_end_matches(')');
+            let rows: Vec<Vec<u16>> = body.split(',').map(|r| r.split_whitespace().map(|c| c.parse().unwrap_or(0)).collect()).filter(|r: &Vec<u16>| !r.is_empty()).collect();
+            if !rows.is_empty() {
+                s.flow = Flow::Grid;
+                s.flow_grid = rows;
+            }
+        }
+        "flow" => {
+            s.flow = match first.and_then(Value::ident) {
+                Some("horizontal" | "row") => Flow::Horizontal,
+                Some("vertical" | "column") => Flow::Vertical,
+                Some("horizontal-wrap" | "row-wrap") => Flow::HorizontalWrap,
+                Some("vertical-wrap" | "column-wrap") => Flow::VerticalWrap,
+                Some("default" | "stack") => Flow::Default,
+                _ => return,
+            }
+        }
         "min-width" => s.min_width = l(first).unwrap_or(s.min_width),
         "min-height" => s.min_height = l(first).unwrap_or(s.min_height),
         "max-width" => s.max_width = l(first).unwrap_or(s.max_width),
@@ -2972,6 +3198,18 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.background_repeat = bg_repeat(before).unwrap_or((true, true));
             }
         }
+        "foreground-image" => {
+            s.fg_url = v.iter().find_map(|x| match x {
+                Value::Url(u) => Some(u.clone()),
+                _ => None,
+            });
+        }
+        "foreground-size" => s.fg_size = bg_size(v, fs).unwrap_or(BgSize::Auto),
+        "foreground-position" => s.fg_position = bg_position(v, fs).unwrap_or((StopPos::Fraction(0.0), StopPos::Fraction(0.0))),
+        "foreground-repeat" => s.fg_repeat = bg_repeat(v).unwrap_or((true, true)),
+        "fill" => s.fill = v.iter().find_map(&color),
+        "stroke" => s.stroke = v.iter().find_map(&color),
+        "stroke-width" => s.stroke_width = first.and_then(|x| px(x, fs)).unwrap_or(1.0),
         "user-select" | "-webkit-user-select" | "-moz-user-select" => {
             s.user_select = match first.and_then(Value::ident) {
                 Some("none") => UserSelect::None,
@@ -4147,6 +4385,24 @@ mod tests {
         assert_eq!(f("g"), (1.0, 0.0, Length::Px(0.0)));
         assert_eq!(f("h"), (3.0, 1.0, Length::Auto));
         assert_eq!(f("i"), (0.0, 0.0, Length::Auto));
+    }
+
+    #[test]
+    fn sciter_flow_and_star_lengths_become_flex_properties() {
+        let doc = Document::parse(
+            r#"<div id="row" style="flow: horizontal"><i id="a" style="width: 2*"></i><i id="b" style="size: 30dip *"></i>
+               <i id="c" style="margin-left: *"></i></div>
+               <div id="col" style="flow: vertical"><i id="d" style="height: *"></i><i id="e" style="width: *"></i></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let s = |id: &str| style_of(&doc, &styles, id);
+        assert_eq!((s("row").display, s("row").flex_direction), (Display::Flex, FlexDirection::Row));
+        assert_eq!((s("a").flex_grow, s("a").flex_basis, s("a").width), (2.0, Length::Px(0.0), Length::Auto));
+        assert_eq!((s("b").width, s("b").align_self), (Length::Px(30.0), Align::Stretch));
+        assert_eq!(s("c").margin.left, Length::Auto);
+        assert_eq!(s("col").flex_direction, FlexDirection::Column);
+        assert_eq!(s("d").flex_grow, 1.0);
+        assert_eq!(s("e").align_self, Align::Stretch);
     }
 
     #[test]

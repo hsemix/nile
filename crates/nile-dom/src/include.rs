@@ -170,8 +170,10 @@ fn comparison(term: &str) -> bool {
     }
 }
 
-/// Sciter's `<menu.context id=x>` shorthand: a class list after the tag name becomes a `class`
-/// attribute (`<menu id=x class="context">`). Raw text (`<script>`, `<style>`) and comments are left alone.
+/// Sciter's tag shorthands (docs.sciter.com/docs/HTML, "syntax shortcuts"): `<menu.context>` and
+/// `<div #title>` / `<input|text(user).wide>` become `class`, `id`, `type` and `name` attributes
+/// (`|type`, `#id`, `.class`, `(name)`, glued to the tag name or standing alone as attributes).
+/// Raw text (`<script>`, `<style>`) and comments are left alone.
 pub(crate) fn expand_class_tags(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let bytes = html.as_bytes();
@@ -205,43 +207,106 @@ pub(crate) fn expand_class_tags(html: &str) -> String {
         while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'-') {
             j += 1;
         }
-        if j == name_start || bytes[j.min(bytes.len() - 1)] != b'.' || !bytes[name_start].is_ascii_alphabetic() {
+        if j == name_start || !bytes[name_start].is_ascii_alphabetic() {
             i += 1;
             continue;
         }
-        // `.class.class` up to whitespace, `/` or `>`.
-        let mut k = j;
-        while k < bytes.len() && !bytes[k].is_ascii_whitespace() && bytes[k] != b'>' && bytes[k] != b'/' {
-            k += 1;
-        }
-        let classes: Vec<&str> = html[j..k].split('.').filter(|c| !c.is_empty()).collect();
-        let valid = !classes.is_empty() && classes.iter().all(|c| c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
-        if !valid {
-            i += 1;
-            continue;
-        }
-        out.push_str(&html[at..j]);
+        let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'-' || c == b'_';
         if closing {
-            at = k;
-        } else {
-            // Merge with an existing quoted `class="..."` on the same tag, else add one.
-            let end = tag_end(html, k).unwrap_or(k);
-            let rest = &html[k..end];
-            let list = classes.join(" ");
-            match rest.find("class=\"") {
-                Some(p) => {
-                    out.push_str(&rest[..p + 7]);
-                    out.push_str(&list);
-                    out.push(' ');
-                    out.push_str(&rest[p + 7..]);
-                    at = end;
+            // `</div.a.b>`: drop the class list.
+            if bytes.get(j) == Some(&b'.') {
+                let mut k = j;
+                while k < bytes.len() && !bytes[k].is_ascii_whitespace() && bytes[k] != b'>' && bytes[k] != b'/' {
+                    k += 1;
                 }
-                None => {
-                    out.push_str(&format!(" class=\"{list}\""));
+                if html[j..k].split('.').filter(|c| !c.is_empty()).all(|c| c.bytes().all(ident)) {
+                    out.push_str(&html[at..j]);
                     at = k;
                 }
             }
+            i = at.max(i + 1);
+            continue;
         }
+        let Some(end) = tag_end(html, j) else {
+            i += 1;
+            continue;
+        };
+        // Walk the attribute area: shorthands are collected, everything else is copied as it is.
+        let (mut id, mut ty, mut name) = (None, None, None);
+        let mut classes: Vec<&str> = Vec::new();
+        let mut rest = String::new();
+        let mut p = j;
+        let mut found = false;
+        while p < end {
+            let c = bytes[p];
+            let take = |from: usize| {
+                let mut q = from;
+                while q < end && ident(bytes[q]) {
+                    q += 1;
+                }
+                q
+            };
+            // A shorthand starts a token (right after the tag name, or after whitespace/another shorthand).
+            if matches!(c, b'#' | b'.' | b'|') && take(p + 1) > p + 1 && (c != b'|' || p == j) {
+                let q = take(p + 1);
+                let word = &html[p + 1..q];
+                match c {
+                    b'#' => id = Some(word),
+                    b'|' => ty = Some(word),
+                    _ => classes.push(word),
+                }
+                found = true;
+                p = q;
+            } else if c == b'(' && bytes[p..end].contains(&b')') {
+                let q = p + bytes[p..end].iter().position(|b| *b == b')').unwrap_or(0);
+                name = Some(&html[p + 1..q]);
+                found = true;
+                p = q + 1;
+            } else if c.is_ascii_whitespace() {
+                rest.push(c as char);
+                p += 1;
+            } else {
+                // An ordinary attribute (or the closing `/`): copy it whole, quotes included.
+                let mut quote = None;
+                while p < end {
+                    let ch = html[p..].chars().next().unwrap_or(' ');
+                    match quote {
+                        Some(q) if ch == q => quote = None,
+                        None if ch == '"' || ch == '\'' => quote = Some(ch),
+                        None if ch.is_ascii_whitespace() => break,
+                        _ => {}
+                    }
+                    rest.push(ch);
+                    p += ch.len_utf8();
+                }
+            }
+        }
+        if !found {
+            i = j.max(i + 1);
+            continue;
+        }
+        out.push_str(&html[at..j]);
+        let mut add = String::new();
+        for (key, v) in [("type", ty), ("id", id), ("name", name)] {
+            if let Some(v) = v.filter(|v| !v.is_empty()) {
+                add.push_str(&format!(" {key}=\"{v}\""));
+            }
+        }
+        if !classes.is_empty() {
+            let list = classes.join(" ");
+            // Merge with an existing quoted `class="..."` on the same tag, else add one.
+            match rest.find("class=\"") {
+                Some(q) => rest.insert_str(q + 7, &format!("{list} ")),
+                None => add.push_str(&format!(" class=\"{list}\"")),
+            }
+        }
+        out.push_str(&add);
+        let rest = rest.trim_end();
+        if !rest.is_empty() && !rest.starts_with(|c: char| c.is_ascii_whitespace() || c == '/') {
+            out.push(' ');
+        }
+        out.push_str(rest);
+        at = end;
         i = at.max(i + 1);
     }
     out.push_str(&html[at..]);
@@ -372,6 +437,10 @@ mod tests {
         // Not markup: comparisons in scripts, comments, plain tags.
         assert_eq!(expand_class_tags("<script>if (a<b.c) {}</script><p>1 < 2.5</p>"), "<script>if (a<b.c) {}</script><p>1 < 2.5</p>");
         assert_eq!(expand_class_tags("<!-- <a.b> --><a href=x.y>"), "<!-- <a.b> --><a href=x.y>");
+        assert_eq!(expand_class_tags("<div #title>x</div>"), "<div id=\"title\">x</div>");
+        assert_eq!(expand_class_tags("<input|text(user) value=\"a.b #c\" />"), "<input type=\"text\" name=\"user\" value=\"a.b #c\" />");
+        assert_eq!(expand_class_tags("<button|radio(g).first class=\"x\">"), "<button type=\"radio\" name=\"g\" class=\"first x\">");
+        assert_eq!(expand_class_tags("<a href=a.b#c>"), "<a href=a.b#c>");
     }
 
     #[test]
