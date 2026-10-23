@@ -2406,7 +2406,8 @@ impl Page {
             }
         }
         let (x, y) = self.pointer.unwrap_or_default();
-        let mouse = |kind| UiEvent::Mouse { kind, x, y, button: 0 };
+        let mods = self.mod_bits();
+        let mouse = |kind| UiEvent::Mouse { kind, x, y, button: 0, mods };
         if let Some(o) = old {
             self.emit(o, mouse("mouseout"));
         }
@@ -2599,7 +2600,7 @@ impl Page {
             }
         }
         if let Some(t) = self.interaction().hover {
-            changed |= self.emit(t, UiEvent::Mouse { kind: "mousemove", x, y, button: 0 }).1;
+            changed |= self.emit(t, UiEvent::Mouse { kind: "mousemove", x, y, button: 0, mods: self.mod_bits() }).1;
         }
         changed
     }
@@ -2656,7 +2657,12 @@ impl Page {
 
     pub fn mouse_event(&self, kind: &'static str) -> UiEvent {
         let (x, y) = self.pointer.unwrap_or_default();
-        UiEvent::Mouse { kind, x, y, button: 0 }
+        UiEvent::Mouse { kind, x, y, button: 0, mods: self.mod_bits() }
+    }
+
+    /// The held modifier keys as the bits `UiEvent::Mouse` carries (1 shift, 2 control, 4 alt, 8 meta).
+    fn mod_bits(&self) -> u8 {
+        u8::from(self.mods.shift_key()) | u8::from(self.mods.control_key()) << 1 | u8::from(self.mods.alt_key()) << 2 | u8::from(self.mods.super_key()) << 3
     }
 
     /// Primary button down: the hovered element becomes active and focus moves
@@ -4366,6 +4372,280 @@ mod tests {
         assert_eq!(js(&mut p, "window.seen"), "true,true,0");
         assert_eq!(p.view.borrow_mut().window_requests.last(), Some(&nile_script::WindowCommand::Quit(3)));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_ui_barcode_module_draws_codes_that_match_reference_encoders() {
+        // Expected bars/rows come from python-barcode and qrcode (the encoders were also checked against
+        // them over thousands of values: all of QR versions 1-40 at every level, EAN-13/8, UPC-A, Code 39,
+        // and Code 128 decoded back to its text).
+        let (mut p, path) = page(
+            r#"<body><nile-barcode id="a" type="ean13" value="590123412345" height="40"></nile-barcode>
+               <nile-barcode id="b" type="code39" value="@@"></nile-barcode>
+            <script type="module">
+              import { encode, svg, types } from "@nile/ui";
+              const qr = encode("qr", "Nile", { ecc: "H", mask: 3 });
+              window.out = [
+                encode("ean13", "5901234123457").bars,
+                encode("ean13", "590123412345").text,
+                encode("code39", "nile").bars,
+                qr.version + ":" + qr.rows.join(","),
+                svg("code128", "ORDER-1042").startsWith("<svg"),
+                types.join(" "),
+              ].join(";");
+              try { encode("ean13", "5901234123458"); } catch (e) { window.err = e.message; }
+            </script></body>"#,
+            "ui-barcode",
+        );
+        let want = [
+            "10100010110100111011001100100110111101001110101010110011011011001000010101110010011101000100101",
+            "5901234123457",
+            "10001011101110101010111010001110101110100011101010111010100011101110101110001010100010111011101",
+            "1:111111100000001111111,100000100110001000001,101110100010101011101,101110100011101011101,101110101010101011101,100000100111101000001,111111101010101111111,000000001010100000000,001100111111011010000,100010001100000100001,110111111110100110011,010001000000101001011,111011110011000010011,000000001010100100101,111111101001001010000,100000100101110001100,101110100000010001111,101110101100011011010,101110101010100011100,100000100100100011001,111111100110000100000",
+            "true",
+            "code128 code39 ean13 ean8 upca qr",
+        ];
+        assert_eq!(js(&mut p, "window.out"), want.join(";"));
+        assert!(js(&mut p, "window.err").contains("check digit is wrong"));
+        // The element draws an <svg> inside itself, and flags a value it can't encode.
+        assert_eq!(js(&mut p, "document.getElementById('a').innerHTML.startsWith('<svg')"), "true");
+        assert_eq!(js(&mut p, "document.getElementById('b').hasAttribute('invalid')"), "true");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_drawer_opens_closes_and_keeps_focus() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><button id="t" data-drawer-toggle="#d">menu</button>
+               <button id="o" data-drawer-open="#d" style="position:absolute;left:100px;top:0">open</button>
+               <nile-drawer id="d" size="200"><button id="in">a</button><button id="x" data-drawer-close>close</button></nile-drawer>
+            <script type="module">
+              import "@nile/ui";
+              window.ev = [];
+              const d = window.d = document.getElementById("d");
+              d.addEventListener("open", () => ev.push("open"));
+              d.addEventListener("close", () => ev.push("close"));
+              d.addEventListener("beforeclose", (e) => { if (window.hold) e.preventDefault(); });
+            </script></body>"##,
+            "ui-drawer",
+        );
+        let settle = |p: &mut Page, ms: u64| {
+            std::thread::sleep(Duration::from_millis(ms));
+            p.run_timers();
+            p.run_timers();
+        };
+        let state = |p: &mut Page| js(p, "[d.opened, d.classList.contains('nile-shown'), d.classList.contains('nile-open'), document.activeElement && document.activeElement.id].join()");
+        p.run_timers();
+        assert_eq!(state(&mut p), "false,false,false,t".replace("t", "") + "", "closed at first");
+        click(&mut p, "t");
+        settle(&mut p, 40);
+        assert_eq!(state(&mut p), "true,true,true,in", "the toggle button opens it and focus moves inside");
+        // Escape closes it, and focus goes back to where it was.
+        p.key("keydown", "Escape".into(), ModifiersState::default());
+        settle(&mut p, 260);
+        assert_eq!(state(&mut p), "false,false,false,t");
+        // A listener can veto the close.
+        js(&mut p, "window.hold = true; d.show()");
+        settle(&mut p, 40);
+        p.key("keydown", "Escape".into(), ModifiersState::default());
+        settle(&mut p, 260);
+        assert_eq!(js(&mut p, "d.opened"), "true", "beforeclose preventDefault keeps it open");
+        js(&mut p, "window.hold = false");
+        // The close button inside closes it; a bubbling `open`/`close` pair was fired each time.
+        click(&mut p, "x");
+        settle(&mut p, 260);
+        assert_eq!(js(&mut p, "d.opened"), "false");
+        assert_eq!(js(&mut p, "ev.join()"), "open,close,open,close");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_splitter_drags_collapses_and_remembers() {
+        let key = format!("splitter-test-{}", std::process::id());
+        let (mut p, path) = page(
+            &r#"<body style="margin:0"><nile-splitter id="s" persist="PERSIST_KEY" style="width:600px;height:100px">
+                 <div id="a" size="200" min="100" max="400" collapsible>a</div><div id="b" min="50">b</div>
+               </nile-splitter>
+            <script type="module">
+              import "@nile/ui";
+              window.s = document.getElementById("s");
+              window.changes = 0;
+              s.addEventListener("splitterchange", () => changes++);
+              window.grip = () => { const r = document.querySelector(".nile-splitter-grip").getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; };
+            </script></body>"#
+                .replace("PERSIST_KEY", &key),
+            "ui-splitter",
+        );
+        p.run_timers();
+        let sizes = |p: &mut Page| js(p, "s.sizes.join()");
+        let grip = |p: &mut Page| -> (f32, f32) {
+            let v = js(p, "grip().join()");
+            let mut it = v.split(',').map(|n| n.parse::<f32>().unwrap());
+            (it.next().unwrap(), it.next().unwrap())
+        };
+        assert_eq!(sizes(&mut p), "200,390", "the size attribute sets the first pane, the other takes the rest");
+        // Drag the grip 100px right.
+        let (x, y) = grip(&mut p);
+        p.pointer_moved(x, y);
+        p.press();
+        p.pointer_moved(x + 100.0, y);
+        p.release();
+        assert_eq!(sizes(&mut p), "300,290");
+        // max is 400: dragging further stops there.
+        let (x, y) = grip(&mut p);
+        p.pointer_moved(x, y);
+        p.press();
+        p.pointer_moved(x + 290.0, y);
+        p.release();
+        assert_eq!(sizes(&mut p), "400,190");
+        // A click without a drag collapses the collapsible pane, and another brings it back.
+        let (x, y) = grip(&mut p);
+        p.pointer_moved(x, y);
+        p.press();
+        p.release();
+        assert_eq!(js(&mut p, "[s.sizes.join(), s.isCollapsed(0)].join(';')"), "0,590;true");
+        let (x, y) = grip(&mut p);
+        p.pointer_moved(x, y);
+        p.press();
+        p.release();
+        assert_eq!(sizes(&mut p), "400,190", "expanding restores the size it had");
+        // Arrow keys on the focused grip move it by 10px.
+        js(&mut p, "document.querySelector('.nile-splitter-grip').focus()");
+        p.key("keydown", "ArrowLeft".into(), ModifiersState::default());
+        assert_eq!(sizes(&mut p), "390,200");
+        assert!(js(&mut p, "changes").parse::<u32>().unwrap() >= 5);
+        // The layout is saved for next time.
+        std::thread::sleep(Duration::from_millis(150));
+        p.run_timers();
+        assert_eq!(js(&mut p, &format!("localStorage.getItem('nile-splitter:{key}')")), r#"{"sizes":[390,null],"collapsed":[false,false]}"#);
+        js(&mut p, &format!("localStorage.removeItem('nile-splitter:{key}')"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_grid_draws_only_visible_rows_and_sorts_selects_and_resizes() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><nile-grid id="g" key="id" select="multiple" row-height="30" empty="Nothing here" style="width:600px;height:200px">
+                 <nile-column key="id" title="#" width="80" type="number"></nile-column>
+                 <nile-column key="name" title="Name"></nile-column>
+               </nile-grid>
+            <script type="module">
+              import "@nile/ui";
+              const g = window.g = document.getElementById("g");
+              window.events = [];
+              g.addEventListener("selectionchange", (e) => events.push("sel:" + e.detail.indexes.join(".")));
+              g.addEventListener("sort", (e) => events.push("sort:" + e.detail.key + ":" + e.detail.direction));
+              g.addEventListener("columnresize", (e) => events.push("resize:" + e.detail.key + ":" + e.detail.width));
+              g.addEventListener("rowactivate", (e) => events.push("go:" + e.detail.index));
+              window.empty = () => getComputedStyle(g.querySelector(".nile-grid-empty")).display;
+              window.mounted = () => g.mountedCount;
+              // Rows are recycled, so the document order isn't the grid order: go by each row's position.
+              window.shown = () => Array.from(g.querySelectorAll(".nile-grid-row")).filter((r) => r.style.display !== "none").sort((a, b) => a._vi - b._vi);
+              window.firstCells = () => shown().slice(0, 3).map((r) => r.querySelector(".nile-grid-cell:nth-child(2)").textContent).join();
+              window.at = (sel, i) => { const el = sel === ".nile-grid-row" ? shown()[i] : (i === undefined ? g.querySelector(sel) : g.querySelectorAll(sel)[i]); const r = el.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2].join(); };
+              g.rows = Array.from({ length: 10000 }, (_, i) => ({ id: i + 1, name: "Item " + (10000 - i) }));
+            </script></body>"##,
+            "ui-grid",
+        );
+        p.run_timers();
+        let at = |p: &mut Page, sel: &str, i: Option<usize>| -> (f32, f32) {
+            let v = match i {
+                Some(i) => js(p, &format!("at('{sel}', {i})")),
+                None => js(p, &format!("at('{sel}')")),
+            };
+            let mut it = v.split(',').map(|n| n.parse::<f32>().unwrap());
+            (it.next().unwrap(), it.next().unwrap())
+        };
+        let click_at = |p: &mut Page, (x, y): (f32, f32)| {
+            p.pointer_moved(x, y);
+            p.press();
+            p.release();
+        };
+        // 10,000 rows, but only the ones in view (and a little beyond) are in the document.
+        let mounted: usize = js(&mut p, "mounted()").parse().unwrap();
+        assert!((5..=20).contains(&mounted), "mounted {mounted}");
+        assert_eq!(js(&mut p, "g.rowCount"), "10000");
+        assert_eq!(js(&mut p, "empty()"), "none");
+        // Scrolling mounts new rows and drops the old ones.
+        js(&mut p, "g.querySelector('.nile-grid-body').scrollTop = 30 * 5000");
+        p.run_timers();
+        std::thread::sleep(Duration::from_millis(40));
+        p.run_timers();
+        assert_eq!(js(&mut p, "g.querySelector('.nile-grid-row').textContent.length > 0 && mounted() <= 20"), "true");
+        assert_eq!(js(&mut p, "shown().some((r) => r.firstChild.textContent === '5001')"), "true");
+        js(&mut p, "g.querySelector('.nile-grid-body').scrollTop = 0");
+        p.run_timers();
+        std::thread::sleep(Duration::from_millis(40));
+        p.run_timers();
+        // Click the Name header: natural-order ascending ("Item 1", "Item 2", "Item 10"...), then descending.
+        let header = at(&mut p, ".nile-grid-hcell", Some(1));
+        click_at(&mut p, header);
+        assert_eq!(js(&mut p, "firstCells()"), "Item 1,Item 2,Item 3");
+        click_at(&mut p, header);
+        assert_eq!(js(&mut p, "firstCells()"), "Item 10000,Item 9999,Item 9998");
+        click_at(&mut p, header);
+        assert_eq!(js(&mut p, "firstCells()"), "Item 10000,Item 9999,Item 9998", "a third click clears the sort, back to the data order");
+        click_at(&mut p, header);
+        click_at(&mut p, header);
+        // Click selects, Shift-click extends, Ctrl-click toggles.
+        let row = |p: &mut Page, i: usize| at(p, ".nile-grid-row", Some(i));
+        let r1 = row(&mut p, 1);
+        click_at(&mut p, r1);
+        assert_eq!(js(&mut p, "g.selectedIndex"), "1");
+        p.mods = ModifiersState::SHIFT;
+        let r3 = row(&mut p, 3);
+        click_at(&mut p, r3);
+        assert_eq!(js(&mut p, "g.selected.map((r) => r.id).join()"), "2,3,4", "shift-click selects the range");
+        p.mods = ModifiersState::CONTROL;
+        let r2 = row(&mut p, 2);
+        click_at(&mut p, r2);
+        assert_eq!(js(&mut p, "g.selected.map((r) => r.id).join()"), "2,4", "ctrl-click removed the middle one");
+        p.mods = ModifiersState::default();
+        // Keys: arrows move the selection, Enter activates.
+        js(&mut p, "g.querySelector('.nile-grid-body').focus()");
+        p.key("keydown", "ArrowDown".into(), ModifiersState::default());
+        assert_eq!(js(&mut p, "g.selectedIndex"), "3");
+        p.key("keydown", "Enter".into(), ModifiersState::default());
+        assert!(js(&mut p, "events.join()").contains("go:3"));
+        p.key("keydown", "End".into(), ModifiersState::default());
+        assert_eq!(js(&mut p, "g.selectedIndex"), "9999");
+        // Dragging the edge of a column header resizes it.
+        let edge = at(&mut p, ".nile-grid-resizer", Some(0));
+        p.pointer_moved(edge.0, edge.1);
+        p.press();
+        p.pointer_moved(edge.0 + 40.0, edge.1);
+        p.release();
+        assert_eq!(js(&mut p, "g.columns[0]._w"), "120");
+        assert!(js(&mut p, "events.join()").contains("resize:id:120"));
+        // Changing the data keeps the selection by key; an empty grid shows its message.
+        js(&mut p, "g.rows = [{ id: 7, name: 'x' }]");
+        assert_eq!(js(&mut p, "g.selected.length"), "0");
+        js(&mut p, "g.rows = []");
+        assert_eq!(js(&mut p, "empty()"), "flex");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_splitter_reads_frameset_style_sizes() {
+        let (mut p, path) = page(
+            r#"<body style="margin:0">
+               <nile-splitter id="a" cols="100px 1* 2*" style="width:600px;height:50px"><div>a</div><div>b</div><div>c</div></nile-splitter>
+               <nile-splitter id="b" style="width:600px;height:50px"><div size="25%">a</div><div size="3*">b</div><div size="1*">c</div></nile-splitter>
+               <nile-splitter id="c" rows="40 *" style="width:300px;height:200px"><div>a</div><div>b</div></nile-splitter>
+            <script type="module">
+              import "@nile/ui";
+              window.sizes = (id) => document.getElementById(id).sizes.map(Math.round).join();
+            </script></body>"#,
+            "ui-splitter-units",
+        );
+        p.run_timers();
+        // 600px minus two 10px grips: 100px fixed, the other 480 shared 1:2.
+        assert_eq!(js(&mut p, "sizes('a')"), "100,160,320");
+        // 25% of 600 = 150; the other 430 (after the grips) is shared 3:1, rounded to whole pixels.
+        assert_eq!(js(&mut p, "sizes('b')"), "150,323,107");
+        // `rows` stacks the panes: 40px, then the rest (200 - 10 grip).
+        assert_eq!(js(&mut p, "sizes('c')"), "40,150");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -6987,6 +7267,91 @@ cd</textarea>
             p.view.borrow_mut().layout();
         }
         eprintln!("hover move: {:.3} ms each", t.elapsed().as_secs_f64() * 1e3 / n as f64);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_splitter_drag() {
+        let file = std::env::var("NILE_BENCH_FILE").map(PathBuf::from).unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/splitter.html"));
+        let (w, h) = (1000u32, 760u32);
+        let mut p = Page::load(file, (w as f32, h as f32), 0.0);
+        p.layout(w as f32, h as f32);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for _ in 0..3 {
+            p.run_timers();
+            p.paint(&mut px, w, h, 1.0);
+        }
+        let v = p.eval("(() => { const r = document.querySelector('.nile-splitter-grip').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2].join(); })()").0.unwrap();
+        let mut it = v.split(',').map(|n| n.parse::<f32>().unwrap());
+        let (x, y) = (it.next().unwrap(), it.next().unwrap());
+        p.pointer_moved(x, y);
+        p.press();
+        let n = 80;
+        let (mut total, mut worst) = (0.0f64, 0.0f64);
+        let mut frames = Vec::new();
+        for i in 1..=n {
+            let t = Instant::now();
+            p.pointer_moved(x + (i as f32) * 3.0, y);
+            p.run_timers();
+            p.sync();
+            p.paint(&mut px, w, h, 1.0);
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            total += ms;
+            worst = worst.max(ms);
+            frames.push(ms);
+        }
+        p.release();
+        eprintln!("splitter drag (3px per move): {:.2} ms/frame avg, {:.1} ms worst", total / n as f64, worst);
+        eprintln!("  frames: {}", frames.iter().map(|m| format!("{m:.0}")).collect::<Vec<_>>().join(" "));
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_grid_scroll() {
+        let file = std::env::var("NILE_BENCH_FILE").map(PathBuf::from).unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/data-grid.html"));
+        let (w, h) = (1000u32, 720u32);
+        let mut p = Page::load(file, (w as f32, h as f32), 0.0);
+        p.layout(w as f32, h as f32);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for _ in 0..3 {
+            p.run_timers();
+            p.paint(&mut px, w, h, 1.0);
+        }
+        p.pointer_moved(700.0, 300.0);
+        for step in [18.0f32, 60.0, 120.0] {
+            let mut rows = Vec::new();
+            let (mut js_ms, mut sync_ms, mut paint_ms, mut worst) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            let n = 40;
+            for _ in 0..n {
+                let t = Instant::now();
+                p.wheel(0.0, -step);
+                let t_js = Instant::now();
+                std::thread::sleep(Duration::from_millis(2));
+                p.run_timers(); // the grid's requestAnimationFrame work
+                let a = t_js.elapsed().as_secs_f64() * 1e3 - 2.0;
+                let t_sync = Instant::now();
+                p.sync();
+                let _ = p.animate();
+                let b = t_sync.elapsed().as_secs_f64() * 1e3;
+                let t_paint = Instant::now();
+                p.paint(&mut px, w, h, 1.0);
+                let c = t_paint.elapsed().as_secs_f64() * 1e3;
+                let total = t.elapsed().as_secs_f64() * 1e3 - 2.0;
+                js_ms += a;
+                sync_ms += b;
+                paint_ms += c;
+                worst = worst.max(total);
+                rows.push(total);
+            }
+            eprintln!(
+                "wheel {step:>5}px: scripts {:.2} ms, relayout {:.2} ms, paint {:.2} ms (avg), worst frame {:.1} ms",
+                js_ms / n as f64,
+                sync_ms / n as f64,
+                paint_ms / n as f64,
+                worst
+            );
+            eprintln!("  frames: {}", rows.iter().map(|m| format!("{m:.0}")).collect::<Vec<_>>().join(" "));
+        }
     }
 
     #[test]

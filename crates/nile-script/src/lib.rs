@@ -40,6 +40,15 @@ const EDIT: &str = include_str!("edit.js");
 const WEB: &str = include_str!("web.js");
 const CANVAS: &str = include_str!("canvas.js");
 const AUDIO: &str = include_str!("audio.js");
+// `@nile/ui`: the component library, whole modules loaded by `import`.
+const UI_MODULES: &[(&str, &str)] = &[
+    ("@nile/ui", include_str!("ui/index.js")),
+    ("@nile/ui/base", include_str!("ui/base.js")),
+    ("@nile/ui/barcode", include_str!("ui/barcode.js")),
+    ("@nile/ui/drawer", include_str!("ui/drawer.js")),
+    ("@nile/ui/splitter", include_str!("ui/splitter.js")),
+    ("@nile/ui/grid", include_str!("ui/grid.js")),
+];
 
 fn prelude() -> String {
     include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", &WEB.replace("/*@CANVAS@*/", CANVAS).replace("/*@AUDIO@*/", AUDIO))
@@ -315,7 +324,7 @@ impl Resolver for FileResolver {
             return Err(rquickjs::Error::new_resolving(base.to_string_lossy(), name));
         }
         let path = std::path::Path::new(name);
-        if matches!(name, "@nile" | "@sciter" | "@env" | "@sys" | "@debug" | "@storage") {
+        if matches!(name, "@nile" | "@sciter" | "@env" | "@sys" | "@debug" | "@storage" | "@nile/ui") || name.starts_with("@nile/ui/") {
             // `@sciter` is the same module under the name Sciter apps use.
             return Ok(if name == "@sciter" { "@nile".to_string() } else { name.to_string() });
         }
@@ -381,6 +390,7 @@ impl Loader for FileLoader {
             ),
             "@debug" => Some("const m = globalThis.__debugModule;\nexport const { setUnhandledExceptionHandler, setConsoleOutputHandler, callStackAt, setResourceArrivalHandler, setBreakpointHandler, setBreakpoints, getElementByUID, getUIDofElement, highlightElement, getStyleRulesOfElement, containerId, objectKind, sublimatedValue, sublimatedValueElements, frameVariables } = m;\nexport default m;"),
             "@storage" => Some("const m = globalThis.__storageModule;\nexport const open = m.open;\nexport default m;"),
+            n if n.starts_with("@nile/ui") => UI_MODULES.iter().find(|(m, _)| *m == n).map(|(_, src)| *src),
             "@env" => Some(
                 "const m = globalThis.__envModule;\nexport const { language, country, userName, machineName, domainName, arguments: args, launch, home, homeURL, path, pathURL, drives, variable, exec, DEVICE } = m;\nexport { args as arguments };\nexport const OS = m.OS, PLATFORM = m.PLATFORM;\nexport default m;",
             ),
@@ -412,8 +422,9 @@ fn with_location(name: &str, source: String) -> String {
 /// An input event for [`ScriptHost::dispatch`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiEvent {
-    /// `click`, `mousedown`, `mouseup`, `mousemove`, `mouseover`, `mouseout`.
-    Mouse { kind: &'static str, x: f32, y: f32, button: i32 },
+    /// `click`, `mousedown`, `mouseup`, `mousemove`, `mouseover`, `mouseout`. `mods` is the held modifier keys as
+    /// bits: 1 shift, 2 control, 4 alt, 8 meta.
+    Mouse { kind: &'static str, x: f32, y: f32, button: i32, mods: u8 },
     /// `keydown`, `keyup`.
     Key { kind: &'static str, key: String, ctrl: bool, shift: bool, alt: bool, meta: bool },
     /// `focus`, `blur`, ... with no payload.
@@ -1180,10 +1191,14 @@ impl ScriptHost {
         self.call_global("__dispatch", |ctx, f| {
             let init = Object::new(ctx.clone())?;
             let kind = match event {
-                UiEvent::Mouse { kind, x, y, button } => {
+                UiEvent::Mouse { kind, x, y, button, mods } => {
                     init.set("clientX", *x)?;
                     init.set("clientY", *y)?;
                     init.set("button", *button)?;
+                    init.set("shiftKey", mods & 1 != 0)?;
+                    init.set("ctrlKey", mods & 2 != 0)?;
+                    init.set("altKey", mods & 4 != 0)?;
+                    init.set("metaKey", mods & 8 != 0)?;
                     kind
                 }
                 UiEvent::Key { kind, key, ctrl, shift, alt, meta } => {
@@ -1575,7 +1590,7 @@ mod tests {
         )
         .unwrap();
         let inner = doc.borrow().find(|n| n.attr("id") == Some("inner")).unwrap();
-        let ev = UiEvent::Mouse { kind: "click", x: 1.0, y: 2.0, button: 0 };
+        let ev = UiEvent::Mouse { kind: "click", x: 1.0, y: 2.0, button: 0, mods: 0 };
         assert!(host.dispatch(inner, &ev));
         host.run("console.log(__log.join(','))").unwrap();
         assert_eq!(
@@ -1598,7 +1613,7 @@ mod tests {
         )
         .unwrap();
         let i = doc.borrow().find(|n| n.attr("id") == Some("i")).unwrap();
-        let ev = UiEvent::Mouse { kind: "click", x: 0.0, y: 0.0, button: 0 };
+        let ev = UiEvent::Mouse { kind: "click", x: 0.0, y: 0.0, button: 0, mods: 0 };
         assert!(!host.dispatch(i, &ev), "preventDefault reports false");
         assert!(host.dispatch(i, &ev), "once listener is gone; click bubbles to o");
         host.run("console.log(__out.join(','))").unwrap();

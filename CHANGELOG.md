@@ -8,6 +8,20 @@ the section becomes that version's.
 
 ## Unreleased
 
+### 2026-10-22
+
+#### Added
+- `@nile/ui`, an optional component library written in JavaScript and built into the program (`import ... from "@nile/ui"`; nothing to install, and a module that isn't imported costs nothing). First module: **barcodes and QR codes**: `<nile-barcode type value height module-width margin color background text ecc>` and `svg(type, value, options)`, `encode`, `dataUrl` for Code 128, Code 39, EAN-13, EAN-8, UPC-A and QR (byte mode, versions 1-40, error correction L/M/Q/H). Checked against `qrcode` (identical matrices for all 160 version/level combinations), `python-barcode` and OpenCV's readers. `examples/barcodes.html`, `docs/guide/ui-components.md`.
+- `@nile/ui` drawer, splitter and data grid, each with an example page and tests: `<nile-drawer>` (slides in from any edge; backdrop, Escape and click-outside close, a cancelable `beforeclose`, focus kept inside and restored, `data-drawer-toggle|open|close` buttons that need no script), `<nile-splitter>` (draggable grip with a three-dot handle, keyboard resizing, min/max, click-to-collapse panes that restore their size, nesting, sizes remembered with `persist`, and the same size units as `<frameset>`: px, `%` and `N*` shares, per pane or as a `cols`/`rows` list on the host) and `<nile-grid>` with `<nile-column>` (draws only the visible rows so 100,000 cost the same as 30; columns with computed, formatted and custom cells; natural-order sorting, single/multiple selection with Shift/Ctrl, arrow/Page/Home/End keys, resizable columns, an empty state; events `selectionchange`, `rowactivate`, `sort`, `columnresize`). `examples/drawer.html`, `splitter.html`, `data-grid.html`, [guide](docs/guide/ui-components.md).
+- Mouse events (`click`, `mousedown`, `mouseup`, `mousemove`, ...) now carry `shiftKey`, `ctrlKey`, `altKey` and `metaKey`; they were always false before, so Shift-click and Ctrl-click handlers couldn't work.
+
+#### Fixed
+- `<nile-splitter>` dragging: the panes are measured once when the drag starts, a pointer move that doesn't change the clamped size writes nothing, and `splitterchange` is sent once per frame (and when the drag ends) instead of on every move: 2.1 ms to 0.9 ms per move. `bench_splitter_drag` (ignored test) measures it.
+- `<nile-grid>` scrolling: row elements are now reused instead of rebuilt when rows scroll in and out of view, the spacer is only rewritten when its size changes, and `selected`/`selectedIndex` no longer scan every row (`selectedCount` and `mountedCount` are new and O(1)). A frame while scrolling 100,000 rows now takes about 2 ms (6-10 ms on the frames that bring new rows in), down from 12-17 ms. `bench_grid_scroll` (ignored test; `NILE_BENCH_FILE` picks another page) measures it.
+- `flex: 0 0 100px`, `flex: 0 0 auto` and any other `flex` shorthand with a bare `0` for `flex-shrink` ignored the basis (the `0` was read as `flex-basis: 0`); `flex: 1 200px` and `flex: 100px` now parse too.
+- The `background` shorthand now resets the colour like the spec says: `background: none` and `background: url(...)` left an inherited or user-agent background colour (a button's, for one) showing.
+
+
 ### 2026-10-20
 
 #### Added

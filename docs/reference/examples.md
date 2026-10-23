@@ -16,6 +16,7 @@ ownership require a GUI run; PNG success does not verify them.
 
 | Entry | Features/workflows | Persistence and limitations |
 |---|---|---|
+| [Retail counter](../../examples/retail-counter/index.html) | Aronium-style dark checkout reference, receipt, search, keyboard shortcuts, held sales, discounts and demo payments | In-memory sample data; no payment or hardware integration. [Instructions](../../examples/retail-counter/README.md) |
 | [Neon Breaker](../../examples/neon-breaker/index.html) | Three-sector arcade game, fixed-step physics, Canvas rendering, keyboard/mouse controls, power-ups, pooled audio and music | Local high score/settings; CPU rendering. [Run, package and verify](../../examples/neon-breaker/README.md) |
 | [System theme](../../examples/system-theme/index.html) | Optional OS appearance, control states and components | External CSS package; [loading guide](../../themes/system/README.md) |
 | [POS](../../examples/pos/index.html) | Product search/categories, quantities, discount, customers, held carts, cash/change, simulated card/mobile, receipts and reports | In-memory sample data; no real payments, database, authentication or printing. [Instructions](../../examples/pos/README.md) |
@@ -94,6 +95,10 @@ browser compatibility.
 | [transforms.html](../../examples/transforms.html) | 2D transforms |
 | [transforms3d.html](../../examples/transforms3d.html) | Projected 3D transforms |
 | [window.html](../../examples/window.html) | Window attributes and frameless chrome |
+| [drawer.html](../../examples/drawer.html) | `@nile/ui` drawer from any edge, backdrop and no-script triggers |
+| [splitter.html](../../examples/splitter.html) | `@nile/ui` splitter: drag, keyboard, collapse, remembered sizes |
+| [data-grid.html](../../examples/data-grid.html) | `@nile/ui` data grid: 100,000 virtual rows, sorting, selection, resize |
+| [barcodes.html](../../examples/barcodes.html) | `@nile/ui` Code 128/39, EAN-13/8, UPC-A and QR |
 | [windows.html](../../examples/windows.html) | Multiple windows, modal result and shared messages |
 | [word-ribbon.html](../../examples/word-ribbon.html) | Word-style editing ribbon |
 

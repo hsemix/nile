@@ -1,0 +1,66 @@
+<!doctype html>
+<html window-width="1000" window-height="640">
+<meta charset="utf-8">
+<title>Drawer: @nile/ui</title>
+<style>
+  html, body { height: 100%; margin: 0 }
+  body { font-family: system-ui, sans-serif; background: #1b1b1b; color: #e5e5e5; display: flex; flex-direction: column }
+  .top { height: 44px; display: flex; align-items: center; gap: 10px; padding: 0 14px; background: #262626; border-bottom: 1px solid #333 }
+  .top .grow { flex: 1 }
+  .main { flex: 1; display: flex }
+  .receipt { flex: 1; display: flex; align-items: center; justify-content: center; color: #888; flex-direction: column; gap: 4px }
+  .receipt b { font-size: 26px; color: #777 }
+  .handle { width: 22px; display: flex; align-items: center; justify-content: center; background: #222; border: 0; color: #888; font-size: 18px; line-height: 1; padding: 0 }
+  .handle:hover { background: #2c2c2c; color: #ddd }
+  .keys { width: 300px; background: #202020; padding: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-content: start }
+  .keys button { height: 56px; background: #2b2b2b; color: #ddd; border: 1px solid #3a3a3a; border-radius: 4px }
+  button { cursor: default }
+  .admin h2 { margin: 0; padding: 16px 18px; font-size: 20px; font-weight: 400; display: flex; justify-content: space-between; align-items: center }
+  .admin h2 button { background: none; border: 0; color: inherit; font-size: 20px; padding: 0 4px }
+  .admin ul { list-style: none; margin: 0; padding: 0 }
+  .admin li { padding: 12px 18px; display: flex; gap: 12px; align-items: center }
+  .admin li:hover { background: rgba(255, 255, 255, 0.07) }
+  .admin .label { padding: 10px 18px 4px; font-size: 12px; color: #9a9a9a; text-transform: uppercase; letter-spacing: .05em }
+  nile-drawer { --nile-drawer-bg: #333; --nile-drawer-color: #f1f1f1 }
+  .sheet { padding: 18px }
+</style>
+<body>
+  <div class="top">
+    <span>POS</span><span class="grow"></span>
+    <button data-drawer-toggle="#bottom">Bottom sheet</button>
+    <button data-drawer-toggle="#left">Left drawer</button>
+  </div>
+  <div class="main">
+    <div class="receipt"><b>No items</b><span>Add products to the receipt</span></div>
+    <button class="handle" data-drawer-toggle="#admin" title="Open menu">&#x22EE;</button>
+    <div class="keys"><button>Cash</button><button>Card</button><button>Discount</button><button>Save sale</button><button>Lock</button><button>Delete</button></div>
+  </div>
+
+  <nile-drawer id="admin" size="340">
+    <div class="admin">
+      <h2>POS - Admin <button data-drawer-close aria-label="Close">&#x2192;</button></h2>
+      <ul>
+        <li>Management</li>
+      </ul>
+      <div class="label">Sales</div>
+      <ul><li>View sales history</li><li>View open sales</li><li>Cash In / Out</li><li>End of day</li></ul>
+      <div class="label">User</div>
+      <ul><li>User info</li></ul>
+    </div>
+  </nile-drawer>
+
+  <nile-drawer id="left" side="left" size="260" backdrop="false">
+    <div class="sheet"><h3>Left drawer</h3><p>No backdrop, so the page behind stays usable. Escape closes it.</p><button data-drawer-close>Close</button></div>
+  </nile-drawer>
+
+  <nile-drawer id="bottom" side="bottom" size="180">
+    <div class="sheet"><h3>Bottom sheet</h3><p>Click outside, press Escape or use the button.</p><button data-drawer-close>Done</button></div>
+  </nile-drawer>
+
+  <script type="module">
+    import "@nile/ui";
+    $("#admin").on("open", () => console.log("admin opened"));
+    $("#admin").on("close", () => console.log("admin closed"));
+  </script>
+</body>
+</html>

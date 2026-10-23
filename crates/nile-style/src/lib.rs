@@ -2938,8 +2938,11 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
         }
         "background" | "background-color" | "background-image" => {
             if d.name != "background-image" {
-                if let Some(c) = v.iter().find_map(&color) {
-                    s.background = Some(c);
+                let found = v.iter().find_map(&color);
+                // The shorthand resets the colour too (`background: none` means a transparent one);
+                // `background-color` only changes it when it has a value.
+                if found.is_some() || d.name == "background" {
+                    s.background = found;
                 }
             }
             if d.name != "background-color" {
@@ -3608,15 +3611,29 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.flex_shrink = 1.0;
                 s.flex_basis = Length::Auto;
             }
-            [Value::Number(g), rest @ ..] => {
-                s.flex_grow = *g;
-                s.flex_shrink = match rest.first() {
-                    Some(Value::Number(sh)) => *sh,
-                    _ => 1.0,
-                };
-                s.flex_basis = rest.iter().find_map(|x| length(x, fs)).unwrap_or(Length::Px(0.0));
+            tokens => {
+                // Up to two bare numbers (grow, then shrink), and a basis (a length, a percentage or `auto`)
+                // anywhere around them; a third bare number can only be a basis of 0.
+                let mut numbers = Vec::new();
+                let mut basis = None;
+                for x in tokens {
+                    match x {
+                        Value::Number(n) if numbers.len() < 2 => numbers.push(*n),
+                        Value::Number(n) if *n == 0.0 => basis = Some(Length::Px(0.0)),
+                        Value::Number(_) => return,
+                        other => match length(other, fs) {
+                            Some(b) => basis = Some(b),
+                            None => return,
+                        },
+                    }
+                }
+                if numbers.is_empty() && basis.is_none() {
+                    return;
+                }
+                s.flex_grow = numbers.first().copied().unwrap_or(1.0);
+                s.flex_shrink = numbers.get(1).copied().unwrap_or(1.0);
+                s.flex_basis = basis.unwrap_or(Length::Px(0.0));
             }
-            _ => {}
         },
         "justify-content" => s.justify_content = first.and_then(align).unwrap_or(s.justify_content),
         "align-items" => s.align_items = first.and_then(align).unwrap_or(s.align_items),
@@ -4087,6 +4104,49 @@ mod tests {
         assert_eq!(c.grid_row, GridPlace { start: GridLine::Line(1), end: GridLine::Line(3) });
         assert_eq!(c.grid_column, GridPlace { start: GridLine::Line(2), end: GridLine::Line(4) });
         assert_eq!((c.align_items, c.justify_items), (Align::Center, Align::End));
+    }
+
+    #[test]
+    fn the_background_shorthand_resets_the_colour() {
+        let doc = Document::parse(
+            r#"<style>button { background: #eee }</style>
+               <button id="a" style="background: none">a</button>
+               <button id="b" style="background: url(x.png)">b</button>
+               <button id="c" style="background-image: none">c</button>
+               <button id="d" style="background: red; background-color: blue">d</button>
+               <button id="e" style="background: transparent">e</button>"#,
+        );
+        let styles = compute_styles(&doc);
+        assert!(style_of(&doc, &styles, "a").background.is_none());
+        assert!(style_of(&doc, &styles, "b").background.is_none());
+        assert!(style_of(&doc, &styles, "c").background.is_some()); // only the image
+        assert!(style_of(&doc, &styles, "d").background.is_some());
+        assert!(style_of(&doc, &styles, "e").background.is_none_or(|c| c.a == 0));
+    }
+
+    #[test]
+    fn the_flex_shorthand_reads_grow_shrink_and_basis() {
+        let doc = Document::parse(
+            r#"<div id="a" style="flex: 0 0 100px"></div><div id="b" style="flex: 0 0 auto"></div>
+               <div id="c" style="flex: 2 3 10%"></div><div id="d" style="flex: 1"></div>
+               <div id="e" style="flex: 1 200px"></div><div id="f" style="flex: 100px"></div>
+               <div id="g" style="flex: 1 0 0"></div><div id="h" style="flex: 3 1 auto"></div>
+               <div id="i" style="flex: none"></div>"#,
+        );
+        let styles = compute_styles(&doc);
+        let f = |id: &str| {
+            let s = style_of(&doc, &styles, id);
+            (s.flex_grow, s.flex_shrink, s.flex_basis)
+        };
+        assert_eq!(f("a"), (0.0, 0.0, Length::Px(100.0)));
+        assert_eq!(f("b"), (0.0, 0.0, Length::Auto));
+        assert_eq!(f("c"), (2.0, 3.0, Length::Percent(0.1)));
+        assert_eq!(f("d"), (1.0, 1.0, Length::Px(0.0)));
+        assert_eq!(f("e"), (1.0, 1.0, Length::Px(200.0)));
+        assert_eq!(f("f"), (1.0, 1.0, Length::Px(100.0)));
+        assert_eq!(f("g"), (1.0, 0.0, Length::Px(0.0)));
+        assert_eq!(f("h"), (3.0, 1.0, Length::Auto));
+        assert_eq!(f("i"), (0.0, 0.0, Length::Auto));
     }
 
     #[test]

@@ -64,6 +64,7 @@ for these examples.
 | Local images, transforms, generated content | [Images](../../examples/images.html), [Transforms](../../examples/transforms.html), [Pseudo-elements](../../examples/pseudo.html) |
 | Gradients and animation | [Gradients](../../examples/gradients.html), [Animations](../../examples/animations.html) |
 | Frameless windows | [Window](../../examples/window.html) |
+| Drawer, splitter, data grid, barcodes (`@nile/ui`) | [Drawer](../../examples/drawer.html), [Splitter](../../examples/splitter.html), [Data grid](../../examples/data-grid.html), [Barcodes](../../examples/barcodes.html) |
 | C embedding | [render.c](../../examples/c/render.c), [generated header](../../crates/nile-capi/include/nile.h) |
 
 For the broader feature list and remaining compatibility gaps, see the
@@ -76,3 +77,4 @@ the entry page is `target/doc/nile_engine/index.html`.
 16. [Run one instance, open links and files, start at login](app-lifecycle.md).
 17. [Publish signed updates for a packed app](updates.md).
 18. [Drag and drop elements and files](drag-and-drop.md).
+19. [Ready-made components: drawer, splitter, data grid, barcodes and QR codes (`@nile/ui`)](ui-components.md).
