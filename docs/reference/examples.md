@@ -29,6 +29,7 @@ ownership require a GUI run; PNG success does not verify them.
 | [Menubar](../../examples/menubar.html) | Nested custom menus, keyboard commands, editor, selection preservation and context menu | Draft in localStorage; not a native OS menu. [Script](../../examples/menubar.js) |
 | [Workbench](../../examples/workbench/index.html) | Nine interfaces: settings, dashboard, kanban, mail, IDE, inventory, calendar, media, slides | In-memory sample flows; no real email/media/code execution. [Instructions](../../examples/workbench/README.md) |
 | [Todo](../../examples/todo/index.html) | Modules, JSX, state and reconciliation | Small component example |
+| [Components in JSX](../../examples/jsx-components.html) | New tags and inputs from classes and JSX: `customElements.define`, `content()`, `"on click at span"`, class components as JSX tags | A rating input, a quantity stepper and a badge |
 | [First app](../../examples/getting-started/index.html) | Inputs, events, selection, theme and basic layout | Tutorial entry |
 | [Bootstrap](../../examples/bootstrap/run.js) | Hidden startup script opens application window | Native shell run required |
 | [C host](../../examples/c/render.c) | Embedding, script/host bridge, input and rendering | Build instructions in [embedding](../guide/embedding.md) |

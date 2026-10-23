@@ -210,7 +210,7 @@ What changed and when is in the [changelog](CHANGELOG.md).
   hover and `getBoundingClientRect` follow scrolled content; `scrollTop`/`scrollLeft`/`scrollWidth`/`scrollHeight`,
   `scrollTo`/`scrollBy` and `scroll` events work on elements (see `examples/scrolling.html`). Inputs and textareas
   scroll to keep the caret visible.
-- **Properties:** `display` (block, inline, inline-block, flex, grid, none), `box-sizing`, `width/height` + min/max, `margin`, `padding`,
+- **Properties:** `display` (block, inline, inline-block, flex, inline-flex, grid, inline-grid, none), `box-sizing`, `width/height` + min/max, `margin`, `padding`,
   `border`, `border-radius`, `background(-color)`, `color`, `font-size/weight/family`,
   `line-height`, `text-align`, `white-space` (`nowrap`), `font-style`, `text-decoration` (underline, line-through), `flex`, `flex-direction/wrap/grow/shrink/basis`,
   `justify-content`, `align-items`, `gap`.
