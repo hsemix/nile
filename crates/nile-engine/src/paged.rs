@@ -146,6 +146,32 @@ impl Page {
         Some((pixels, w, h))
     }
 
+    /// Write the page as a PDF for `Window.this.print()` / `exportPdf()` (an empty `path` means a temp file) and tell the script the file name, or the error, through `__printReady`. The window's own viewport and
+    /// scale are put back afterwards, so showing paper doesn't change what is on screen.
+    pub(crate) fn run_print_job(&mut self, id: u32, wanted: &str, title: &str) {
+        let path = if wanted.is_empty() { std::env::temp_dir().join(format!("nile-print-{}-{id}.pdf", std::process::id())) } else { std::path::PathBuf::from(wanted) };
+        let (viewport, scale) = {
+            let v = self.view.borrow();
+            (v.viewport, v.scale)
+        };
+        let outcome = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display())).and_then(|file| {
+            let mut out = std::io::BufWriter::new(file);
+            self.write_pdf(&mut out, title);
+            out.flush().map_err(|e| e.to_string())
+        });
+        {
+            let mut v = self.view.borrow_mut();
+            v.set_viewport(viewport.0, viewport.1);
+            v.scale = scale;
+        }
+        let (file, error) = match outcome {
+            Ok(()) => (path.to_string_lossy().into_owned(), String::new()),
+            Err(e) => (String::new(), e),
+        };
+        let args = format!("[{id},{},{}]", crate::editing::json_string(&file), crate::editing::json_string(&error));
+        let _ = self.call("__printReady", &args);
+    }
+
     /// Write every page to `out` as a PDF (vector text and shapes). Returns the page count.
     pub fn write_pdf(&mut self, out: &mut impl Write, title: &str) -> usize {
         let count = self.paginate();

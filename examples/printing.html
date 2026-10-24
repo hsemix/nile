@@ -1,0 +1,78 @@
+<!doctype html>
+<html window-width="860" window-height="620">
+<meta charset="utf-8">
+<title>Printing</title>
+<style>
+  @page { size: 80mm 200mm; margin: 6mm }
+  body { margin: 0; padding: 24px; font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b }
+  h1 { margin: 0 0 4px; font-size: 20px }
+  p.note { margin: 0 0 16px; color: #64748b; font-size: 13px }
+  .cols { display: flex; gap: 28px; align-items: flex-start }
+  .panel { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px; box-sizing: border-box }
+  .panel h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #64748b }
+  pre#receipt { margin: 0; font: 12px/1.35 ui-monospace, Menlo, Consolas, monospace; white-space: pre; }
+  label { display: block; margin: 10px 0 4px; font-size: 13px; color: #475569 }
+  select, input { width: 280px; padding: 6px 8px; box-sizing: border-box }
+  .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px }
+  button { padding: 7px 14px }
+  #log { margin-top: 12px; min-height: 80px; font-size: 13px; color: #334155; white-space: pre-wrap }
+  @media print { .noprint { display: none } body { background: #fff; padding: 0 } }
+</style>
+<body>
+  <h1>Printing</h1>
+  <p class="note noprint">The same page prints as paper (the 80 mm @page above), and the receipt on the left goes to a thermal printer as ESC/POS commands.</p>
+  <div class="cols">
+    <div class="panel" style="width:360px"><h2>Receipt preview</h2><pre id="receipt"></pre></div>
+    <div class="panel noprint" style="width:380px">
+      <h2>Send it</h2>
+      <label>Installed printer (macOS, Linux, Windows)</label>
+      <select id="printer"><option value="">Loading printers...</option></select>
+      <label>Network printer (IP address, port 9100)</label>
+      <input id="host" placeholder="192.168.1.50">
+      <div class="buttons">
+        <button id="page">Print this page</button>
+        <button id="pdf">Save as PDF</button>
+        <button id="raw">Receipt to printer</button>
+        <button id="net">Receipt to network</button>
+      </div>
+      <div id="log"></div>
+    </div>
+  </div>
+  <script type="module">
+    import { Receipt, printReceipt } from "@nile/escpos";
+    import { printers } from "@nile/print";
+    const $ = (id) => document.getElementById(id);
+    const say = (text) => { $("log").textContent = text; };
+
+    const receipt = () => new Receipt({ width: 42, codepage: "cp858" })
+      .align("center").bold().size(2, 2).line("SOFTSALE").size(1, 1).bold(false)
+      .line("12 Market Street, Kampala").line("Tel 0700 000 000").rule()
+      .align("left")
+      .row("Whole milk 1 l  x2", "5.00").row("Sourdough loaf", "3.80").row("Café crème", "2.40")
+      .rule("=").bold().size(1, 2).row("TOTAL", "11.20").size(1, 1).bold(false)
+      .row("Cash", "20.00").row("Change", "8.80")
+      .feed(1).align("center").line("Thank you!").qr("https://shop.example/r/10042", { size: 5 })
+      .feed(2).cut().drawer();
+    $("receipt").textContent = receipt().preview();
+
+    const option = (value, text) => { const o = document.createElement("option"); o.value = value; o.textContent = text; $("printer").appendChild(o); };
+    printers().then((list) => {
+      $("printer").innerHTML = "";
+      if (!list.length) option("", "No printers found");
+      list.forEach((p) => option(p.name, p.name + (p.default ? " (default)" : "") + " - " + p.status));
+    }, (e) => { $("printer").innerHTML = ""; option("", "No printers"); say("Could not list printers: " + e.message); });
+
+    const run = (label, job) => async () => {
+      say(label + "...");
+      try { await job(); say(label + ": done"); } catch (e) { say(label + " failed: " + e.message); }
+    };
+    $("page").addEventListener("click", run("Print", () => Window.this.print({ printer: $("printer").value || undefined, title: "Receipt" })));
+    $("pdf").addEventListener("click", run("Save PDF", async () => {
+      const path = await Window.this.selectFile({ mode: "save", caption: "Save as PDF", extension: "pdf" });
+      if (path) await Window.this.exportPdf(String(path).replace(/^file:\/\//, ""));
+    }));
+    $("raw").addEventListener("click", run("Receipt to printer", () => printReceipt(receipt(), { printer: $("printer").value })));
+    $("net").addEventListener("click", run("Receipt to network printer", () => printReceipt(receipt(), { host: $("host").value.trim() })));
+  </script>
+</body>
+</html>

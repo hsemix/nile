@@ -77,6 +77,7 @@ child pages or run [windows.html](../../examples/windows.html).
 | `isValid`, `isActive` | This-window state; another window's isActive currently approximates validity |
 | `caption` | This window read/write title; another handle's setter is not implemented |
 | `on/off`, add/removeEventListener | Window-handle event subscriptions |
+| `print(options)`, `exportPdf(path)` | The page as paper: PDF to the system printer (`printer`, `copies`, `title`) or to a file; Promises ([printing guide](../guide/printing.md)) |
 
 `closerequest` on Window.this is cancelable; `activate` reports focus changes;
 `close` on an opened handle reports its value. `modal({ ... })` returns a Promise

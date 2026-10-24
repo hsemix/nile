@@ -63,6 +63,8 @@ const UI_MODULES: &[(&str, &str)] = &[
     ("@nile/ui/menu", include_str!("ui/menu.js")),
     ("@nile/ui/palette", include_str!("ui/palette.js")),
     ("@nile/ui/wizard", include_str!("ui/wizard.js")),
+    ("@nile/print", include_str!("ui/print.js")),
+    ("@nile/escpos", include_str!("ui/escpos.js")),
 ];
 
 fn prelude() -> String {
@@ -285,6 +287,9 @@ pub trait Environment {
     /// Show the popup element `node` in an OS window of its own (`rect`: its border box in viewport
     /// coordinates), or take it back.
     fn portal_set(&self, _node: NodeId, _rect: [f32; 4]) {}
+    /// `Window.this.print()` / `exportPdf()`: the page should write its PDF to `path` (empty: a temp file) with `title`
+    /// and answer with `__printReady(id, path, error)`.
+    fn print_request(&self, _id: u32, _path: &str, _title: &str) {}
     /// The `<menu>` element chosen as the application menu bar, or none.
     fn set_app_menu(&self, _node: Option<NodeId>) {}
     /// The host shows `Window.this.menu` as a system menu bar (macOS, Windows). When it doesn't, the
@@ -339,7 +344,7 @@ impl Resolver for FileResolver {
             return Err(rquickjs::Error::new_resolving(base.to_string_lossy(), name));
         }
         let path = std::path::Path::new(name);
-        if matches!(name, "@nile" | "@sciter" | "@env" | "@sys" | "@debug" | "@storage" | "@nile/ui") || name.starts_with("@nile/ui/") {
+        if matches!(name, "@nile" | "@sciter" | "@env" | "@sys" | "@debug" | "@storage" | "@nile/ui" | "@nile/print" | "@nile/escpos") || name.starts_with("@nile/ui/") {
             // `@sciter` is the same module under the name Sciter apps use.
             return Ok(if name == "@sciter" { "@nile".to_string() } else { name.to_string() });
         }
@@ -405,7 +410,7 @@ impl Loader for FileLoader {
             ),
             "@debug" => Some("const m = globalThis.__debugModule;\nexport const { setUnhandledExceptionHandler, setConsoleOutputHandler, callStackAt, setResourceArrivalHandler, setBreakpointHandler, setBreakpoints, getElementByUID, getUIDofElement, highlightElement, getStyleRulesOfElement, containerId, objectKind, sublimatedValue, sublimatedValueElements, frameVariables } = m;\nexport default m;"),
             "@storage" => Some("const m = globalThis.__storageModule;\nexport const open = m.open;\nexport default m;"),
-            n if n.starts_with("@nile/ui") => UI_MODULES.iter().find(|(m, _)| *m == n).map(|(_, src)| *src),
+            n if n.starts_with("@nile/ui") || n == "@nile/print" || n == "@nile/escpos" => UI_MODULES.iter().find(|(m, _)| *m == n).map(|(_, src)| *src),
             "@env" => Some(
                 "const m = globalThis.__envModule;\nexport const { language, country, userName, machineName, domainName, arguments: args, launch, home, homeURL, path, pathURL, drives, variable, exec, DEVICE } = m;\nexport { args as arguments };\nexport const OS = m.OS, PLATFORM = m.PLATFORM;\nexport default m;",
             ),
@@ -875,6 +880,10 @@ fn install_natives(
     native!("menuSet", {
         let env = env.clone();
         move |id: i32| env.set_app_menu(node(id))
+    });
+    native!("printRequest", {
+        let env = env.clone();
+        move |id: i32, path: String, title: String| env.print_request(id as u32, &path, &title)
     });
     native!("portalSet", {
         let env = env.clone();

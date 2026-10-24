@@ -78,3 +78,4 @@ the entry page is `target/doc/nile_engine/index.html`.
 17. [Publish signed updates for a packed app](updates.md).
 18. [Drag and drop elements and files](drag-and-drop.md).
 19. [Ready-made components: drawer, splitter, data grid, dialogs, toasts, shortcuts, tabs, accordion, combobox, ribbon, tiles, charts, barcodes and QR codes (`@nile/ui`)](ui-components.md).
+20. [Printing: the page as paper, PDF, printers and ESC/POS receipt printers (`@nile/print`, `@nile/escpos`)](printing.md).
