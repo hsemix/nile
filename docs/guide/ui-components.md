@@ -7,7 +7,8 @@ install or ship: import what you use. A module that isn't imported costs nothing
 ```js
 import { svg, encode, dataUrl } from "@nile/ui";   // everything
 import { svg } from "@nile/ui/barcode";            // one module
-//   modules: barcode, drawer, splitter, grid, dialog, toast, shortcuts, tabs, accordion, combobox, ribbon, tiles, chart
+//   modules: barcode, drawer, splitter, grid, dialog, toast, shortcuts, tabs, accordion, combobox, ribbon, tiles, chart,
+//            tree, keypad, date, menu, palette, wizard
 ```
 
 Importing a module registers its elements, so after `import "@nile/ui"` the tags below work in
@@ -320,6 +321,114 @@ donut.data = [{ label: "Cash", value: 62 }, { label: "Card", value: 31 }];      
 `type`: `bar`, `line`, `area`, `pie`, `donut`; `stacked` (bar, area), `smooth` (line, area), `legend` (`bottom`, `top`,
 `none`), `min`/`max`, `grid`, `points`, `colors`. Hover shows a tooltip, a legend entry hides or shows its series,
 a click raises `chartclick`. The chart redraws on resize. See `examples/ui-charts.html`.
+
+## Tree
+
+```html
+<nile-tree id="groups" selected="5"></nile-tree>
+```
+```js
+groups.items = [{ id: 1, label: "Drinks", children: [{ id: 2, label: "Coffee" }, { id: 3, label: "Tea" }] },
+                { id: 4, label: "Frozen", hasChildren: true }];     // hasChildren + load = children fetched on first open
+groups.load = (item) => fetchChildren(item.id);                    // an array, or a Promise of one
+groups.addEventListener("selectionchange", (e) => show(e.detail.item));
+```
+
+The same tree can be written as nested `<nile-node label="..." id="..." expanded>` elements. Items take `icon` (HTML,
+e.g. an inline `<svg>`), `disabled`, `expanded`, and anything else you want to keep on them; `render(item)` returns
+the text or node for a label. Methods: `expand`, `collapse`, `toggle`, `expandAll`, `collapseAll`, `select`, `reveal`
+(opens the ancestors and scrolls), `find`, `add(item, parentId, index)`, `remove`, `update`, `refresh`; `filter = "text"`
+keeps the matches and their ancestors. Events: `selectionchange`, `activate` (Enter or double click), `expand`,
+`collapse`, cancelable `beforeexpand`, `loaderror`. Keys: arrows, Right/Left to open and close or step into and out of a
+branch, Home/End, `*`, Space, Enter and type-ahead. Collapsing a branch that holds the selection moves the selection onto
+it. Every visible row is an element, so keep very large trees collapsed. Style with `--nile-tree-hover/-selected/-accent`.
+See `examples/ui-tree.html`.
+
+## Keypad
+
+```html
+<input id="qty"> <nile-keypad target="#qty" decimal sign keys="5,10,20"></nile-keypad>
+<nile-keypad pin display max-length="4" enter-label="Unlock"></nile-keypad>
+```
+
+An on-screen number pad for tills and kiosks. It types into the `target` field (which keeps focus; the field gets normal
+`input` events) or works on its own with a `display`. The first digit after the pad is shown or Enter replaces what the
+field held (`replace-first="false"` appends instead). `decimal` adds a point and limits digits after it (`decimals`, 2),
+`sign` a plus/minus key, `double-zero` a `00` key, `keys="5,10,20"` quick amounts that add to the value, `max-length`
+and `max` limit the number, `pin` masks the display. Properties `value` and `number`; `press("7")` presses a key from
+script; events `input`, `enter` (`detail: { value, number }`) and a cancelable `beforeinput`. See `examples/ui-inputs.html`.
+
+## Dates
+
+```html
+<nile-calendar value="2026-10-24" min="2026-10-01"></nile-calendar>
+<nile-date value="2026-10-24" format="dd/MM/yyyy"></nile-date>
+<nile-date-range start="2026-10-01" end="2026-10-31"></nile-date-range>
+```
+
+`<nile-calendar>` is a month you can click (`months="2"` shows two; `range` picks a span with a hover preview);
+`<nile-date>` is a text field plus popup calendar; `<nile-date-range>` shows both ends and a list of presets (Today,
+Last 7 days, This month...; replace them with the `presets` property: `[{ label, range: () => [start, end] }]`).
+Values are ISO dates; `format` (tokens `yyyy yy MMMM MMM MM M dd d`) is what the field shows and parses, so typed text in
+the same format is accepted on Enter or when you leave the field (a bad entry restores the old value and sets
+`invalid`). `min`, `max`, `week-start` (1 = Monday, the default), the calendar's `isDisabled(iso)` property and
+`monthNames`/`dayNames` for other languages. `formatDate(iso, format)` and `parseDate(text, format)` are exported.
+Keys in the calendar: arrows, PageUp/PageDown (Shift = year), Home/End, Enter. Events: `change` (`{ value }` or
+`{ start, end }`), `monthchange`. See `examples/ui-inputs.html`.
+
+## Menus
+
+```js
+import { menu, contextMenu } from "@nile/ui";
+const item = await menu([
+  { label: "Open", shortcut: "Mod+O", run: openIt },
+  { label: "Recent", items: [{ label: "report.xlsx" }] },     // submenu
+  { separator: true },
+  { label: "Autosave", checked: true },
+  { label: "Delete", danger: true, disabled: !canDelete },
+], { anchor: button });                                         // or { x, y }
+contextMenu(listEl, (event) => rowMenuFor(event.target));       // right button; array or function
+```
+
+A popup menu from plain data. It resolves with the chosen item (its `run` has been called) or `null`. Shortcuts show in
+the platform's form; Up/Down, Home/End, Right/Left for submenus, Enter, Escape and letter jumps work, and an outside
+press closes it. Style with `--nile-menu-bg/-color/-hover/-border/-danger`. See `examples/ui-commands.html`.
+
+## Command palette
+
+```js
+import { palette, shortcuts } from "@nile/ui";
+palette.add({ label: "New sale", shortcut: "F8", group: "Sales", run: newSale });
+shortcuts.on("Mod+S", save, { label: "Save document" });         // labelled shortcuts appear in the palette too
+palette.bind("Mod+K");
+const customer = await palette.open({ items: customers.map((c) => ({ label: c.name, hint: c.phone, data: c })) });
+```
+
+A type-to-filter list with fuzzy matching (typed letters in order, runs and word starts score higher, matches are
+underlined). With no `items` it lists your commands plus every labelled shortcut; with `items` it is a general picker
+that resolves with the chosen item or `null`. Items take `label`, `hint`, `group`, `shortcut`, `keywords`, `disabled`
+and `run`. `palette.open` again (or the bound key) closes it; shortcuts stay quiet while it is open.
+
+## Wizard
+
+```html
+<nile-wizard id="setup" linear cancel-label="Cancel">
+  <nile-step label="Company" description="Who you are">...</nile-step>
+  <nile-step label="Taxes" optional>...</nile-step>
+  <nile-step label="Done">...</nile-step>
+</nile-wizard>
+```
+```js
+setup.steps[0].validate = () => (name.value ? true : "Enter your company name");   // or a Promise
+setup.addEventListener("finish", save);
+```
+
+A numbered step header, the current step's content and Back / Next / Finish buttons. Going forwards runs the leaving
+step's `validate` (true goes on; false or text stays and shows it in red; a Promise is awaited and the buttons are
+disabled meanwhile). `linear` stops the header jumping ahead of steps you haven't reached, `optional` and `disabled`
+steps are marked or skipped, and `cancel-label` adds a Cancel button. Methods `next()`, `back()`, `goto(i)`, `finish()`,
+`reset()`; events `stepchange`, `beforestepchange` (cancelable), `beforefinish`, `finish`, `cancel`. Enter in a field
+presses Next. See `examples/ui-wizard.html`.
 
 ## Barcodes
 

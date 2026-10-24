@@ -11,9 +11,11 @@ the section becomes that version's.
 ### 2026-10-24
 
 #### Added
+- Six more `@nile/ui` components, each with an example page and tests: `<nile-tree>` (expand/collapse, lazy children, filter, keyboard and type-ahead), `<nile-keypad>` (number pad for a field or a PIN, decimal/sign/quick amounts), `<nile-calendar>`, `<nile-date>` and `<nile-date-range>` (typed or clicked dates in any format, min/max, two-month range picker with presets), `menu()`/`contextMenu()` (popup menus with submenus, check marks, shortcuts), `palette` (a Ctrl+K command palette with fuzzy matching that also lists labelled shortcuts, and a general picker) and `<nile-wizard>` (steps with sync or async validation, optional and skipped steps). `examples/ui-tree.html`, `ui-inputs.html`, `ui-commands.html`, `ui-wizard.html`, [guide](docs/guide/ui-components.md).
 - `examples/jsx-components.html`: new tags and inputs written as classes and JSX (a rating input, a quantity stepper, a class component used as a JSX tag).
 
 #### Fixed
+- Removing the focused element (a closed menu or dialog) leaves nothing focused, so keys reach the document and its shortcuts again; they used to go to the detached element.
 - `display: inline-flex` and `inline-grid` are atomic inline boxes that shrink to fit and sit in a line, as `inline-block` does; they used to behave as full-width block flex/grid containers. `getComputedStyle` reports the inline value.
 
 ### 2026-10-23

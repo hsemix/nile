@@ -1,0 +1,53 @@
+<!doctype html>
+<html window-width="640" window-height="460">
+<meta charset="utf-8">
+<title>Tree: @nile/ui</title>
+<style>
+  body { margin: 0; padding: 24px; font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b }
+  h1 { margin: 0 0 14px; font-size: 20px }
+  .row { display: flex; gap: 20px }
+  .box { width: 260px }
+  .box input { width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 6px 8px }
+  nile-tree { height: 280px; background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px }
+  nile-tree:focus { border-color: #2563eb }
+  #info { font-size: 13px; color: #475569; line-height: 1.7 }
+  #info b { color: #1e293b }
+  .count { margin-left: 6px; font-size: 11px; opacity: 0.6 }
+</style>
+<body>
+  <h1>Tree</h1>
+  <div class="row">
+    <div class="box">
+      <input id="find" placeholder="Filter groups...">
+      <nile-tree id="groups" selected="5"></nile-tree>
+    </div>
+    <div id="info">Arrow keys move, Right and Left open and close, a letter jumps. "Frozen" loads its children when you first open it.</div>
+  </div>
+  <script type="module">
+    import "@nile/ui";
+    const $ = (id) => document.getElementById(id);
+    const folder = '<svg viewBox="0 0 16 16" width="14" height="14" fill="#f59e0b"><path d="M1 3h5l1.5 2H15v8H1z"/></svg>';
+    const tree = $("groups");
+    tree.items = [
+      { id: 1, label: "Drinks", icon: folder, expanded: true, children: [
+        { id: 2, label: "Coffee", icon: folder }, { id: 3, label: "Tea", icon: folder, children: [{ id: 4, label: "Green tea" }, { id: 5, label: "Black tea" }] }, { id: 6, label: "Juice", icon: folder } ] },
+      { id: 7, label: "Bakery", icon: folder, children: [{ id: 8, label: "Bread" }, { id: 9, label: "Pastries" }] },
+      { id: 10, label: "Frozen", icon: folder, hasChildren: true },
+      { id: 11, label: "Household", icon: folder, disabled: true },
+    ];
+    tree.load = (item) => new Promise((done) => setTimeout(() => done([{ id: 100, label: "Ice cream" }, { id: 101, label: "Frozen peas" }]), 400));
+    tree.render = (item) => { const s = document.createElement("span"); s.textContent = item.label; if (item.children) { const n = document.createElement("span"); n.className = "count"; n.textContent = item.children.length; s.appendChild(n); } return s; };
+    const show = () => {
+      const item = tree.selectedItem;
+      const path = [];
+      for (let x = item; x; x = x._parent) path.unshift(x.label);
+      $("info").innerHTML = item ? "Selected: <b>" + path.join(" / ") + "</b> (id " + item.id + ")" : "Nothing selected";
+    };
+    tree.addEventListener("selectionchange", show);
+    tree.addEventListener("activate", (e) => { $("info").innerHTML += "<br>Opened: <b>" + e.detail.item.label + "</b>"; });
+    $("find").addEventListener("input", (e) => { tree.filter = e.target.value; });
+    tree.reveal(5);
+    show();
+  </script>
+</body>
+</html>

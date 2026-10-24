@@ -11,7 +11,7 @@
 // anywhere, except that a plain letter, digit or punctuation key (no Ctrl/Alt/Meta) is left to the text field you are
 // typing in. They stay quiet while a dialog is open unless the shortcut is registered with { always: true }.
 // { when: () => boolean } adds a condition; { prevent: false } lets the browser default run too.
-// shortcuts.list() returns what is registered; shortcuts.format("Mod+S") gives "Ctrl+S" or "⌘S" for display
+// shortcuts.list() returns what is registered ({ keys, label, run }); shortcuts.format("Mod+S") gives "Ctrl+S" or "⌘S" for display
 // (data-shortcut buttons get it in their `data-hint` attribute).
 
 import { modal } from "@nile/ui/base";
@@ -139,7 +139,7 @@ export const shortcuts = {
     }
   },
   list() {
-    return entries.map((e) => ({ keys: e.keys, label: e.label || "" }));
+    return entries.map((e) => ({ keys: e.keys, label: e.label || "", run: e.run }));
   },
   format: formatShortcut,
   /** Re-read data-shortcut attributes after adding buttons (sets data-hint). */

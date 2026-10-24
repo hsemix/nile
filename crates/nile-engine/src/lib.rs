@@ -596,6 +596,13 @@ impl View {
         let changed = self.doc.borrow().version != self.seen_version;
         if changed {
             self.restyle();
+            // Removing the focused element leaves nothing focused (keys go to the document again), as in a browser.
+            let lost = self.interaction.focus.filter(|f| !self.doc.borrow().is_attached(*f));
+            if let Some(old) = lost {
+                self.interaction.focus = None;
+                self.focus_changes.push((Some(old), None));
+                self.restyle();
+            }
         }
         changed
     }
@@ -4992,6 +4999,369 @@ mod tests {
         key(&mut p, "Enter", none);
         assert_eq!(js(&mut p, "g.sortKey + ',' + g.sortDirection"), "price,asc");
         assert_eq!(js(&mut p, "document.activeElement.textContent.indexOf('Price') === 0"), "true", "focus stays on the header after it is redrawn");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_tree_expands_selects_filters_and_loads_lazily() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><nile-tree id="tr" style="width:240px;height:200px"></nile-tree>
+            <script type="module">
+              import "@nile/ui";
+              window.tr = document.getElementById("tr");
+              tr.items = [{ id: 1, label: "Drinks", children: [{ id: 2, label: "Coffee" }, { id: 3, label: "Tea", children: [{ id: 6, label: "Green" }] }] }, { id: 4, label: "Food", hasChildren: true }, { id: 5, label: "Misc" }];
+              tr.load = (item) => new Promise((r) => setTimeout(() => r([{ id: 7, label: "Bread" }]), 0));
+              window.log = [];
+              tr.addEventListener("selectionchange", (e) => log.push("sel:" + e.detail.id));
+              tr.addEventListener("expand", (e) => log.push("exp:" + e.detail.id));
+              tr.addEventListener("collapse", (e) => log.push("col:" + e.detail.id));
+              tr.addEventListener("activate", (e) => log.push("act:" + e.detail.id));
+              window.rows = () => Array.from(tr.querySelectorAll(".nile-tree-row")).map((r) => r.getAttribute("data-id")).join();
+            </script></body>"##,
+            "ui-tree",
+        );
+        p.run_timers();
+        p.run_timers();
+        let none = ModifiersState::default();
+        let key = |p: &mut Page, k: &str| p.key("keydown", k.into(), none);
+        let settle = |p: &mut Page| {
+            std::thread::sleep(Duration::from_millis(30));
+            p.run_timers();
+            p.run_timers();
+        };
+        assert_eq!(js(&mut p, "rows()"), "1,4,5");
+        assert_eq!(js(&mut p, "tr.getAttribute('role') + ',' + document.querySelector('.nile-tree-row').getAttribute('aria-expanded')"), "tree,false");
+
+        // A click selects; Right expands, then goes to the first child; Down walks; Left goes back to the parent.
+        js(&mut p, "document.querySelector('.nile-tree-row').click()");
+        js(&mut p, "tr.focus()");
+        key(&mut p, "ArrowRight");
+        assert_eq!(js(&mut p, "rows()"), "1,2,3,4,5");
+        key(&mut p, "ArrowRight");
+        key(&mut p, "ArrowDown");
+        assert_eq!(js(&mut p, "tr.selected"), "3");
+        key(&mut p, "ArrowRight");
+        assert_eq!(js(&mut p, "rows()"), "1,2,3,6,4,5");
+        key(&mut p, "ArrowRight");
+        assert_eq!(js(&mut p, "tr.selected"), "6", "Right on an open branch enters it");
+        key(&mut p, "ArrowLeft");
+        assert_eq!(js(&mut p, "tr.selected"), "3");
+        assert_eq!(js(&mut p, "document.querySelector('[data-id=\"6\"]').getAttribute('aria-level')"), "3");
+        // Collapsing an ancestor of the selection moves the selection onto it.
+        key(&mut p, "ArrowRight");
+        key(&mut p, "ArrowRight");
+        js(&mut p, "tr.collapse(1)");
+        assert_eq!(js(&mut p, "[rows(), tr.selected].join('|')"), "1,4,5|1");
+        key(&mut p, "End");
+        assert_eq!(js(&mut p, "tr.selected"), "5");
+        key(&mut p, "Enter");
+        assert!(js(&mut p, "log.join()").ends_with("act:5"), "{}", js(&mut p, "log.join()"));
+
+        // Lazy children load once, when the branch is first opened.
+        js(&mut p, "tr.select(4)");
+        key(&mut p, "ArrowRight");
+        settle(&mut p);
+        assert_eq!(js(&mut p, "rows()"), "1,4,7,5");
+        // Type-ahead jumps to a label.
+        js(&mut p, "tr.select(1)");
+        key(&mut p, "m");
+        assert_eq!(js(&mut p, "tr.selected"), "5");
+
+        // A filter keeps matches and their ancestors, opened.
+        js(&mut p, "tr.filter = 'gre'");
+        assert_eq!(js(&mut p, "rows()"), "1,3,6");
+        js(&mut p, "tr.filter = ''");
+        assert_eq!(js(&mut p, "rows()"), "1,4,7,5");
+        // Data changes: add, update, remove, reveal.
+        js(&mut p, "tr.add({ id: 8, label: 'Juice' }, 1)");
+        js(&mut p, "tr.reveal(6)");
+        assert_eq!(js(&mut p, "rows()"), "1,2,3,6,8,4,7,5");
+        js(&mut p, "tr.remove(1)");
+        assert_eq!(js(&mut p, "rows()"), "4,7,5");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_keypad_types_into_a_field_and_limits_what_it_takes() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><input id="f"><nile-keypad id="k" target="#f" decimal sign double-zero></nile-keypad>
+            <nile-keypad id="n" max-length="3" display enter-label="Go"></nile-keypad>
+            <nile-keypad id="pin" pin display max-length="4"></nile-keypad>
+            <script type="module">
+              import "@nile/ui";
+              window.log = [];
+              for (const id of ["f", "k", "n", "pin"]) window[id] = document.getElementById(id);
+              k.addEventListener("enter", (e) => log.push("enter:" + e.detail.number));
+              f.addEventListener("input", () => log.push("in:" + f.value));
+              window.press = (pad, ...keys) => keys.forEach((x) => pad.querySelector('[data-key="' + x + '"]').click());
+            </script></body>"##,
+            "ui-keypad",
+        );
+        p.run_timers();
+        p.run_timers();
+        assert_eq!(js(&mut p, "k.querySelectorAll('.nile-keypad-key').length"), "16", "10 digits, point, C, sign, 00, backspace and OK");
+        js(&mut p, "press(k, '7', '5')");
+        assert_eq!(js(&mut p, "f.value"), "75");
+        js(&mut p, "press(k, '.', '5', '5', '5')");
+        assert_eq!(js(&mut p, "f.value"), "75.55", "two decimals at most");
+        js(&mut p, "press(k, '.')");
+        assert_eq!(js(&mut p, "f.value"), "75.55", "one point only");
+        js(&mut p, "press(k, 'Backspace', '-')");
+        assert_eq!(js(&mut p, "[f.value, k.number].join()"), "-75.5,-75.5");
+        js(&mut p, "press(k, 'Clear')");
+        assert_eq!(js(&mut p, "f.value"), "");
+        js(&mut p, "press(k, '0', '0', '0', '4', '2')");
+        assert_eq!(js(&mut p, "f.value"), "42", "no leading zeros");
+        js(&mut p, "press(k, 'Enter')");
+        assert!(js(&mut p, "log.join()").ends_with("enter:42"), "{}", js(&mut p, "log.join()"));
+        // The first digit after Enter starts again; the text the field already held is replaced too.
+        js(&mut p, "press(k, '9')");
+        assert_eq!(js(&mut p, "f.value"), "9");
+        js(&mut p, "f.value = '120'; k.value = ''; press(k, '3')");
+        assert_eq!(js(&mut p, "f.value"), "3");
+
+        // Length limit, display, custom Enter label.
+        js(&mut p, "press(n, '1', '2', '3', '4')");
+        assert_eq!(js(&mut p, "[n.value, n.querySelector('.nile-keypad-display').textContent, n.querySelector('.nile-enter').textContent].join()"), "123,123,Go");
+        js(&mut p, "press(pin, '1', '2', '3', '4', '5')");
+        assert_eq!(js(&mut p, "[pin.value, pin.querySelector('.nile-keypad-display').textContent].join()"), "1234,●●●●");
+        // Quick amounts add up.
+        js(&mut p, "const q = document.createElement('nile-keypad'); q.setAttribute('keys', '5,10'); q.setAttribute('display', ''); document.body.appendChild(q); window.q = q");
+        p.run_timers();
+        js(&mut p, "press(q, '+5', '+10')");
+        assert_eq!(js(&mut p, "q.value"), "15");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_date_widgets_pick_parse_and_apply_presets() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0">
+              <nile-calendar id="c" value="2026-10-24" min="2026-10-05" max="2026-10-28"></nile-calendar>
+              <nile-calendar id="r" range month="2026-10"></nile-calendar>
+              <nile-date id="d" value="2026-10-24" format="dd/MM/yyyy"></nile-date>
+              <nile-date-range id="dr" start="2026-10-01" end="2026-10-31"></nile-date-range>
+            <script type="module">
+              import { formatDate, parseDate } from "@nile/ui";
+              window.formatDate = formatDate; window.parseDate = parseDate;
+              for (const id of ["c", "r", "d", "dr"]) window[id] = document.getElementById(id);
+              window.log = [];
+              c.addEventListener("change", (e) => log.push("c:" + e.detail.value));
+              c.addEventListener("monthchange", (e) => log.push("m:" + e.detail.month));
+              r.addEventListener("change", (e) => log.push("r:" + e.detail.start + ">" + e.detail.end));
+              d.addEventListener("change", (e) => log.push("d:" + e.detail.value));
+              dr.addEventListener("change", (e) => log.push("dr:" + e.detail.start + ">" + e.detail.end));
+              window.day = (cal, iso) => cal.querySelector('.nile-cal-day[data-date="' + iso + '"]');
+            </script></body>"##,
+            "ui-date",
+        );
+        p.run_timers();
+        p.run_timers();
+        let none = ModifiersState::default();
+        // Text formats both ways, and rubbish is refused.
+        assert_eq!(js(&mut p, "formatDate('2026-10-24', 'dd/MM/yyyy') + '|' + formatDate('2026-03-04', 'MMM d, yyyy') + '|' + formatDate('2026-03-04', 'MMMM yy')"), "24/10/2026|Mar 4, 2026|March 26");
+        assert_eq!(js(&mut p, "[parseDate('24/10/2026', 'dd/MM/yyyy'), parseDate('Oct 4, 2026', 'MMM d, yyyy'), parseDate('31/02/2026', 'dd/MM/yyyy'), parseDate('x', 'dd/MM/yyyy')].join()"), "2026-10-24,2026-10-04,,");
+
+        // A month of days: title, 42 cells, Monday first, today's marks, min/max greyed out, the value selected.
+        assert_eq!(js(&mut p, "c.querySelector('.nile-cal-title').textContent + '|' + c.querySelectorAll('.nile-cal-day').length + '|' + c.querySelector('.nile-cal-dow').textContent"), "October 2026|42|Mo");
+        assert_eq!(js(&mut p, "[day(c, '2026-10-24').getAttribute('aria-selected'), day(c, '2026-10-03').disabled, day(c, '2026-10-29').disabled, day(c, '2026-10-10').disabled].join()"), "true,true,true,false");
+        js(&mut p, "day(c, '2026-10-20').click()");
+        assert_eq!(js(&mut p, "[c.value, log.join()].join('|')"), "2026-10-20|c:2026-10-20");
+        js(&mut p, "day(c, '2026-10-03').click()");
+        assert_eq!(js(&mut p, "c.value"), "2026-10-20", "a disabled day can't be picked");
+        js(&mut p, "c.querySelector('.nile-cal-nav[data-dir=\"1\"]').click()");
+        assert_eq!(js(&mut p, "c.querySelector('.nile-cal-title').textContent + '|' + log[log.length - 1]"), "November 2026|m:2026-11");
+        // Keyboard: arrows move the focused day, Enter picks, PageUp goes back a month.
+        js(&mut p, "c.value = '2026-10-20'");
+        js(&mut p, "c.focus()");
+        p.key("keydown", "ArrowRight".into(), none);
+        p.key("keydown", "ArrowDown".into(), none);
+        p.key("keydown", "Enter".into(), none);
+        assert_eq!(js(&mut p, "c.value"), "2026-10-28");
+
+        // A span: two clicks, the in-between days highlighted, the later click before the first swaps them.
+        js(&mut p, "day(r, '2026-10-12').click(); day(r, '2026-10-05').click()");
+        assert_eq!(js(&mut p, "[r.start, r.end, r.querySelectorAll('.nile-in-range').length, log[log.length - 1]].join()"), "2026-10-05,2026-10-12,6,r:2026-10-05>2026-10-12");
+
+        // The date field: typed text in its format commits on Enter; a bad one is refused and flagged.
+        assert_eq!(js(&mut p, "d.querySelector('input').value"), "24/10/2026");
+        js(&mut p, "d.querySelector('input').focus(); d.querySelector('input').value = '25/12/2026'");
+        p.key("keydown", "Enter".into(), none);
+        assert_eq!(js(&mut p, "[d.value, d.querySelector('input').value, log[log.length - 1]].join()"), "2026-12-25,25/12/2026,d:2026-12-25");
+        js(&mut p, "d.querySelector('input').value = 'soon'");
+        p.key("keydown", "Enter".into(), none);
+        assert_eq!(js(&mut p, "[d.value, d.querySelector('input').value, d.hasAttribute('invalid')].join()"), "2026-12-25,25/12/2026,true");
+        js(&mut p, "d.querySelector('.nile-date-btn').click()");
+        assert_eq!(js(&mut p, "d.querySelector('.nile-date-pop').classList.contains('nile-open') + ',' + d.querySelector('.nile-cal-title').textContent"), "true,December 2026");
+        js(&mut p, "day(d, '2026-12-09').click()");
+        assert_eq!(js(&mut p, "[d.value, d.querySelector('input').value, d.querySelector('.nile-date-pop').classList.contains('nile-open')].join()"), "2026-12-09,09/12/2026,false");
+
+        // The range field: shows both ends, a preset fills it.
+        assert_eq!(js(&mut p, "dr.querySelector('.nile-date-text').textContent"), "2026-10-01 – 2026-10-31");
+        js(&mut p, "dr.querySelector('.nile-date-box').click()");
+        assert_eq!(js(&mut p, "dr.querySelectorAll('.nile-date-preset').length > 4"), "true");
+        js(&mut p, "dr.querySelectorAll('.nile-date-preset')[2].click()");
+        assert_eq!(js(&mut p, "Math.round((new Date(dr.end) - new Date(dr.start)) / 864e5)"), "6", "Last 7 days");
+        assert!(js(&mut p, "log[log.length - 1]").starts_with("dr:"));
+        js(&mut p, "dr.setRange('2026-11-10', '2026-11-02')");
+        assert_eq!(js(&mut p, "dr.start + '>' + dr.end"), "2026-11-02>2026-11-10");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_menu_and_palette_choose_by_keyboard_and_pointer() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><div id="zone" style="width:200px;height:100px"></div>
+            <script type="module">
+              import { menu, contextMenu, palette, shortcuts, fuzzy } from "@nile/ui";
+              window.menu = menu; window.palette = palette; window.fuzzy = fuzzy; window.shortcuts = shortcuts;
+              window.log = [];
+              window.items = () => [{ label: "Open", id: "open", shortcut: "Mod+O", run: () => log.push("run-open") }, { label: "Recent", id: "recent", items: [{ label: "a.txt", id: "a" }, { label: "b.txt", id: "b" }] }, { separator: true }, { label: "Wrap", id: "wrap", checked: true }, { label: "Delete", id: "del", disabled: true }];
+              contextMenu(document.getElementById("zone"), () => items());
+              palette.add({ id: "new-sale", label: "New sale", shortcut: "F8", run: () => log.push("sale") });
+              palette.add({ id: "stock", label: "Open stock register", hint: "Stock", run: () => log.push("stock") });
+              shortcuts.on("Mod+S", () => log.push("save"), { label: "Save document" });
+              palette.bind("Mod+K");
+              window.rows = () => Array.from(document.querySelectorAll(".nile-menu-row")).map((r) => r.querySelector(".nile-menu-label").textContent).join();
+            </script></body>"##,
+            "ui-menu",
+        );
+        p.run_timers();
+        p.run_timers();
+        let none = ModifiersState::default();
+        let ctrl = if cfg!(target_os = "macos") { ModifiersState::SUPER } else { ModifiersState::CONTROL };
+        let key = |p: &mut Page, k: &str, m: ModifiersState| p.key("keydown", k.into(), m);
+
+        // A menu from data: rows, a check mark, a disabled row, a submenu; Down/Down/Right/Enter chooses a.txt.
+        js(&mut p, "menu(items(), { x: 20, y: 20 }).then((c) => log.push('chose:' + (c && c.id)))");
+        assert_eq!(js(&mut p, "rows()"), "Open,Recent,Wrap,Delete");
+        assert_eq!(js(&mut p, "[document.querySelector('[aria-checked]').getAttribute('aria-checked'), document.querySelector('[aria-disabled]').textContent.indexOf('Delete') >= 0].join()"), "true,true");
+        key(&mut p, "ArrowDown", none);
+        key(&mut p, "ArrowDown", none);
+        key(&mut p, "ArrowRight", none);
+        assert_eq!(js(&mut p, "document.querySelectorAll('.nile-menu-popup').length"), "2");
+        key(&mut p, "ArrowDown", none);
+        key(&mut p, "Enter", none);
+        p.run_timers();
+        assert_eq!(js(&mut p, "[log.join(), document.querySelectorAll('.nile-menu-popup').length].join('|')"), "chose:b|0");
+        // Disabled rows don't choose; a click runs the item's own handler; Escape dismisses with null.
+        js(&mut p, "log.length = 0; menu(items(), { x: 20, y: 20 }).then((c) => log.push('chose:' + (c && c.id)))");
+        js(&mut p, "Array.from(document.querySelectorAll('.nile-menu-row')).find((r) => r.textContent.indexOf('Delete') >= 0).click()");
+        assert_eq!(js(&mut p, "document.querySelectorAll('.nile-menu-popup').length"), "1");
+        js(&mut p, "document.querySelector('.nile-menu-row').click()");
+        p.run_timers();
+        assert_eq!(js(&mut p, "log.join()"), "run-open,chose:open");
+        js(&mut p, "log.length = 0; menu(items(), { x: 5, y: 5 }).then((c) => log.push('chose:' + (c && c.id)))");
+        key(&mut p, "Escape", none);
+        p.run_timers();
+        assert_eq!(js(&mut p, "log.join()"), "chose:null");
+        // The right button over an element opens it.
+        js(&mut p, "document.getElementById('zone').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 30 }))");
+        assert_eq!(js(&mut p, "rows()"), "Open,Recent,Wrap,Delete");
+        key(&mut p, "Escape", none);
+
+        // The palette: Mod+K opens it with commands and labelled shortcuts; fuzzy typing filters; Enter runs.
+        key(&mut p, "k", ctrl);
+        assert_eq!(js(&mut p, "palette.isOpen + ',' + document.querySelectorAll('.nile-palette-row').length"), "true,3");
+        assert_eq!(js(&mut p, "document.querySelector('.nile-palette-key') ? 'keys' : 'none'"), "keys");
+        js(&mut p, "const i = document.querySelector('.nile-palette-input'); i.value = 'osr'; i.dispatchEvent(new Event('input', { bubbles: true }))");
+        assert_eq!(js(&mut p, "Array.from(document.querySelectorAll('.nile-palette-row')).map((r) => r.querySelector('.nile-palette-label').textContent).join()"), "Open stock register");
+        assert_eq!(js(&mut p, "document.querySelectorAll('.nile-palette-match').length"), "3");
+        key(&mut p, "Enter", none);
+        assert_eq!(js(&mut p, "[log.join(), palette.isOpen].join('|')"), "chose:null,stock|false");
+        // Shortcuts stay quiet while it is open, and Mod+K closes it again.
+        key(&mut p, "k", ctrl);
+        key(&mut p, "s", ctrl);
+        assert!(!js(&mut p, "log.join()").contains("save"), "{}", js(&mut p, "log.join()"));
+        key(&mut p, "k", ctrl);
+        assert_eq!(js(&mut p, "palette.isOpen"), "false");
+        // A picker over your own items resolves with the chosen one.
+        js(&mut p, "palette.open({ items: [{ label: 'Ada Lovelace', data: 1 }, { label: 'Alan Turing', data: 2 }], placeholder: 'Find' }).then((c) => log.push('picked:' + (c && c.data)))");
+        js(&mut p, "const j = document.querySelector('.nile-palette-input'); j.value = 'tur'; j.dispatchEvent(new Event('input', { bubbles: true }))");
+        key(&mut p, "Enter", none);
+        p.run_timers();
+        assert!(js(&mut p, "log.join()").ends_with("picked:2"), "{}", js(&mut p, "log.join()"));
+        // The matcher itself: a run beats scattered letters; non-matches are null.
+        assert_eq!(js(&mut p, "[fuzzy('abc', 'xabcx').score > fuzzy('abc', 'a-b-c').score, fuzzy('zz', 'abc') === null].join()"), "true,true");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_ui_wizard_validates_steps_and_finishes() {
+        let (mut p, path) = page(
+            r##"<body style="margin:0"><nile-wizard id="w" linear cancel-label="Cancel" style="width:500px;height:300px">
+              <nile-step label="Company" description="Name"><input id="name"></nile-step>
+              <nile-step label="Taxes" optional><p>Taxes</p></nile-step>
+              <nile-step label="Hidden" disabled><p>nope</p></nile-step>
+              <nile-step label="Done"><p>All set</p></nile-step>
+            </nile-wizard>
+            <script type="module">
+              import "@nile/ui";
+              window.w = document.getElementById("w");
+              window.log = [];
+              w.addEventListener("stepchange", (e) => log.push(e.detail.from + ">" + e.detail.to));
+              w.addEventListener("finish", () => log.push("finish"));
+              w.addEventListener("cancel", () => log.push("cancel"));
+              window.ready = false;
+              w.steps[0].validate = () => (document.getElementById("name").value ? true : "Enter a company name");
+              w.steps[1].validate = () => new Promise((r) => setTimeout(() => r(true), 0));
+              window.btn = (cls) => w.querySelector(".nile-wizard-" + cls);
+            </script></body>"##,
+            "ui-wizard",
+        );
+        p.run_timers();
+        p.run_timers();
+        let settle = |p: &mut Page| {
+            for _ in 0..3 {
+                std::thread::sleep(Duration::from_millis(20));
+                p.run_timers();
+            }
+        };
+        assert_eq!(js(&mut p, "[w.selectedIndex, w.querySelectorAll('.nile-wizard-dot').length, btn('back').disabled, btn('next').textContent].join()"), "0,4,true,Next");
+        assert_eq!(js(&mut p, "w.querySelectorAll('.nile-wizard-dot')[1].querySelector('.nile-wizard-sub').textContent"), "Optional");
+        // Validation keeps you on the step and shows its text; a linear header won't jump ahead.
+        js(&mut p, "btn('next').click()");
+        settle(&mut p);
+        assert_eq!(js(&mut p, "[w.selectedIndex, w.querySelector('.nile-wizard-error').textContent].join()"), "0,Enter a company name");
+        js(&mut p, "w.querySelectorAll('.nile-wizard-dot')[3].click()");
+        settle(&mut p);
+        assert_eq!(js(&mut p, "w.selectedIndex"), "0");
+        js(&mut p, "document.getElementById('name').value = 'SoftSale'; btn('next').click()");
+        settle(&mut p);
+        assert_eq!(js(&mut p, "[w.selectedIndex, w.querySelector('.nile-wizard-error').textContent, log.join()].join('|')"), "1||0>1");
+        // Disabled steps are skipped, in both directions; the last step offers Finish.
+        js(&mut p, "btn('next').click()");
+        settle(&mut p);
+        assert_eq!(js(&mut p, "[w.selectedIndex, btn('next').textContent, w.querySelectorAll('.nile-wizard-dot.nile-done').length].join()"), "3,Finish,2");
+        js(&mut p, "btn('back').click()");
+        settle(&mut p);
+        assert_eq!(js(&mut p, "w.selectedIndex"), "1");
+        // Visited steps can be clicked in the header; Finish and Cancel raise their events.
+        js(&mut p, "w.querySelectorAll('.nile-wizard-dot')[3].click()");
+        settle(&mut p);
+        js(&mut p, "btn('next').click()");
+        settle(&mut p);
+        js(&mut p, "btn('cancel').click()");
+        assert_eq!(js(&mut p, "log.slice(-2).join()"), "finish,cancel");
+        js(&mut p, "w.reset()");
+        assert_eq!(js(&mut p, "[w.selectedIndex, btn('back').disabled].join()"), "0,true");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn removing_the_focused_element_sends_keys_to_the_document_again() {
+        let (mut p, path) = page(
+            r##"<body><div id="host"><button id="b">x</button></div>
+            <script>window.keys = []; document.addEventListener("keydown", (e) => keys.push(e.key));</script></body>"##,
+            "focus-removed",
+        );
+        js(&mut p, "document.getElementById('b').focus()");
+        assert_eq!(js(&mut p, "document.activeElement.id"), "b");
+        js(&mut p, "document.getElementById('host').innerHTML = ''");
+        p.sync();
+        assert_eq!(js(&mut p, "document.activeElement === document.body || document.activeElement === null"), "true");
+        p.key("keydown", "q".into(), ModifiersState::default());
+        assert_eq!(js(&mut p, "keys.join()"), "q", "the key reaches the document");
         let _ = std::fs::remove_file(path);
     }
 

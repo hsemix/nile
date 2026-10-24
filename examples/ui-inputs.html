@@ -1,0 +1,49 @@
+<!doctype html>
+<html window-width="900" window-height="560">
+<meta charset="utf-8">
+<title>Keypad and date pickers: @nile/ui</title>
+<style>
+  body { margin: 0; padding: 24px; font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b }
+  h1 { margin: 0 0 14px; font-size: 20px }
+  h2 { margin: 18px 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #64748b }
+  .cols { display: flex; gap: 32px; align-items: flex-start }
+  .col { display: flex; flex-direction: column; gap: 8px }
+  input.big { width: 220px; padding: 8px 10px; font-size: 20px; text-align: right }
+  nile-keypad { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; width: 230px }
+  nile-calendar { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px }
+  #out { margin-top: 16px; font-size: 13px; color: #475569; min-height: 40px; line-height: 1.6 }
+</style>
+<body>
+  <h1>Keypad and dates</h1>
+  <div class="cols">
+    <div class="col">
+      <h2>Keypad for a field</h2>
+      <input id="amount" class="big" placeholder="0.00">
+      <nile-keypad id="pad" target="#amount" decimal sign keys="5,10,20,50" enter-label="Add"></nile-keypad>
+    </div>
+    <div class="col">
+      <h2>PIN pad</h2>
+      <nile-keypad id="pin" pin display max-length="4" enter-label="Unlock"></nile-keypad>
+    </div>
+    <div class="col">
+      <h2>Calendar</h2>
+      <nile-calendar id="cal" value="2026-10-24" min="2026-10-01" max="2026-12-20"></nile-calendar>
+      <h2>Date field</h2>
+      <nile-date id="d" value="2026-10-24" format="dd/MM/yyyy"></nile-date>
+      <h2>Date range</h2>
+      <nile-date-range id="range" start="2026-10-01" end="2026-10-31"></nile-date-range>
+    </div>
+  </div>
+  <div id="out">Press keys, pick days.</div>
+  <script type="module">
+    import "@nile/ui";
+    const $ = (id) => document.getElementById(id);
+    const say = (text) => { $("out").textContent = text; };
+    $("pad").addEventListener("enter", (e) => say("Added " + e.detail.number));
+    $("pin").addEventListener("enter", (e) => say(e.detail.value.length === 4 ? "PIN of 4 digits entered" : "PIN needs 4 digits"));
+    $("cal").addEventListener("change", (e) => say("Calendar: " + e.detail.value));
+    $("d").addEventListener("change", (e) => say("Date field: " + e.detail.value));
+    $("range").addEventListener("change", (e) => say("Range: " + e.detail.start + " to " + e.detail.end));
+  </script>
+</body>
+</html>
