@@ -2905,13 +2905,13 @@ fn build_children(
         let pseudo = styles.is_pseudo(c);
         let is_inline = if pseudo {
             let cs = styles.get(c);
-            matches!(cs.display, Display::Inline | Display::InlineBlock) && !cs.position.out_of_flow() && cs.float == nile_style::Float::None
+            (cs.display == Display::Inline || cs.is_inline_block()) && !cs.position.out_of_flow() && cs.float == nile_style::Float::None
         } else {
             match &doc.node(c).kind {
                 NodeKind::Text(_) => true,
                 NodeKind::Element { .. } => {
                     let cs = styles.get(c);
-                    matches!(cs.display, Display::Inline | Display::InlineBlock) && !cs.position.out_of_flow() && cs.float == nile_style::Float::None
+                    (cs.display == Display::Inline || cs.is_inline_block()) && !cs.position.out_of_flow() && cs.float == nile_style::Float::None
                 }
                 NodeKind::Document => false,
             }
@@ -3042,7 +3042,7 @@ impl InlineText {
                 if es.display == Display::None {
                     return;
                 }
-                if es.display == Display::InlineBlock {
+                if es.is_inline_block() {
                     if let Some(spec) = make_box(id) {
                         self.boxes.push(InlineBoxSpec { index: self.text.len(), ..spec });
                         self.collapse = false;
@@ -3103,7 +3103,7 @@ impl InlineText {
         if es.display == Display::None {
             return;
         }
-        if !inside && es.display == Display::InlineBlock {
+        if !inside && es.is_inline_block() {
             if let Some(spec) = make_box(id) {
                 self.boxes.push(InlineBoxSpec { index: self.text.len(), ..spec });
                 self.collapse = false;
@@ -4760,6 +4760,21 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
         assert_eq!(b.x - a.x, 40.0, "30px wide plus the 10px gap");
         assert_eq!(f.width, 80.0, "the button is as wide as its content, not the page");
         assert_eq!(k.width, 50.0, "a block button shrinks to fit too");
+    }
+
+    #[test]
+    fn inline_flex_and_inline_grid_are_atomic_inline_boxes_that_shrink_to_fit() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><div id="f" style="display:inline-flex; gap:10px"><span style="width:30px; height:10px"></span><span style="width:40px; height:10px"></span></div>
+               <div id="g" style="display:inline-grid; grid-template-columns: 20px 20px"><span style="height:10px"></span><span style="height:10px"></span></div>
+               <p id="after" style="margin:0">next</p></body>"#,
+        );
+        let (f, g, after) = (rect_of(&doc, &t, "f"), rect_of(&doc, &t, "g"), rect_of(&doc, &t, "after"));
+        assert_eq!(f.width, 80.0, "as wide as its content, not the page: {f:?}");
+        assert_eq!(g.width, 40.0, "{g:?}");
+        assert_eq!(f.y, g.y, "both sit in the same line");
+        assert!(g.x >= f.x + f.width, "side by side: {f:?} {g:?}");
+        assert!(after.y >= f.y + f.height, "the next block starts below them");
     }
 
     #[test]

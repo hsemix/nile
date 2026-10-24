@@ -1,0 +1,41 @@
+<!doctype html>
+<html window-width="720" window-height="460">
+<meta charset="utf-8">
+<title>Wizard: @nile/ui</title>
+<style>
+  body { margin: 0; padding: 24px; font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b }
+  h1 { margin: 0 0 14px; font-size: 20px }
+  nile-wizard { height: 320px; background: #fff; border: 1px solid #cbd5e1; border-radius: 8px }
+  label { display: block; margin: 8px 0 4px; font-size: 13px; color: #475569 }
+  input { padding: 6px 8px; width: 280px }
+  #done { margin-top: 14px; font-size: 13px; color: #16a34a }
+</style>
+<body>
+  <h1>First-run setup</h1>
+  <nile-wizard id="setup" linear cancel-label="Cancel">
+    <nile-step label="Company" description="Who you are">
+      <label>Company name</label><input id="name" placeholder="SoftSale">
+      <label>Tax number</label><input id="tax">
+    </nile-step>
+    <nile-step label="Taxes" optional>
+      <p>Add the tax rates you charge. You can change them later under Management.</p>
+      <label><input type="checkbox" id="vat" checked style="width:auto"> VAT 18%</label>
+    </nile-step>
+    <nile-step label="Backup" description="Where data goes">
+      <label>Backup folder</label><input id="folder" placeholder="C:\Backups">
+      <p style="font-size:12px;color:#64748b">The folder is checked when you press Next (an async check, like asking the disk).</p>
+    </nile-step>
+    <nile-step label="Done"><p>Everything is ready. Press Finish to open the till.</p></nile-step>
+  </nile-wizard>
+  <div id="done"></div>
+  <script type="module">
+    import "@nile/ui";
+    const $ = (id) => document.getElementById(id);
+    const w = $("setup");
+    w.steps[0].validate = () => ($("name").value.trim() ? true : "Enter your company name to continue.");
+    w.steps[2].validate = () => new Promise((ok) => setTimeout(() => ok($("folder").value.trim() ? true : "Choose a backup folder."), 250));
+    w.addEventListener("finish", () => { $("done").textContent = "Setup finished for " + $("name").value; });
+    w.addEventListener("cancel", () => { w.reset(); $("done").textContent = "Cancelled"; });
+  </script>
+</body>
+</html>

@@ -561,6 +561,8 @@ pub enum TextAlign {
 pub struct ComputedStyle {
     // Box model
     pub display: Display,
+    /// `inline-flex` / `inline-grid`: the container is `display` Flex or Grid but sits in a line as one atomic box.
+    pub inline_level: bool,
     /// Sciter `flow:` (a container laid out as a row or column of its children).
     pub flow: Flow,
     /// The cell numbers of `flow: grid(...)`, row by row (0 = an empty cell).
@@ -801,6 +803,7 @@ impl Default for ComputedStyle {
     fn default() -> Self {
         ComputedStyle {
             display: Display::Block,
+            inline_level: false,
             flow: Flow::Default,
             flow_grid: Vec::new(),
             star_w: 0.0,
@@ -953,6 +956,10 @@ impl Default for ComputedStyle {
 }
 
 impl ComputedStyle {
+    /// An atomic inline box (an `inline-block`, `inline-flex` or `inline-grid`).
+    pub fn is_inline_block(&self) -> bool {
+        self.display == Display::InlineBlock || (self.inline_level && matches!(self.display, Display::Flex | Display::Grid))
+    }
     /// The `(horizontal, vertical)` radius of each corner (top left, top right, bottom right,
     /// bottom left) for a border box of `w` by `h`, `%` resolved.
     pub fn corner_radii(&self, w: f32, h: f32) -> [(f32, f32); 4] {
@@ -993,6 +1000,8 @@ impl ComputedStyle {
                 Display::Block => "block",
                 Display::Inline => "inline",
                 Display::InlineBlock => "inline-block",
+                Display::Flex if self.inline_level => "inline-flex",
+                Display::Grid if self.inline_level => "inline-grid",
                 Display::Flex => "flex",
                 Display::Grid => "grid",
                 Display::ListItem => "list-item",
@@ -2885,6 +2894,7 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
 
     match d.name.as_str() {
         "display" => {
+            s.inline_level = matches!(first.and_then(Value::ident), Some("inline-flex" | "inline-grid"));
             s.display = match first.and_then(Value::ident) {
                 Some("block" | "-webkit-box") => Display::Block,
                 Some("inline") => Display::Inline,

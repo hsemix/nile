@@ -1,0 +1,102 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Components in JSX</title>
+<style>
+  body { margin: 24px; font: 14px system-ui, sans-serif; color: #1f2937; background: #f9fafb; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 14px; margin: 22px 0 6px; color: #4b5563; }
+  p.note { margin: 0 0 8px; color: #6b7280; }
+  code { background: #eef0f3; padding: 1px 4px; border-radius: 3px; }
+  .out { margin-top: 6px; min-height: 18px; color: #2563eb; }
+
+  /* A custom tag: styled from the page, with :where() so the page can override it. */
+  :where(rating-input) { display: inline-flex; gap: 4px; font-size: 26px; cursor: pointer; user-select: none; }
+  :where(rating-input) .on { color: #f59e0b; }
+  :where(rating-input) .off { color: #cbd5e1; }
+  :where(rating-input[readonly]) { cursor: default; }
+
+  :where(qty-stepper) { display: inline-flex; align-items: center; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; }
+  :where(qty-stepper) button { width: 30px; height: 30px; border: 0; background: transparent; font-size: 16px; cursor: pointer; }
+  :where(qty-stepper) .n { min-width: 36px; text-align: center; font-variant-numeric: tabular-nums; }
+
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 99px; background: #dbeafe; color: #1e40af; margin-right: 6px; }
+  .badge.warn { background: #fee2e2; color: #991b1b; }
+</style>
+</head>
+<body>
+<h1>Components in JSX</h1>
+<p class="note">New tags, inputs and widgets from JSX and classes, no framework. Each one is a class extending <code>Element</code>.</p>
+
+<h2>1. A custom input tag: <code>&lt;rating-input value="3"&gt;</code></h2>
+<p class="note">Registered with <code>customElements.define</code>; draws with <code>content()</code>; handles clicks with <code>"on click at span"</code>; reports with a <code>change</code> event.</p>
+<rating-input id="rating" value="3"></rating-input>
+<div class="out" id="rating-out"></div>
+
+<h2>2. A tag with buttons: <code>&lt;qty-stepper min="0" max="9"&gt;</code></h2>
+<qty-stepper id="qty" value="2" min="0" max="9"></qty-stepper>
+<div class="out" id="qty-out"></div>
+
+<h2>3. A class component used as a JSX tag: <code>&lt;Badge level="warn"&gt;</code></h2>
+<p class="note">Not registered: a class (or function) used as a JSX tag is instantiated when the vnode is rendered.</p>
+<div id="badges"></div>
+
+<script type="module">
+  /** A star rating. `value` is a property and an attribute; clicking a star sets it. */
+  class RatingInput extends Element {
+    static get observedAttributes() { return ["value"]; }
+    get value() { return Number(this.getAttribute("value") || 0); }
+    set value(v) { this.setAttribute("value", String(v)); }
+    connectedCallback() { this.draw(); }
+    attributeChangedCallback() { this.draw(); }
+    draw() {
+      const n = this.value;
+      this.content([1, 2, 3, 4, 5].map((i) => <span class={i <= n ? "on" : "off"} data-i={i}>★</span>));
+    }
+    ["on click at span"](evt, span) {
+      if (this.hasAttribute("readonly")) return;
+      this.value = Number(span.getAttribute("data-i"));
+      this.dispatchEvent(new CustomEvent("change", { bubbles: true, detail: this.value }));
+    }
+  }
+  customElements.define("rating-input", RatingInput);
+
+  /** A number with minus/plus buttons, clamped to min..max. */
+  class QtyStepper extends Element {
+    static get observedAttributes() { return ["value", "min", "max"]; }
+    get value() { return Number(this.getAttribute("value") || 0); }
+    set value(v) {
+      const min = Number(this.getAttribute("min") ?? -Infinity), max = Number(this.getAttribute("max") ?? Infinity);
+      this.setAttribute("value", String(Math.max(min, Math.min(max, v))));
+    }
+    connectedCallback() { this.draw(); }
+    attributeChangedCallback() { this.draw(); }
+    draw() {
+      this.content([
+        <button type="button" data-step="-1" aria-label="Less">−</button>,
+        <span class="n">{this.value}</span>,
+        <button type="button" data-step="1" aria-label="More">+</button>,
+      ]);
+    }
+    ["on click at button"](evt, button) {
+      const before = this.value;
+      this.value = before + Number(button.getAttribute("data-step"));
+      if (this.value !== before) this.dispatchEvent(new CustomEvent("change", { bubbles: true, detail: this.value }));
+    }
+  }
+  customElements.define("qty-stepper", QtyStepper);
+
+  /** A class used as a JSX tag: `this(props, kids)` stores the props, `render()` returns the vnode. */
+  class Badge extends Element {
+    this(props, kids) { this.level = props.level || ""; this.kids = kids; }
+    render() { return <span class={"badge " + this.level}>{this.kids}</span>; }
+  }
+
+  const $ = (id) => document.getElementById(id);
+  $("rating").addEventListener("change", (e) => { $("rating-out").textContent = "rated " + e.detail + " / 5"; });
+  $("qty").addEventListener("change", (e) => { $("qty-out").textContent = "quantity " + e.detail; });
+  $("badges").content([<Badge>In stock</Badge>, <Badge level="warn">Low: 3 left</Badge>]);
+</script>
+</body>
+</html>

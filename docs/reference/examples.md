@@ -29,6 +29,7 @@ ownership require a GUI run; PNG success does not verify them.
 | [Menubar](../../examples/menubar.html) | Nested custom menus, keyboard commands, editor, selection preservation and context menu | Draft in localStorage; not a native OS menu. [Script](../../examples/menubar.js) |
 | [Workbench](../../examples/workbench/index.html) | Nine interfaces: settings, dashboard, kanban, mail, IDE, inventory, calendar, media, slides | In-memory sample flows; no real email/media/code execution. [Instructions](../../examples/workbench/README.md) |
 | [Todo](../../examples/todo/index.html) | Modules, JSX, state and reconciliation | Small component example |
+| [Components in JSX](../../examples/jsx-components.html) | New tags and inputs from classes and JSX: `customElements.define`, `content()`, `"on click at span"`, class components as JSX tags | A rating input, a quantity stepper and a badge |
 | [First app](../../examples/getting-started/index.html) | Inputs, events, selection, theme and basic layout | Tutorial entry |
 | [Bootstrap](../../examples/bootstrap/run.js) | Hidden startup script opens application window | Native shell run required |
 | [C host](../../examples/c/render.c) | Embedding, script/host bridge, input and rendering | Build instructions in [embedding](../guide/embedding.md) |
@@ -104,6 +105,10 @@ browser compatibility.
 | [ui-combobox.html](../../examples/ui-combobox.html) | `@nile/ui` combobox: markup options, script items with groups and hints, async source |
 | [ui-ribbon.html](../../examples/ui-ribbon.html) | `@nile/ui` Microsoft-style ribbon: tabs, groups, drop-downs, toggles, contextual tab, collapse |
 | [ui-charts.html](../../examples/ui-charts.html) | `@nile/ui` bar, line, stacked area and donut charts with tooltips |
+| [ui-tree.html](../../examples/ui-tree.html) | `@nile/ui` tree: lazy children, filter, icons, keyboard |
+| [ui-inputs.html](../../examples/ui-inputs.html) | `@nile/ui` number keypad (field and PIN), calendar, date field and date range with presets |
+| [ui-commands.html](../../examples/ui-commands.html) | `@nile/ui` popup menu with submenus, context menu, command palette and a customer picker |
+| [ui-wizard.html](../../examples/ui-wizard.html) | `@nile/ui` wizard with validation, an async step check, optional and skipped steps |
 | [sciter-flow.html](../../examples/sciter-flow.html) | Sciter layout CSS: `flow:`, `*` units, `size:`, `dip`, `flow: grid(...)`, tag shortcuts |
 | [sciter-paths.html](../../examples/sciter-paths.html) | Sciter `url(path:...)` images, `foreground-image`, `var(name)`, window constants |
 | [windows.html](../../examples/windows.html) | Multiple windows, modal result and shared messages |

@@ -1,0 +1,66 @@
+<!doctype html>
+<html window-width="720" window-height="480">
+<meta charset="utf-8">
+<title>Menu and command palette: @nile/ui</title>
+<style>
+  body { margin: 0; padding: 24px; font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b }
+  h1 { margin: 0 0 6px; font-size: 20px }
+  p { margin: 0 0 14px; color: #64748b; font-size: 13px }
+  kbd { padding: 1px 6px; border: 1px solid #cbd5e1; border-radius: 4px; background: #fff; font-size: 12px }
+  .bar { display: flex; gap: 8px; margin-bottom: 14px }
+  button { padding: 7px 14px }
+  #list { width: 320px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff }
+  #list div { padding: 8px 12px; border-bottom: 1px solid #e2e8f0 }
+  #out { margin-top: 14px; font-size: 13px; color: #475569; min-height: 20px }
+</style>
+<body>
+  <h1>Menu and command palette</h1>
+  <p>Press <kbd id="k1">Ctrl+K</kbd> for the palette. It lists the commands below and the shortcuts you labelled. Right-click a row for its menu.</p>
+  <div class="bar">
+    <button id="file">File</button>
+    <button id="who">Find a customer...</button>
+  </div>
+  <div id="list"><div>Milk 1 l</div><div>Butter 250 g</div><div>Sourdough loaf</div></div>
+  <div id="out"></div>
+  <script type="module">
+    import { menu, contextMenu, palette, shortcuts, toast } from "@nile/ui";
+    const $ = (id) => document.getElementById(id);
+    const say = (text) => { $("out").textContent = text; };
+    $("k1").textContent = shortcuts.format("Mod+K");
+    shortcuts.on("Mod+S", () => say("Saved"), { label: "Save document" });
+    palette.add({ label: "New sale", shortcut: "F8", group: "Sales", run: () => say("New sale") });
+    palette.add({ label: "Open stock register", hint: "Stock", group: "Stock", run: () => say("Stock register") });
+    palette.add({ label: "Print receipt", hint: "Printer", group: "Sales", run: () => say("Printing...") });
+    palette.add({ label: "Lock screen", group: "Session", run: () => toast("Locked", { type: "warning" }) });
+    palette.bind("Mod+K");
+
+    $("file").addEventListener("click", () => menu([
+      { label: "New", shortcut: "Mod+N", run: () => say("New") },
+      { label: "Open recent", items: [{ label: "report-oct.xlsx", run: () => say("Opening report-oct.xlsx") }, { label: "stock.csv", run: () => say("Opening stock.csv") }] },
+      { separator: true },
+      { label: "Autosave", checked: true, run: () => say("Autosave toggled") },
+      { label: "Delete", danger: true, disabled: true },
+      { label: "Quit", run: () => say("Quit chosen") },
+    ], { anchor: $("file") }));
+
+    contextMenu($("list"), (e) => {
+      const row = e.target.closest("#list > div");
+      if (!row) return null;
+      return [
+        { label: "Add to receipt", run: () => say("Added " + row.textContent) },
+        { label: "Edit price...", shortcut: "F2", run: () => say("Edit " + row.textContent) },
+        { separator: true },
+        { label: "Remove", danger: true, run: () => { row.remove(); say("Removed"); } },
+      ];
+    });
+
+    $("who").addEventListener("click", async () => {
+      const pick = await palette.open({
+        placeholder: "Find a customer...",
+        items: [{ label: "Ada Lovelace", hint: "0700 111 222", data: 1 }, { label: "Alan Turing", hint: "0700 333 444", data: 2 }, { label: "Grace Hopper", hint: "0700 555 666", data: 3 }],
+      });
+      say(pick ? "Customer: " + pick.label : "No customer chosen");
+    });
+  </script>
+</body>
+</html>
