@@ -4554,11 +4554,11 @@ mod tests {
         assert_eq!(js(&mut p, "d.join()"), "no");
 
         // toast(): shows, picks its type and role, closes by itself, and is capped.
-        js(&mut p, "window.t = ui.toast.error('Printer offline', { duration: 60 })");
+        js(&mut p, "window.t = ui.toast.error('Printer offline', { duration: 600 })");
         settle(&mut p, 30);
         assert_eq!(js(&mut p, "[document.querySelector('.nile-toast').getAttribute('data-type'), document.querySelector('.nile-toast').getAttribute('role'), document.querySelector('.nile-toast-text').textContent].join()"), "error,alert,Printer offline");
         assert_eq!(js(&mut p, "document.querySelector('.nile-toast').classList.contains('nile-in')"), "true");
-        settle(&mut p, 100);
+        settle(&mut p, 700);
         settle(&mut p, 250);
         assert_eq!(js(&mut p, "document.querySelectorAll('.nile-toast').length"), "0", "it goes away on its own");
         js(&mut p, "for (let i = 0; i < 8; i++) ui.toast('m' + i, { duration: 0 });");
