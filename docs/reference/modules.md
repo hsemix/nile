@@ -260,6 +260,13 @@ title })`, `printRaw(printer, bytes)` and `sendNetwork(host, port, bytes, { time
 text, rows, columns, barcodes, QR, logos, cut, cash drawer and a text `preview()`), `encodeText` and `printReceipt(receipt,
 { host | printer | file })`. See the [printing guide](../guide/printing.md).
 
+## `crypto` and `@nile/crypto`
+
+`crypto.getRandomValues`, `crypto.randomUUID` and `crypto.subtle` (digest SHA-1/256/384/512; HMAC; PBKDF2; AES-GCM; raw keys
+only) are globals, backed by `ring`; `@nile/crypto` adds `hashPassword`, `verifyPassword`, `needsRehash` (PBKDF2-SHA256,
+600,000 iterations), `sha256`, `digest`, `hmac`, `encryptText`, `decryptText`, `randomBytes`, `uuid`, `hex`. See the
+[hashing and encryption guide](../guide/hashing-and-encryption.md).
+
 ## `@debug`
 
 | Export | Behavior |

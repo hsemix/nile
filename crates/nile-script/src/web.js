@@ -3186,4 +3186,5 @@
   
   /*@CANVAS@*/
   /*@AUDIO@*/
+  /*@CRYPTO@*/
   }

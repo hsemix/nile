@@ -451,7 +451,12 @@ pub(crate) fn start(state: &SysState, op_id: u32, op: String, args: Vec<String>)
     state.pending.fetch_add(1, Ordering::Relaxed);
     let (done, pending) = (state.done.clone(), state.pending.clone());
     std::thread::spawn(move || {
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&op, &args))).unwrap_or_else(|_| Err("EIO: the operation panicked".into()));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match op.strip_prefix("crypto:") {
+            // `crypto.subtle` work (PBKDF2 can take a while) runs here too, so it never stalls the window.
+            Some(rest) => crate::crypto::call(rest, &args),
+            None => run(&op, &args),
+        }))
+        .unwrap_or_else(|_| Err("EIO: the operation panicked".into()));
         done.lock().unwrap().push((op_id, r));
         pending.fetch_sub(1, Ordering::Relaxed);
     });

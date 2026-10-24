@@ -5595,6 +5595,90 @@ mod tests {
     }
 
     #[test]
+    fn web_crypto_hashes_signs_derives_and_encrypts_with_the_published_vectors() {
+        let (mut p, path) = page(
+            r##"<body><script type="module">
+              import { hashPassword, verifyPassword, needsRehash, sha256, hmac, encryptText, decryptText } from "@nile/crypto";
+              const enc = (t) => new TextEncoder().encode(t);
+              const hx = (b) => Array.from(new Uint8Array(b), (x) => (x < 16 ? "0" : "") + x.toString(16)).join("");
+              const s = crypto.subtle;
+              window.out = [];
+              const note = (k, v) => out.push(k + "=" + v);
+              (async () => {
+                note("sha256", hx(await s.digest("SHA-256", enc("abc"))));
+                note("sha1", hx(await s.digest({ name: "SHA-1" }, enc("abc"))));
+                note("helper", await sha256("abc"));
+                const hk = await s.importKey("raw", enc("key"), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+                const tag = await s.sign("HMAC", hk, enc("The quick brown fox jumps over the lazy dog"));
+                note("hmac", hx(tag));
+                note("verify", [await s.verify("HMAC", hk, tag, enc("The quick brown fox jumps over the lazy dog")), await s.verify("HMAC", hk, tag, enc("other"))].join());
+                note("hmac2", await hmac("key", "The quick brown fox jumps over the lazy dog"));
+                const pk = await s.importKey("raw", enc("password"), "PBKDF2", false, ["deriveBits", "deriveKey"]);
+                note("pbkdf2", hx(await s.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: enc("salt"), iterations: 4096 }, pk, 256)));
+                const zero = await s.importKey("raw", new Uint8Array(16), "AES-GCM", true, ["encrypt", "decrypt"]);
+                note("gcm", hx(await s.encrypt({ name: "AES-GCM", iv: new Uint8Array(12) }, zero, new Uint8Array(16))));
+                const key = await s.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+                const iv = crypto.getRandomValues(new Uint8Array(12));
+                const sealed = await s.encrypt({ name: "AES-GCM", iv, additionalData: enc("ctx") }, key, enc("hello"));
+                note("roundtrip", new TextDecoder().decode(await s.decrypt({ name: "AES-GCM", iv, additionalData: enc("ctx") }, key, sealed)));
+                try { await s.decrypt({ name: "AES-GCM", iv, additionalData: enc("other") }, key, sealed); note("tamper", "accepted"); } catch (e) { note("tamper", e.name); }
+                try { await s.digest("MD5", enc("x")); } catch (e) { note("md5", e.name); }
+                note("exported", (await s.exportKey("raw", key)).byteLength);
+                const derived = await s.deriveKey({ name: "PBKDF2", hash: "SHA-256", salt: enc("s"), iterations: 10 }, pk, { name: "AES-GCM", length: 128 }, false, ["encrypt"]);
+                note("derived", derived.algorithm.name + derived.algorithm.length + derived.extractable);
+                // helpers
+                const stored = await hashPassword("correct horse", { iterations: 2000 });
+                note("stored", stored.split("$").length + ":" + stored.split("$").slice(0, 2).join("$"));
+                note("verify-pw", [await verifyPassword("correct horse", stored), await verifyPassword("wrong", stored), await verifyPassword("x", "garbage")].join());
+                note("rehash", [needsRehash(stored), needsRehash(stored, { iterations: 1000 })].join());
+                const box = await encryptText("pw", "secret note", { iterations: 1000 });
+                note("text", await decryptText("pw", box));
+                try { await decryptText("nope", box); } catch (e) { note("badpw", e.name); }
+                out.push("done");
+              })().catch((e) => out.push("ERR " + e.name + " " + e.message));
+              // sync parts
+              const a = crypto.getRandomValues(new Uint8Array(32)), b = crypto.getRandomValues(new Uint8Array(32));
+              window.sync = [a.some((x) => x !== 0), a.join() !== b.join(), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(crypto.randomUUID()), crypto.randomUUID() !== crypto.randomUUID()].join();
+              try { crypto.getRandomValues(new Float32Array(2)); window.sync += ",float-ok"; } catch (e) { window.sync += "," + e.name; }
+              try { crypto.getRandomValues(new Uint8Array(70000)); } catch (e) { window.sync += "," + e.name; }
+            </script></body>"##,
+            "web-crypto",
+        );
+        for _ in 0..200 {
+            std::thread::sleep(Duration::from_millis(30));
+            p.run_timers();
+            if js(&mut p, "out.includes('done') || out.some((l) => l.startsWith('ERR'))") == "true" {
+                break;
+            }
+        }
+        let out = js(&mut p, "out.join('\\n')");
+        for line in [
+            "sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "sha1=a9993e364706816aba3e25717850c26c9cd0d89d",
+            "helper=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "hmac=f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
+            "verify=true,false",
+            "hmac2=f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
+            "pbkdf2=c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a",
+            "gcm=0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf",
+            "roundtrip=hello",
+            "tamper=OperationError",
+            "md5=NotSupportedError",
+            "exported=32",
+            "derived=AES-GCM128false",
+            "stored=4:pbkdf2-sha256$2000",
+            "verify-pw=true,false,false",
+            "rehash=true,false",
+            "text=secret note",
+            "badpw=OperationError",
+        ] {
+            assert!(out.lines().any(|l| l == line), "missing {line:?} in:\n{out}");
+        }
+        assert_eq!(js(&mut p, "sync"), "true,true,true,true,TypeMismatchError,QuotaExceededError");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn the_ui_grid_keeps_an_edit_with_its_record_and_the_drag_clean() {
         let (mut p, path) = page(
             r##"<body style="margin:0"><div id="host"></div>

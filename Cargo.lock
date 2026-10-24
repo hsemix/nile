@@ -2075,6 +2075,7 @@ dependencies = [
  "nile-extension-pack",
  "nile-extensions",
  "nile-style",
+ "ring",
  "rquickjs",
  "rustls",
  "serde_json",
