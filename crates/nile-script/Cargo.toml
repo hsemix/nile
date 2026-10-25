@@ -21,6 +21,7 @@ nile-canvas.workspace = true
 nile-audio = { workspace = true, optional = true }
 rquickjs.workspace = true
 base64.workspace = true
+ring.workspace = true
 
 nile-extensions = { path = "../nile-extensions" }
 serde_json = "1"

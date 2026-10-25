@@ -346,6 +346,8 @@ pub struct View {
     pub focus_changes: Vec<(Option<NodeId>, Option<NodeId>)>,
     /// Window actions scripts and `role="window-*"` elements asked for; the window loop applies them.
     pub window_requests: Vec<WindowCommand>,
+    /// `Window.this.print()` / `exportPdf()` jobs waiting for the page to write its PDF: (id, path, title).
+    pub print_requests: Vec<(u32, String, String)>,
     /// How this window was opened (its id, opener, `parameters`).
     pub window_info: WindowInfo,
     /// The `<menu>` element the page chose as the application menu bar (`Window.this.menu`).
@@ -961,6 +963,10 @@ impl Environment for Env {
         v.scroll_dirty = true;
     }
 
+    fn print_request(&self, id: u32, path: &str, title: &str) {
+        self.0.borrow_mut().print_requests.push((id, path.to_string(), title.to_string()));
+    }
+
     fn portal_set(&self, node: NodeId, rect: [f32; 4]) {
         let mut v = self.0.borrow_mut();
         let rect = (rect[0], rect[1], rect[2], rect[3]);
@@ -1336,6 +1342,7 @@ impl Page {
             images: FileImages::new(path.parent().map(PathBuf::from).unwrap_or_default()),
             focus_changes: Vec::new(),
             window_requests: Vec::new(),
+            print_requests: Vec::new(),
             file_request: None,
             dialogs: DEFAULTS.with(|d| d.borrow().0.clone()),
             resized: false,
@@ -1590,6 +1597,10 @@ impl Page {
         let moved = !moves.is_empty();
         for (old, new) in moves {
             self.focus_moved(old, new);
+        }
+        let jobs = std::mem::take(&mut self.view.borrow_mut().print_requests);
+        for (id, path, title) in jobs {
+            self.run_print_job(id, &path, &title);
         }
         let requests = std::mem::take(&mut self.view.borrow_mut().clipboard_requests);
         for kind in requests {
@@ -4554,11 +4565,11 @@ mod tests {
         assert_eq!(js(&mut p, "d.join()"), "no");
 
         // toast(): shows, picks its type and role, closes by itself, and is capped.
-        js(&mut p, "window.t = ui.toast.error('Printer offline', { duration: 60 })");
+        js(&mut p, "window.t = ui.toast.error('Printer offline', { duration: 600 })");
         settle(&mut p, 30);
         assert_eq!(js(&mut p, "[document.querySelector('.nile-toast').getAttribute('data-type'), document.querySelector('.nile-toast').getAttribute('role'), document.querySelector('.nile-toast-text').textContent].join()"), "error,alert,Printer offline");
         assert_eq!(js(&mut p, "document.querySelector('.nile-toast').classList.contains('nile-in')"), "true");
-        settle(&mut p, 100);
+        settle(&mut p, 700);
         settle(&mut p, 250);
         assert_eq!(js(&mut p, "document.querySelectorAll('.nile-toast').length"), "0", "it goes away on its own");
         js(&mut p, "for (let i = 0; i < 8; i++) ui.toast('m' + i, { duration: 0 });");
@@ -5362,6 +5373,308 @@ mod tests {
         assert_eq!(js(&mut p, "document.activeElement === document.body || document.activeElement === null"), "true");
         p.key("keydown", "q".into(), ModifiersState::default());
         assert_eq!(js(&mut p, "keys.join()"), "q", "the key reaches the document");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_escpos_receipt_builds_the_right_bytes() {
+        let (mut p, path) = page(
+            r##"<body><script type="module">
+              import { Receipt, encodeText, printReceipt } from "@nile/escpos";
+              window.Receipt = Receipt; window.encodeText = encodeText; window.printReceipt = printReceipt;
+              window.hex = (r) => r.hex();
+            </script></body>"##,
+            "escpos",
+        );
+        p.run_timers();
+        p.run_timers();
+        // Setup: initialise + code page; text and styles.
+        assert_eq!(js(&mut p, "new Receipt().hex()"), "1b 40 1b 74 00");
+        assert_eq!(js(&mut p, "new Receipt({ init: false }).align('center').bold().line('Hi').hex()"), "1b 61 01 1b 45 01 48 69 0a");
+        assert_eq!(js(&mut p, "new Receipt({ init: false }).size(2, 2).size(1, 1).underline().invert().font('B').hex()"), "1d 21 11 1d 21 00 1b 2d 01 1d 42 01 1b 4d 01");
+        // Layout helpers pad to the width; double-width halves it.
+        assert_eq!(js(&mut p, "new Receipt({ init: false, width: 10 }).row('A', '1.00').preview()"), "A     1.00");
+        assert_eq!(js(&mut p, "new Receipt({ init: false, width: 10 }).size(2, 1).row('A', '1').preview()"), "A   1");
+        assert_eq!(js(&mut p, "new Receipt({ init: false, width: 12 }).columns([{ text: 'Milk', width: 6 }, { text: 'x2', width: 2, align: 'right' }, { text: '5.00', align: 'right' }]).preview()"), "Milk  x25.00");
+        assert_eq!(js(&mut p, "new Receipt({ init: false, width: 4 }).rule('=').preview()"), "====");
+        assert_eq!(js(&mut p, "new Receipt({ init: false, width: 12 }).align('center').line('ABCD').preview()"), "    ABCD");
+        // Code pages: é, ñ, the euro sign (only in 858/1252), and "?" for what a page lacks.
+        assert_eq!(js(&mut p, "[encodeText('é', 'cp437'), encodeText('ñ', 'cp437'), encodeText('€', 'cp858'), encodeText('€', 'cp437'), encodeText('é€', 'cp1252'), encodeText('日', 'cp437'), encodeText('Ab', 'ascii')].map((a) => a.join('.')).join('|')"), "130|164|213|63|233.128|63|65.98");
+        assert_eq!(js(&mut p, "new Receipt({ codepage: 'cp858' }).hex()"), "1b 40 1b 74 13");
+        // Barcode, QR, image, cut, drawer, beep.
+        assert_eq!(js(&mut p, "new Receipt({ init: false }).barcode('code128', '123', { height: 60, width: 2 }).hex()"), "1d 68 3c 1d 77 02 1d 48 02 1d 6b 49 05 7b 42 31 32 33");
+        assert_eq!(js(&mut p, "new Receipt({ init: false }).barcode('ean13', '5901234123457', { text: 'none' }).hex()"), "1d 68 50 1d 77 03 1d 48 00 1d 6b 43 0d 35 39 30 31 32 33 34 31 32 33 34 35 37");
+        assert_eq!(js(&mut p, "new Receipt({ init: false }).qr('AB', { size: 5 }).hex()"), "1d 28 6b 04 00 31 41 32 00 1d 28 6b 03 00 31 43 05 1d 28 6b 03 00 31 45 31 1d 28 6b 05 00 31 50 30 41 42 1d 28 6b 03 00 31 51 30");
+        assert_eq!(js(&mut p, "new Receipt({ init: false }).image({ width: 8, height: 2, data: new Uint8ClampedArray(8 * 2 * 4).fill(0).map((v, i) => (i % 4 === 3 ? 255 : 0)) }).hex()"), "1d 76 30 00 01 00 02 00 ff ff");
+        assert_eq!(js(&mut p, "new Receipt({ init: false }).image({ width: 3, height: 1, data: Uint8ClampedArray.from([0,0,0,255, 255,255,255,255, 0,0,0,255]) }).hex()"), "1d 76 30 00 01 00 01 00 a0");
+        assert_eq!(js(&mut p, "new Receipt({ init: false }).feed(2).cut().cut({ partial: true }).drawer().drawer(1).beep(2).hex()"), "1b 64 02 1d 56 41 03 1d 56 42 03 1b 70 00 19 fa 1b 70 01 19 fa 1b 42 02 02");
+        assert_eq!(js(&mut p, "(() => { try { new Receipt().barcode('nope', '1'); return 'no error'; } catch (e) { return 'threw'; } })()"), "threw");
+        assert_eq!(js(&mut p, "new Receipt({ init: false }).text('a\\nb').preview()"), "a\nb");
+        // A file target writes the bytes.
+        let out = std::env::temp_dir().join(format!("nile-escpos-{}.bin", std::process::id()));
+        js(&mut p, &format!("window.done = null; printReceipt(new Receipt().line('OK').cut(), {{ file: {:?} }}).then(() => (done = 'ok'), (e) => (done = 'err ' + e.message))", out.to_string_lossy()));
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(20));
+            p.run_timers();
+        }
+        assert_eq!(js(&mut p, "done"), "ok");
+        assert_eq!(std::fs::read(&out).unwrap(), [0x1b, 0x40, 0x1b, 0x74, 0, b'O', b'K', 0x0a, 0x1d, 0x56, 0x41, 3]);
+        let _ = std::fs::remove_file(out);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    #[test]
+    fn the_print_module_lists_printers_and_sends_jobs_through_cups_commands() {
+        use std::os::unix::fs::PermissionsExt;
+        // These tests change the process's PATH: one at a time.
+        let _path = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("nile-print-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = |name: &str, body: &str| {
+            let f = dir.join(name);
+            std::fs::write(&f, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        script(
+            "lpstat",
+            "echo 'printer Office is idle.  enabled since Thu 01 Jan 2026'\necho 'printer Kitchen disabled since Thu 01 Jan 2026 -'\necho '\treason unknown'\necho 'printer TM-T20 now printing TM-T20-5.  enabled since Thu 01 Jan 2026'\necho 'system default destination: Office'",
+        );
+        let log = dir.join("calls.txt");
+        script("lp", &format!("echo \"$@\" >> '{}'\ncat > '{}.stdin' 2>/dev/null\necho 'request id is X-1 (1 file(s))'", log.display(), log.display()));
+        script("lpfail", "echo boom >&2\nexit 1");
+        let (mut p, path) = page(
+            &format!(
+                r##"<body><script type="module">
+              import {{ printers, printFile, printRaw, sendNetwork, parseLpstat }} from "@nile/print";
+              import {{ setenv, getenv }} from "@sys";
+              window.parseLpstat = parseLpstat;
+              setenv("PATH", {dir:?} + ":" + getenv("PATH"));
+              window.out = [];
+              window.step = async () => {{
+                out.push(JSON.stringify(await printers()));
+                await printFile("/tmp/invoice.pdf", {{ printer: "Office", copies: 2, title: "Invoice 7" }});
+                await printFile("/tmp/other.pdf");
+                await printRaw("TM-T20", new Uint8Array([27, 64, 72, 105, 10]));
+                try {{ await printRaw("", [1]); }} catch (e) {{ out.push("empty: " + e.message); }}
+                out.push("done");
+              }};
+              step().catch((e) => out.push("ERR " + e.message));
+            </script></body>"##,
+                dir = dir.to_string_lossy()
+            ),
+            "print",
+        );
+        for _ in 0..60 {
+            std::thread::sleep(Duration::from_millis(30));
+            p.run_timers();
+            if js(&mut p, "out.includes('done')") == "true" {
+                break;
+            }
+        }
+        let out = js(&mut p, "out.join('\\n')");
+        assert!(out.contains("done"), "{out}");
+        assert!(out.contains(r#"[{"name":"Office","default":true,"status":"idle"},{"name":"Kitchen","default":false,"status":"offline"},{"name":"TM-T20","default":false,"status":"printing"}]"#), "{out}");
+        assert!(out.contains("empty: printRaw needs a printer name"), "{out}");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(calls.lines().collect::<Vec<_>>(), ["-d Office -n 2 -t Invoice 7 /tmp/invoice.pdf", "/tmp/other.pdf", "-d TM-T20 -o raw -t Nile receipt"]);
+        assert_eq!(std::fs::read(format!("{}.stdin", log.display())).unwrap(), [27, 64, 72, 105, 10], "the raw bytes reach lp's standard input");
+
+        // The parser alone, and a failing command surfaces its message.
+        assert_eq!(js(&mut p, "JSON.stringify(parseLpstat('system default destination: B\\nprinter A is idle.\\nprinter B is idle.'))"), r#"[{"name":"A","default":false,"status":"idle"},{"name":"B","default":true,"status":"idle"}]"#);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_print_module_sends_raw_bytes_to_a_network_printer() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let (mut s, _) = listener.accept().unwrap();
+            let mut got = Vec::new();
+            let _ = s.read_to_end(&mut got);
+            let _ = tx.send(got);
+        });
+        let (mut p, path) = page(
+            &format!(
+                r##"<body><script type="module">
+              import {{ Receipt, printReceipt }} from "@nile/escpos";
+              window.done = null;
+              printReceipt(new Receipt().line("Net").cut(), {{ host: "127.0.0.1", port: {port} }}).then(() => (done = "sent"), (e) => (done = "err " + e.message));
+            </script></body>"##
+            ),
+            "print-net",
+        );
+        for _ in 0..80 {
+            std::thread::sleep(Duration::from_millis(25));
+            p.run_timers();
+            if js(&mut p, "done") != "null" {
+                break;
+            }
+        }
+        assert_eq!(js(&mut p, "done"), "sent");
+        let got = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(got, [0x1b, 0x40, 0x1b, 0x74, 0, b'N', b'e', b't', 0x0a, 0x1d, 0x56, 0x41, 3]);
+        // Nothing listening: the promise rejects instead of hanging.
+        let (mut p2, path2) = page(
+            r##"<body><script type="module">
+              import { sendNetwork } from "@nile/print";
+              window.done = null;
+              sendNetwork("127.0.0.1", 1, [1], { timeout: 1500 }).then(() => (done = "sent"), (e) => (done = "err"));
+            </script></body>"##,
+            "print-net-down",
+        );
+        for _ in 0..120 {
+            std::thread::sleep(Duration::from_millis(25));
+            p2.run_timers();
+            if js(&mut p2, "done") != "null" {
+                break;
+            }
+        }
+        assert_eq!(js(&mut p2, "done"), "err");
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn window_print_writes_the_page_as_a_pdf_and_hands_it_to_the_printer() {
+        use std::os::unix::fs::PermissionsExt;
+        let _path = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("nile-winprint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("calls.txt");
+        let lp = dir.join("lp");
+        std::fs::write(&lp, format!("#!/bin/sh\necho \"$@\" >> '{}'\ncp \"$(eval echo \\${{$#}})\" '{}.pdf'\n", log.display(), log.display())).unwrap();
+        std::fs::set_permissions(&lp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let saved = dir.join("saved.pdf");
+        let (mut p, path) = page(
+            &format!(
+                r##"<html><head><title>Invoice 7</title><style>@page {{ size: 200px 300px; margin: 10px }}</style></head><body><h1>Invoice</h1><p>Total 8.80</p>
+            <script type="module">
+              import {{ setenv, getenv }} from "@sys";
+              setenv("PATH", {dir:?} + ":" + getenv("PATH"));
+              window.out = [];
+              window.w0 = window.innerWidth;
+              (async () => {{
+                out.push("export:" + (await Window.this.exportPdf({saved:?})));
+                out.push("print:" + (await Window.this.print({{ printer: "Office", copies: 2 }})));
+                try {{ await Window.this.exportPdf("/nonexistent-dir/x.pdf"); }} catch (e) {{ out.push("failed"); }}
+              }})().catch((e) => out.push("ERR " + e.message));
+            </script></body></html>"##,
+                dir = dir.to_string_lossy(),
+                saved = saved.to_string_lossy()
+            ),
+            "window-print",
+        );
+        for _ in 0..80 {
+            std::thread::sleep(Duration::from_millis(25));
+            p.run_timers();
+            if js(&mut p, "out.includes('failed')") == "true" {
+                break;
+            }
+        }
+        let out = js(&mut p, "out.join('\\n')");
+        assert!(out.contains("print:true") && out.contains("failed"), "{out}");
+        let head = std::fs::read(&saved).unwrap();
+        assert!(head.starts_with(b"%PDF"), "a PDF was written");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(calls.starts_with("-d Office -n 2 "), "{calls}");
+        assert!(std::fs::read(format!("{}.pdf", log.display())).unwrap().starts_with(b"%PDF"), "lp was given the PDF");
+        assert_eq!(js(&mut p, "window.innerWidth === w0"), "true", "the window's own size is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn web_crypto_hashes_signs_derives_and_encrypts_with_the_published_vectors() {
+        let (mut p, path) = page(
+            r##"<body><script type="module">
+              import { hashPassword, verifyPassword, needsRehash, sha256, hmac, encryptText, decryptText } from "@nile/crypto";
+              const enc = (t) => new TextEncoder().encode(t);
+              const hx = (b) => Array.from(new Uint8Array(b), (x) => (x < 16 ? "0" : "") + x.toString(16)).join("");
+              const s = crypto.subtle;
+              window.out = [];
+              const note = (k, v) => out.push(k + "=" + v);
+              (async () => {
+                note("sha256", hx(await s.digest("SHA-256", enc("abc"))));
+                note("sha1", hx(await s.digest({ name: "SHA-1" }, enc("abc"))));
+                note("helper", await sha256("abc"));
+                const hk = await s.importKey("raw", enc("key"), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+                const tag = await s.sign("HMAC", hk, enc("The quick brown fox jumps over the lazy dog"));
+                note("hmac", hx(tag));
+                note("verify", [await s.verify("HMAC", hk, tag, enc("The quick brown fox jumps over the lazy dog")), await s.verify("HMAC", hk, tag, enc("other"))].join());
+                note("hmac2", await hmac("key", "The quick brown fox jumps over the lazy dog"));
+                const pk = await s.importKey("raw", enc("password"), "PBKDF2", false, ["deriveBits", "deriveKey"]);
+                note("pbkdf2", hx(await s.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: enc("salt"), iterations: 4096 }, pk, 256)));
+                const zero = await s.importKey("raw", new Uint8Array(16), "AES-GCM", true, ["encrypt", "decrypt"]);
+                note("gcm", hx(await s.encrypt({ name: "AES-GCM", iv: new Uint8Array(12) }, zero, new Uint8Array(16))));
+                const key = await s.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+                const iv = crypto.getRandomValues(new Uint8Array(12));
+                const sealed = await s.encrypt({ name: "AES-GCM", iv, additionalData: enc("ctx") }, key, enc("hello"));
+                note("roundtrip", new TextDecoder().decode(await s.decrypt({ name: "AES-GCM", iv, additionalData: enc("ctx") }, key, sealed)));
+                try { await s.decrypt({ name: "AES-GCM", iv, additionalData: enc("other") }, key, sealed); note("tamper", "accepted"); } catch (e) { note("tamper", e.name); }
+                try { await s.digest("MD5", enc("x")); } catch (e) { note("md5", e.name); }
+                note("exported", (await s.exportKey("raw", key)).byteLength);
+                const derived = await s.deriveKey({ name: "PBKDF2", hash: "SHA-256", salt: enc("s"), iterations: 10 }, pk, { name: "AES-GCM", length: 128 }, false, ["encrypt"]);
+                note("derived", derived.algorithm.name + derived.algorithm.length + derived.extractable);
+                // helpers
+                const stored = await hashPassword("correct horse", { iterations: 2000 });
+                note("stored", stored.split("$").length + ":" + stored.split("$").slice(0, 2).join("$"));
+                note("verify-pw", [await verifyPassword("correct horse", stored), await verifyPassword("wrong", stored), await verifyPassword("x", "garbage")].join());
+                note("rehash", [needsRehash(stored), needsRehash(stored, { iterations: 1000 })].join());
+                const box = await encryptText("pw", "secret note", { iterations: 1000 });
+                note("text", await decryptText("pw", box));
+                try { await decryptText("nope", box); } catch (e) { note("badpw", e.name); }
+                out.push("done");
+              })().catch((e) => out.push("ERR " + e.name + " " + e.message));
+              // sync parts
+              const a = crypto.getRandomValues(new Uint8Array(32)), b = crypto.getRandomValues(new Uint8Array(32));
+              window.sync = [a.some((x) => x !== 0), a.join() !== b.join(), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(crypto.randomUUID()), crypto.randomUUID() !== crypto.randomUUID()].join();
+              try { crypto.getRandomValues(new Float32Array(2)); window.sync += ",float-ok"; } catch (e) { window.sync += "," + e.name; }
+              try { crypto.getRandomValues(new Uint8Array(70000)); } catch (e) { window.sync += "," + e.name; }
+            </script></body>"##,
+            "web-crypto",
+        );
+        for _ in 0..200 {
+            std::thread::sleep(Duration::from_millis(30));
+            p.run_timers();
+            if js(&mut p, "out.includes('done') || out.some((l) => l.startsWith('ERR'))") == "true" {
+                break;
+            }
+        }
+        let out = js(&mut p, "out.join('\\n')");
+        for line in [
+            "sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "sha1=a9993e364706816aba3e25717850c26c9cd0d89d",
+            "helper=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "hmac=f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
+            "verify=true,false",
+            "hmac2=f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
+            "pbkdf2=c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a",
+            "gcm=0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf",
+            "roundtrip=hello",
+            "tamper=OperationError",
+            "md5=NotSupportedError",
+            "exported=32",
+            "derived=AES-GCM128false",
+            "stored=4:pbkdf2-sha256$2000",
+            "verify-pw=true,false,false",
+            "rehash=true,false",
+            "text=secret note",
+            "badpw=OperationError",
+        ] {
+            assert!(out.lines().any(|l| l == line), "missing {line:?} in:\n{out}");
+        }
+        assert_eq!(js(&mut p, "sync"), "true,true,true,true,TypeMismatchError,QuotaExceededError");
         let _ = std::fs::remove_file(path);
     }
 

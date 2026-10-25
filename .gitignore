@@ -3,3 +3,4 @@ target/
 .vscode/
 CLAUDE.md
 notes.txt
+examples/retail-counter/

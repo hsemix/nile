@@ -252,6 +252,21 @@ EAN-13, EAN-8, UPC-A, QR; `<nile-barcode>`, `svg`, `encode`, `dataUrl`), `drawer
 `splitter` (`<nile-splitter>`), `grid` (`<nile-grid>`, `<nile-column>`), `dialog` (`<nile-dialog>`, `confirm`, `prompt`, `alert`, `dialog`), `toast` (`toast`), `shortcuts` (`shortcuts`), `tabs` (`<nile-tabs>`, `<nile-tab>`), `accordion` (`<nile-accordion>`, `<nile-section>`), `combobox` (`<nile-combobox>`), `ribbon` (`ribbon(config)`, `<nile-ribbon>`), `tiles` (`<nile-tiles>`, `<nile-tile>`), `chart` (`<nile-chart>`, `niceScale`), `tree` (`<nile-tree>`), `keypad` (`<nile-keypad>`), `date` (`<nile-calendar>`, `<nile-date>`, `<nile-date-range>`, `formatDate`, `parseDate`), `menu` (`menu`, `contextMenu`), `palette` (`palette`, `fuzzy`) and `wizard` (`<nile-wizard>`, `<nile-step>`). Options and details:
 [ui-components guide](../guide/ui-components.md).
 
+## `@nile/print` and `@nile/escpos`
+
+Built-in JS modules (Nile extensions): `@nile/print` has `printers()`, `defaultPrinter()`, `printFile(path, { printer, copies,
+title })`, `printRaw(printer, bytes)` and `sendNetwork(host, port, bytes, { timeout })` over the system's print tools
+(CUPS `lp` on macOS/Linux, PowerShell and winspool on Windows); `@nile/escpos` has `Receipt` (an ESC/POS command builder with
+text, rows, columns, barcodes, QR, logos, cut, cash drawer and a text `preview()`), `encodeText` and `printReceipt(receipt,
+{ host | printer | file })`. See the [printing guide](../guide/printing.md).
+
+## `crypto` and `@nile/crypto`
+
+`crypto.getRandomValues`, `crypto.randomUUID` and `crypto.subtle` (digest SHA-1/256/384/512; HMAC; PBKDF2; AES-GCM; raw keys
+only) are globals, backed by `ring`; `@nile/crypto` adds `hashPassword`, `verifyPassword`, `needsRehash` (PBKDF2-SHA256,
+600,000 iterations), `sha256`, `digest`, `hmac`, `encryptText`, `decryptText`, `randomBytes`, `uuid`, `hex`. See the
+[hashing and encryption guide](../guide/hashing-and-encryption.md).
+
 ## `@debug`
 
 | Export | Behavior |

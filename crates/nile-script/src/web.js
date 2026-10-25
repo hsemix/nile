@@ -1224,6 +1224,25 @@
     if (!g.host || !g.host.has(name)) throw new Error("updates are not available in this host");
     return g.host[name](...args);
   };
+  const printJobs = new Map();
+  let printNext = 1;
+  const printJob = (options, path) => new Promise((resolve, reject) => {
+    const id = printNext++;
+    printJobs.set(id, { resolve, reject, options: options || {}, export: path !== null });
+    N.printRequest(id, path || "", String((options && options.title) || document.title || ""));
+  });
+  Object.defineProperty(g, "__printReady", {
+    value(id, file, error) {
+      const job = printJobs.get(id);
+      if (!job) return;
+      printJobs.delete(id);
+      if (error) { job.reject(new Error(error)); return; }
+      if (job.export) { job.resolve(file); return; }
+      import("@nile/print").then(({ printFile }) => printFile(file, job.options)).then(
+        () => { try { sysFs.unlinkSync(file); } catch (e) { /* left in the temp folder */ } job.resolve(true); },
+        (e) => { try { sysFs.unlinkSync(file); } catch (x) { /* ditto */ } job.reject(e); });
+    },
+  });
   let badgeText = null, progressValue = null;
   Object.defineProperty(g, "application", { value: { start() {}, run() { return 0; }, quit(code = 0) { N.windowCommand("quit", +code | 0, 0); },
     get arguments() { return g.__envModule.arguments(); },
@@ -1509,6 +1528,12 @@
     // The application menu bar of the window: `Window.this.menu = document.$("menu#app")`. The shell shows
     // it as the system menu bar on macOS and Windows (elsewhere the page draws its own); null removes it.
     get menu() { return appMenu; }
+    // Print or save the page as paper: `await Window.this.print({ printer, copies, title })` writes the page as a PDF
+    // (the `@page` size and margins, page breaks, repeated table headers) and sends it to the system's print path
+    // (`@nile/print` `printFile`), `Window.this.exportPdf(path)` only writes the file. Both resolve once done.
+    // Silent: there is no system print dialog yet, so choose the printer with `@nile/print` `printers()`.
+    print(options = {}) { return printJob(options, null); }
+    exportPdf(path, options = {}) { return printJob(options, String(path)); }
     // The tray icon (notification area): `Window.this.tray = { icon: "tray.png", tooltip: "My app", menu: $("menu#tray") }`
     // (`template: true` lets macOS tint a one-colour icon); null removes it. `trayclick` and `traydoubleclick`
     // fire on the document. Nile extension (Sciter has no tray API); not available on Linux yet.
@@ -3161,4 +3186,5 @@
   
   /*@CANVAS@*/
   /*@AUDIO@*/
+  /*@CRYPTO@*/
   }
