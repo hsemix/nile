@@ -188,8 +188,20 @@ pub fn fs(op: &str, args: &[String]) -> Result<String, String> {
         "rmdir" => std::fs::remove_dir(&path).map(|_| String::new()).map_err(failed),
         "rename" => std::fs::rename(&path, path_of(arg(1))).map(|_| String::new()).map_err(failed),
         "copyfile" => std::fs::copy(&path, path_of(arg(1))).map(|_| String::new()).map_err(failed),
-        "realpath" => nile_dom::vfs::canonicalize(&path).map(|p| p.to_string_lossy().into_owned()).map_err(failed),
+        "realpath" => nile_dom::vfs::canonicalize(&path).map(|p| plain_path(&p.to_string_lossy())).map_err(failed),
         _ => Err(format!("ENOSYS: unknown operation {op}")),
+    }
+}
+
+/// A path as scripts and other programs expect it: Windows' `canonicalize` returns the verbatim form
+/// (`\\?\C:\dir`, `\\?\UNC\server\share`), which most tools and string comparisons choke on.
+pub(crate) fn plain_path(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = p.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        p.to_string()
     }
 }
 
@@ -210,6 +222,14 @@ pub(crate) fn json_str(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn realpath_drops_the_windows_verbatim_prefix() {
+        assert_eq!(plain_path(r"\\?\C:\Users\me\app"), r"C:\Users\me\app");
+        assert_eq!(plain_path(r"\\?\UNC\server\share\dir"), r"\\server\share\dir");
+        assert_eq!(plain_path("/usr/local/bin"), "/usr/local/bin");
+        assert_eq!(plain_path(r"C:\plain"), r"C:\plain");
+    }
+
     use super::*;
 
     #[test]

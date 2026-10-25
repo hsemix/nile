@@ -17,6 +17,7 @@ the section becomes that version's.
 - `examples/jsx-components.html`: new tags and inputs written as classes and JSX (a rating input, a quantity stepper, a class component used as a JSX tag).
 
 #### Fixed
+- `fs.realpath` (`@sys`) no longer returns Windows' verbatim `\\?\C:\...` form; the prefix is dropped (`\\?\UNC\server\share` becomes `\\server\share`).
 - Removing the focused element (a closed menu or dialog) leaves nothing focused, so keys reach the document and its shortcuts again; they used to go to the detached element.
 - `display: inline-flex` and `inline-grid` are atomic inline boxes that shrink to fit and sit in a line, as `inline-block` does; they used to behave as full-width block flex/grid containers. `getComputedStyle` reports the inline value.
 
