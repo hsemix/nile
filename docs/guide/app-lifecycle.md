@@ -83,6 +83,18 @@ application.loginItem = true;     // a Run key (Windows), a LaunchAgent (macOS),
 console.log(application.loginItem);
 ```
 
+## Global hotkeys
+
+A shortcut that works while another program is in front (a quick-capture window, start/stop for a recorder):
+
+```js
+const key = application.registerHotkey("CmdOrCtrl+Shift+K", () => Window.this.focus());
+if (!(await key.ready)) console.warn("another program owns that shortcut");
+key.close();                       // give it back
+```
+
+The accelerator is modifiers (`Ctrl`, `Shift`, `Alt`/`Option`, `Cmd`/`Win`/`Super`, `CmdOrCtrl`) and one key (a letter, digit, `F1`-`F24`, `Space`, `Enter`, arrows...) joined by `+`. `ready` resolves with whether the system accepted it; a misspelling or a shortcut another program already owns is refused. The keys belong to the window that registered them and go when the program ends. Linux works under X11 only (Wayland has no global shortcuts). `examples/hotkeys.html`. Registration is checked on macOS; the keypress itself, Windows and Linux haven't been run here.
+
 ## What isn't here
 
 Auto-update, an installer (MSI/DMG) and code signing are not part of Nile yet, and a C host that embeds

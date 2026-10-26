@@ -360,6 +360,8 @@ pub struct View {
     pub menu_invocations: Vec<u64>,
     /// The tray icon and dock/taskbar badge the page asked for (the shell shows them).
     pub tray: Option<TraySpec>,
+    /// The global hotkeys the page registered, `(id, accelerator)`; the shell owns the registration.
+    pub hotkeys: Vec<(u32, String)>,
     pub badge: Option<String>,
     pub progress: Progress,
     /// Popups that are shown in windows of their own (see `Portal`).
@@ -937,6 +939,10 @@ impl Environment for Env {
         self.0.borrow().window_info.clone()
     }
 
+    fn set_hotkeys(&self, keys: Vec<(u32, String)>) {
+        self.0.borrow_mut().hotkeys = keys;
+    }
+
     fn set_tray(&self, spec: Option<TraySpec>) {
         self.0.borrow_mut().tray = spec;
     }
@@ -1352,6 +1358,7 @@ impl Page {
             native_menu: cfg!(any(target_os = "macos", target_os = "windows")) && std::env::var("NILE_MENU").map_or(true, |v| v != "inline"),
             menu_invocations: Vec::new(),
             tray: None,
+            hotkeys: Vec::new(),
             badge: None,
             progress: Progress::None,
             portals: Vec::new(),
@@ -8455,6 +8462,32 @@ cd</textarea>
         assert_eq!(p.progress(), nile_script::Progress::None);
         js(&mut p, "application.badge = null; Window.this.tray = null; 0");
         assert!(p.tray().is_none() && p.badge().is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn global_hotkeys_are_registered_by_the_page_and_fire_its_handler() {
+        let (mut p, path) = page(
+            r#"<body><script>
+                 window.log = [];
+                 window.k1 = application.registerHotkey("Ctrl+Shift+K", () => log.push("k1"));
+                 window.k2 = application.registerHotkey("Alt+F9", () => log.push("k2"));
+                 k1.ready.then((ok) => log.push("ready:" + ok));
+                 k2.ready.then((ok) => log.push("ready2:" + ok));
+               </script></body>"#,
+            "hotkeys",
+        );
+        p.sync();
+        assert_eq!(p.hotkeys(), vec![(1, "Ctrl+Shift+K".to_string()), (2, "Alt+F9".to_string())]);
+        p.hotkey_event(1, "ok");
+        p.hotkey_event(2, "refused");
+        p.hotkey_event(1, "pressed");
+        p.hotkey_event(2, "pressed");
+        js(&mut p, "k2.close(); 0");
+        assert_eq!(p.hotkeys(), vec![(1, "Ctrl+Shift+K".to_string())]);
+        p.hotkey_event(2, "pressed");
+        p.run_timers();
+        assert_eq!(js(&mut p, "log.join(',')"), "ready:true,ready2:false,k1,k2");
         let _ = std::fs::remove_file(path);
     }
 

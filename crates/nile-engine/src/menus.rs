@@ -183,6 +183,16 @@ impl Page {
         self.call("__trayEvent", &format!("[\"{kind}\"]")).1
     }
 
+    /// The global hotkeys the page registered (`application.registerHotkey`), as `(id, accelerator)`.
+    pub fn hotkeys(&self) -> Vec<(u32, String)> {
+        self.view.borrow().hotkeys.clone()
+    }
+
+    /// A global hotkey was pressed (`ok` = false: the system refused the registration).
+    pub fn hotkey_event(&mut self, id: u32, state: &str) -> bool {
+        self.call("__hotkeyEvent", &format!("[{id},\"{state}\"]")).1
+    }
+
     /// The application menu the page chose (`Window.this.menu`), if any.
     pub fn app_menu(&mut self) -> Option<Vec<MenuItem>> {
         let root = self.view.borrow().app_menu?;

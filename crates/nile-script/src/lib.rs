@@ -312,6 +312,8 @@ pub trait Environment {
     /// The text on the dock / taskbar icon (`application.badge`); `None` clears it.
     fn set_badge(&self, _text: Option<String>) {}
     fn set_progress(&self, _progress: Progress) {}
+    /// The global hotkeys the page wants (`application.registerHotkey`): `(id, accelerator)`.
+    fn set_hotkeys(&self, _keys: Vec<(u32, String)>) {}
     fn portal_clear(&self, _node: NodeId) {}
     /// How this window was opened.
     fn window_info(&self) -> WindowInfo {
@@ -860,6 +862,13 @@ fn install_natives(
         let env = env.clone();
         move |on: bool, icon: String, tooltip: String, menu: i32, template: bool| {
             env.set_tray(on.then(|| TraySpec { icon, tooltip, menu: node(menu), template }))
+        }
+    });
+    native!("hotkeysSet", {
+        let env = env.clone();
+        move |json: String| {
+            let list: Vec<(u32, String)> = serde_json::from_str(&json).unwrap_or_default();
+            env.set_hotkeys(list)
         }
     });
     native!("progressSet", {

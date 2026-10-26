@@ -1,0 +1,34 @@
+<html window-title="Global hotkeys" window-width="480" window-height="300">
+<head>
+<style>
+  body { margin: 0; padding: 20px; font: 14px system-ui; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  input { width: 180px; margin-right: 8px; }
+  #log { margin-top: 14px; padding: 10px; background: #8881; border-radius: 6px; min-height: 100px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h1>Global hotkeys</h1>
+  <p>These work while another app is in front. Try the default, then switch to another program and press it.</p>
+  <p>
+    <input id="accel" value="CmdOrCtrl+Shift+K">
+    <button id="add">Register</button>
+    <button id="drop">Release all</button>
+  </p>
+  <div id="log">Nothing registered.</div>
+<script>
+  const log = (t) => { document.getElementById("log").textContent += "\n" + t; };
+  let keys = [];
+  document.getElementById("add").onclick = async () => {
+    const accel = document.getElementById("accel").value;
+    const key = application.registerHotkey(accel, () => {
+      log(accel + " pressed at " + new Date().toLocaleTimeString());
+      Window.this.focus();
+    });
+    keys.push(key);
+    log((await key.ready) ? accel + " registered" : accel + " refused (spelling, or another app owns it)");
+  };
+  document.getElementById("drop").onclick = () => { keys.forEach((k) => k.close()); keys = []; log("released"); };
+</script>
+</body>
+</html>

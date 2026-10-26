@@ -1249,6 +1249,15 @@
     },
   });
   let badgeText = null, progressValue = null;
+  const hotkeys = new Map();
+  let hotkeySeq = 0;
+  const hotkeysPush = () => N.hotkeysSet(JSON.stringify([...hotkeys].map(([id, k]) => [id, k.accel])));
+  Object.defineProperty(g, "__hotkeyEvent", { value(id, state) {
+    const k = hotkeys.get(id);
+    if (!k) return;
+    if (state === "ok" || state === "refused") k.settle(state === "ok");
+    else if (state === "pressed") { try { k.handler(); } catch (err) { console.error(err && err.stack ? err.stack : String(err)); } }
+  } });
   Object.defineProperty(g, "application", { value: { start() {}, run() { return 0; }, quit(code = 0) { N.windowCommand("quit", +code | 0, 0); },
     get arguments() { return g.__envModule.arguments(); },
     // Make this program the handler of `scheme://` links / `.ext` files, or start it at login. Each
@@ -1295,6 +1304,18 @@
       if (v == null || v === false || v === "") { progressValue = null; N.progressSet(0, 0); }
       else if (v === "indeterminate") { progressValue = "indeterminate"; N.progressSet(1, 0); }
       else { const n = Number(v); if (Number.isNaN(n)) return; progressValue = Math.min(1, Math.max(0, n)); N.progressSet(2, progressValue); }
+    },
+    // A shortcut that works while the app is in the background (a quick-capture window, a recorder's start/stop):
+    // `const key = application.registerHotkey("Ctrl+Shift+K", () => ...)`. The accelerator is modifiers
+    // (Ctrl, Shift, Alt, Cmd/Super, CmdOrCtrl) and a key joined by `+`. `key.ready` is a Promise for whether the
+    // system accepted it (another app may own it); `key.close()` gives it back. Nile extension (Sciter has none).
+    registerHotkey(accel, handler) {
+      const id = ++hotkeySeq;
+      let settle;
+      const ready = new Promise((r) => { settle = r; });
+      hotkeys.set(id, { accel: String(accel), handler, settle });
+      hotkeysPush();
+      return { accel: String(accel), ready, close() { if (hotkeys.delete(id)) { hotkeysPush(); settle(false); } } };
     },
     registerProtocol(scheme) { return N.envCall("registerProtocol", [String(scheme)]) === "1"; },
     registerFileType(ext) { return N.envCall("registerFileType", [String(ext)]) === "1"; },

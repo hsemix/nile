@@ -8,6 +8,11 @@ the section becomes that version's.
 
 ## Unreleased
 
+### 2026-10-27
+
+#### Added
+- `application.registerHotkey("CmdOrCtrl+Shift+K", handler)`: system-wide hotkeys that work while the app is in the background (`global-hotkey` crate). Returns `{ ready, close() }`; `ready` says whether the system accepted the key. `examples/hotkeys.html`, [guide](docs/guide/app-lifecycle.md). Linux: X11 only.
+
 ### 2026-10-26
 
 #### Added
