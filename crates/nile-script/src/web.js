@@ -2871,8 +2871,9 @@
     getWinSize() { return JSON.parse(sysRun("tty_size")); }
   }
   // `fs.watch(path, (path, events) => ...)`: events is a bitmask, 1 for a rename (something created,
-  // removed or renamed) and 2 for a change. Folders are watched with what is inside them. Written by
-  // looking at the tree every 250 ms (no operating system notifications), so it stops at 20,000 entries.
+  // removed or renamed) and 2 for a change. Folders are watched with what is inside them. Uses the operating
+  // system's notifications (inotify, FSEvents, ReadDirectoryChangesW; bursts arrive together after 40 ms); a build
+  // without them, or a system that refuses (out of watches), looks at the tree every 250 ms instead, which stops at 20,000 entries.
   const WATCH_LIMIT = 20000;
   const snapshot = (root) => {
     const seen = new Map();
@@ -2889,6 +2890,20 @@
   const watchFs = (path, callback) => {
     path = String(path);
     if (!sync.stat(path)) throw Object.assign(new Error("ENOENT: no such file or directory: " + path), { code: "ENOENT" });
+    let native = null;
+    try { native = Number(sysRun("watch_new", path)); } catch (e) { /* polling below */ }
+    if (native !== null) {
+      let closed = false;
+      (async () => {
+        while (!closed) {
+          let text;
+          try { text = await sysAsync("watch_next", native); } catch (e) { break; }
+          if (closed || text[0] !== "D") break;
+          for (const [p, e] of JSON.parse(text.slice(1))) { try { callback(p, e); } catch (err) { console.error(err && err.stack ? err.stack : String(err)); } }
+        }
+      })();
+      return { path, close() { if (!closed) { closed = true; try { sysRun("close", native); } catch (e) { /* gone */ } } } };
+    }
     let before = snapshot(path);
     const timer = setInterval(() => {
       const now = snapshot(path);

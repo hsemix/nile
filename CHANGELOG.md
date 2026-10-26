@@ -13,6 +13,7 @@ the section becomes that version's.
 #### Added
 - `@nile/mail`: send email over SMTP (STARTTLS or TLS, AUTH PLAIN/LOGIN, HTML and text, attachments, inline images, RFC 2047 headers, dot-stuffing, header-injection refusal) with `buildMessage` for the raw message. `examples/mail.html`, [guide](docs/guide/email.md).
 - `@nile/keychain`: secrets in the system credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service) with `set`/`get`/`remove`, binary `setBytes`/`getBytes`, `available()`; Promises on a worker thread; cargo feature `keychain` (default in nile-engine; `keyring` crate). [guide](docs/guide/credentials.md).
+- `fs.watch` uses real file notifications (inotify, FSEvents, ReadDirectoryChangesW via the `notify` crate; cargo feature `watch`, default in nile-engine) instead of polling every 250 ms; bursts arrive together, and it still polls when the feature is off or the system refuses a watch.
 
 #### Fixed
 - `width: 100%` on an `<input>`, `<select>` or other inline-block was ignored (layout sizes inline boxes on their own, where a percentage had nothing to refer to), so form fields stayed content-sized; a full-width inline-block now fills its container like in a browser. Smaller percentages still size to the content.

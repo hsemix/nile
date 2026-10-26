@@ -49,6 +49,75 @@ enum Res {
     Pipe(Mutex<Pipe>),
     /// A terminal: standard input (0), output (1) or error (2).
     Tty(i32),
+    /// An operating system file watch: the events it queued, and the watcher that must stay alive.
+    #[cfg(feature = "watch")]
+    Watch(Mutex<Watch>),
+}
+
+#[cfg(feature = "watch")]
+struct Watch {
+    events: std::sync::mpsc::Receiver<(String, u8)>,
+    _watcher: notify::RecommendedWatcher,
+}
+
+/// Start watching `path` (and what is inside a folder). Events come back as (path, 1 = created/removed/renamed | 2 = changed),
+/// with paths spelled like the one given even where the system reports a canonical form (macOS `/private/var`).
+#[cfg(feature = "watch")]
+fn watch_new(path: &str) -> Result<String, String> {
+    use notify::{EventKind, RecursiveMode, Watcher};
+    let given = std::path::PathBuf::from(path);
+    let real = std::fs::canonicalize(&given).map_err(io)?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (given2, real2) = (given.clone(), real.clone());
+    let mut watcher = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
+        let Ok(ev) = ev else { return };
+        let flag = match ev.kind {
+            EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(notify::event::ModifyKind::Name(_)) => 1,
+            EventKind::Modify(_) => 2,
+            _ => return,
+        };
+        for p in ev.paths {
+            let shown = p.strip_prefix(&real2).map(|rest| given2.join(rest)).unwrap_or(p);
+            let _ = tx.send((shown.to_string_lossy().replace('\\', "/"), flag));
+        }
+    })
+    .map_err(|e| format!("EIO: {e}"))?;
+    watcher.watch(&real, RecursiveMode::Recursive).map_err(|e| format!("EIO: {e}"))?;
+    Ok(add(Res::Watch(Mutex::new(Watch { events: rx, _watcher: watcher }))).to_string())
+}
+
+/// Wait for the next batch of events (a burst is gathered for 40 ms and repeats are merged); `E` once the watch was closed.
+#[cfg(feature = "watch")]
+fn watch_next(id: &str) -> Result<String, String> {
+    use std::sync::mpsc::RecvTimeoutError;
+    let first = loop {
+        let res = get(id).map_err(|_| "EBADF: watch closed".to_string());
+        let Ok(res) = res else { return Ok("E".into()) };
+        let Res::Watch(w) = &*res else { return Err("EBADF: not a watch".into()) };
+        let got = w.lock().unwrap().events.recv_timeout(Duration::from_millis(100));
+        match got {
+            Ok(e) => break e,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return Ok("E".into()),
+        }
+    };
+    std::thread::sleep(Duration::from_millis(40));
+    let mut batch = vec![first];
+    if let Ok(res) = get(id) {
+        if let Res::Watch(w) = &*res {
+            while let Ok(e) = w.lock().unwrap().events.try_recv() {
+                batch.push(e);
+            }
+        }
+    }
+    let mut merged: Vec<(String, u8)> = Vec::new();
+    for (p, f) in batch {
+        match merged.iter_mut().find(|(q, _)| *q == p) {
+            Some(entry) => entry.1 |= f,
+            None => merged.push((p, f)),
+        }
+    }
+    Ok(format!("D{}", serde_json::to_string(&merged).unwrap_or_default()))
 }
 
 #[cfg(unix)]
@@ -275,6 +344,10 @@ pub(crate) fn call(op: &str, a: &[String]) -> Result<String, String> {
         }
         // ---- sockets ----
         "tcp_new" => Ok(add(Res::Tcp(Mutex::default())).to_string()),
+        #[cfg(feature = "watch")]
+        "watch_new" => watch_new(arg(0)),
+        #[cfg(not(feature = "watch"))]
+        "watch_new" => Err("ENOSYS: file notifications are not built in".into()),
         "udp_new" => Ok(add(Res::Udp(Mutex::new(None))).to_string()),
         // ---- named pipes ----
         #[cfg(unix)]
@@ -468,6 +541,10 @@ pub(crate) fn start(state: &SysState, op_id: u32, op: String, args: Vec<String>)
 
 fn run(op: &str, a: &[String]) -> Result<String, String> {
     let arg = |i: usize| a.get(i).map(String::as_str).unwrap_or("");
+    #[cfg(feature = "watch")]
+    if op == "watch_next" {
+        return watch_next(arg(0));
+    }
     let res = get(arg(0))?;
     let len: usize = arg(1).parse().unwrap_or(65536).clamp(1, 1 << 24);
     // Read results: `D` + data, or `E` at the end of the stream.

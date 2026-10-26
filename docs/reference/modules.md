@@ -149,7 +149,7 @@ finally { await file.close(); }
 The directory's entries are enumerated up front, not lazily streamed from OS.
 `sys.Pipe` (named pipes), `sys.TTY(fd)` and `fs.watch(path, cb)` exist. On Windows a pipe is a loopback socket
 announced in a file in the temp folder, so it only connects Nile to Nile; `TTY` sizes and modes use `stty` on Unix
-and fixed defaults elsewhere; `fs.watch` polls every 250 ms (events 1 = rename, 2 = change, 20,000 entries at most).
+and fixed defaults elsewhere; `fs.watch` uses the system's file notifications (inotify, FSEvents, ReadDirectoryChangesW; events 1 = rename, 2 = change, merged flags possible, bursts delivered together after 40 ms) and polls every 250 ms (20,000 entries at most) when built without the `watch` feature or when the system refuses a watch.
 
 ## `@sys` processes
 

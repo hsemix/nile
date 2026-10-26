@@ -6269,7 +6269,7 @@ mod tests {
                 log.push("tty:" + (size.width > 0 && size.height > 0) + ":" + bad);
                 // fs.watch sees a new file and then a change to it.
                 const seen = [];
-                const watch = sys.fs.watch(dir, (path, events) => seen.push(path.split("/").pop() + ":" + events));
+                const watch = sys.fs.watch(dir, (path, events) => seen.push([path.split("/").pop(), events]));
                 let missing = "none";
                 try {{ sys.fs.watch(dir + "/nope", () => {{}}); }} catch (e) {{ missing = e.code; }}
                 await new Promise((r) => setTimeout(r, 400));
@@ -6278,7 +6278,9 @@ mod tests {
                 sys.fs.writeFileSync(dir + "/new.txt", "one two three");
                 await new Promise((r) => setTimeout(r, 700));
                 watch.close();
-                log.push("watch:" + seen.filter((s) => s.startsWith("new.txt")).join(",") + ":" + missing + ":" + (watch.path === dir));
+                // The system may merge flags (a create arrives with the write that followed it); the second write has the change bit.
+                const mine = seen.filter((s) => s[0] === "new.txt").map((s) => s[1]);
+                log.push("watch:" + (mine.length >= 2 && (mine[0] & 1) === 1 && (mine[mine.length - 1] & 2) === 2 ? "ok" : JSON.stringify(mine)) + ":" + missing + ":" + (watch.path === dir));
                 window.done = 1;
               }})().catch((e) => {{ log.push("error:" + e.message); window.done = 1; }});
             </script></body>"#),
@@ -6292,7 +6294,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let log = js(&mut p, "window.log.join('|')");
-        assert!(log.starts_with("pipe:PING:true|tty:true:EBADF|watch:new.txt:1,new.txt:2:ENOENT"), "{log}");
+        assert!(log.starts_with("pipe:PING:true|tty:true:EBADF|watch:ok:ENOENT"), "{log}");
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_file(path);
     }
