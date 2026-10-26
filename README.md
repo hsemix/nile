@@ -178,7 +178,8 @@ verified and what is only compiled.
   serial, email, camera and more.
 - **[Feature reference](docs/reference/README.md)**: CSS, DOM and events, web APIs, built-in modules, windows and menus,
   editing, the C API, [what's supported](docs/reference/supported.md) and [known gaps](docs/reference/known-gaps.md).
-- **[Native extensions](docs/extensions.md)** and the [changelog](CHANGELOG.md).
+- **[Native extensions](docs/extensions.md)**, the [changelog](CHANGELOG.md), the [architecture notes](docs/architecture/README.md) for contributors and the
+  [Windows and Linux test checklist](docs/testing/platform-checklist.md).
 - Compatibility with Sciter follows its documentation ([docs.sciter.com](https://docs.sciter.com)), but Nile is its own
   project and not a drop-in replacement. Nile is a desktop UI engine, not a browser: features are added for named
   desktop needs, not for web parity.

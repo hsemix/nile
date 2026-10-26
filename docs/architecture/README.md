@@ -26,3 +26,7 @@ because every system has its own fonts. To change a page or accept a deliberate 
 golden that encodes a bug will keep the bug. A failing comparison writes `<name>.actual.png` and `<name>.diff.png` (changed
 pixels in red) to `target/golden-failures/`, which CI uploads as an artifact. Known gap: `conic-gradient` isn't drawn, so
 no page uses it.
+
+## Manual testing
+
+[`docs/testing/platform-checklist.md`](../testing/platform-checklist.md) is the hands-on checklist for Windows and Linux (menus, tray, printing, credential stores, hotkeys, serial, camera, packaging, screen readers): CI only proves those paths compile.
