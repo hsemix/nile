@@ -11,6 +11,7 @@ the section becomes that version's.
 ### 2026-10-27
 
 #### Changed
+- README rewritten as a front page (what you get, screenshots, demos, platform status, roadmap); the full feature inventory and the known gaps moved to `docs/reference/supported.md` and `docs/reference/known-gaps.md`.
 - Native extension buffers reach scripts as `Uint8Array`s directly instead of base64 text (a camera frame took hundreds of milliseconds to decode).
 
 #### Added
