@@ -217,6 +217,18 @@ pub struct TraySpec {
     pub template: bool,
 }
 
+/// One monitor, as the window system reports it (physical pixels; `scale` is device pixels per CSS px).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ScreenInfo {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f32,
+    pub primary: bool,
+}
+
 /// What scripts can ask of the embedder: layout results and the viewport.
 /// Implementations must bring styles/layout up to date with the document
 /// before answering, since scripts expect to read what they just wrote.
@@ -324,6 +336,10 @@ pub trait Environment {
     fn dialog(&self, _kind: &str, _args: [&str; 4]) -> Option<String> {
         None
     }
+    /// The monitors and the index of the one the window is on (`Window.screens`, `screenBox`).
+    fn screens(&self) -> (Vec<ScreenInfo>, usize) {
+        (Vec::new(), 0)
+    }
     /// Window `[screenX, screenY, outerWidth, outerHeight, fullscreen (0/1)]`.
     fn window_rect(&self) -> [f32; 5] {
         let (w, h) = self.viewport();
@@ -422,7 +438,7 @@ impl Loader for FileLoader {
             "@storage" => Some("const m = globalThis.__storageModule;\nexport const open = m.open;\nexport default m;"),
             n if n.starts_with("@nile/ui") || n == "@nile/print" || n == "@nile/escpos" || n == "@nile/crypto" || n == "@nile/keychain" || n == "@nile/mail" => UI_MODULES.iter().find(|(m, _)| *m == n).map(|(_, src)| *src),
             "@env" => Some(
-                "const m = globalThis.__envModule;\nexport const { language, country, userName, machineName, domainName, arguments: args, launch, reveal, moveToTrash, openWith, home, homeURL, path, pathURL, drives, variable, exec, DEVICE } = m;\nexport { args as arguments };\nexport const OS = m.OS, PLATFORM = m.PLATFORM;\nexport default m;",
+                "const m = globalThis.__envModule;\nexport const { language, country, userName, machineName, domainName, arguments: args, launch, reveal, moveToTrash, openWith, online, power, idleSeconds, home, homeURL, path, pathURL, drives, variable, exec, DEVICE } = m;\nexport { args as arguments };\nexport const OS = m.OS, PLATFORM = m.PLATFORM;\nexport default m;",
             ),
             _ => None,
         };
@@ -953,6 +969,15 @@ fn install_natives(
     native!("windowFocus", {
         let env = env.clone();
         move |id: u32| env.window_command(WindowCommand::FocusId(id))
+    });
+    native!("screensInfo", {
+        let env = env.clone();
+        // [[name, x, y, w, h, scale, primary], ...] plus the window's index, as JSON.
+        move || -> String {
+            let (list, at) = env.screens();
+            let rows: Vec<serde_json::Value> = list.iter().map(|s| serde_json::json!([s.name, s.x, s.y, s.width, s.height, s.scale, s.primary])).collect();
+            serde_json::json!({ "screens": rows, "at": at }).to_string()
+        }
     });
     native!("windowRect", {
         let env = env.clone();

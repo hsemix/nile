@@ -298,6 +298,15 @@ impl Win {
         let pos = window.outer_position().map(|p| p.to_logical::<f32>(scale)).unwrap_or_default();
         let outer = window.outer_size().to_logical::<f32>(scale);
         self.page.view.borrow_mut().window_rect = Some([pos.x, pos.y, outer.width, outer.height, f32::from(window.fullscreen().is_some())]);
+        let screens = screens_of(&window);
+        let changed = self.page.view.borrow().screens != screens;
+        if changed {
+            let first = self.page.view.borrow().screens.0.is_empty();
+            self.page.view.borrow_mut().screens = screens;
+            if !first {
+                self.page.screen_changed();
+            }
+        }
         actions
     }
 
@@ -1337,6 +1346,26 @@ impl App {
             self.after(event_loop, id);
         }
     }
+}
+
+/// The monitors winit knows, and the index of the one `window` is on (the first when unknown).
+fn screens_of(window: &winit::window::Window) -> (Vec<nile_script::ScreenInfo>, usize) {
+    let primary = window.primary_monitor();
+    let current = window.current_monitor();
+    let list: Vec<nile_script::ScreenInfo> = window
+        .available_monitors()
+        .map(|m| nile_script::ScreenInfo {
+            name: m.name().unwrap_or_default(),
+            x: m.position().x,
+            y: m.position().y,
+            width: m.size().width,
+            height: m.size().height,
+            scale: m.scale_factor() as f32,
+            primary: primary.as_ref() == Some(&m),
+        })
+        .collect();
+    let at = current.and_then(|c| window.available_monitors().position(|m| m == c)).unwrap_or(0);
+    (list, at)
 }
 
 #[cfg(test)]

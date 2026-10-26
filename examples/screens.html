@@ -1,0 +1,37 @@
+<html window-title="Screens and machine state" window-width="560" window-height="420">
+<head>
+<style>
+  body { margin: 0; padding: 20px; font: 14px system-ui; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  pre { margin: 0; padding: 10px; background: #8881; border-radius: 6px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h1>Monitors, power, network and idle time</h1>
+  <pre id="out">...</pre>
+<script type="module">
+  import { online, power, idleSeconds } from "@env";
+  const out = document.getElementById("out");
+  const events = [];
+  addEventListener("resolutionchange", () => { events.push("resolutionchange"); show(); });
+  addEventListener("online", () => { events.push("online"); show(); });
+  addEventListener("offline", () => { events.push("offline"); show(); });
+  async function show() {
+    const lines = [];
+    for (let i = 0; i < Window.screens; i++) {
+      const [x, y, w, h] = Window.screenBox(i, "frame");
+      const css = Window.screenBox(i, "frame", "dimension", false);
+      lines.push(`screen ${i}${Window.screenBox(i, "isPrimary") ? " (primary)" : ""}${i === Window.this.screen ? " <- this window" : ""}: ${w}x${h} at ${x},${y}, ${css.join("x")} CSS px, ratio ${Window.screenBox(i, "devicePixelRatio")}`);
+    }
+    const pw = await power();
+    lines.push("online: " + await online() + " (navigator.onLine " + navigator.onLine + ")");
+    lines.push("power: " + (pw.battery ? pw.percent + "%" + (pw.charging ? ", charging" : ", on battery") : "no battery"));
+    lines.push("idle: " + (await idleSeconds().catch((e) => e.message)) + " s");
+    lines.push("events: " + events.join(", "));
+    out.textContent = lines.join("\n");
+  }
+  show();
+  setInterval(show, 2000);
+</script>
+</body>
+</html>

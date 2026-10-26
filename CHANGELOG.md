@@ -11,6 +11,8 @@ the section becomes that version's.
 ### 2026-10-27
 
 #### Added
+- Monitors: `Window.screens`, `Window.screenBox(n, "frame" | "workarea" | "device" | "isPrimary" | "devicePixelRatio", part, asPPX)`, `Window.this.screen`/`screenBox(...)` (Sciter shapes) and a `resolutionchange` event on the window. `workarea` equals `frame` (the system gives no taskbar area); no `snapshot`.
+- `@env` `online()`, `power()` (`{ battery, charging, percent }`) and `idleSeconds()` (Promises on a worker thread: `pmset`/`ioreg` on macOS, PowerShell on Windows, `/sys/class/power_supply` and `xprintidle` on Linux); `navigator.onLine` is live and `online`/`offline` fire on the window (checked every 5 s once listened to). `examples/screens.html`, [guide](docs/guide/desktop-helpers.md).
 - `application.registerHotkey("CmdOrCtrl+Shift+K", handler)`: system-wide hotkeys that work while the app is in the background (`global-hotkey` crate). Returns `{ ready, close() }`; `ready` says whether the system accepted the key. `examples/hotkeys.html`, [guide](docs/guide/app-lifecycle.md). Linux: X11 only.
 
 ### 2026-10-26

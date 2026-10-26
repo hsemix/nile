@@ -376,6 +376,8 @@ pub struct View {
     /// Where the window is: `[screenX, screenY, outerWidth, outerHeight, fullscreen]`, kept
     /// current by the window loop. `None` in headless runs.
     pub window_rect: Option<[f32; 5]>,
+    /// The monitors and the index of the window's, kept current by the window loop (empty in headless runs).
+    pub screens: (Vec<nile_script::ScreenInfo>, usize),
 }
 
 /// A selection over the page's text, valid for one version of the document.
@@ -1012,6 +1014,17 @@ impl Environment for Env {
         })
     }
 
+    fn screens(&self) -> (Vec<nile_script::ScreenInfo>, usize) {
+        let v = self.0.borrow();
+        if v.screens.0.is_empty() {
+            // Headless: one screen the size of the window.
+            let (w, h) = v.viewport;
+            let one = nile_script::ScreenInfo { name: "Screen".into(), x: 0, y: 0, width: w as u32, height: h as u32, scale: v.scale.max(1.0), primary: true };
+            return (vec![one], 0);
+        }
+        v.screens.clone()
+    }
+
     fn window_rect(&self) -> [f32; 5] {
         let v = self.0.borrow();
         v.window_rect.unwrap_or([0.0, 0.0, v.viewport.0, v.viewport.1, 0.0])
@@ -1353,6 +1366,7 @@ impl Page {
             dialogs: DEFAULTS.with(|d| d.borrow().0.clone()),
             resized: false,
             window_rect: None,
+            screens: (Vec::new(), 0),
             window_info: info,
             app_menu: None,
             native_menu: cfg!(any(target_os = "macos", target_os = "windows")) && std::env::var("NILE_MENU").map_or(true, |v| v != "inline"),
@@ -8462,6 +8476,52 @@ cd</textarea>
         assert_eq!(p.progress(), nile_script::Progress::None);
         js(&mut p, "application.badge = null; Window.this.tray = null; 0");
         assert!(p.tray().is_none() && p.badge().is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn window_screens_describe_the_monitors() {
+        let (mut p, path) = page("<body></body>", "screens");
+        p.view.borrow_mut().screens = (
+            vec![
+                nile_script::ScreenInfo { name: "A".into(), x: 0, y: 0, width: 2880, height: 1800, scale: 2.0, primary: true },
+                nile_script::ScreenInfo { name: "B".into(), x: 2880, y: 0, width: 1920, height: 1080, scale: 1.0, primary: false },
+            ],
+            1,
+        );
+        let out = js(
+            &mut p,
+            "[Window.screens, Window.this.screen, Window.screenBox(0, 'frame').join(), Window.screenBox(0, 'frame', 'dimension', false).join(), Window.screenBox(1, 'frame', 'right'), Window.this.screenBox('device'), Window.screenBox(0, 'isPrimary'), Window.screenBox(0, 'devicePixelRatio')].join('|')",
+        );
+        assert_eq!(out, "2|1|0,0,2880,1800|1440,900|4800|B|true|2");
+        js(&mut p, "window.seen = 0; addEventListener('resolutionchange', () => seen++); 0");
+        p.screen_changed();
+        assert_eq!(js(&mut p, "window.seen"), "1");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_machine_state_queries_answer_off_the_window_thread() {
+        let (mut p, path) = page(
+            r#"<body><script type="module">
+              import * as env from "@env";
+              window.out = "";
+              window.seen = [];
+              addEventListener("online", () => seen.push("online"));
+              Promise.all([env.online(), env.power(), env.idleSeconds().catch((e) => "none")]).then(([o, pw, idle]) => {
+                window.out = typeof o + ":" + typeof pw.battery + ":" + typeof pw.charging + ":" + (idle === "none" || typeof idle === "number");
+              });
+            </script></body>"#,
+            "machine-state",
+        );
+        for _ in 0..600 {
+            p.tick();
+            if !js(&mut p, "window.out").is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(js(&mut p, "window.out"), "boolean:boolean:boolean:true");
         let _ = std::fs::remove_file(path);
     }
 

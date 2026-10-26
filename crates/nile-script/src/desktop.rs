@@ -118,6 +118,106 @@ pub fn trash(path: &Path) -> Result<(), String> {
     }
 }
 
+
+// ---- the machine's state: network, power, idle time ----------------------------------------------------------------
+
+/// Worker-thread entry for `sysAsync("desktop:<op>")`: `online`, `power`, `idle`. Answers are JSON.
+pub fn query(op: &str) -> Result<String, String> {
+    match op {
+        "online" => Ok(online().to_string()),
+        "power" => Ok(power_json()),
+        "idle" => idle_seconds().map(|s| format!("{s:.1}")),
+        _ => Err(format!("unknown desktop query: {op}")),
+    }
+}
+
+/// Is there a route to the internet? A UDP "connect" sends nothing: it only asks the system for a route.
+fn online() -> bool {
+    use std::net::UdpSocket;
+    ["8.8.8.8:53", "[2001:4860:4860::8888]:53"].iter().any(|addr| UdpSocket::bind(if addr.starts_with('[') { "[::]:0" } else { "0.0.0.0:0" }).and_then(|s| s.connect(addr)).is_ok())
+}
+
+/// `{"battery": bool, "charging": bool, "percent": number|null}`: `battery` is false on a desktop without one.
+fn power_json() -> String {
+    let (battery, charging, percent) = power();
+    serde_json::json!({ "battery": battery, "charging": charging, "percent": percent }).to_string()
+}
+
+fn power() -> (bool, bool, Option<u32>) {
+    if cfg!(target_os = "macos") {
+        let out = Command::new("pmset").args(["-g", "batt"]).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+        return parse_pmset(&out);
+    }
+    if cfg!(windows) {
+        let script = "$b = Get-CimInstance Win32_Battery | Select-Object -First 1; if ($b) { \"$($b.EstimatedChargeRemaining) $($b.BatteryStatus)\" }";
+        let out = Command::new("powershell").args(["-NoProfile", "-Command", script]).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+        let mut it = out.split_whitespace();
+        return match (it.next().and_then(|p| p.parse::<u32>().ok()), it.next().and_then(|s| s.parse::<u32>().ok())) {
+            // BatteryStatus 2 = on AC power, 6-9 = charging.
+            (Some(p), Some(s)) => (true, s == 2 || (6..=9).contains(&s), Some(p.min(100))),
+            _ => (false, false, None),
+        };
+    }
+    // Linux: /sys/class/power_supply/BAT*/{capacity,status}.
+    let Ok(dir) = std::fs::read_dir("/sys/class/power_supply") else { return (false, false, None) };
+    for entry in dir.flatten() {
+        let p = entry.path();
+        if std::fs::read_to_string(p.join("type")).map(|t| t.trim() == "Battery").unwrap_or(false) {
+            let percent = std::fs::read_to_string(p.join("capacity")).ok().and_then(|c| c.trim().parse().ok());
+            let status = std::fs::read_to_string(p.join("status")).unwrap_or_default();
+            return (true, matches!(status.trim(), "Charging" | "Full"), percent);
+        }
+    }
+    (false, false, None)
+}
+
+/// `pmset -g batt`: "Now drawing from 'Battery Power'" / "'AC Power'", then "-InternalBattery-0 (id=...)\t87%; charging; ...".
+fn parse_pmset(text: &str) -> (bool, bool, Option<u32>) {
+    let line = text.lines().find(|l| l.contains('%'));
+    let Some(line) = line else { return (false, false, None) };
+    let percent = line.split('%').next().and_then(|head| head.rsplit(|c: char| !c.is_ascii_digit()).next()).and_then(|d| d.parse().ok());
+    let charging = line.contains("; charging") || line.contains("finishing charge") || line.contains("charged");
+    (true, charging, percent)
+}
+
+/// Seconds since the last keyboard or mouse input.
+fn idle_seconds() -> Result<f64, String> {
+    if cfg!(target_os = "macos") {
+        let out = Command::new("ioreg").args(["-c", "IOHIDSystem", "-d", "4"]).output().map_err(|e| format!("ioreg: {e}"))?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let ns = text.lines().find(|l| l.contains("HIDIdleTime")).and_then(|l| l.rsplit('=').next()).and_then(|v| v.trim().parse::<f64>().ok());
+        return ns.map(|n| n / 1e9).ok_or_else(|| "ENOSYS: the system did not report idle time".into());
+    }
+    if cfg!(windows) {
+        let script = r#"Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class NileIdle { [StructLayout(LayoutKind.Sequential)] struct LII { public uint cb; public uint t; }
+  [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LII p);
+  public static double Seconds() { LII i = new LII(); i.cb = 8; GetLastInputInfo(ref i); return (Environment.TickCount - (int)i.t) / 1000.0; } }
+"@
+[NileIdle]::Seconds()"#;
+        let out = Command::new("powershell").args(["-NoProfile", "-Command", script]).output().map_err(|e| format!("powershell: {e}"))?;
+        return String::from_utf8_lossy(&out.stdout).trim().parse().map_err(|_| "ENOSYS: the system did not report idle time".into());
+    }
+    // X11: xprintidle prints milliseconds. Wayland and bare consoles have no such thing.
+    let out = Command::new("xprintidle").output().map_err(|_| "ENOSYS: idle time needs xprintidle (X11)".to_string())?;
+    String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().map(|ms| ms / 1000.0).map_err(|_| "ENOSYS: the system did not report idle time".into())
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::parse_pmset;
+
+    #[test]
+    fn pmset_output_is_read() {
+        let on_battery = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1)\t87%; discharging; 5:01 remaining present: true\n";
+        assert_eq!(parse_pmset(on_battery), (true, false, Some(87)));
+        let on_ac = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t100%; charged; 0:00 remaining present: true\n";
+        assert_eq!(parse_pmset(on_ac), (true, true, Some(100)));
+        assert_eq!(parse_pmset("Now drawing from 'AC Power'\n"), (false, false, None));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

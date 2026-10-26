@@ -193,6 +193,11 @@ impl Page {
         self.call("__hotkeyEvent", &format!("[{id},\"{state}\"]")).1
     }
 
+    /// The monitors changed (resolution, scale, window moved to another one): `resolutionchange` on the window.
+    pub fn screen_changed(&mut self) -> bool {
+        self.call("__screenChanged", "[]").1
+    }
+
     /// The application menu the page chose (`Window.this.menu`), if any.
     pub fn app_menu(&mut self) -> Option<Vec<MenuItem>> {
         let root = self.view.borrow().app_menu?;
