@@ -1,0 +1,9 @@
+{
+  "extensions": {
+    "@media": "./extensions/media"
+  },
+  "application": {
+    "id": "org.nile.media-example",
+    "version": "0.1.0"
+  }
+}

@@ -44,7 +44,7 @@
   };
   globalThis.__nativeExtDeliver = packet => {
     const token = key(packet.host, packet.call);
-    const value = { value: JSON.parse(packet.json), buffers: packet.buffers.map(decode) };
+    const value = { value: JSON.parse(packet.json), buffers: packet.buffers.map(b => typeof b === 'string' ? decode(b) : b) };
     if (packet.event) {
       const listener = subscriptions.get(token);
       if (listener) {

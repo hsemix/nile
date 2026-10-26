@@ -28,6 +28,8 @@ pub fn libraries() -> &'static PathBuf {
                 "nile-ext-sqlite",
                 "-p",
                 "nile-ext-notifications",
+                "-p",
+                "nile-ext-media",
                 "--target-dir",
             ])
             .arg(&dir)

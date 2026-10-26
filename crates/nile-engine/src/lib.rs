@@ -5787,8 +5787,8 @@ mod tests {
                     window.ready = 2;
                     await new Promise((r) => setTimeout(r, 800));
                     log.push("data:" + heard.join(""));
-                    const sig = await port.getSignals();
-                    log.push("sig:" + typeof sig.clearToSend);
+                    // A pseudo-terminal has no modem lines (ENOTTY); a real port answers.
+                    try {{ await port.getSignals(); }} catch (e) {{ if (e.code !== "ENOTTY" && e.code !== "EIO") throw e; }}
                     await port.close();
                     let after = "none";
                     try {{ await port.write("x"); }} catch (e) {{ after = e.code; }}
@@ -5826,7 +5826,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let log = js(&mut p, "window.log.join('|')");
-        assert_eq!(log, "line:ping|four:abcd|timeout:SERIAL_TIMEOUT|data:late|sig:boolean|closed:SERIAL_CLOSED|bad:ENOENT");
+        assert_eq!(log, "line:ping|four:abcd|timeout:SERIAL_TIMEOUT|data:late|closed:SERIAL_CLOSED|bad:ENOENT");
         assert!(String::from_utf8_lossy(&heard).contains("hello"), "the device saw {:?}", String::from_utf8_lossy(&heard));
         let _ = std::fs::remove_file(path);
     }

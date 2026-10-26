@@ -10,7 +10,12 @@ the section becomes that version's.
 
 ### 2026-10-27
 
+#### Changed
+- Native extension buffers reach scripts as `Uint8Array`s directly instead of base64 text (a camera frame took hundreds of milliseconds to decode).
+
 #### Added
+- `@media`, an optional native extension (`extensions/media`) for camera and microphone capture: device lists, a camera preview as `ImageData`/`drawTo(canvas)`, full-size JPEG photos, microphone chunks with a level meter and WAV recording. `examples/media/`, [guide](docs/guide/camera-and-microphone.md). Checked on a MacBook; Windows and Linux untested.
+- `nile --pack --camera "reason" --microphone "reason"` write `NSCameraUsageDescription`/`NSMicrophoneUsageDescription` into the macOS bundle's `Info.plist`.
 - `@nile/serial`: serial ports in the binary (`serialport` crate without libudev; cargo feature `serial`, default in nile-engine): `list`, `open` with baud/data bits/stop bits/parity/flow control, `write`, `onData`, buffered `read`/`readUntil` with timeouts, DTR/RTS/break and status lines, unplug notice. `examples/serial.html`, [guide](docs/guide/serial.md).
 - Monitors: `Window.screens`, `Window.screenBox(n, "frame" | "workarea" | "device" | "isPrimary" | "devicePixelRatio", part, asPPX)`, `Window.this.screen`/`screenBox(...)` (Sciter shapes) and a `resolutionchange` event on the window. `workarea` equals `frame` (the system gives no taskbar area); no `snapshot`.
 - `@env` `online()`, `power()` (`{ battery, charging, percent }`) and `idleSeconds()` (Promises on a worker thread: `pmset`/`ioreg` on macOS, PowerShell on Windows, `/sys/class/power_supply` and `xprintidle` on Linux); `navigator.onLine` is live and `online`/`offline` fire on the window (checked every 5 s once listened to). `examples/screens.html`, [guide](docs/guide/desktop-helpers.md).

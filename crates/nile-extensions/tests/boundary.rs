@@ -455,3 +455,21 @@ fn a_failed_extension_init_calls_no_hooks() {
         assert_eq!(shutdowns, 0, "shutdown must not run for an extension whose init failed");
     }
 }
+
+#[test]
+fn media_lists_devices_rejects_unknown_streams_and_shuts_down() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = support::package(temp.path(), "media", "@media", &support::library("media"), "");
+    let host = Extensions::load(&config).unwrap();
+    // Listing never prompts: without camera access the camera list is simply empty. Machines without audio hardware
+    // (CI) have no microphones, so only the shape is checked.
+    let devices = call(&host, "media.devices", json!({}));
+    assert_eq!(devices.status, NILE_OK, "{}", devices.message);
+    let value: serde_json::Value = serde_json::from_str(&devices.json).unwrap();
+    assert!(value["cameras"].is_array() && value["microphones"].is_array() && value["cameraAccess"].is_boolean(), "{value}");
+    let photo = call(&host, "media.camera.photo", json!({"stream": 12345}));
+    assert_eq!(photo.code, "MEDIA_HANDLE");
+    let now = Instant::now();
+    drop(host);
+    assert!(now.elapsed() < Duration::from_secs(8));
+}

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "extensions/sqlite", "extensions/notifications"]
+members = ["crates/*", "extensions/sqlite", "extensions/notifications", "extensions/media"]
 
 [workspace.package]
 version = "0.1.0"
