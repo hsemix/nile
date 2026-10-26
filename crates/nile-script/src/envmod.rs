@@ -106,6 +106,10 @@ pub fn call(op: &str, args: &[String]) -> String {
             };
             result.is_ok().to_string()
         }
+        // Answer "" on success or the message; the script side throws.
+        "reveal" => crate::desktop::reveal(&path_of(arg(0))).map(|_| String::new()).unwrap_or_else(|e| e),
+        "trash" => crate::desktop::trash(&path_of(arg(0))).map(|_| String::new()).unwrap_or_else(|e| e),
+        "openWith" => crate::desktop::open_with(&path_of(arg(0)), arg(1)).map(|_| String::new()).unwrap_or_else(|e| e),
         "exec" => Command::new(arg(0)).args(&args[1.min(args.len())..]).spawn().is_ok().to_string(),
         _ => String::new(),
     }

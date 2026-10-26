@@ -267,6 +267,27 @@ only) are globals, backed by `ring`; `@nile/crypto` adds `hashPassword`, `verify
 600,000 iterations), `sha256`, `digest`, `hmac`, `encryptText`, `decryptText`, `randomBytes`, `uuid`, `hex`. See the
 [hashing and encryption guide](../guide/hashing-and-encryption.md).
 
+## `Intl` and the `toLocale*` methods
+
+`Intl.NumberFormat`, `DateTimeFormat`, `PluralRules`, `ListFormat`, `RelativeTimeFormat` and `Collator`, with
+`Number/Date.prototype.toLocale*String` and `String.prototype.localeCompare` using them, for about two dozen locales; the
+default locale is the OS's (`navigator.language`). Details and limits: [internationalization guide](../guide/internationalization.md).
+
+## `@nile/keychain`
+
+`keychain.set/get/remove(account)`, `setBytes/getBytes`, `service`, `available()`, `reason()` over the system credential store
+(macOS Keychain, Windows Credential Manager, Linux Secret Service); Promises on a worker thread. Feature `keychain` (default
+in nile-engine). See the [guide](../guide/credentials.md).
+
+## `@nile/mail`
+
+`sendMail(options)` (SMTP with STARTTLS or TLS, AUTH PLAIN/LOGIN, HTML, attachments, inline images), `buildMessage(options)` (the raw
+message), `parseAddress`. See the [email guide](../guide/email.md).
+
+## `@env` file helpers
+
+`reveal(path)`, `moveToTrash(path)` and `openWith(path, app)` beside `launch`. See the [guide](../guide/desktop-helpers.md).
+
 ## `@debug`
 
 | Export | Behavior |

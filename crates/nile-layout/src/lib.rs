@@ -4778,6 +4778,18 @@ second</textarea><textarea id="e" style="padding:3px 4px; border:1px solid #777"
     }
 
     #[test]
+    fn a_full_width_inline_block_fills_its_container() {
+        let (doc, t) = rects(
+            r#"<body style="margin:0"><div style="width:300px; padding:10px"><label id="l">Name</label><input id="i" style="width:100%; box-sizing:border-box"><select id="s" style="width:100%; box-sizing:border-box"></select><input id="h" style="width:50%; box-sizing:border-box"></div></body>"#,
+        );
+        let (i, s, h, l) = (rect_of(&doc, &t, "i"), rect_of(&doc, &t, "s"), rect_of(&doc, &t, "h"), rect_of(&doc, &t, "l"));
+        assert_eq!(i.width, 300.0, "{i:?}");
+        assert_eq!(s.width, 300.0, "{s:?}");
+        assert!(i.y >= l.y + l.height - 1.0, "the field is on its own line below the label: {i:?} {l:?}");
+        assert!(h.width < 300.0, "a half-width one still sizes to its content for now: {h:?}");
+    }
+
+    #[test]
     fn three_d_transforms_move_hit_testing_and_bounds() {
         let (doc, t) = rects(
             r#"<body style="margin:0"><div style="perspective:200px; width:200px; height:100px">

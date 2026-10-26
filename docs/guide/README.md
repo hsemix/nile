@@ -80,3 +80,7 @@ the entry page is `target/doc/nile_engine/index.html`.
 19. [Ready-made components: drawer, splitter, data grid, dialogs, toasts, shortcuts, tabs, accordion, combobox, ribbon, tiles, charts, barcodes and QR codes (`@nile/ui`)](ui-components.md).
 20. [Printing: the page as paper, PDF, printers and ESC/POS receipt printers (`@nile/print`, `@nile/escpos`)](printing.md).
 21. [Hashing, password hashing and encryption: `crypto.subtle` and `@nile/crypto`](hashing-and-encryption.md).
+22. [Numbers, dates, currencies and sorting: `Intl`](internationalization.md).
+23. [Showing, trashing and opening files: `reveal`, `moveToTrash`, `openWith`](desktop-helpers.md).
+24. [Keeping secrets in the system credential store: `@nile/keychain`](credentials.md).
+25. [Sending email over SMTP: `@nile/mail`](email.md).

@@ -5679,6 +5679,211 @@ mod tests {
     }
 
     #[test]
+    fn intl_formats_numbers_currencies_dates_and_collates_like_icu() {
+        let (mut p, path) = page(r##"<body><script>window.d = new Date(2026, 9, 24, 15, 5, 9);</script></body>"##, "intl");
+        let check = |p: &mut Page, code: &str, want: &str| assert_eq!(js(p, code), want, "{code}");
+        let nb = "\u{a0}";
+        let nn = "\u{202f}";
+        // numbers
+        check(&mut p, "(1234567.891).toLocaleString('en-US')", "1,234,567.891");
+        check(&mut p, "(1234567.891).toLocaleString('de-DE')", "1.234.567,891");
+        check(&mut p, "(1234567.891).toLocaleString('fr-FR')", &format!("1{nn}234{nn}567,891"));
+        check(&mut p, "(1234567.891).toLocaleString('en-IN')", "12,34,567.891");
+        check(&mut p, "[(1234.5).toLocaleString('es-ES'), (12345.5).toLocaleString('es-ES')].join('|')", "1234,5|12.345,5");
+        check(&mut p, "(1.005).toLocaleString('en-US', { maximumFractionDigits: 2 })", "1.01");
+        check(&mut p, "(2.5).toLocaleString('en-US', { maximumFractionDigits: 0 })", "3");
+        check(&mut p, "(0.1 + 0.2).toLocaleString('en-US', { maximumFractionDigits: 2 })", "0.3");
+        check(&mut p, "(0.256).toLocaleString('en-US', { style: 'percent' })", "26%");
+        check(&mut p, "(5).toLocaleString('en-US', { minimumIntegerDigits: 3 })", "005");
+        check(&mut p, "(0).toLocaleString('en-US', { minimumFractionDigits: 2 })", "0.00");
+        check(&mut p, "(123456).toLocaleString('en-US', { maximumSignificantDigits: 3 })", "123,000");
+        check(&mut p, "(1234).toLocaleString('en-US', { notation: 'compact' })", "1.2K");
+        check(&mut p, "(1234567).toLocaleString('en-US', { notation: 'compact', compactDisplay: 'long' })", "1.2 million");
+        check(&mut p, "(1234).toLocaleString('en-US', { useGrouping: false })", "1234");
+        check(&mut p, "[(5).toLocaleString('en-US', { signDisplay: 'always' }), (-0.5).toLocaleString('en-US'), NaN.toLocaleString('en-US')].join('|')", "+5|-0.5|NaN");
+        // currencies
+        check(&mut p, "(1234.5).toLocaleString('en-US', { style: 'currency', currency: 'USD' })", "$1,234.50");
+        check(&mut p, "(-1234.5).toLocaleString('en-US', { style: 'currency', currency: 'USD' })", "-$1,234.50");
+        check(&mut p, "(1234.5).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })", &format!("1.234,50{nb}€"));
+        check(&mut p, "(1234.5).toLocaleString('en-UG', { style: 'currency', currency: 'UGX' })", &format!("USh{nb}1,235"));
+        check(&mut p, "(1234.5).toLocaleString('en-US', { style: 'currency', currency: 'JPY' })", "¥1,235");
+        check(&mut p, "(1234.5).toLocaleString('en-US', { style: 'currency', currency: 'CHF' })", &format!("CHF{nb}1,234.50"));
+        check(&mut p, "(1234.5).toLocaleString('en-US', { style: 'currency', currency: 'EUR', currencyDisplay: 'code' })", &format!("EUR{nb}1,234.50"));
+        check(&mut p, "new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).formatToParts(1.5).map((x) => x.type).join()", "currency,integer,decimal,fraction");
+        check(&mut p, "(() => { try { (1).toLocaleString('en-US', { style: 'currency' }); } catch (e) { return e.name; } })()", "TypeError");
+        // dates
+        check(&mut p, "[d.toLocaleDateString('en-US'), d.toLocaleDateString('en-GB'), d.toLocaleDateString('de-DE'), d.toLocaleDateString('fr-FR')].join('|')", "10/24/2026|24/10/2026|24.10.2026|24/10/2026");
+        check(&mut p, "d.toLocaleTimeString('en-US')", &format!("3:05:09{nn}PM"));
+        check(&mut p, "d.toLocaleTimeString('de-DE')", "15:05:09");
+        check(&mut p, "d.toLocaleString('en-US')", &format!("10/24/2026, 3:05:09{nn}PM"));
+        check(&mut p, "d.toLocaleDateString('en-US', { dateStyle: 'full' })", "Saturday, October 24, 2026");
+        check(&mut p, "d.toLocaleDateString('de-DE', { dateStyle: 'long' })", "24. Oktober 2026");
+        check(&mut p, "d.toLocaleDateString('fr-FR', { dateStyle: 'full' })", "samedi 24 octobre 2026");
+        check(&mut p, "d.toLocaleDateString('es-ES', { dateStyle: 'long' })", "24 de octubre de 2026");
+        check(&mut p, "d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })", "October 24, 2026");
+        check(&mut p, "d.toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' })", "24 October 2026");
+        check(&mut p, "d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })", "Sat, Oct 24");
+        check(&mut p, "d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })", &format!("03:05{nn}PM"));
+        check(&mut p, "d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })", "15:05");
+        check(&mut p, "d.toLocaleTimeString('en-US', { hour12: false })", "15:05:09");
+        check(&mut p, "new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', dateStyle: 'short' }).format(new Date(Date.UTC(2026, 0, 5, 23, 30)))", "1/5/26");
+        check(&mut p, "(() => { try { d.toLocaleDateString('xx-invalid-locale-!'); } catch (e) { return e.name; } })()", "RangeError");
+        // plural, list, relative, collation
+        check(&mut p, "[new Intl.PluralRules('en').select(1), new Intl.PluralRules('en').select(2), new Intl.PluralRules('en', { type: 'ordinal' }).select(22), new Intl.PluralRules('ru').select(3), new Intl.PluralRules('fr').select(0)].join()", "one,other,two,few,one");
+        check(&mut p, "[new Intl.ListFormat('en').format(['a', 'b', 'c']), new Intl.ListFormat('en', { type: 'disjunction' }).format(['a', 'b']), new Intl.ListFormat('fr').format(['a', 'b', 'c'])].join('|')", "a, b, and c|a or b|a, b et c");
+        check(&mut p, "[new Intl.RelativeTimeFormat('en', { numeric: 'auto' }).format(-1, 'day'), new Intl.RelativeTimeFormat('en').format(3, 'hours'), new Intl.RelativeTimeFormat('en').format(-2, 'day')].join('|')", "yesterday|in 3 hours|2 days ago");
+        check(&mut p, "['item 10', 'item 2', 'Item 1', 'élan', 'eclair', 'zebra', 'Zebra'].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).join()", "eclair,élan,Item 1,item 2,item 10,zebra,Zebra");
+        check(&mut p, "['a'.localeCompare('B'), 'a'.localeCompare('A'), 'é'.localeCompare('e', undefined, { sensitivity: 'base' }), 'é'.localeCompare('e', undefined, { sensitivity: 'accent' })].join()", "-1,-1,0,1");
+        check(&mut p, "new Intl.NumberFormat('de-DE').resolvedOptions().locale + '|' + Intl.getCanonicalLocales('en_us')", "de-DE|en-US");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_keychain_module_reaches_the_native_store_and_rejects_bad_names() {
+        let (mut p, path) = page(
+            r##"<body><script type="module">
+              import { keychain } from "@nile/keychain";
+              window.out = [];
+              (async () => {
+                try { await keychain.get(""); out.push("accepted"); } catch (e) { out.push("rejected:" + e.message); }
+                const ok = await keychain.available();
+                out.push("available:" + typeof ok);
+                out.push("reason:" + typeof keychain.reason());
+                keychain.service = "NileTest";
+                out.push("service:" + keychain.service);
+                out.push("done");
+              })().catch((e) => out.push("ERR " + e.message));
+            </script></body>"##,
+            "keychain",
+        );
+        for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(30));
+            p.run_timers();
+            if js(&mut p, "out.includes('done') || out.some((l) => l.startsWith('ERR'))") == "true" {
+                break;
+            }
+        }
+        let out = js(&mut p, "out.join('\\n')");
+        assert!(out.contains("rejected:a service and an account name are required"), "{out}");
+        assert!(out.contains("available:boolean") && out.contains("reason:string") && out.contains("service:NileTest") && out.contains("done"), "{out}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mail_builds_mime_and_talks_smtp_with_a_fake_server() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel::<(Vec<String>, String)>();
+        std::thread::spawn(move || {
+            // one session per connection: the first is accepted mail, the second rejects the recipient
+            for session in 0..2 {
+                let (stream, _) = listener.accept().unwrap();
+                let mut out = stream.try_clone().unwrap();
+                let mut input = BufReader::new(stream);
+                let mut commands = Vec::new();
+                let mut message = String::new();
+                out.write_all(b"220 fake ESMTP ready\r\n").unwrap();
+                loop {
+                    let mut line = String::new();
+                    if input.read_line(&mut line).unwrap() == 0 {
+                        break;
+                    }
+                    let line = line.trim_end().to_string();
+                    commands.push(line.clone());
+                    let upper = line.to_uppercase();
+                    if upper.starts_with("EHLO") {
+                        out.write_all(b"250-fake greets you\r\n250-SIZE 1000000\r\n250 AUTH PLAIN LOGIN\r\n").unwrap();
+                    } else if upper.starts_with("AUTH PLAIN") {
+                        out.write_all(b"235 2.7.0 accepted\r\n").unwrap();
+                    } else if upper.starts_with("RCPT") && session == 1 {
+                        out.write_all(b"550 5.1.1 no such user\r\n").unwrap();
+                    } else if upper.starts_with("MAIL") || upper.starts_with("RCPT") {
+                        out.write_all(b"250 ok\r\n").unwrap();
+                    } else if upper == "DATA" {
+                        out.write_all(b"354 go ahead\r\n").unwrap();
+                        loop {
+                            let mut l = String::new();
+                            input.read_line(&mut l).unwrap();
+                            if l == ".\r\n" {
+                                break;
+                            }
+                            message.push_str(&l);
+                        }
+                        out.write_all(b"250 2.0.0 queued as 42\r\n").unwrap();
+                    } else if upper == "QUIT" {
+                        out.write_all(b"221 bye\r\n").unwrap();
+                        break;
+                    } else {
+                        out.write_all(b"502 unknown\r\n").unwrap();
+                    }
+                }
+                tx.send((commands, message)).unwrap();
+            }
+        });
+        let (mut p, path) = page(
+            &format!(
+                r##"<body><script type="module">
+              import {{ sendMail, buildMessage, parseAddress }} from "@nile/mail";
+              window.out = [];
+              window.parseAddress = parseAddress;
+              window.buildMessage = buildMessage;
+              (async () => {{
+                const r = await sendMail({{
+                  host: "127.0.0.1", port: {port}, secure: "none", allowInsecureAuth: true, user: "shop@example.com", password: "p@ss",
+                  from: {{ name: "Soft Sale", address: "shop@example.com" }}, to: ["ada@example.com", "Alan T <alan@example.com>"], bcc: "audit@example.com",
+                  subject: "Reçu n° 7", text: "Hello é\r\n.dotted line\r\nbye", html: "<p>Hello</p>",
+                  attachments: [{{ filename: "r.pdf", content: new Uint8Array([37, 80, 68, 70, 0, 255]) }}],
+                }});
+                out.push("sent:" + r.accepted.join(",") + "|" + r.response);
+                try {{
+                  await sendMail({{ host: "127.0.0.1", port: {port}, secure: "none", from: "a@b.co", to: "nobody@example.com", subject: "x", text: "y" }});
+                  out.push("second: accepted");
+                }} catch (e) {{ out.push("second:" + e.responseCode + ":" + e.message); }}
+                out.push("done");
+              }})().catch((e) => out.push("ERR " + e.message));
+            </script></body>"##
+            ),
+            "mail",
+        );
+        for _ in 0..200 {
+            std::thread::sleep(Duration::from_millis(30));
+            p.run_timers();
+            if js(&mut p, "out.includes('done') || out.some((l) => l.startsWith('ERR'))") == "true" {
+                break;
+            }
+        }
+        let out = js(&mut p, "out.join('\\n')");
+        assert!(out.contains("sent:ada@example.com,alan@example.com,audit@example.com|2.0.0 queued as 42"), "{out}");
+        assert!(out.contains("second:550:550 5.1.1 no such user"), "{out}");
+        let (commands, message) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(commands[0], "EHLO localhost");
+        // AUTH PLAIN "\0shop@example.com\0p@ss"
+        assert_eq!(commands[1], "AUTH PLAIN AHNob3BAZXhhbXBsZS5jb20AcEBzcw==");
+        assert_eq!(&commands[2..6], ["MAIL FROM:<shop@example.com>", "RCPT TO:<ada@example.com>", "RCPT TO:<alan@example.com>", "RCPT TO:<audit@example.com>"]);
+        assert_eq!(commands[6], "DATA");
+        assert_eq!(commands[7], "QUIT");
+        // headers: encoded subject, to without the bcc, a mixed message holding an alternative
+        assert!(message.contains("From: Soft Sale <shop@example.com>\r\n"), "{message}");
+        assert!(message.contains("To: ada@example.com, Alan T <alan@example.com>\r\n") && !message.contains("audit@example.com"), "{message}");
+        assert!(message.contains("Subject: =?UTF-8?B?UmXDp3UgbsKwIDc=?=\r\n"), "{message}");
+        assert!(message.contains("Content-Type: multipart/mixed; boundary=") && message.contains("Content-Type: multipart/alternative; boundary="), "{message}");
+        assert!(message.contains("Content-Type: text/plain; charset=utf-8") && message.contains("Content-Type: text/html; charset=utf-8"), "{message}");
+        assert!(message.contains("Content-Type: application/pdf; name=\"r.pdf\"") && message.contains("Content-Disposition: attachment; filename=\"r.pdf\""), "{message}");
+        assert!(message.contains("JVBERgD/"), "the attachment is base64 (%PDF + 00 ff): {message}");
+        // the dot-stuffed line inside the text part survives base64 untouched, and no raw line starts with a lone dot
+        assert!(!message.lines().any(|l| l == "."), "{message}");
+        let (second, _) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(second.iter().any(|c| c.starts_with("RCPT TO:<nobody@example.com>")) && !second.contains(&"DATA".to_string()), "{second:?}");
+        // the pure helpers: addresses, a refusal to send a password in the clear, header injection, no recipients
+        assert_eq!(js(&mut p, "JSON.stringify([parseAddress('Ada <a@b.co>'), parseAddress('x@y.zz')])"), r#"[{"name":"Ada","address":"a@b.co"},{"name":"","address":"x@y.zz"}]"#);
+        assert_eq!(js(&mut p, "(() => { try { buildMessage({ from: 'a@b.co', to: 'c@d.ee', subject: 'x\\r\\nBcc: evil@e.vil', text: 'y' }); return 'built'; } catch (e) { return e.message; } })()"), "line breaks are not allowed in a header");
+        assert_eq!(js(&mut p, "(() => { try { buildMessage({ from: 'a@b.co', subject: 'x' }); return 'built'; } catch (e) { return e.message; } })()"), "no recipients");
+        assert_eq!(js(&mut p, "(() => { try { buildMessage({ from: 'not-an-address', to: 'c@d.ee' }); return 'built'; } catch (e) { return e.message; } })()"), "not an email address: not-an-address");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn the_ui_grid_keeps_an_edit_with_its_record_and_the_drag_clean() {
         let (mut p, path) = page(
             r##"<body style="margin:0"><div id="host"></div>

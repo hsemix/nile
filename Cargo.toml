@@ -50,6 +50,7 @@ imagesize = "0.13"
 base64 = "0.22"
 # Ed25519 and SHA-256 for update signatures (already linked by rustls).
 ring = "0.17"
+keyring = "4"
 ureq = "3.4.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"

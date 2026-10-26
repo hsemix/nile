@@ -28,10 +28,12 @@ use rquickjs::{
 
 mod extensions;
 mod crypto;
+mod desktop;
 mod envmod;
 mod integration;
 pub use integration::mime_of;
 mod jsx;
+mod keychain;
 mod net;
 mod sys;
 
@@ -42,6 +44,7 @@ const WEB: &str = include_str!("web.js");
 const CANVAS: &str = include_str!("canvas.js");
 const AUDIO: &str = include_str!("audio.js");
 const CRYPTO: &str = include_str!("crypto.js");
+const INTL: &str = include_str!("intl.js");
 // `@nile/ui`: the component library, whole modules loaded by `import`.
 const UI_MODULES: &[(&str, &str)] = &[
     ("@nile/ui", include_str!("ui/index.js")),
@@ -68,10 +71,12 @@ const UI_MODULES: &[(&str, &str)] = &[
     ("@nile/print", include_str!("ui/print.js")),
     ("@nile/escpos", include_str!("ui/escpos.js")),
     ("@nile/crypto", include_str!("ui/passwords.js")),
+    ("@nile/keychain", include_str!("ui/keychain.js")),
+    ("@nile/mail", include_str!("ui/mail.js")),
 ];
 
 fn prelude() -> String {
-    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", &WEB.replace("/*@CANVAS@*/", CANVAS).replace("/*@AUDIO@*/", AUDIO).replace("/*@CRYPTO@*/", CRYPTO))
+    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", &WEB.replace("/*@CANVAS@*/", CANVAS).replace("/*@AUDIO@*/", AUDIO).replace("/*@CRYPTO@*/", CRYPTO).replace("/*@INTL@*/", INTL))
 }
 
 /// Window ids are unique within the process (the main window, then each `new Window()`).
@@ -347,7 +352,7 @@ impl Resolver for FileResolver {
             return Err(rquickjs::Error::new_resolving(base.to_string_lossy(), name));
         }
         let path = std::path::Path::new(name);
-        if matches!(name, "@nile" | "@sciter" | "@env" | "@sys" | "@debug" | "@storage" | "@nile/ui" | "@nile/print" | "@nile/escpos" | "@nile/crypto") || name.starts_with("@nile/ui/") {
+        if matches!(name, "@nile" | "@sciter" | "@env" | "@sys" | "@debug" | "@storage" | "@nile/ui" | "@nile/print" | "@nile/escpos" | "@nile/crypto" | "@nile/keychain" | "@nile/mail") || name.starts_with("@nile/ui/") {
             // `@sciter` is the same module under the name Sciter apps use.
             return Ok(if name == "@sciter" { "@nile".to_string() } else { name.to_string() });
         }
@@ -413,9 +418,9 @@ impl Loader for FileLoader {
             ),
             "@debug" => Some("const m = globalThis.__debugModule;\nexport const { setUnhandledExceptionHandler, setConsoleOutputHandler, callStackAt, setResourceArrivalHandler, setBreakpointHandler, setBreakpoints, getElementByUID, getUIDofElement, highlightElement, getStyleRulesOfElement, containerId, objectKind, sublimatedValue, sublimatedValueElements, frameVariables } = m;\nexport default m;"),
             "@storage" => Some("const m = globalThis.__storageModule;\nexport const open = m.open;\nexport default m;"),
-            n if n.starts_with("@nile/ui") || n == "@nile/print" || n == "@nile/escpos" || n == "@nile/crypto" => UI_MODULES.iter().find(|(m, _)| *m == n).map(|(_, src)| *src),
+            n if n.starts_with("@nile/ui") || n == "@nile/print" || n == "@nile/escpos" || n == "@nile/crypto" || n == "@nile/keychain" || n == "@nile/mail" => UI_MODULES.iter().find(|(m, _)| *m == n).map(|(_, src)| *src),
             "@env" => Some(
-                "const m = globalThis.__envModule;\nexport const { language, country, userName, machineName, domainName, arguments: args, launch, home, homeURL, path, pathURL, drives, variable, exec, DEVICE } = m;\nexport { args as arguments };\nexport const OS = m.OS, PLATFORM = m.PLATFORM;\nexport default m;",
+                "const m = globalThis.__envModule;\nexport const { language, country, userName, machineName, domainName, arguments: args, launch, reveal, moveToTrash, openWith, home, homeURL, path, pathURL, drives, variable, exec, DEVICE } = m;\nexport { args as arguments };\nexport const OS = m.OS, PLATFORM = m.PLATFORM;\nexport default m;",
             ),
             _ => None,
         };

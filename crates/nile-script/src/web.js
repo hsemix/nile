@@ -1090,6 +1090,11 @@
     domainName: () => call("domainName"),
     arguments: () => lines(call("arguments")),
     launch: (path) => { call("launch", String(path)); },
+    // Nile extensions: show a file in Finder/Explorer, move it to the trash/recycle bin, open it with a given program.
+    // Each throws an Error with the system's message when it fails.
+    reveal: (path) => { const e = call("reveal", String(path)); if (e) throw new Error(e); },
+    moveToTrash: (path) => { const e = call("trash", String(path)); if (e) throw new Error(e); },
+    openWith: (path, app) => { const e = call("openWith", String(path), String(app)); if (e) throw new Error(e); },
     home: (rel = "") => call("home", rel),
     homeURL: (rel = "") => toUrl(call("home", rel)),
     path: (name, rel = "") => call("path", name, rel),
@@ -2808,6 +2813,8 @@
     sysOps.set(id, { resolve, reject });
     N.sysStart(id, op, a.map(String));
   });
+  // The system credential store (`@nile/keychain`), on a worker thread because it can wait for an unlock prompt.
+  Object.defineProperty(g, "__keychain", { value: (op, ...a) => sysAsync("keychain:" + op, ...a) });
   Object.defineProperty(g, "__sysDone", {
     value(id, ok, text) {
       const p = sysOps.get(id);
@@ -3187,4 +3194,5 @@
   /*@CANVAS@*/
   /*@AUDIO@*/
   /*@CRYPTO@*/
+  /*@INTL@*/
   }

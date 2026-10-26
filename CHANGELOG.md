@@ -8,6 +8,24 @@ the section becomes that version's.
 
 ## Unreleased
 
+### 2026-10-26
+
+#### Added
+- `@nile/mail`: send email over SMTP (STARTTLS or TLS, AUTH PLAIN/LOGIN, HTML and text, attachments, inline images, RFC 2047 headers, dot-stuffing, header-injection refusal) with `buildMessage` for the raw message. `examples/mail.html`, [guide](docs/guide/email.md).
+- `@nile/keychain`: secrets in the system credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service) with `set`/`get`/`remove`, binary `setBytes`/`getBytes`, `available()`; Promises on a worker thread; cargo feature `keychain` (default in nile-engine; `keyring` crate). [guide](docs/guide/credentials.md).
+
+#### Fixed
+- `width: 100%` on an `<input>`, `<select>` or other inline-block was ignored (layout sizes inline boxes on their own, where a percentage had nothing to refer to), so form fields stayed content-sized; a full-width inline-block now fills its container like in a browser. Smaller percentages still size to the content.
+
+### 2026-10-25
+
+#### Added
+- `Intl` (`NumberFormat`, `DateTimeFormat`, `PluralRules`, `ListFormat`, `RelativeTimeFormat`, `Collator`) and working `Number/Date.prototype.toLocale*String` / `String.prototype.localeCompare` (numeric and accent-aware sorting) for about two dozen locales, written in JS over a small data table instead of ICU. `navigator.language` is now the OS language and region instead of a fixed `en-US`. [guide](docs/guide/internationalization.md).
+- `@env` `reveal(path)` (show in Finder/Explorer), `moveToTrash(path)` (Trash/Recycle Bin, file or folder) and `openWith(path, app)`. [guide](docs/guide/desktop-helpers.md).
+
+#### Fixed
+- `fs.realpath` (`@sys`) no longer returns Windows' verbatim `\\?\C:\...` form; the prefix is dropped (`\\?\UNC\server\share` becomes `\\server\share`).
+
 ### 2026-10-24
 
 #### Added
@@ -17,7 +35,6 @@ the section becomes that version's.
 - `examples/jsx-components.html`: new tags and inputs written as classes and JSX (a rating input, a quantity stepper, a class component used as a JSX tag).
 
 #### Fixed
-- `fs.realpath` (`@sys`) no longer returns Windows' verbatim `\\?\C:\...` form; the prefix is dropped (`\\?\UNC\server\share` becomes `\\server\share`).
 - Removing the focused element (a closed menu or dialog) leaves nothing focused, so keys reach the document and its shortcuts again; they used to go to the detached element.
 - `display: inline-flex` and `inline-grid` are atomic inline boxes that shrink to fit and sit in a line, as `inline-block` does; they used to behave as full-width block flex/grid containers. `getComputedStyle` reports the inline value.
 

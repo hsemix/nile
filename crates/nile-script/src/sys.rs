@@ -454,7 +454,11 @@ pub(crate) fn start(state: &SysState, op_id: u32, op: String, args: Vec<String>)
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match op.strip_prefix("crypto:") {
             // `crypto.subtle` work (PBKDF2 can take a while) runs here too, so it never stalls the window.
             Some(rest) => crate::crypto::call(rest, &args),
-            None => run(&op, &args),
+            None => match op.strip_prefix("keychain:") {
+                // The system credential store can wait for an unlock prompt: worker thread as well.
+                Some(rest) => crate::keychain::call(rest, &args),
+                None => run(&op, &args),
+            },
         }))
         .unwrap_or_else(|_| Err("EIO: the operation panicked".into()));
         done.lock().unwrap().push((op_id, r));

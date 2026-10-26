@@ -1,0 +1,76 @@
+<!doctype html>
+<html window-width="760" window-height="640">
+<meta charset="utf-8">
+<title>Send email</title>
+<style>
+  body { margin: 0; padding: 24px; font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b }
+  h1 { margin: 0 0 4px; font-size: 20px }
+  p.note { margin: 0 0 16px; color: #64748b; font-size: 13px }
+  .cols { display: flex; gap: 24px; align-items: flex-start }
+  .panel { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px; box-sizing: border-box }
+  .panel h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #64748b }
+  label { display: block; margin: 8px 0 3px; font-size: 13px; color: #475569 }
+  input, select, textarea { width: 100%; box-sizing: border-box; padding: 6px 8px; font: inherit }
+  textarea { height: 70px }
+  .row { display: flex; gap: 8px } .row > * { flex: 1 }
+  .buttons { display: flex; gap: 8px; margin-top: 12px }
+  button { padding: 7px 14px }
+  pre { margin: 0; font: 11px/1.4 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-all; max-height: 420px; overflow: auto }
+  #log { margin-top: 10px; font-size: 13px; color: #334155; min-height: 36px; white-space: pre-wrap }
+</style>
+<body>
+  <h1>Send email</h1>
+  <p class="note">SMTP from your own app. The password is kept in the system credential store, not in a file.</p>
+  <div class="cols">
+    <div class="panel" style="width:360px">
+      <h2>Server</h2>
+      <div class="row"><div><label>Host</label><input id="host" placeholder="smtp.example.com"></div><div style="flex:0 0 90px"><label>Port</label><input id="port" value="587"></div></div>
+      <label>Security</label>
+      <select id="secure"><option value="starttls">STARTTLS (587)</option><option value="tls">TLS (465)</option><option value="none">None (25, no login)</option></select>
+      <label>User</label><input id="user" placeholder="shop@example.com" autocomplete="off">
+      <label>Password</label><input id="password" type="password" autocomplete="off">
+      <div class="buttons"><button id="save">Remember password</button><button id="forget">Forget</button></div>
+      <h2 style="margin-top:14px">Message</h2>
+      <label>To</label><input id="to" placeholder="ada@example.com, alan@example.com">
+      <label>Subject</label><input id="subject" value="Receipt 10042">
+      <label>Text</label><textarea id="text">Thank you for shopping with us.&#10;Total: 11.20</textarea>
+      <div class="buttons"><button id="send">Send</button><button id="preview">Preview source</button></div>
+      <div id="log"></div>
+    </div>
+    <div class="panel" style="flex:1"><h2>Message source</h2><pre id="source">Press "Preview source".</pre></div>
+  </div>
+  <script type="module">
+    import { sendMail, buildMessage } from "@nile/mail";
+    import { keychain } from "@nile/keychain";
+    keychain.service = "NileMailExample";
+    const $ = (id) => document.getElementById(id);
+    const say = (t) => { $("log").textContent = t; };
+    const message = () => ({
+      from: { name: "SoftSale", address: $("user").value || "shop@example.com" },
+      to: $("to").value.split(",").map((s) => s.trim()).filter(Boolean),
+      subject: $("subject").value, text: $("text").value,
+      html: "<p>" + $("text").value.replace(/\n/g, "<br>") + "</p>",
+      attachments: [{ filename: "receipt.txt", content: "Receipt 10042\nTotal 11.20\n" }],
+    });
+    $("preview").addEventListener("click", () => {
+      try { $("source").textContent = buildMessage(Object.assign(message(), { to: message().to.length ? message().to : ["you@example.com"] })); say(""); } catch (e) { say(e.message); }
+    });
+    $("save").addEventListener("click", async () => {
+      try { await keychain.set($("user").value || "smtp", $("password").value); say("Password saved in the system store."); } catch (e) { say("Could not save: " + e.message); }
+    });
+    $("forget").addEventListener("click", async () => {
+      try { say((await keychain.remove($("user").value || "smtp")) ? "Password removed." : "Nothing was stored."); } catch (e) { say(e.message); }
+    });
+    $("send").addEventListener("click", async () => {
+      say("Sending...");
+      try {
+        const user = $("user").value;
+        const password = $("password").value || (user ? await keychain.get(user) : null) || undefined;
+        const secure = $("secure").value;
+        const result = await sendMail(Object.assign(message(), { host: $("host").value, port: Number($("port").value), secure, user: secure === "none" ? undefined : user || undefined, password }));
+        say("Sent to " + result.accepted.join(", ") + "\n" + result.response);
+      } catch (e) { say("Failed: " + e.message); }
+    });
+  </script>
+</body>
+</html>

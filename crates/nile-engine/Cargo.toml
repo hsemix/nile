@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["svg-text", "audio"]
+default = ["svg-text", "audio", "keychain"]
 # The OS clipboard (`arboard`). Off for embedders that supply their own clipboard.
 system-clipboard = ["dep:arboard"]
 # `<text>` in SVG (system fonts and shaping, about 0.7 MB of the binary). Without it SVG draws shapes only.
@@ -14,6 +14,8 @@ svg-text = ["nile-svg/text"]
 audio = ["nile-script/audio"]
 audio-vorbis = ["nile-script/audio-vorbis"]
 audio-aac = ["nile-script/audio-aac"]
+# The system credential store for `@nile/keychain` (Keychain, Credential Manager, the Secret Service over D-Bus).
+keychain = ["nile-script/keychain"]
 # `fetch`/`XMLHttpRequest` over http(s) (`ureq`). Without it only files and `data:` URLs load.
 net = ["dep:ureq", "nile-script/tls"]
 
