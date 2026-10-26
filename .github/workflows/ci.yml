@@ -52,6 +52,13 @@ jobs:
             echo "::error title=Clippy on ${{ matrix.os }}::${summary}"
           fi
           exit $status
+      - name: Upload golden image failures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-failures-${{ matrix.os }}
+          path: target/golden-failures
+          if-no-files-found: ignore
       - name: Workspace tests including packed native executable execution
         shell: bash
         run: |

@@ -15,3 +15,14 @@ Data flows one way: `nile-dom` -> `nile-style` -> `nile-layout` (uses `nile-text
 | [Windows and the native shell](windows-and-shell.md) | Window configuration, frames, multiple and owned windows, popups, dialogs, menus, tooltips, translucent windows and platform chrome. |
 | [Accessibility](accessibility.md) | The accessibility tree, text runs and live regions. |
 | [Packaging, updates, lifecycle and native extensions](packaging-and-extensions.md) | `--pack`, signed updates, single-instance and file/URL events, and the native extension host. |
+
+## Golden images
+
+`crates/nile-engine/tests/golden.rs` paints text-free pages (boxes, borders, gradients, flex and grid, stacking,
+transforms, filters, clipping, floats, tables, canvas, SVG) and compares them with the PNGs in
+`crates/nile-engine/tests/golden/` (a few levels of per-channel tolerance, 0.2% of pixels may differ). Text is left out
+because every system has its own fonts. To change a page or accept a deliberate visual change, run
+`NILE_UPDATE_GOLDEN=1 cargo test -p nile-engine --test golden` and **look at the new PNGs** before committing them: a
+golden that encodes a bug will keep the bug. A failing comparison writes `<name>.actual.png` and `<name>.diff.png` (changed
+pixels in red) to `target/golden-failures/`, which CI uploads as an artifact. Known gap: `conic-gradient` isn't drawn, so
+no page uses it.

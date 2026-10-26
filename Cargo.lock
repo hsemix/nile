@@ -2495,6 +2495,7 @@ dependencies = [
  "nile-style",
  "nile-svg",
  "nile-text",
+ "png 0.17.16",
  "serde_json",
  "serialport",
  "skia-safe",
