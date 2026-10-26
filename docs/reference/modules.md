@@ -149,7 +149,7 @@ finally { await file.close(); }
 The directory's entries are enumerated up front, not lazily streamed from OS.
 `sys.Pipe` (named pipes), `sys.TTY(fd)` and `fs.watch(path, cb)` exist. On Windows a pipe is a loopback socket
 announced in a file in the temp folder, so it only connects Nile to Nile; `TTY` sizes and modes use `stty` on Unix
-and fixed defaults elsewhere; `fs.watch` polls every 250 ms (events 1 = rename, 2 = change, 20,000 entries at most).
+and fixed defaults elsewhere; `fs.watch` uses the system's file notifications (inotify, FSEvents, ReadDirectoryChangesW; events 1 = rename, 2 = change, merged flags possible, bursts delivered together after 40 ms) and polls every 250 ms (20,000 entries at most) when built without the `watch` feature or when the system refuses a watch.
 
 ## `@sys` processes
 
@@ -266,6 +266,27 @@ text, rows, columns, barcodes, QR, logos, cut, cash drawer and a text `preview()
 only) are globals, backed by `ring`; `@nile/crypto` adds `hashPassword`, `verifyPassword`, `needsRehash` (PBKDF2-SHA256,
 600,000 iterations), `sha256`, `digest`, `hmac`, `encryptText`, `decryptText`, `randomBytes`, `uuid`, `hex`. See the
 [hashing and encryption guide](../guide/hashing-and-encryption.md).
+
+## `Intl` and the `toLocale*` methods
+
+`Intl.NumberFormat`, `DateTimeFormat`, `PluralRules`, `ListFormat`, `RelativeTimeFormat` and `Collator`, with
+`Number/Date.prototype.toLocale*String` and `String.prototype.localeCompare` using them, for about two dozen locales; the
+default locale is the OS's (`navigator.language`). Details and limits: [internationalization guide](../guide/internationalization.md).
+
+## `@nile/keychain`
+
+`keychain.set/get/remove(account)`, `setBytes/getBytes`, `service`, `available()`, `reason()` over the system credential store
+(macOS Keychain, Windows Credential Manager, Linux Secret Service); Promises on a worker thread. Feature `keychain` (default
+in nile-engine). See the [guide](../guide/credentials.md).
+
+## `@nile/mail`
+
+`sendMail(options)` (SMTP with STARTTLS or TLS, AUTH PLAIN/LOGIN, HTML, attachments, inline images), `buildMessage(options)` (the raw
+message), `parseAddress`. See the [email guide](../guide/email.md).
+
+## `@env` file helpers
+
+`reveal(path)`, `moveToTrash(path)` and `openWith(path, app)` beside `launch`. See the [guide](../guide/desktop-helpers.md).
 
 ## `@debug`
 

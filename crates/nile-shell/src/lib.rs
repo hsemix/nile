@@ -34,6 +34,7 @@ mod access;
 mod app;
 mod bundle;
 mod dialogs;
+mod hotkeys;
 mod instance;
 mod material;
 mod menu;

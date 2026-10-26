@@ -38,6 +38,8 @@ pub enum UserEvent {
     /// The tray icon was clicked (`trayclick`) or double-clicked (`traydoubleclick`).
     #[allow(dead_code)]
     Tray(&'static str),
+    /// A global hotkey (`application.registerHotkey`) was pressed; the id is the system's, mapped by `Hotkeys`.
+    Hotkey(u32),
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -103,6 +105,8 @@ pub struct App {
     menu: Option<menu::NativeMenu>,
     /// Which window's tray icon and badge are shown, and what they were last built from (spec, document version).
     tray_owner: Option<(u32, Option<nile_script::TraySpec>, u64)>,
+    /// The global hotkeys and the window whose page asked for them.
+    hotkeys: crate::hotkeys::Hotkeys,
     badge_owner: Option<(u32, Option<String>)>,
     progress_owner: Option<(u32, nile_script::Progress)>,
     active: u32,
@@ -122,7 +126,7 @@ impl App {
                 let _ = proxy.send_event(UserEvent::Snap(hwnd, state));
             });
         }
-        App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0, menu: None, tray_owner: None, badge_owner: None, progress_owner: None, active: 0, bootstrap: false, exit_code: 0 }
+        App { proxy, wins: Vec::new(), portals: Vec::new(), first: Some(page), main_id: 0, menu: None, tray_owner: None, hotkeys: crate::hotkeys::Hotkeys::default(), badge_owner: None, progress_owner: None, active: 0, bootstrap: false, exit_code: 0 }
     }
 }
 
@@ -294,6 +298,15 @@ impl Win {
         let pos = window.outer_position().map(|p| p.to_logical::<f32>(scale)).unwrap_or_default();
         let outer = window.outer_size().to_logical::<f32>(scale);
         self.page.view.borrow_mut().window_rect = Some([pos.x, pos.y, outer.width, outer.height, f32::from(window.fullscreen().is_some())]);
+        let screens = screens_of(&window);
+        let changed = self.page.view.borrow().screens != screens;
+        if changed {
+            let first = self.page.view.borrow().screens.0.is_empty();
+            self.page.view.borrow_mut().screens = screens;
+            if !first {
+                self.page.screen_changed();
+            }
+        }
         actions
     }
 
@@ -946,6 +959,20 @@ impl App {
         }
         self.sync_menu(id);
         self.sync_tray(id);
+        self.sync_hotkeys(id);
+    }
+
+    /// Register the global hotkeys a window's page asked for. The window that registered them owns them (like the tray).
+    fn sync_hotkeys(&mut self, id: u32) {
+        let Some(i) = self.wins.iter().position(|w| w.id == id) else { return };
+        let wanted = self.wins[i].page.hotkeys();
+        if wanted.is_empty() && self.hotkeys.owner != Some(id) {
+            return;
+        }
+        let Some(results) = self.hotkeys.set(id, &wanted, self.proxy.clone()) else { return };
+        for (key, ok) in results {
+            self.wins[i].page.hotkey_event(key, if ok { "ok" } else { "refused" });
+        }
     }
 
     /// Show a window's `Window.this.menu` as the system menu bar: the active window's on macOS (one
@@ -1187,6 +1214,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::Hotkey(system_id) => {
+                let Some((id, key)) = self.hotkeys.lookup(system_id) else { return };
+                let Some(idx) = self.index(id) else { return };
+                self.wins[idx].page.hotkey_event(key, "pressed");
+                self.wins[idx].window.request_redraw();
+                self.after(event_loop, id);
+                return;
+            }
             UserEvent::Tray(kind) => {
                 let id = self.tray_owner.as_ref().map_or(self.main_id, |(o, ..)| *o);
                 let Some(idx) = self.index(id) else { return };
@@ -1311,6 +1346,26 @@ impl App {
             self.after(event_loop, id);
         }
     }
+}
+
+/// The monitors winit knows, and the index of the one `window` is on (the first when unknown).
+fn screens_of(window: &winit::window::Window) -> (Vec<nile_script::ScreenInfo>, usize) {
+    let primary = window.primary_monitor();
+    let current = window.current_monitor();
+    let list: Vec<nile_script::ScreenInfo> = window
+        .available_monitors()
+        .map(|m| nile_script::ScreenInfo {
+            name: m.name().unwrap_or_default(),
+            x: m.position().x,
+            y: m.position().y,
+            width: m.size().width,
+            height: m.size().height,
+            scale: m.scale_factor() as f32,
+            primary: primary.as_ref() == Some(&m),
+        })
+        .collect();
+    let at = current.and_then(|c| window.available_monitors().position(|m| m == c)).unwrap_or(0);
+    (list, at)
 }
 
 #[cfg(test)]

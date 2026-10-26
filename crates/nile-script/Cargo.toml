@@ -11,6 +11,10 @@ tls = ["dep:rustls", "dep:webpki-roots"]
 audio = ["dep:nile-audio"]
 audio-vorbis = ["audio", "nile-audio/vorbis"]
 audio-aac = ["audio", "nile-audio/aac"]
+# The system credential store (Keychain, Credential Manager, the Secret Service): `@nile/keychain`.
+keychain = ["dep:keyring"]
+# Operating system file notifications for `fs.watch` (inotify, FSEvents, ReadDirectoryChangesW); without it `fs.watch` polls.
+watch = ["dep:notify"]
 
 [dependencies]
 rustls = { workspace = true, optional = true }
@@ -27,6 +31,8 @@ nile-extensions = { path = "../nile-extensions" }
 serde_json = "1"
 
 nile-extension-pack = { path = "../nile-extension-pack" }
+keyring = { workspace = true, optional = true }
+notify = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

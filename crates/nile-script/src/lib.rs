@@ -28,10 +28,12 @@ use rquickjs::{
 
 mod extensions;
 mod crypto;
+mod desktop;
 mod envmod;
 mod integration;
 pub use integration::mime_of;
 mod jsx;
+mod keychain;
 mod net;
 mod sys;
 
@@ -42,6 +44,7 @@ const WEB: &str = include_str!("web.js");
 const CANVAS: &str = include_str!("canvas.js");
 const AUDIO: &str = include_str!("audio.js");
 const CRYPTO: &str = include_str!("crypto.js");
+const INTL: &str = include_str!("intl.js");
 // `@nile/ui`: the component library, whole modules loaded by `import`.
 const UI_MODULES: &[(&str, &str)] = &[
     ("@nile/ui", include_str!("ui/index.js")),
@@ -68,10 +71,12 @@ const UI_MODULES: &[(&str, &str)] = &[
     ("@nile/print", include_str!("ui/print.js")),
     ("@nile/escpos", include_str!("ui/escpos.js")),
     ("@nile/crypto", include_str!("ui/passwords.js")),
+    ("@nile/keychain", include_str!("ui/keychain.js")),
+    ("@nile/mail", include_str!("ui/mail.js")),
 ];
 
 fn prelude() -> String {
-    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", &WEB.replace("/*@CANVAS@*/", CANVAS).replace("/*@AUDIO@*/", AUDIO).replace("/*@CRYPTO@*/", CRYPTO))
+    include_str!("prelude.js").replace("/*@EDIT@*/", EDIT).replace("/*@WEB@*/", &WEB.replace("/*@CANVAS@*/", CANVAS).replace("/*@AUDIO@*/", AUDIO).replace("/*@CRYPTO@*/", CRYPTO).replace("/*@INTL@*/", INTL))
 }
 
 /// Window ids are unique within the process (the main window, then each `new Window()`).
@@ -212,6 +217,18 @@ pub struct TraySpec {
     pub template: bool,
 }
 
+/// One monitor, as the window system reports it (physical pixels; `scale` is device pixels per CSS px).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ScreenInfo {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f32,
+    pub primary: bool,
+}
+
 /// What scripts can ask of the embedder: layout results and the viewport.
 /// Implementations must bring styles/layout up to date with the document
 /// before answering, since scripts expect to read what they just wrote.
@@ -307,6 +324,8 @@ pub trait Environment {
     /// The text on the dock / taskbar icon (`application.badge`); `None` clears it.
     fn set_badge(&self, _text: Option<String>) {}
     fn set_progress(&self, _progress: Progress) {}
+    /// The global hotkeys the page wants (`application.registerHotkey`): `(id, accelerator)`.
+    fn set_hotkeys(&self, _keys: Vec<(u32, String)>) {}
     fn portal_clear(&self, _node: NodeId) {}
     /// How this window was opened.
     fn window_info(&self) -> WindowInfo {
@@ -316,6 +335,10 @@ pub trait Environment {
     /// answer as text, "" when cancelled, `None` when the host has no dialogs.
     fn dialog(&self, _kind: &str, _args: [&str; 4]) -> Option<String> {
         None
+    }
+    /// The monitors and the index of the one the window is on (`Window.screens`, `screenBox`).
+    fn screens(&self) -> (Vec<ScreenInfo>, usize) {
+        (Vec::new(), 0)
     }
     /// Window `[screenX, screenY, outerWidth, outerHeight, fullscreen (0/1)]`.
     fn window_rect(&self) -> [f32; 5] {
@@ -347,7 +370,7 @@ impl Resolver for FileResolver {
             return Err(rquickjs::Error::new_resolving(base.to_string_lossy(), name));
         }
         let path = std::path::Path::new(name);
-        if matches!(name, "@nile" | "@sciter" | "@env" | "@sys" | "@debug" | "@storage" | "@nile/ui" | "@nile/print" | "@nile/escpos" | "@nile/crypto") || name.starts_with("@nile/ui/") {
+        if matches!(name, "@nile" | "@sciter" | "@env" | "@sys" | "@debug" | "@storage" | "@nile/ui" | "@nile/print" | "@nile/escpos" | "@nile/crypto" | "@nile/keychain" | "@nile/mail") || name.starts_with("@nile/ui/") {
             // `@sciter` is the same module under the name Sciter apps use.
             return Ok(if name == "@sciter" { "@nile".to_string() } else { name.to_string() });
         }
@@ -413,9 +436,9 @@ impl Loader for FileLoader {
             ),
             "@debug" => Some("const m = globalThis.__debugModule;\nexport const { setUnhandledExceptionHandler, setConsoleOutputHandler, callStackAt, setResourceArrivalHandler, setBreakpointHandler, setBreakpoints, getElementByUID, getUIDofElement, highlightElement, getStyleRulesOfElement, containerId, objectKind, sublimatedValue, sublimatedValueElements, frameVariables } = m;\nexport default m;"),
             "@storage" => Some("const m = globalThis.__storageModule;\nexport const open = m.open;\nexport default m;"),
-            n if n.starts_with("@nile/ui") || n == "@nile/print" || n == "@nile/escpos" || n == "@nile/crypto" => UI_MODULES.iter().find(|(m, _)| *m == n).map(|(_, src)| *src),
+            n if n.starts_with("@nile/ui") || n == "@nile/print" || n == "@nile/escpos" || n == "@nile/crypto" || n == "@nile/keychain" || n == "@nile/mail" => UI_MODULES.iter().find(|(m, _)| *m == n).map(|(_, src)| *src),
             "@env" => Some(
-                "const m = globalThis.__envModule;\nexport const { language, country, userName, machineName, domainName, arguments: args, launch, home, homeURL, path, pathURL, drives, variable, exec, DEVICE } = m;\nexport { args as arguments };\nexport const OS = m.OS, PLATFORM = m.PLATFORM;\nexport default m;",
+                "const m = globalThis.__envModule;\nexport const { language, country, userName, machineName, domainName, arguments: args, launch, reveal, moveToTrash, openWith, online, power, idleSeconds, home, homeURL, path, pathURL, drives, variable, exec, DEVICE } = m;\nexport { args as arguments };\nexport const OS = m.OS, PLATFORM = m.PLATFORM;\nexport default m;",
             ),
             _ => None,
         };
@@ -857,6 +880,13 @@ fn install_natives(
             env.set_tray(on.then(|| TraySpec { icon, tooltip, menu: node(menu), template }))
         }
     });
+    native!("hotkeysSet", {
+        let env = env.clone();
+        move |json: String| {
+            let list: Vec<(u32, String)> = serde_json::from_str(&json).unwrap_or_default();
+            env.set_hotkeys(list)
+        }
+    });
     native!("progressSet", {
         let env = env.clone();
         // kind: 0 none, 1 indeterminate, 2 a value
@@ -939,6 +969,15 @@ fn install_natives(
     native!("windowFocus", {
         let env = env.clone();
         move |id: u32| env.window_command(WindowCommand::FocusId(id))
+    });
+    native!("screensInfo", {
+        let env = env.clone();
+        // [[name, x, y, w, h, scale, primary], ...] plus the window's index, as JSON.
+        move || -> String {
+            let (list, at) = env.screens();
+            let rows: Vec<serde_json::Value> = list.iter().map(|s| serde_json::json!([s.name, s.x, s.y, s.width, s.height, s.scale, s.primary])).collect();
+            serde_json::json!({ "screens": rows, "at": at }).to_string()
+        }
     });
     native!("windowRect", {
         let env = env.clone();

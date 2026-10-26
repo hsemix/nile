@@ -25,6 +25,7 @@ winit.workspace = true
 softbuffer.workspace = true
 accesskit.workspace = true
 accesskit_winit.workspace = true
+global-hotkey.workspace = true
 
 nile-extension-pack = { path = "../nile-extension-pack" }
 serde_json = "1"

@@ -2447,6 +2447,12 @@ fn sciter_flow(style: &mut ComputedStyle, parent: &ComputedStyle, cell: usize) {
         style.display = Display::Block;
         style.width_fit = true;
     }
+    // `width: 100%` on an inline-block (an `<input>`, a `<select>`, a button) means "fill the line", but layout sizes an
+    // inline box on its own, where a percentage has nothing to refer to. As a block it fills the container, and since it
+    // couldn't share the line anyway, it looks the same as in a browser. Smaller percentages still size to the content.
+    if row.is_none() && style.display == Display::InlineBlock && matches!(style.width, Length::Percent(p) if p >= 1.0) && style.float == Float::None && !style.position.out_of_flow() {
+        style.display = Display::Block;
+    }
     if row.is_none() {
         // In ordinary flow `*` fills the container (less the box's own margins), as Sciter's
         // `width: *` on a button or input does.

@@ -8,6 +8,32 @@ the section becomes that version's.
 
 ## Unreleased
 
+### 2026-10-27
+
+#### Added
+- Monitors: `Window.screens`, `Window.screenBox(n, "frame" | "workarea" | "device" | "isPrimary" | "devicePixelRatio", part, asPPX)`, `Window.this.screen`/`screenBox(...)` (Sciter shapes) and a `resolutionchange` event on the window. `workarea` equals `frame` (the system gives no taskbar area); no `snapshot`.
+- `@env` `online()`, `power()` (`{ battery, charging, percent }`) and `idleSeconds()` (Promises on a worker thread: `pmset`/`ioreg` on macOS, PowerShell on Windows, `/sys/class/power_supply` and `xprintidle` on Linux); `navigator.onLine` is live and `online`/`offline` fire on the window (checked every 5 s once listened to). `examples/screens.html`, [guide](docs/guide/desktop-helpers.md).
+- `application.registerHotkey("CmdOrCtrl+Shift+K", handler)`: system-wide hotkeys that work while the app is in the background (`global-hotkey` crate). Returns `{ ready, close() }`; `ready` says whether the system accepted the key. `examples/hotkeys.html`, [guide](docs/guide/app-lifecycle.md). Linux: X11 only.
+
+### 2026-10-26
+
+#### Added
+- `@nile/mail`: send email over SMTP (STARTTLS or TLS, AUTH PLAIN/LOGIN, HTML and text, attachments, inline images, RFC 2047 headers, dot-stuffing, header-injection refusal) with `buildMessage` for the raw message. `examples/mail.html`, [guide](docs/guide/email.md).
+- `@nile/keychain`: secrets in the system credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service) with `set`/`get`/`remove`, binary `setBytes`/`getBytes`, `available()`; Promises on a worker thread; cargo feature `keychain` (default in nile-engine; `keyring` crate). [guide](docs/guide/credentials.md).
+- `fs.watch` uses real file notifications (inotify, FSEvents, ReadDirectoryChangesW via the `notify` crate; cargo feature `watch`, default in nile-engine) instead of polling every 250 ms; bursts arrive together, and it still polls when the feature is off or the system refuses a watch.
+
+#### Fixed
+- `width: 100%` on an `<input>`, `<select>` or other inline-block was ignored (layout sizes inline boxes on their own, where a percentage had nothing to refer to), so form fields stayed content-sized; a full-width inline-block now fills its container like in a browser. Smaller percentages still size to the content.
+
+### 2026-10-25
+
+#### Added
+- `Intl` (`NumberFormat`, `DateTimeFormat`, `PluralRules`, `ListFormat`, `RelativeTimeFormat`, `Collator`) and working `Number/Date.prototype.toLocale*String` / `String.prototype.localeCompare` (numeric and accent-aware sorting) for about two dozen locales, written in JS over a small data table instead of ICU. `navigator.language` is now the OS language and region instead of a fixed `en-US`. [guide](docs/guide/internationalization.md).
+- `@env` `reveal(path)` (show in Finder/Explorer), `moveToTrash(path)` (Trash/Recycle Bin, file or folder) and `openWith(path, app)`. [guide](docs/guide/desktop-helpers.md).
+
+#### Fixed
+- `fs.realpath` (`@sys`) no longer returns Windows' verbatim `\\?\C:\...` form; the prefix is dropped (`\\?\UNC\server\share` becomes `\\server\share`).
+
 ### 2026-10-24
 
 #### Added

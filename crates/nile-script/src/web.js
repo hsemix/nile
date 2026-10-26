@@ -1090,6 +1090,18 @@
     domainName: () => call("domainName"),
     arguments: () => lines(call("arguments")),
     launch: (path) => { call("launch", String(path)); },
+    // Nile extensions: show a file in Finder/Explorer, move it to the trash/recycle bin, open it with a given program.
+    // Each throws an Error with the system's message when it fails.
+    reveal: (path) => { const e = call("reveal", String(path)); if (e) throw new Error(e); },
+    moveToTrash: (path) => { const e = call("trash", String(path)); if (e) throw new Error(e); },
+    openWith: (path, app) => { const e = call("openWith", String(path), String(app)); if (e) throw new Error(e); },
+    // Nile extensions, all Promises (they may start a program, so they run off the window's thread):
+    // `online()` is whether the machine has a route to the internet; `power()` is `{ battery, charging, percent }`
+    // (`battery` false on a desktop machine); `idleSeconds()` is time since the last key or mouse input (X11 needs
+    // `xprintidle`; rejects with ENOSYS where the system does not say).
+    online: () => sysAsync("desktop:online").then((t) => t === "true"),
+    power: () => sysAsync("desktop:power").then((t) => JSON.parse(t)),
+    idleSeconds: () => sysAsync("desktop:idle").then(Number),
     home: (rel = "") => call("home", rel),
     homeURL: (rel = "") => toUrl(call("home", rel)),
     path: (name, rel = "") => call("path", name, rel),
@@ -1244,6 +1256,15 @@
     },
   });
   let badgeText = null, progressValue = null;
+  const hotkeys = new Map();
+  let hotkeySeq = 0;
+  const hotkeysPush = () => N.hotkeysSet(JSON.stringify([...hotkeys].map(([id, k]) => [id, k.accel])));
+  Object.defineProperty(g, "__hotkeyEvent", { value(id, state) {
+    const k = hotkeys.get(id);
+    if (!k) return;
+    if (state === "ok" || state === "refused") k.settle(state === "ok");
+    else if (state === "pressed") { try { k.handler(); } catch (err) { console.error(err && err.stack ? err.stack : String(err)); } }
+  } });
   Object.defineProperty(g, "application", { value: { start() {}, run() { return 0; }, quit(code = 0) { N.windowCommand("quit", +code | 0, 0); },
     get arguments() { return g.__envModule.arguments(); },
     // Make this program the handler of `scheme://` links / `.ext` files, or start it at login. Each
@@ -1290,6 +1311,18 @@
       if (v == null || v === false || v === "") { progressValue = null; N.progressSet(0, 0); }
       else if (v === "indeterminate") { progressValue = "indeterminate"; N.progressSet(1, 0); }
       else { const n = Number(v); if (Number.isNaN(n)) return; progressValue = Math.min(1, Math.max(0, n)); N.progressSet(2, progressValue); }
+    },
+    // A shortcut that works while the app is in the background (a quick-capture window, a recorder's start/stop):
+    // `const key = application.registerHotkey("Ctrl+Shift+K", () => ...)`. The accelerator is modifiers
+    // (Ctrl, Shift, Alt, Cmd/Super, CmdOrCtrl) and a key joined by `+`. `key.ready` is a Promise for whether the
+    // system accepted it (another app may own it); `key.close()` gives it back. Nile extension (Sciter has none).
+    registerHotkey(accel, handler) {
+      const id = ++hotkeySeq;
+      let settle;
+      const ready = new Promise((r) => { settle = r; });
+      hotkeys.set(id, { accel: String(accel), handler, settle });
+      hotkeysPush();
+      return { accel: String(accel), ready, close() { if (hotkeys.delete(id)) { hotkeysPush(); settle(false); } } };
     },
     registerProtocol(scheme) { return N.envCall("registerProtocol", [String(scheme)]) === "1"; },
     registerFileType(ext) { return N.envCall("registerFileType", [String(ext)]) === "1"; },
@@ -1469,11 +1502,58 @@
     menuBar = null;
   }
   let trayState = null;
+  const screenList = () => JSON.parse(N.screensInfo());
+  const screenBox = (n, what, part, asPPX) => {
+    const { screens } = screenList();
+    const row = screens[n | 0];
+    if (!row) throw new Error("no such screen: " + n);
+    const [name, x, y, w, h, scale, primary] = row;
+    if (what === "device") return name;
+    if (what === "isPrimary") return primary;
+    if (what === "devicePixelRatio") return scale;
+    if (what !== "frame" && what !== "workarea") return undefined;
+    const k = asPPX === false ? 1 / scale : 1;
+    const [px, py, pw, ph] = [x * k, y * k, w * k, h * k].map((v) => Math.round(v));
+    switch (part || "xywh") {
+      case "xywh": case "rectw": return [px, py, pw, ph];
+      case "rect": return [px, py, px + pw, py + ph];
+      case "position": return [px, py];
+      case "dimension": return [pw, ph];
+      case "left": return px; case "top": return py;
+      case "right": return px + pw; case "bottom": return py + ph;
+      case "width": return pw; case "height": return ph;
+    }
+    return undefined;
+  };
+  // `online`/`offline` events on the window and a live `navigator.onLine`: checked every 5 s once someone listens.
+  {
+    let polling = null;
+    const poll = () => sysAsync("desktop:online").then((t) => {
+      const now = t === "true";
+      if (now !== navigator.onLine) { Object.defineProperty(navigator, "onLine", { value: now, configurable: true }); g.dispatchEvent(new Event(now ? "online" : "offline")); }
+    }, () => {});
+    const add = g.addEventListener;
+    g.addEventListener = function (type, ...rest) {
+      if ((type === "online" || type === "offline") && !polling) { polling = setInterval(poll, 5000); poll(); }
+      return add.call(this, type, ...rest);
+    };
+  }
+  Object.defineProperty(g, "__screenChanged", { value() { const e = new Event("resolutionchange"); g.dispatchEvent(e); } });
   class Window {
     constructor(params = {}) { openWindow(this, params, false); }
     static get this() { return thisWindow; }
     static get all() { return [thisWindow, ...[...known.values()].filter((w) => w._valid && w !== thisWindow)]; }
     static get share() { return shared; }
+    // Monitors (docs.sciter.com/docs/DOM/Window): `Window.screens` is how many; `Window.screenBox(n, what, part, asPPX)`
+    // reports one: what = "frame" (the monitor), "workarea" (same as frame here: the system doesn't tell us where the
+    // taskbar is), "device" (its name), "isPrimary", "devicePixelRatio"; part = "xywh" (default), "rect", "position",
+    // "dimension", "left"/"top"/"right"/"bottom"/"width"/"height"; asPPX true (default) is physical pixels, false CSS px.
+    // `Window.this.screen` is the index of the monitor the window is on; `resolutionchange` fires on the window when the
+    // monitors or their scale change. No "snapshot".
+    static get screens() { return screenList().screens.length; }
+    static screenBox(n, what, part, asPPX) { return screenBox(n, what, part, asPPX); }
+    get screen() { return screenList().at; }
+    screenBox(what, part, asPPX) { return screenBox(screenList().at, what, part, asPPX); }
     // selectFile({ mode: "open" | "open-multiple" | "save", filter, extension, caption, path })
     selectFile(params = {}) {
       const mode = params.mode || "open";
@@ -2808,6 +2888,8 @@
     sysOps.set(id, { resolve, reject });
     N.sysStart(id, op, a.map(String));
   });
+  // The system credential store (`@nile/keychain`), on a worker thread because it can wait for an unlock prompt.
+  Object.defineProperty(g, "__keychain", { value: (op, ...a) => sysAsync("keychain:" + op, ...a) });
   Object.defineProperty(g, "__sysDone", {
     value(id, ok, text) {
       const p = sysOps.get(id);
@@ -2864,8 +2946,9 @@
     getWinSize() { return JSON.parse(sysRun("tty_size")); }
   }
   // `fs.watch(path, (path, events) => ...)`: events is a bitmask, 1 for a rename (something created,
-  // removed or renamed) and 2 for a change. Folders are watched with what is inside them. Written by
-  // looking at the tree every 250 ms (no operating system notifications), so it stops at 20,000 entries.
+  // removed or renamed) and 2 for a change. Folders are watched with what is inside them. Uses the operating
+  // system's notifications (inotify, FSEvents, ReadDirectoryChangesW; bursts arrive together after 40 ms); a build
+  // without them, or a system that refuses (out of watches), looks at the tree every 250 ms instead, which stops at 20,000 entries.
   const WATCH_LIMIT = 20000;
   const snapshot = (root) => {
     const seen = new Map();
@@ -2882,6 +2965,20 @@
   const watchFs = (path, callback) => {
     path = String(path);
     if (!sync.stat(path)) throw Object.assign(new Error("ENOENT: no such file or directory: " + path), { code: "ENOENT" });
+    let native = null;
+    try { native = Number(sysRun("watch_new", path)); } catch (e) { /* polling below */ }
+    if (native !== null) {
+      let closed = false;
+      (async () => {
+        while (!closed) {
+          let text;
+          try { text = await sysAsync("watch_next", native); } catch (e) { break; }
+          if (closed || text[0] !== "D") break;
+          for (const [p, e] of JSON.parse(text.slice(1))) { try { callback(p, e); } catch (err) { console.error(err && err.stack ? err.stack : String(err)); } }
+        }
+      })();
+      return { path, close() { if (!closed) { closed = true; try { sysRun("close", native); } catch (e) { /* gone */ } } } };
+    }
     let before = snapshot(path);
     const timer = setInterval(() => {
       const now = snapshot(path);
@@ -3187,4 +3284,5 @@
   /*@CANVAS@*/
   /*@AUDIO@*/
   /*@CRYPTO@*/
+  /*@INTL@*/
   }
