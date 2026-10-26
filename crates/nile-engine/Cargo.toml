@@ -39,6 +39,7 @@ ureq = { workspace = true, optional = true }
 [dev-dependencies]
 nile-extensions = { path = "../nile-extensions" }
 tempfile = "3"
+png = "0.17"
 serde_json = "1"
 cc = "1"
 
