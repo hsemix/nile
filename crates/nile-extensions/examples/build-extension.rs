@@ -5,9 +5,9 @@ use support::{output, Result};
 fn run() -> Result<()> {
     let mut arguments = std::env::args().skip(1);
     let name = arguments.next().ok_or(
-        "usage: build-extension <sqlite|notifications> --dest PATH [--release] [--target TRIPLE]",
+        "usage: build-extension <sqlite|notifications|media> --dest PATH [--release] [--target TRIPLE]",
     )?;
-    if !["sqlite", "notifications"].contains(&name.as_str()) {
+    if !["sqlite", "notifications", "media"].contains(&name.as_str()) {
         return Err("unknown extension".into());
     }
     let (mut destination, mut target, mut release) = (None, None, false);

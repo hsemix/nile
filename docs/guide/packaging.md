@@ -57,6 +57,7 @@ nile --pack my-app -o MyApp --icon icon.png --version 1.2.0 --company "Acme" \
   file and product version, company, copyright: Explorer's Properties > Details). Even without `--icon`,
   `--version`/`--company`/... write the version resource. (Written without a Windows machine to hand: CI
   compiles it, but it hasn't run. The version block's layout is checked by a unit test.)
+- `--camera "Why the app uses the camera"` and `--microphone "..."` write `NSCameraUsageDescription` / `NSMicrophoneUsageDescription` into the macOS bundle's `Info.plist`. Without them macOS refuses camera and microphone access to a bundled app (the optional `@media` extension needs them; a notarized app also needs the camera/audio-input entitlements when you sign it).
 - Without `--icon`, a program gets Nile's own icon (`assets/icon.html`, drawn with Nile itself) where the system shows one: an `.app` bundle on macOS, an `.exe` on Windows, and as the window icon of every Nile window that doesn't set its own (the page's `window-icon`, or the `.png` it was packed with, win).
 - `nile --brand program.exe -o out.exe [--icon ...] [--version ...]` writes the same icon and file details into any Windows program; the release workflow uses it for `nile.exe` (Linux archives carry `nile.png` and a `nile.desktop`).
 - **macOS:** the same options fill the bundle's `Info.plist` (`CFBundleShortVersionString`, copyright).

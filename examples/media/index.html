@@ -1,0 +1,70 @@
+<html window-title="Camera and microphone" window-width="720" window-height="560">
+<head>
+<style>
+  body { margin: 0; padding: 16px; font: 14px system-ui; }
+  h1 { font-size: 18px; margin: 0 0 10px; }
+  .row { margin-bottom: 8px; }
+  select { width: 240px; margin-right: 6px; }
+  canvas { background: #000; width: 360px; height: 202px; display: block; border-radius: 6px; }
+  #meter { width: 240px; height: 10px; background: #8883; border-radius: 5px; margin: 8px 0; }
+  #bar { height: 10px; width: 0; background: #2a9d4b; border-radius: 5px; }
+  #log { margin-top: 10px; height: 110px; overflow: auto; padding: 8px; background: #8881; border-radius: 6px; white-space: pre-wrap; font: 12px ui-monospace, monospace; }
+</style>
+</head>
+<body>
+  <h1>Camera and microphone (@media extension)</h1>
+  <div class="row">
+    <select id="cams"></select><button id="camStart">Start camera</button><button id="photo" disabled>Take photo</button><button id="camStop" disabled>Stop</button>
+  </div>
+  <canvas id="preview" width="360" height="202"></canvas>
+  <div class="row" style="margin-top:12px">
+    <select id="mics"></select><button id="micStart">Start microphone</button><button id="rec" disabled>Record</button><button id="micStop" disabled>Stop</button>
+  </div>
+  <div id="meter"><div id="bar"></div></div>
+  <div id="log">Build the extension first:
+cargo run -p nile-extensions --example build-extension -- media --dest examples/media/extensions/media</div>
+<script type="module">
+  import media from "@media";
+  import { fs } from "@sys";
+  const $ = (id) => document.getElementById(id);
+  const log = (t) => { const l = $("log"); l.textContent += "\n" + t; l.scrollTop = l.scrollHeight; };
+  let cam = null, mic = null, recording = false, shots = 0;
+  const fill = (select, items) => { select.innerHTML = ""; for (const d of items) { const o = document.createElement("option"); o.value = d.id; o.textContent = d.name; select.appendChild(o); } };
+  async function refresh() {
+    const d = await media.devices();
+    fill($("cams"), d.cameras); fill($("mics"), d.microphones);
+    log(d.cameras.length + " camera(s), " + d.microphones.length + " microphone(s)" + (d.cameraAccess ? "" : " (camera access not granted yet: Start camera asks)"));
+  }
+  $("camStart").onclick = async () => {
+    try {
+      if (!(await media.permission("camera"))) { log("camera access denied"); return; }
+      await refresh();
+      cam = await media.camera({ device: $("cams").value, width: 1280, height: 720, fps: 30 });
+      cam.drawTo($("preview"));
+      cam.onEnd((m) => log("camera ended: " + m));
+      log("camera " + cam.width + "x" + cam.height + ", preview " + cam.previewWidth + "x" + cam.previewHeight);
+      $("camStart").disabled = true; $("camStop").disabled = false; $("photo").disabled = false;
+    } catch (e) { log("camera: " + e.code + " " + e.message); }
+  };
+  $("photo").onclick = async () => {
+    try { const jpeg = await cam.photo({ quality: 85 }); const name = "photo-" + (++shots) + ".jpg"; fs.writeFileSync(name, jpeg); log("saved " + name + " (" + jpeg.length + " bytes)"); }
+    catch (e) { log("photo: " + e.code + " " + e.message); }
+  };
+  $("camStop").onclick = () => { cam.stop(); cam = null; $("camStart").disabled = false; $("camStop").disabled = true; $("photo").disabled = true; };
+  $("micStart").onclick = async () => {
+    try {
+      mic = await media.microphone({ device: $("mics").value, sampleRate: 16000 });
+      mic.onData((samples, level) => { $("bar").style.width = Math.round(Math.min(1, level * 1.5) * 100) + "%"; });
+      log("microphone at " + mic.sampleRate + " Hz");
+      $("micStart").disabled = true; $("micStop").disabled = false; $("rec").disabled = false;
+    } catch (e) { log("microphone: " + e.code + " " + e.message); }
+  };
+  $("rec").onclick = () => {
+    if (!recording) { mic.startRecording(); recording = true; $("rec").textContent = "Save recording"; log("recording..."); }
+    else { const wav = mic.stopRecording(); recording = false; $("rec").textContent = "Record"; fs.writeFileSync("recording.wav", wav); log("saved recording.wav (" + wav.length + " bytes)"); }
+  };
+  $("micStop").onclick = () => { mic.stop(); mic = null; $("bar").style.width = "0"; $("micStart").disabled = false; $("micStop").disabled = true; $("rec").disabled = true; };
+  refresh().catch((e) => log("error: " + e.message));
+</script>
+</body>
+</html>

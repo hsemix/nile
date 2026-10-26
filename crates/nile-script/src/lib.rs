@@ -34,6 +34,7 @@ mod integration;
 pub use integration::mime_of;
 mod jsx;
 mod keychain;
+mod serial;
 mod net;
 mod sys;
 
@@ -72,6 +73,7 @@ const UI_MODULES: &[(&str, &str)] = &[
     ("@nile/escpos", include_str!("ui/escpos.js")),
     ("@nile/crypto", include_str!("ui/passwords.js")),
     ("@nile/keychain", include_str!("ui/keychain.js")),
+    ("@nile/serial", include_str!("ui/serial.js")),
     ("@nile/mail", include_str!("ui/mail.js")),
 ];
 
@@ -370,7 +372,7 @@ impl Resolver for FileResolver {
             return Err(rquickjs::Error::new_resolving(base.to_string_lossy(), name));
         }
         let path = std::path::Path::new(name);
-        if matches!(name, "@nile" | "@sciter" | "@env" | "@sys" | "@debug" | "@storage" | "@nile/ui" | "@nile/print" | "@nile/escpos" | "@nile/crypto" | "@nile/keychain" | "@nile/mail") || name.starts_with("@nile/ui/") {
+        if matches!(name, "@nile" | "@sciter" | "@env" | "@sys" | "@debug" | "@storage" | "@nile/ui" | "@nile/print" | "@nile/escpos" | "@nile/crypto" | "@nile/keychain" | "@nile/serial" | "@nile/mail") || name.starts_with("@nile/ui/") {
             // `@sciter` is the same module under the name Sciter apps use.
             return Ok(if name == "@sciter" { "@nile".to_string() } else { name.to_string() });
         }
@@ -436,7 +438,7 @@ impl Loader for FileLoader {
             ),
             "@debug" => Some("const m = globalThis.__debugModule;\nexport const { setUnhandledExceptionHandler, setConsoleOutputHandler, callStackAt, setResourceArrivalHandler, setBreakpointHandler, setBreakpoints, getElementByUID, getUIDofElement, highlightElement, getStyleRulesOfElement, containerId, objectKind, sublimatedValue, sublimatedValueElements, frameVariables } = m;\nexport default m;"),
             "@storage" => Some("const m = globalThis.__storageModule;\nexport const open = m.open;\nexport default m;"),
-            n if n.starts_with("@nile/ui") || n == "@nile/print" || n == "@nile/escpos" || n == "@nile/crypto" || n == "@nile/keychain" || n == "@nile/mail" => UI_MODULES.iter().find(|(m, _)| *m == n).map(|(_, src)| *src),
+            n if n.starts_with("@nile/ui") || n == "@nile/print" || n == "@nile/escpos" || n == "@nile/crypto" || n == "@nile/keychain" || n == "@nile/serial" || n == "@nile/mail" => UI_MODULES.iter().find(|(m, _)| *m == n).map(|(_, src)| *src),
             "@env" => Some(
                 "const m = globalThis.__envModule;\nexport const { language, country, userName, machineName, domainName, arguments: args, launch, reveal, moveToTrash, openWith, online, power, idleSeconds, home, homeURL, path, pathURL, drives, variable, exec, DEVICE } = m;\nexport { args as arguments };\nexport const OS = m.OS, PLATFORM = m.PLATFORM;\nexport default m;",
             ),

@@ -19,6 +19,8 @@ pages to look up features, arguments, return values and limitations.
 | [Native integration](native-api.md) | Rust host lifecycle and every exported C function, with ownership and safety contracts |
 | [Large interfaces](performance.md) | Scrolling, virtualization, scheduling and layout measurements |
 | [Example catalog](examples.md) | Runnable demonstrations and what each implements |
+| [What's supported](supported.md) | The complete inventory of supported features, one dense list |
+| [Known gaps](known-gaps.md) | What is missing or partial, and why |
 
 ## Feature coverage
 

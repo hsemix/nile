@@ -15,6 +15,8 @@ audio-aac = ["audio", "nile-audio/aac"]
 keychain = ["dep:keyring"]
 # Operating system file notifications for `fs.watch` (inotify, FSEvents, ReadDirectoryChangesW); without it `fs.watch` polls.
 watch = ["dep:notify"]
+# Serial ports (`@nile/serial`) through the `serialport` crate (no libudev).
+serial = ["dep:serialport"]
 
 [dependencies]
 rustls = { workspace = true, optional = true }
@@ -33,6 +35,7 @@ serde_json = "1"
 nile-extension-pack = { path = "../nile-extension-pack" }
 keyring = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
+serialport = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -116,11 +116,12 @@ impl ScriptHost {
                 packet.set("code", delivery.code)?;
                 packet.set("message", delivery.message)?;
                 packet.set("json", delivery.json)?;
-                let buffers: Vec<String> = delivery
+                // Straight into Uint8Arrays: a camera frame is hundreds of kilobytes, too many for text encoding.
+                let buffers = delivery
                     .buffers
                     .iter()
-                    .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
-                    .collect();
+                    .map(|b| rquickjs::TypedArray::<u8>::new(ctx.clone(), b.clone()))
+                    .collect::<rquickjs::Result<Vec<_>>>()?;
                 packet.set("buffers", buffers)?;
                 f.call::<_, ()>((packet,))
             });

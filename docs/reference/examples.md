@@ -110,6 +110,8 @@ browser compatibility.
 | [ui-commands.html](../../examples/ui-commands.html) | `@nile/ui` popup menu with submenus, context menu, command palette and a customer picker |
 | [ui-wizard.html](../../examples/ui-wizard.html) | `@nile/ui` wizard with validation, an async step check, optional and skipped steps |
 | [printing.html](../../examples/printing.html) | `Window.this.print()`, `exportPdf`, `@nile/print` printer list and an ESC/POS receipt with a text preview, sent to an installed or network printer |
+| [media/](../../examples/media/index.html) | `@media` extension: camera preview and photo, microphone level and WAV recording (build the extension first) |
+| [serial.html](../../examples/serial.html) | `@nile/serial` terminal: list ports, open, send, receive, toggle DTR |
 | [mail.html](../../examples/mail.html) | `@nile/mail` form: SMTP settings, message source preview, password kept in `@nile/keychain` |
 | [sciter-flow.html](../../examples/sciter-flow.html) | Sciter layout CSS: `flow:`, `*` units, `size:`, `dip`, `flow: grid(...)`, tag shortcuts |
 | [sciter-paths.html](../../examples/sciter-paths.html) | Sciter `url(path:...)` images, `foreground-image`, `var(name)`, window constants |

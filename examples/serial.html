@@ -1,0 +1,59 @@
+<html window-title="Serial ports" window-width="560" window-height="460">
+<head>
+<style>
+  body { margin: 0; padding: 20px; font: 14px system-ui; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  select, input, button { margin: 0 6px 8px 0; }
+  select { width: 260px; }
+  input[type=text] { width: 200px; }
+  #log { height: 220px; overflow: auto; padding: 10px; background: #8881; border-radius: 6px; white-space: pre-wrap; font: 12px ui-monospace, monospace; }
+</style>
+</head>
+<body>
+  <h1>Serial ports</h1>
+  <div>
+    <select id="ports"></select>
+    <select id="baud"><option>9600</option><option>19200</option><option>57600</option><option selected>115200</option></select>
+    <button id="refresh">Refresh</button>
+    <button id="open">Open</button>
+    <button id="close" disabled>Close</button>
+  </div>
+  <div>
+    <input type="text" id="text" value="hello"> <button id="send" disabled>Send + CRLF</button>
+    <button id="dtr" disabled>Toggle DTR</button>
+  </div>
+  <div id="log">Pick a port and open it. Received bytes are shown as text.</div>
+<script type="module">
+  import serial from "@nile/serial";
+  const $ = (id) => document.getElementById(id);
+  const log = (t) => { const l = $("log"); l.textContent += "\n" + t; l.scrollTop = l.scrollHeight; };
+  let port = null, dtr = false;
+  async function refresh() {
+    const list = await serial.list();
+    $("ports").innerHTML = "";
+    for (const p of list) {
+      const o = document.createElement("option");
+      o.textContent = p.path + (p.product ? "  (" + p.product + ")" : "");
+      o.value = p.path;
+      $("ports").appendChild(o);
+    }
+    log(list.length + " port(s) found");
+  }
+  const state = (open) => { for (const id of ["close", "send", "dtr"]) $(id).disabled = !open; $("open").disabled = open; };
+  $("refresh").onclick = () => refresh().catch((e) => log("error: " + e.message));
+  $("open").onclick = async () => {
+    try {
+      port = await serial.open($("ports").value, { baudRate: Number($("baud").value) });
+      port.onData((bytes) => log("< " + new TextDecoder().decode(bytes).replace(/\r/g, "\\r").replace(/\n/g, "\\n")));
+      port.onClose((m) => { log("port lost: " + m); state(false); });
+      log("opened " + port.path);
+      state(true);
+    } catch (e) { log("could not open: " + e.message); }
+  };
+  $("close").onclick = async () => { await port.close(); log("closed"); state(false); };
+  $("send").onclick = async () => { const t = $("text").value + "\r\n"; await port.write(t); log("> " + $("text").value); };
+  $("dtr").onclick = async () => { dtr = !dtr; await port.setSignals({ dataTerminalReady: dtr }); log("DTR " + (dtr ? "on" : "off")); };
+  refresh().catch((e) => log("error: " + e.message));
+</script>
+</body>
+</html>

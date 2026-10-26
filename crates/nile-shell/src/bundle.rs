@@ -23,6 +23,9 @@ pub struct AppInfo {
     pub protocols: Vec<String>,
     /// File extensions the app opens (`md`, `txt`), without the dot.
     pub file_types: Vec<String>,
+    /// macOS asks the user about the camera / microphone only for an app that says why (`NSCameraUsageDescription`).
+    pub camera_usage: String,
+    pub microphone_usage: String,
 }
 
 pub use nile_script::mime_of;
@@ -277,6 +280,12 @@ pub fn app_bundle(exe: &Path, archive: &Path, name: &str, icon: Option<&Path>, i
             info.file_types.iter().map(|e| format!("<string>{}</string>", esc(e.trim_start_matches('.')))).collect::<String>()
         );
     }
+    if !info.camera_usage.is_empty() {
+        opens += &format!("  <key>NSCameraUsageDescription</key><string>{}</string>\n", esc(&info.camera_usage));
+    }
+    if !info.microphone_usage.is_empty() {
+        opens += &format!("  <key>NSMicrophoneUsageDescription</key><string>{}</string>\n", esc(&info.microphone_usage));
+    }
     std::fs::write(
         app.join("Contents/Info.plist"),
         format!(
@@ -303,7 +312,7 @@ mod tests {
     use super::*;
 
     fn info() -> AppInfo {
-        AppInfo { name: "Demo".into(), version: "1.2.3".into(), description: "A demo".into(), company: "Acme".into(), copyright: "(c) Acme".into(), category: String::new(), protocols: Vec::new(), file_types: Vec::new() }
+        AppInfo { name: "Demo".into(), version: "1.2.3".into(), description: "A demo".into(), company: "Acme".into(), copyright: "(c) Acme".into(), category: String::new(), protocols: Vec::new(), file_types: Vec::new(), ..AppInfo::default() }
     }
 
     #[test]

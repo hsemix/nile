@@ -267,6 +267,8 @@ fn pack_command(args: &[String]) -> ! {
             "--description" => info.description = it.next().cloned().unwrap_or_default(),
             "--company" => info.company = it.next().cloned().unwrap_or_default(),
             "--copyright" => info.copyright = it.next().cloned().unwrap_or_default(),
+            "--camera" => info.camera_usage = it.next().cloned().unwrap_or_default(),
+            "--microphone" => info.microphone_usage = it.next().cloned().unwrap_or_default(),
             "--category" => {
                 info.category = it.next().cloned().unwrap_or_default();
                 desktop = true;

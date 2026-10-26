@@ -279,6 +279,11 @@ default locale is the OS's (`navigator.language`). Details and limits: [internat
 (macOS Keychain, Windows Credential Manager, Linux Secret Service); Promises on a worker thread. Feature `keychain` (default
 in nile-engine). See the [guide](../guide/credentials.md).
 
+## `@nile/serial`
+
+`list()`, `open(path, options)` -> a port with `write`, `onData`, `read`, `readUntil`, `discard`, `setSignals`, `getSignals`,
+`onClose` and `close`. See the [serial guide](../guide/serial.md).
+
 ## `@nile/mail`
 
 `sendMail(options)` (SMTP with STARTTLS or TLS, AUTH PLAIN/LOGIN, HTML, attachments, inline images), `buildMessage(options)` (the raw
