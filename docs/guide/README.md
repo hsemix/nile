@@ -84,3 +84,4 @@ the entry page is `target/doc/nile_engine/index.html`.
 23. [Showing, trashing and opening files: `reveal`, `moveToTrash`, `openWith`](desktop-helpers.md).
 24. [Keeping secrets in the system credential store: `@nile/keychain`](credentials.md).
 25. [Sending email over SMTP: `@nile/mail`](email.md).
+26. [Serial ports: `@nile/serial`](serial.md).

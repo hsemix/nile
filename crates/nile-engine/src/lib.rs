@@ -5759,6 +5759,78 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    // Linux only: macOS refuses to open a pseudo-terminal slave by name (ENOTTY).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_serial_module_talks_to_a_port_and_buffers_what_arrives() {
+        use std::io::{Read, Write};
+        let (mut master, slave) = serialport::TTYPort::pair().expect("pty pair");
+        let name = serialport::SerialPort::name(&slave).expect("slave name");
+        let (mut p, path) = page(
+            &format!(
+                r#"<body><script type="module">
+                  import serial from "@nile/serial";
+                  window.log = []; window.ready = 0; window.done = 0;
+                  (async () => {{
+                    const port = await serial.open("{name}", {{ baudRate: 115200 }});
+                    window.ready = 1;
+                    await port.write("hello\n");
+                    const line = await port.readUntil("\n", {{ timeout: 4000 }});
+                    log.push("line:" + new TextDecoder().decode(line).trim());
+                    const four = await port.read(4, {{ timeout: 4000 }});
+                    log.push("four:" + new TextDecoder().decode(four));
+                    let timed = "none";
+                    try {{ await port.read(1, {{ timeout: 150 }}); }} catch (e) {{ timed = e.code; }}
+                    log.push("timeout:" + timed);
+                    const heard = [];
+                    port.onData((b) => heard.push(new TextDecoder().decode(b)));
+                    window.ready = 2;
+                    await new Promise((r) => setTimeout(r, 800));
+                    log.push("data:" + heard.join(""));
+                    const sig = await port.getSignals();
+                    log.push("sig:" + typeof sig.clearToSend);
+                    await port.close();
+                    let after = "none";
+                    try {{ await port.write("x"); }} catch (e) {{ after = e.code; }}
+                    log.push("closed:" + after);
+                    let bad = "none";
+                    try {{ await serial.open("/nonexistent/port"); }} catch (e) {{ bad = e.code; }}
+                    log.push("bad:" + bad);
+                    window.done = 1;
+                  }})().catch((e) => {{ log.push("error:" + e.message); window.done = 1; }});
+                </script></body>"#
+            ),
+            "serial",
+        );
+        let mut sent = (false, false);
+        let mut heard = Vec::new();
+        for _ in 0..1500 {
+            p.tick();
+            let ready = js(&mut p, "window.ready");
+            if ready == "1" && !sent.0 {
+                master.write_all(b"ping\nabcd").unwrap();
+                sent.0 = true;
+            }
+            if ready == "2" && !sent.1 {
+                master.write_all(b"late").unwrap();
+                sent.1 = true;
+            }
+            let mut buf = [0u8; 64];
+            serialport::SerialPort::set_timeout(&mut master, std::time::Duration::from_millis(1)).unwrap();
+            if let Ok(n) = master.read(&mut buf) {
+                heard.extend_from_slice(&buf[..n]);
+            }
+            if js(&mut p, "window.done") == "1" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let log = js(&mut p, "window.log.join('|')");
+        assert_eq!(log, "line:ping|four:abcd|timeout:SERIAL_TIMEOUT|data:late|sig:boolean|closed:SERIAL_CLOSED|bad:ENOENT");
+        assert!(String::from_utf8_lossy(&heard).contains("hello"), "the device saw {:?}", String::from_utf8_lossy(&heard));
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn the_keychain_module_reaches_the_native_store_and_rejects_bad_names() {
         let (mut p, path) = page(

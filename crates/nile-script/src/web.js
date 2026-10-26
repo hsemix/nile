@@ -2889,6 +2889,8 @@
     N.sysStart(id, op, a.map(String));
   });
   // The system credential store (`@nile/keychain`), on a worker thread because it can wait for an unlock prompt.
+  // Serial ports (`@nile/serial`): every op on a worker thread (opening and reading wait on the device).
+  Object.defineProperty(g, "__serial", { value: (op, ...a) => sysAsync("serial:" + op, ...a) });
   Object.defineProperty(g, "__keychain", { value: (op, ...a) => sysAsync("keychain:" + op, ...a) });
   Object.defineProperty(g, "__sysDone", {
     value(id, ok, text) {

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["svg-text", "audio", "keychain", "watch"]
+default = ["svg-text", "audio", "keychain", "watch", "serial"]
 # The OS clipboard (`arboard`). Off for embedders that supply their own clipboard.
 system-clipboard = ["dep:arboard"]
 # `<text>` in SVG (system fonts and shaping, about 0.7 MB of the binary). Without it SVG draws shapes only.
@@ -18,6 +18,8 @@ audio-aac = ["nile-script/audio-aac"]
 keychain = ["nile-script/keychain"]
 # Real file notifications for `fs.watch` (otherwise it polls every 250 ms).
 watch = ["nile-script/watch"]
+# Serial ports for `@nile/serial`.
+serial = ["nile-script/serial"]
 # `fetch`/`XMLHttpRequest` over http(s) (`ureq`). Without it only files and `data:` URLs load.
 net = ["dep:ureq", "nile-script/tls"]
 
@@ -39,3 +41,7 @@ nile-extensions = { path = "../nile-extensions" }
 tempfile = "3"
 serde_json = "1"
 cc = "1"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# A pseudo-terminal pair stands in for a serial device in the `@nile/serial` test.
+serialport = { workspace = true }

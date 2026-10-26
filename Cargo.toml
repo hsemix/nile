@@ -51,6 +51,7 @@ base64 = "0.22"
 # Ed25519 and SHA-256 for update signatures (already linked by rustls).
 ring = "0.17"
 keyring = "4"
+serialport = { version = "4.10", default-features = false }
 global-hotkey = "0.9"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 ureq = "3.4.2"
