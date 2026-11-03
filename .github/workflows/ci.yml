@@ -68,6 +68,14 @@ jobs:
         run: |
           cargo build -p nile-app
           NILE_STORAGE_DIR=off dotnet run --project bindings/dotnet/Nile.Tests
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: ffi
+          ini-values: ffi.enable=1
+      - name: PHP bindings
+        shell: bash
+        run: NILE_STORAGE_DIR=off php bindings/php/tests/run.php
       - name: Upload golden image failures
         if: failure()
         uses: actions/upload-artifact@v4
