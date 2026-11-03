@@ -119,6 +119,9 @@ cc examples/c/render.c -Icrates/nile-capi/include -Ltarget/release -lnile -Wl,-r
 Every exported function, with ownership and safety rules, is in the [native API reference](docs/reference/native-api.md).
 The C API is versioned (`nile_abi_version()` against `NILE_ABI_VERSION`, and every struct starts with its size, so a newer library serves an older host) and reaches the shell features a host has to provide: menus, tray, badge and progress, global hotkeys, monitors, application events, dialogs, clipboard, IME, accessibility and popup windows. Not in it yet: multiple mouse buttons, touch, signed updates, GPU surfaces (it paints into CPU memory).
 
+Python bindings (`ctypes`, no dependencies) live in [`bindings/python`](bindings/python/README.md): `nile.run("index.html")`,
+`@nile.function` for `host.*` calls from the page, and a headless `nile.View`. [`bindings/dotnet`](bindings/dotnet/README.md) is the same for .NET (`App.Run`, `App.Function`, `NileView`), and [`bindings/php`](bindings/php/README.md) for PHP 8.2+ (FFI).
+
 ## Native extensions
 
 Native packages can add operations that return Promises, binary buffers, managed resources and event streams, without
@@ -197,7 +200,7 @@ Next, in rough order:
 3. **GPU surfaces**: Skia on Metal, D3D and Vulkan instead of the CPU path (paint is already about 1 ms on a large page,
    so this matters for very large windows).
 4. **More desktop hardware** when an app needs it: HID, raw USB, Bluetooth LE.
-5. **Language bindings** (Python, C#, Go) over the C API, once the engine coverage is where we want it.
+5. **Language bindings**: Python is in [`bindings/python`](bindings/python/README.md) (not on PyPI yet); [.NET](bindings/dotnet/README.md) and [PHP](bindings/php/README.md) are in too; none is published to a package index yet.
 
 Open CSS items (`@container`, multi-column layout, `writing-mode`, shadow DOM) are tracked in
 [Known gaps](docs/reference/known-gaps.md).
