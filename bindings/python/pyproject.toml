@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nile-ui"
+version = "0.1.0"
+description = "Python bindings for Nile, the embeddable HTML/CSS/JS UI engine (no webview)"
+requires-python = ">=3.8"
+license = { text = "MIT OR Apache-2.0" }
+
+[tool.setuptools]
+packages = ["nile"]
+
+[tool.setuptools.package-data]
+nile = ["_native/*"]

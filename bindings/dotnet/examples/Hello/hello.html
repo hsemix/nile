@@ -1,0 +1,11 @@
+<html window-title="Nile + .NET" window-width="420" window-height="220">
+<body style="font: 16px system-ui; padding: 24px">
+  <h2 style="margin: 0 0 12px">Nile + .NET</h2>
+  <input id="name" value="Ada" style="font: inherit; padding: 4px">
+  <button id="go" style="font: inherit; padding: 4px 12px">Greet</button>
+  <p id="out" style="margin-top: 16px">Press the button.</p>
+  <script>
+    document.getElementById("go").onclick = () =>
+      document.getElementById("out").textContent = host.greet(document.getElementById("name").value);
+  </script>
+</body></html>

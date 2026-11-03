@@ -10,6 +10,10 @@ the section becomes that version's.
 
 ### 2026-11-03
 
+#### Added
+- Python bindings in `bindings/python` (`import nile`), over `libnile_app` with `ctypes` and no dependencies: `nile.run(path)` opens a window, `@nile.function` exposes Python functions to pages as `host.<name>(...)`, and `nile.View` drives a page headless (`eval`, `call`, input, `render`, `save_png`, `write_pdf`). Tests run in CI on macOS and Linux; `examples/hello.py` shows the round trip. Not on PyPI yet.
+- .NET bindings in `bindings/dotnet` (`using Nile;`, `net8.0`, P/Invoke, no dependencies) with the same shape: `App.Run`, `App.Function("name", ...)` for `host.*`, `NileView` for headless use. Tests run in CI on all three systems (the first run of Nile's library on Windows from another language); `examples/Hello` shows the round trip. Not on NuGet yet.
+
 #### Fixed
 - Sciter's `calculator` sample (a page written for both browsers and Sciter, with `@supports (display: grid)` next to `@supports (flow: horizontal)`) now renders and works:
   - `//` line comments in style sheets (Sciter allows them) no longer swallow the declaration after them.

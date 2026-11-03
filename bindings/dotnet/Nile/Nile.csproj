@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Nile</RootNamespace>
+    <PackageId>Nile.UI</PackageId>
+    <Version>0.1.0</Version>
+    <Description>.NET bindings for Nile, the embeddable HTML/CSS/JS UI engine (no webview)</Description>
+    <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Per-platform libraries go in runtimes/<rid>/native when a package is built. -->
+    <None Include="runtimes/**" Pack="true" PackagePath="runtimes" />
+  </ItemGroup>
+</Project>
