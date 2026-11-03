@@ -52,6 +52,12 @@ jobs:
             echo "::error title=Clippy on ${{ matrix.os }}::${summary}"
           fi
           exit $status
+      - name: C API smoke test
+        if: runner.os != 'Windows'
+        run: |
+          cargo build -p nile-capi
+          cc -Wall -Wextra examples/c/abi_check.c -Icrates/nile-capi/include -Ltarget/debug -lnile -Wl,-rpath,$PWD/target/debug -o abi_check
+          ./abi_check
       - name: Upload golden image failures
         if: failure()
         uses: actions/upload-artifact@v4

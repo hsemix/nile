@@ -2463,11 +2463,13 @@ dependencies = [
 name = "nile-capi"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "cbindgen",
  "nile-dom",
  "nile-engine",
  "nile-script",
  "nile-style",
+ "serde_json",
 ]
 
 [[package]]

@@ -111,6 +111,7 @@ browser compatibility.
 | [ui-wizard.html](../../examples/ui-wizard.html) | `@nile/ui` wizard with validation, an async step check, optional and skipped steps |
 | [printing.html](../../examples/printing.html) | `Window.this.print()`, `exportPdf`, `@nile/print` printer list and an ESC/POS receipt with a text preview, sent to an installed or network printer |
 | [media/](../../examples/media/index.html) | `@media` extension: camera preview and photo, microphone level and WAV recording (build the extension first) |
+| [calculator/](../../examples/calculator/index.html) | The Sciter SDK calculator, unchanged: one page for browsers (`display: grid`) and Sciter (`flow: grid(...)`, `size: *`, an `<include media="sciter">` window caption with `window-*` constants) |
 | [serial.html](../../examples/serial.html) | `@nile/serial` terminal: list ports, open, send, receive, toggle DTR |
 | [mail.html](../../examples/mail.html) | `@nile/mail` form: SMTP settings, message source preview, password kept in `@nile/keychain` |
 | [sciter-flow.html](../../examples/sciter-flow.html) | Sciter layout CSS: `flow:`, `*` units, `size:`, `dip`, `flow: grid(...)`, tag shortcuts |

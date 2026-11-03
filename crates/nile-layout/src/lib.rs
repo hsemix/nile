@@ -1420,8 +1420,14 @@ pub fn layout_with(
 
     // The root fills the viewport, like a browser's initial containing block.
     let mut root_style = tree.style(root).unwrap().clone();
-    root_style.size.width = Dimension::length(viewport_width);
-    root_style.min_size.height = LengthPercentageAuto::length(viewport_height);
+    // A content-box root (`html { border: 1px solid }`) must still fit the viewport: its own padding and border come off.
+    let hs = styles.get(html);
+    let (extra_x, extra_y) = if hs.border_box { (0.0, 0.0) } else { (hs.padding.left + hs.padding.right + hs.border_width.left + hs.border_width.right, hs.padding.top + hs.padding.bottom + hs.border_width.top + hs.border_width.bottom) };
+    root_style.size.width = Dimension::length((viewport_width - extra_x).max(0.0));
+    root_style.min_size.height = LengthPercentageAuto::length((viewport_height - extra_y).max(0.0));
+    if let Length::Percent(pct) = hs.height {
+        root_style.size.height = Dimension::length((pct * viewport_height - extra_y).max(0.0));
+    }
     tree.set_style(root, root_style).unwrap();
     // `html { height: 100% }` is a percentage of the viewport (the initial containing block), which
     // Taffy only knows as a minimum; give such a root element a definite height so `body` can use it.
@@ -1430,7 +1436,7 @@ pub fn layout_with(
         let Some(NodeCtx::Element(e)) = tree.get_node_context(child) else { continue };
         if let Length::Percent(pct) = styles.get(*e).height {
             let mut st = tree.style(child).unwrap().clone();
-            st.size.height = Dimension::length(pct * viewport_height);
+            st.size.height = Dimension::length((pct * (viewport_height - extra_y)).max(0.0));
             tree.set_style(child, st).unwrap();
             definite_root = true;
         }

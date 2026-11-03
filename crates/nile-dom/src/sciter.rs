@@ -57,6 +57,54 @@ pub(crate) fn expand_entities(html: &str) -> String {
     out
 }
 
+/// Sciter reads `<tag ... />` as an empty element for any tag (`<picture src="x" />`, `<window-button role="..." />`),
+/// where HTML5 would ignore the slash on a non-void element and nest what follows inside it. This writes such a tag out
+/// as `<tag ...></tag>`. Void elements (`<br />`, `<input />`), foreign content (`<svg>`, `<math>`, where the parser
+/// already honours the slash), comments and the text of `<script>`/`<style>`/`<textarea>`/`<title>` are left alone.
+pub(crate) fn close_self_closed(html: &str) -> String {
+    if !html.contains("/>") {
+        return html.to_string();
+    }
+    const VOID: [&str; 15] = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr", "frame"];
+    const RAW: [&str; 4] = ["script", "style", "textarea", "title"];
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len() + 32);
+    let mut at = 0;
+    let mut i = 0;
+    while let Some(rel) = html[i..].find('<') {
+        let start = i + rel;
+        if html[start..].starts_with("<!--") {
+            i = html[start..].find("-->").map_or(html.len(), |e| start + e + 3);
+            continue;
+        }
+        let name: String = lower[start + 1..].chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':')).collect();
+        if name.is_empty() || !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            i = start + 1;
+            continue;
+        }
+        let Some(end) = tag_end(html, start + 1 + name.len()) else { break };
+        let self_closed = html[..end].ends_with('/');
+        if self_closed && !VOID.contains(&name.as_str()) && !name.contains(':') && name != "svg" && name != "math" {
+            out.push_str(&html[at..end - 1]);
+            out.push_str(&format!("></{name}>"));
+            at = end + 1;
+        }
+        i = end + 1;
+        if !self_closed {
+            if name == "svg" || name == "math" {
+                // Foreign content keeps its own rules up to the matching end tag.
+                let close = format!("</{name}");
+                i = lower[i..].find(&close).map_or(html.len(), |e| i + e);
+            } else if RAW.contains(&name.as_str()) {
+                let close = format!("</{name}");
+                i = lower[i..].find(&close).map_or(html.len(), |e| i + e);
+            }
+        }
+    }
+    out.push_str(&html[at.min(html.len())..]);
+    out
+}
+
 /// Wraps the markup between `<html ...>` (past its `</head>`) and the first explicit `<body>` in a
 /// `<nile-hoist>` element; `Document::convert` re-attaches that element's children to `<html>`.
 pub(crate) fn hoist_before_body(html: &str) -> String {
@@ -112,6 +160,16 @@ mod tests {
         let html = "<!ENTITY fa-x \"&#xf000;\">\n<!ENTITY y 'Y'><p>&fa-x; &y; &amp; &nope;</p>";
         assert_eq!(expand_entities(html), "\n<p>&#xf000; Y &amp; &nope;</p>");
         assert_eq!(expand_entities("<p>&lt;</p>"), "<p>&lt;</p>");
+    }
+
+    #[test]
+    fn any_self_closed_tag_is_empty_as_in_sciter() {
+        assert_eq!(close_self_closed("<header><picture src=\"a.svg\" /><window-caption>T</window-caption></header>"), "<header><picture src=\"a.svg\" ></picture><window-caption>T</window-caption></header>");
+        // Void elements, foreign content, comments, raw text and quoted slashes stay as they are.
+        let kept = "<br /><input value=\"a/>b\" /><svg><path d=\"M0 0\" /></svg><!-- <p /> --><script>if (a<b) x = '<p />'</script><textarea><b /></textarea>";
+        assert_eq!(close_self_closed(kept), kept);
+        assert_eq!(close_self_closed("<script src=\"x.js\" /><p>after</p>"), "<script src=\"x.js\" ></script><p>after</p>");
+        assert_eq!(close_self_closed("<div />text"), "<div ></div>text");
     }
 
     #[test]

@@ -103,19 +103,20 @@ fn a_c_host_can_load_render_type_script_and_get_window_requests() {
 
         // Window: config, title, and the close button queued as a request.
         let mut cfg = std::mem::zeroed::<NileWindowConfig>();
+        cfg.struct_size = std::mem::size_of::<NileWindowConfig>() as u32;
         assert!(nile_view_window_config(v, 1000.0, 800.0, &mut cfg));
         assert_eq!((cfg.width, cfg.frame, cfg.frameless), (320.0, 2, true));
         assert_eq!(CStr::from_ptr(cfg.title).to_str().unwrap(), "Demo");
         nile_pointer_move(v, 20.0, 10.0);
         nile_pointer_button(v, 0, true, 0);
         nile_pointer_button(v, 0, false, 0);
-        let mut cmd = NileWindowCommand { kind: NileWindowCommandKind::None, a: 0.0, b: 0.0 };
+        let mut cmd = NileWindowCommand { struct_size: std::mem::size_of::<NileWindowCommand>() as u32, kind: NileWindowCommandKind::None, a: 0.0, b: 0.0 };
         assert!(nile_view_take_window_command(v, &mut cmd));
         assert_eq!(cmd.kind, NileWindowCommandKind::Close);
         assert!(!nile_view_take_window_command(v, &mut cmd));
         assert_eq!(cmd.kind, NileWindowCommandKind::None);
 
-        let mut tick = NileTick { redraw: false, next_ms: 0 };
+        let mut tick = NileTick { struct_size: std::mem::size_of::<NileTick>() as u32, redraw: false, next_ms: 0 };
         nile_view_tick(v, &mut tick);
         assert!(tick.next_ms == -1 || tick.next_ms >= 0);
         nile_view_destroy(v);
@@ -133,6 +134,7 @@ fn translucent_config_dialogs_drops_and_portals_reach_c() {
         </script></body></html>"#);
         let v = nile_view_create_html(html.as_ptr(), ptr::null(), 300.0, 200.0);
         let mut cfg = std::mem::zeroed::<NileWindowConfig>();
+        cfg.struct_size = std::mem::size_of::<NileWindowConfig>() as u32;
         assert!(nile_view_window_config(v, 1000.0, 800.0, &mut cfg));
         assert_eq!((cfg.frame, cfg.shadow, cfg.translucent, cfg.material), (4, true, true, 3));
 
@@ -141,8 +143,9 @@ fn translucent_config_dialogs_drops_and_portals_reach_c() {
             assert_eq!(CStr::from_ptr(caption).to_str().unwrap(), "Pick");
             c"/tmp/nile-capi-dialog.txt".as_ptr()
         }
-        nile_view_set_dialogs(v, NileDialogs { open_files: Some(open), save_file: None, pick_folder: None, message: None, user: ptr::null_mut() });
-        let mut tick = NileTick { redraw: false, next_ms: 0 };
+        let dialogs = NileDialogs { struct_size: std::mem::size_of::<NileDialogs>() as u32, open_files: Some(open), save_file: None, pick_folder: None, message: None, user: ptr::null_mut() };
+        nile_view_set_dialogs(v, &dialogs);
+        let mut tick = NileTick { struct_size: std::mem::size_of::<NileTick>() as u32, redraw: false, next_ms: 0 };
         nile_view_tick(v, &mut tick);
         assert!(nile_view_eval_ok(v, "String(Window.this.selectFile({ mode: 'open', caption: 'Pick' })).endsWith('nile-capi-dialog.txt')"));
 
@@ -191,5 +194,101 @@ fn bad_arguments_fail_softly() {
         assert_eq!(nile_view_eval(ptr::null_mut(), s("1").as_ptr(), ptr::null_mut()), 2);
         nile_view_destroy(ptr::null_mut());
         nile_string_free(ptr::null_mut());
+    }
+}
+
+#[test]
+fn the_abi_version_and_struct_sizes_keep_old_hosts_safe() {
+    unsafe {
+        assert_eq!(nile_abi_version(), NILE_ABI_VERSION);
+        let v = nile_view_create_html(s(PAGE).as_ptr(), ptr::null(), 300.0, 200.0);
+
+        // A host that forgot to set `struct_size` gets nothing written, rather than memory it did not give.
+        let mut cfg = std::mem::zeroed::<NileWindowConfig>();
+        assert!(!nile_view_window_config(v, 1000.0, 800.0, &mut cfg));
+        assert_eq!(cfg.width, 0.0);
+
+        // A host built against an older, smaller struct only has the part it knows filled in.
+        let mut old = std::mem::zeroed::<NileWindowConfig>();
+        old.struct_size = std::mem::offset_of!(NileWindowConfig, min_width) as u32;
+        assert!(nile_view_window_config(v, 1000.0, 800.0, &mut old));
+        assert_eq!(old.width, 320.0);
+        assert_eq!(old.min_width, 0.0);
+        assert_eq!(old.struct_size as usize, std::mem::offset_of!(NileWindowConfig, min_width));
+
+        // An older NileClipboard (without the HTML callbacks) reads the missing ones as NULL.
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct OldClipboard {
+            struct_size: u32,
+            get: Option<unsafe extern "C" fn(*mut c_void) -> *const c_char>,
+            set: Option<unsafe extern "C" fn(*const c_char, *mut c_void)>,
+            user: *mut c_void,
+        }
+        unsafe extern "C" fn get(_u: *mut c_void) -> *const c_char {
+            c"clip".as_ptr()
+        }
+        let old = OldClipboard { struct_size: std::mem::size_of::<OldClipboard>() as u32, get: Some(get), set: None, user: ptr::null_mut() };
+        let read = read_in(&old as *const OldClipboard as *const NileClipboard).unwrap();
+        assert!(read.get.is_some() && read.get_html.is_none() && read.set_html.is_none());
+        assert_eq!(read.struct_size as usize, std::mem::size_of::<NileClipboard>());
+        assert!(read_in::<NileClipboard>(ptr::null()).is_none());
+        nile_view_destroy(v);
+    }
+}
+
+#[test]
+fn tray_badge_progress_hotkeys_screens_and_application_events_reach_c() {
+    unsafe {
+        let html = s(r#"<html window-frame="solid" style="border-radius:12px"><body><menu id="t"><li id="a">One</li></menu><button role="window-maximize" style="width:20px;height:20px">m</button><script>
+            window.log = [];
+            Window.this.tray = { icon: "none.png", tooltip: "Tip", menu: document.getElementById("t") };
+            application.badge = 3;
+            application.progress = 0.5;
+            document.addEventListener("trayclick", () => log.push("tray"));
+            document.addEventListener("open-url", (e) => log.push("url:" + e.url));
+            window.key = application.registerHotkey("Ctrl+Shift+K", () => log.push("pressed"));
+            key.ready.then((ok) => log.push("ready:" + ok));
+            window.addEventListener("resolutionchange", () => log.push("res"));
+        </script></body></html>"#);
+        let v = nile_view_create_html(html.as_ptr(), ptr::null(), 300.0, 200.0);
+
+        let tray: serde_json::Value = serde_json::from_str(&take(nile_view_tray(v))).unwrap();
+        assert_eq!((tray["tooltip"].as_str(), tray["menu"].as_array().map(Vec::len)), (Some("Tip"), Some(1)));
+        assert!(tray["icon"].is_string());
+        nile_view_tray_event(v, s("trayclick").as_ptr());
+        assert_eq!(take(nile_view_badge(v)), "3");
+        let mut x = 0.0f32;
+        assert_eq!(nile_view_progress(v, &mut x), 2);
+        assert_eq!(x, 0.5);
+
+        let keys: serde_json::Value = serde_json::from_str(&take(nile_view_hotkeys(v))).unwrap();
+        assert_eq!(keys, serde_json::json!([{ "id": 1, "accelerator": "Ctrl+Shift+K" }]));
+        nile_view_hotkey_event(v, 1, NileHotkeyState::Registered);
+        nile_view_hotkey_event(v, 1, NileHotkeyState::Pressed);
+
+        // Monitors: the first report is silent, a later change fires resolutionchange.
+        let one = s(r#"[{"name":"A","x":0,"y":0,"width":2880,"height":1800,"scale":2,"primary":true}]"#);
+        assert!(nile_view_set_screens(v, one.as_ptr(), 0));
+        assert!(!nile_view_set_screens(v, one.as_ptr(), 0));
+        let two = s(r#"[{"name":"A","x":0,"y":0,"width":2880,"height":1800,"scale":2,"primary":true},{"name":"B","x":2880,"y":0,"width":1920,"height":1080,"scale":1,"primary":false}]"#);
+        assert!(nile_view_set_screens(v, two.as_ptr(), 1));
+        assert!(nile_view_eval_ok(v, "Window.screens === 2 && Window.this.screen === 1"));
+
+        // Application events: valid kinds and objects only.
+        assert!(!nile_view_application_event(v, s("bad kind\"").as_ptr(), ptr::null()));
+        assert!(!nile_view_application_event(v, s("open-url").as_ptr(), s("[1]").as_ptr()));
+        nile_view_application_event(v, s("open-url").as_ptr(), s(r#"{"url":"myapp://x"}"#).as_ptr());
+
+        let mut rect = [0.0f32; 4];
+        assert!(nile_view_maximize_button_rect(v, rect.as_mut_ptr()));
+        assert!(rect[2] >= 20.0 && rect[3] >= 20.0);
+        assert_eq!(nile_view_window_corner_radius(v), 12.0);
+        for _ in 0..3 {
+            let mut tick = NileTick { struct_size: std::mem::size_of::<NileTick>() as u32, redraw: false, next_ms: 0 };
+            nile_view_tick(v, &mut tick);
+        }
+        assert!(nile_view_eval_ok(v, "['tray', 'ready:true', 'pressed', 'res', 'url:myapp://x'].every((x) => log.includes(x))"));
+        nile_view_destroy(v);
     }
 }

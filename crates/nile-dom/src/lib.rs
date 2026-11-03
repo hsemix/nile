@@ -76,7 +76,7 @@ impl Document {
     pub const ROOT: NodeId = NodeId(0);
 
     pub fn parse(html: &str) -> Document {
-        let html = sciter::hoist_before_body(&sciter::expand_entities(&rewrite_frames(html)));
+        let html = sciter::hoist_before_body(&sciter::expand_entities(&sciter::close_self_closed(&rewrite_frames(html))));
         let dom = html5ever::parse_document(RcDom::default(), Default::default())
             .from_utf8()
             .read_from(&mut html.as_bytes())

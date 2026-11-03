@@ -170,6 +170,32 @@ clipboard is private memory. `nile_view_selected_text` returns the input/page
 selection for a host Copy command. Update the window rectangle so script window
 measurements reflect the actual host window.
 
+### Versioning and struct sizes
+
+Check the interface first: `if (nile_abi_version() != NILE_ABI_VERSION) abort();` (the constant comes from the header you
+compiled against, the function from the library you loaded). Structs the library fills (`NileTick`, `NileWindowCommand`,
+`NileWindowConfig`) and structs you pass in (`NileClipboard`, `NileDialogs`, by pointer) start with `uint32_t struct_size`:
+set it to `sizeof` the struct, for example `NileTick tick = {.struct_size = sizeof(NileTick)};`. A newer library then fills
+or reads only the part your build knows, so it keeps working with your program. See the
+[reference](../reference/native-api.md#abi-version-and-struct-sizes).
+
+### Tray, badge, hotkeys, monitors and application events
+
+The shell features that need the operating system are polled or reported through plain functions:
+
+- **Tray and dock:** `nile_view_tray` returns JSON (tooltip, icon as base64, menu items) or NULL; show the icon, forward
+  clicks with `nile_view_tray_event("trayclick" | "traydoubleclick")` and menu choices with `nile_view_menu_click`. The badge
+  text is `nile_view_badge` and the progress `nile_view_progress`.
+- **Global hotkeys:** `nile_view_hotkeys` lists what the page registered; register each with the system, then report
+  `nile_view_hotkey_event(view, id, NILE_HOTKEY_STATE_REGISTERED | NILE_HOTKEY_STATE_REFUSED)` and each press with
+  `NILE_HOTKEY_STATE_PRESSED`.
+- **Monitors:** call `nile_view_set_screens` with a JSON list of monitors and the window's index at start-up and when they change;
+  scripts see `Window.screens`, `Window.screenBox` and `resolutionchange`.
+- **Application events:** forward a second launch, a URL or a file the system hands you with `nile_view_application_event`.
+- **Window chrome:** `nile_view_maximize_button_rect` (for Snap Layouts) and `nile_view_window_corner_radius`.
+
+`examples/c/abi_check.c` calls each of these once.
+
 ### Standalone programs: `libnile_app`
 
 `libnile` is for hosts that own the window. If your program is just a Nile application, link

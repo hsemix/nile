@@ -1207,3 +1207,23 @@ fn dom_points_map_to_the_run_and_back_through_collapsed_whitespace() {
     let e = t.dom_caret_rect(&doc, &styles, DomPoint { node: id("e"), offset: 0 }).unwrap().0;
     assert!(e.height > 10.0);
 }
+
+#[test]
+fn a_root_with_a_border_still_fits_the_viewport() {
+    let doc = Document::parse(r#"<html style="border: 3px solid transparent; padding: 2px"><body style="margin:0"><div id="d" style="height:10px"></div></body></html>"#);
+    let styles = compute_styles(&doc);
+    let mut text = TextEngine::new();
+    let tree = layout(&doc, &styles, &mut text, 300.0, 100.0);
+    let html = doc.find(|n| n.tag() == Some("html")).unwrap();
+    let r = tree.node_rect(html).unwrap();
+    // Border and padding come out of the viewport rather than being added to it.
+    assert_eq!((r.width, r.height), (300.0, 100.0));
+    let d = tree.node_rect(doc.find(|n| n.attr("id") == Some("d")).unwrap()).unwrap();
+    assert_eq!((d.x, d.width), (5.0, 290.0));
+
+    let tall = Document::parse(r#"<html style="height:100%; border: 1px solid transparent"><body style="margin:0;height:100%"></body></html>"#);
+    let styles = compute_styles(&tall);
+    let tree = layout(&tall, &styles, &mut text, 300.0, 100.0);
+    let body = tall.find(|n| n.tag() == Some("body")).unwrap();
+    assert_eq!(tree.node_rect(body).unwrap().height, 98.0);
+}

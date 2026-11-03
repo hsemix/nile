@@ -283,6 +283,11 @@ impl Position {
     pub fn out_of_flow(self) -> bool {
         matches!(self, Position::Absolute | Position::Fixed)
     }
+
+    /// Where Sciter's `width: *` can fill the containing block: static, or out of flow (a fixed caption bar).
+    pub fn out_of_flow_or_static(self) -> bool {
+        matches!(self, Position::Static | Position::Absolute | Position::Fixed)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2400,11 +2405,17 @@ pub fn control_fraction(doc: &Document, id: NodeId) -> (Option<f32>, bool) {
 /// own height in a row, as in Sciter, instead of stretching); in a flex parent a child with
 /// `width|height: N*` along the main axis grows by N from a zero basis, and across it stretches.
 fn sciter_flow(style: &mut ComputedStyle, parent: &ComputedStyle, cell: usize) {
-    if style.flow == Flow::Grid && style.display == Display::Block {
+    if style.flow == Flow::Grid && matches!(style.display, Display::Block | Display::Grid) {
+        // `flow: grid(...)` is the whole grid: equal columns, rows that share the height. A sheet written for browsers and
+        // Sciter (`@supports (display: grid)` next to `@supports (flow: ...)`) can carry a template of its own for the
+        // browser; both apply here, and the one Sciter's author wrote for Sciter wins.
         style.display = Display::Grid;
         let columns = style.flow_grid.iter().map(Vec::len).max().unwrap_or(1) as u16;
         let track = grid::Track { min: grid::Breadth::Px(0.0), max: grid::Breadth::Fr(1.0) };
         style.grid_template_columns = vec![grid::TrackItem::Repeat(grid::TrackRepeat::Count(columns), vec![track])];
+        style.grid_template_rows = Vec::new();
+        style.justify_content = Align::Normal;
+        style.align_content = Align::Normal;
     }
     if parent.flow == Flow::Grid && cell > 0 {
         // The item's cells: the bounding box of the template positions that carry its number.
@@ -2453,6 +2464,19 @@ fn sciter_flow(style: &mut ComputedStyle, parent: &ComputedStyle, cell: usize) {
     if row.is_none() && style.display == Display::InlineBlock && matches!(style.width, Length::Percent(p) if p >= 1.0) && style.float == Float::None && !style.position.out_of_flow() {
         style.display = Display::Block;
     }
+    if row.is_none() && parent.display == Display::Grid {
+        // A grid item's `*` fills its cell, not the whole grid (a percentage would be taken from the container).
+        if style.star_w > 0.0 && style.width == Length::Auto && style.position == Position::Static {
+            if style.display == Display::InlineBlock {
+                style.display = Display::Block;
+            }
+            style.justify_self = Align::Stretch;
+        }
+        if style.star_h > 0.0 && style.height == Length::Auto && style.position == Position::Static {
+            style.align_self = Align::Stretch;
+        }
+        return;
+    }
     if row.is_none() {
         // In ordinary flow `*` fills the container (less the box's own margins), as Sciter's
         // `width: *` on a button or input does.
@@ -2460,7 +2484,7 @@ fn sciter_flow(style: &mut ComputedStyle, parent: &ComputedStyle, cell: usize) {
             (Length::Px(a), Length::Px(b)) => Some(a + b),
             _ => None,
         };
-        if style.star_w > 0.0 && style.width == Length::Auto && style.position == Position::Static {
+        if style.star_w > 0.0 && style.width == Length::Auto && style.position.out_of_flow_or_static() {
             // An inline-block can't take a percentage of its line (layout sizes it on its own), so
             // a filling one becomes a block.
             if style.display == Display::InlineBlock {
@@ -2471,7 +2495,7 @@ fn sciter_flow(style: &mut ComputedStyle, parent: &ComputedStyle, cell: usize) {
                 style.width = if m + inner == 0.0 { Length::Percent(1.0) } else { Length::Calc { px: -m - inner, pct: 1.0 } };
             }
         }
-        if style.star_h > 0.0 && style.height == Length::Auto && style.position == Position::Static {
+        if style.star_h > 0.0 && style.height == Length::Auto && style.position.out_of_flow_or_static() {
             if let Some(m) = gap(style.margin.top, style.margin.bottom) {
                 let inner = if style.border_box { 0.0 } else { style.padding.top + style.padding.bottom + style.border_width.top + style.border_width.bottom };
                 style.height = if m + inner == 0.0 { Length::Percent(1.0) } else { Length::Calc { px: -m - inner, pct: 1.0 } };
@@ -4883,5 +4907,32 @@ mod theme_tests {
         assert_eq!(style_of(page, "k").accent_color, Some(Color::rgb(255, 0, 0)));
         assert_eq!(style_of(page, "k").color_scheme, ColorScheme::Dark);
         assert_eq!(style_of(page, "c").accent_color, None);
+    }
+
+    #[test]
+    fn a_star_on_a_flow_grid_item_fills_its_cell_and_flow_grid_wins_over_other_templates() {
+        let page = r#"<style>
+            .g { grid-template-columns: repeat(4, 100px); grid-template-rows: 50px 50px; align-content: center; justify-content: center }
+            .g { flow: grid(1 1 2, 3 3 3); }
+            .g > button { margin: 2px; size: * }
+            #fixed { position: fixed; width: *; height: 30px }
+        </style><body><div class="g" id="g"><button id="a">a</button><button id="b">b</button><button id="c">c</button></div><header id="fixed">f</header></body>"#;
+        let a = style_of(page, "a");
+        // Not a percentage of the grid (which overflowed it): the item stretches in its cell.
+        assert_eq!((a.width, a.height, a.justify_self, a.align_self), (Length::Auto, Length::Auto, Align::Stretch, Align::Stretch));
+        let g = style_of(page, "g");
+        assert_eq!(g.display, Display::Grid);
+        assert_eq!(g.grid_template_columns.len(), 1, "three equal columns replace the 100px ones");
+        assert!(g.grid_template_rows.is_empty());
+        assert_eq!((g.justify_content, g.align_content), (Align::Normal, Align::Normal));
+        // A fixed bar's `width: *` is the viewport's width.
+        assert_eq!(style_of(page, "fixed").width, Length::Percent(1.0));
+    }
+
+    #[test]
+    fn media_platform_comparisons_work_in_style_sheets() {
+        let here = if cfg!(target_os = "macos") { "OSX" } else if cfg!(windows) { "Windows" } else { "Linux" };
+        let page = format!(r#"<style>#x {{ width: 1px }} @media platform == "{here}" {{ #x {{ width: 2px }} }} @media platform != "{here}" {{ #x {{ width: 3px }} }}</style><body><i id="x"></i></body>"#);
+        assert_eq!(style_of(&page, "x").width, Length::Px(2.0));
     }
 }

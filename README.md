@@ -117,7 +117,7 @@ cc examples/c/render.c -Icrates/nile-capi/include -Ltarget/release -lnile -Wl,-r
 ```
 
 Every exported function, with ownership and safety rules, is in the [native API reference](docs/reference/native-api.md).
-Not in the C API yet: multiple mouse buttons, touch, GPU surfaces (it paints into CPU memory).
+The C API is versioned (`nile_abi_version()` against `NILE_ABI_VERSION`, and every struct starts with its size, so a newer library serves an older host) and reaches the shell features a host has to provide: menus, tray, badge and progress, global hotkeys, monitors, application events, dialogs, clipboard, IME, accessibility and popup windows. Not in it yet: multiple mouse buttons, touch, signed updates, GPU surfaces (it paints into CPU memory).
 
 ## Native extensions
 
