@@ -27,6 +27,17 @@ use nile_engine::{
 use nile_script::WindowCommand;
 use nile_style::Cursor;
 
+/// The version of this library's binary interface. It changes whenever a function's signature or a struct's layout
+/// changes incompatibly; compare it with [`nile_abi_version`] at start-up, before using anything else:
+///
+/// ```c
+/// if (nile_abi_version() != NILE_ABI_VERSION) abort(); // the header and the library do not match
+/// ```
+///
+/// Version 2 (current): every struct that crosses the boundary starts with a `uint32_t struct_size` that the caller sets to
+/// `sizeof` its own copy of the struct, so a library newer than the host can add fields without breaking it.
+pub const NILE_ABI_VERSION: u32 = 2;
+
 /// An open page: its document, styles, layout and script runtime.
 pub struct NileView {
     page: Page,
@@ -75,6 +86,8 @@ pub enum NileCursor {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct NileTick {
+    /// Set to `sizeof(NileTick)` before the call.
+    pub struct_size: u32,
     /// Something changed; draw again.
     pub redraw: bool,
     /// Call `nile_view_tick` again in this many milliseconds (timers, animations, the caret
@@ -106,6 +119,8 @@ pub enum NileWindowCommandKind {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct NileWindowCommand {
+    /// Set to `sizeof(NileWindowCommand)` before the call.
+    pub struct_size: u32,
     pub kind: NileWindowCommandKind,
     pub a: f32,
     pub b: f32,
@@ -115,6 +130,8 @@ pub struct NileWindowCommand {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct NileWindowConfig {
+    /// Set to `sizeof(NileWindowConfig)` before the call; only the fields that fit are written.
+    pub struct_size: u32,
     /// The title (`window-title` or `<title>`); valid until the next call on the view.
     pub title: *const c_char,
     /// Content size in logical pixels, resolved against the desktop size you passed.
@@ -161,6 +178,8 @@ pub type NileHostFn = Option<unsafe extern "C" fn(args_json: *const c_char, user
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct NileClipboard {
+    /// Set to `sizeof(NileClipboard)`; callbacks your struct does not have count as NULL.
+    pub struct_size: u32,
     pub get: Option<unsafe extern "C" fn(user: *mut c_void) -> *const c_char>,
     pub set: Option<unsafe extern "C" fn(text: *const c_char, user: *mut c_void)>,
     pub user: *mut c_void,
@@ -201,6 +220,8 @@ impl Clipboard for CClipboard {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct NileDialogs {
+    /// Set to `sizeof(NileDialogs)`; callbacks your struct does not have count as NULL.
+    pub struct_size: u32,
     /// Open dialog. `filters` is Sciter's `label|*.ext;*.ext|label|*.*` text (may be empty), `dir`
     /// where to start. Return the chosen paths separated by newlines, or NULL when cancelled.
     pub open_files: Option<unsafe extern "C" fn(multiple: bool, filters: *const c_char, caption: *const c_char, dir: *const c_char, user: *mut c_void) -> *const c_char>,
@@ -263,6 +284,43 @@ impl Dialogs for CDialogs {
 
 // ---------------------------------------------------------------------------------------------
 
+/// Copy `value` into a host's struct, but only the part the host knows (its `struct_size`, the first field, which is left
+/// as the host set it). Returns false when the pointer is NULL or the host did not set a size.
+fn write_out<T: Copy>(out: *mut T, value: T) -> bool {
+    if out.is_null() {
+        return false;
+    }
+    let known = unsafe { (out as *const u32).read() } as usize;
+    let n = known.min(std::mem::size_of::<T>());
+    if n <= 4 {
+        return false;
+    }
+    unsafe { ptr::copy_nonoverlapping((&value as *const T).cast::<u8>().add(4), out.cast::<u8>().add(4), n - 4) };
+    true
+}
+
+/// Read a struct the host filled in: its `struct_size` bytes land in a zeroed full-size copy (so fields added after the host
+/// was built read as zero, which is NULL for every callback), and the size field is set to the full size.
+///
+/// # Safety
+/// `T` must be valid when all zero bytes (callbacks are `Option<fn>`, pointers raw) and start with a `u32` size field.
+unsafe fn read_in<T: Copy>(host: *const T) -> Option<T> {
+    if host.is_null() {
+        return None;
+    }
+    let known = unsafe { (host as *const u32).read() } as usize;
+    if known <= 4 {
+        return None;
+    }
+    let mut full = std::mem::MaybeUninit::<T>::zeroed();
+    let n = known.min(std::mem::size_of::<T>());
+    unsafe {
+        ptr::copy_nonoverlapping(host.cast::<u8>(), full.as_mut_ptr().cast::<u8>(), n);
+        (full.as_mut_ptr() as *mut u32).write(std::mem::size_of::<T>() as u32);
+        Some(full.assume_init())
+    }
+}
+
 fn text<'a>(p: *const c_char) -> Option<&'a str> {
     (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_str().ok()).flatten()
 }
@@ -299,6 +357,12 @@ fn new_view(page: Page) -> *mut NileView {
 }
 
 // ---- lifecycle ------------------------------------------------------------------------------
+
+/// The binary interface version this library implements (see `NILE_ABI_VERSION` in the header).
+#[no_mangle]
+pub extern "C" fn nile_abi_version() -> u32 {
+    NILE_ABI_VERSION
+}
 
 /// The engine's version, e.g. "0.1.0".
 #[no_mangle]
@@ -526,16 +590,15 @@ pub unsafe extern "C" fn nile_text_input(view: *mut NileView, utf8: *const c_cha
 /// `view` must be a live view; `out` NULL or writable.
 #[no_mangle]
 pub unsafe extern "C" fn nile_view_tick(view: *mut NileView, out: *mut NileTick) {
+    let size = std::mem::size_of::<NileTick>() as u32;
     let result = match view_ref(view) {
-        Some(v) => guard(NileTick { redraw: false, next_ms: -1 }, || {
+        Some(v) => guard(NileTick { struct_size: size, redraw: false, next_ms: -1 }, || {
             let (redraw, next) = v.page.tick();
-            NileTick { redraw, next_ms: next.map_or(-1, |d: Duration| d.as_millis().min(i32::MAX as u128) as i32) }
+            NileTick { struct_size: size, redraw, next_ms: next.map_or(-1, |d: Duration| d.as_millis().min(i32::MAX as u128) as i32) }
         }),
-        None => NileTick { redraw: false, next_ms: -1 },
+        None => NileTick { struct_size: size, redraw: false, next_ms: -1 },
     };
-    if let Some(out) = unsafe { out.as_mut() } {
-        *out = result;
-    }
+    write_out(out, result);
 }
 
 /// The pointer shape to show at the last pointer position.
@@ -581,8 +644,8 @@ pub unsafe extern "C" fn nile_view_selected_text(view: *mut NileView) -> *mut c_
 /// # Safety
 /// `view` must be a live view; the callbacks and `user` must stay valid for its lifetime.
 #[no_mangle]
-pub unsafe extern "C" fn nile_view_set_clipboard(view: *mut NileView, clipboard: NileClipboard) {
-    if let Some(v) = view_ref(view) {
+pub unsafe extern "C" fn nile_view_set_clipboard(view: *mut NileView, clipboard: *const NileClipboard) {
+    if let (Some(v), Some(clipboard)) = (view_ref(view), unsafe { read_in(clipboard) }) {
         v.page.set_clipboard(Box::new(CClipboard(clipboard)));
     }
 }
@@ -593,8 +656,8 @@ pub unsafe extern "C" fn nile_view_set_clipboard(view: *mut NileView, clipboard:
 /// # Safety
 /// `view` must be a live view; the callbacks and `user` must stay valid for its lifetime.
 #[no_mangle]
-pub unsafe extern "C" fn nile_view_set_dialogs(view: *mut NileView, dialogs: NileDialogs) {
-    if let Some(v) = view_ref(view) {
+pub unsafe extern "C" fn nile_view_set_dialogs(view: *mut NileView, dialogs: *const NileDialogs) {
+    if let (Some(v), Some(dialogs)) = (view_ref(view), unsafe { read_in(dialogs) }) {
         v.page.set_dialogs(std::rc::Rc::new(CDialogs(dialogs)));
     }
 }
@@ -782,6 +845,207 @@ pub unsafe extern "C" fn nile_view_menu_accelerator(view: *mut NileView, key: *c
     guard(false, || v.page.menu_accelerator(key, mods(modifiers)))
 }
 
+// ---- tray, badge, progress, hotkeys, monitors and application events ----------------------------------------------
+
+/// The tray icon the page asked for (`Window.this.tray = {...}`) as JSON, or NULL when it has none:
+/// `{"tooltip": "...", "template": bool, "icon": "<base64 of the icon file's bytes (PNG)>", "menu": [...]}`, where `menu` has the
+/// shape of [`nile_view_menu`] (choose an item with [`nile_view_menu_click`]). Show the icon in the notification area / menu
+/// bar, report clicks with [`nile_view_tray_event`], and call again after the page changes. Free the string with
+/// [`nile_string_free`].
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_tray(view: *mut NileView) -> *mut c_char {
+    use base64::Engine;
+    let Some(v) = view_ref(view) else { return ptr::null_mut() };
+    guard(ptr::null_mut(), || {
+        let Some(info) = v.page.tray() else { return ptr::null_mut() };
+        let menu: serde_json::Value = serde_json::from_str(&nile_engine::menus::menu_json(&info.items)).unwrap_or(serde_json::Value::Array(Vec::new()));
+        into_c(
+            serde_json::json!({
+                "tooltip": info.tooltip,
+                "template": info.template,
+                "icon": base64::engine::general_purpose::STANDARD.encode(&info.icon),
+                "menu": menu,
+            })
+            .to_string(),
+        )
+    })
+}
+
+/// The tray icon was clicked (`"trayclick"`) or double-clicked (`"traydoubleclick"`): fires that event on the document.
+/// Returns true if the page changed.
+///
+/// # Safety
+/// `view` must be a live view and `kind` a valid string.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_tray_event(view: *mut NileView, kind: *const c_char) -> bool {
+    let (Some(v), Some(kind)) = (view_ref(view), text(kind)) else { return false };
+    guard(false, || v.page.tray_event(kind))
+}
+
+/// The dock / taskbar badge text (`application.badge`), or NULL when none is set. Free it with [`nile_string_free`].
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_badge(view: *mut NileView) -> *mut c_char {
+    let Some(v) = view_ref(view) else { return ptr::null_mut() };
+    guard(ptr::null_mut(), || v.page.badge().map_or(ptr::null_mut(), into_c))
+}
+
+/// The dock / taskbar progress (`application.progress`): returns 0 for none, 1 for indeterminate, 2 for a value, which is
+/// then written to `value` (0.0 to 1.0; `value` may be NULL).
+///
+/// # Safety
+/// `view` must be a live view; `value` NULL or writable.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_progress(view: *mut NileView, value: *mut f32) -> i32 {
+    let Some(v) = view_ref(view) else { return 0 };
+    guard(0, || match v.page.progress() {
+        nile_script::Progress::None => 0,
+        nile_script::Progress::Indeterminate => 1,
+        nile_script::Progress::Value(x) => {
+            if let Some(out) = unsafe { value.as_mut() } {
+                *out = x;
+            }
+            2
+        }
+    })
+}
+
+/// What happened to a global hotkey (`nile_view_hotkey_event`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NileHotkeyState {
+    /// The system accepted the registration (`application.registerHotkey(...).ready` resolves true).
+    Registered = 0,
+    /// The system refused it: a bad accelerator, or another program owns it (`ready` resolves false).
+    Refused = 1,
+    /// The user pressed it: the page's handler runs.
+    Pressed = 2,
+}
+
+/// The global hotkeys the page registered (`application.registerHotkey`), as JSON
+/// `[{"id": 1, "accelerator": "CmdOrCtrl+Shift+K"}]`. Register each with the system, report the outcome with
+/// [`nile_view_hotkey_event`] (`Registered` or `Refused`) and later each press (`Pressed`). Accelerators are modifiers
+/// (`Ctrl`, `Shift`, `Alt`/`Option`, `Cmd`/`Super`, `CmdOrCtrl`) and a key joined by `+`. Call again after the page changes; ids
+/// that vanished from the list were released. Free the string with [`nile_string_free`].
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_hotkeys(view: *mut NileView) -> *mut c_char {
+    let Some(v) = view_ref(view) else { return ptr::null_mut() };
+    guard(ptr::null_mut(), || {
+        let list: Vec<serde_json::Value> = v.page.hotkeys().into_iter().map(|(id, accel)| serde_json::json!({ "id": id, "accelerator": accel })).collect();
+        into_c(serde_json::Value::Array(list).to_string())
+    })
+}
+
+/// Report a global hotkey's registration result or a press, by the `id` from [`nile_view_hotkeys`]. Returns true if the
+/// page changed.
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_hotkey_event(view: *mut NileView, id: u32, state: NileHotkeyState) -> bool {
+    let Some(v) = view_ref(view) else { return false };
+    let state = match state {
+        NileHotkeyState::Registered => "ok",
+        NileHotkeyState::Refused => "refused",
+        NileHotkeyState::Pressed => "pressed",
+    };
+    guard(false, || v.page.hotkey_event(id, state))
+}
+
+/// Tell scripts about the monitors (`Window.screens`, `Window.screenBox`, `Window.this.screen`): `screens_json` is
+/// `[{"name": "...", "x": 0, "y": 0, "width": 2880, "height": 1800, "scale": 2.0, "primary": true}]` (position and size in
+/// physical pixels, `scale` device pixels per CSS pixel) and `current` the index of the monitor the window is on. Call it when
+/// the window is created and whenever the monitors or the window's monitor change: a change after the first call fires
+/// `resolutionchange` on the window. Returns true if the information changed.
+///
+/// # Safety
+/// `view` must be a live view and `screens_json` a valid string.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_set_screens(view: *mut NileView, screens_json: *const c_char, current: i32) -> bool {
+    let (Some(v), Some(json)) = (view_ref(view), text(screens_json)) else { return false };
+    guard(false, || {
+        let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(json) else { return false };
+        let list: Vec<nile_script::ScreenInfo> = rows
+            .iter()
+            .map(|r| nile_script::ScreenInfo {
+                name: r["name"].as_str().unwrap_or_default().to_string(),
+                x: r["x"].as_i64().unwrap_or(0) as i32,
+                y: r["y"].as_i64().unwrap_or(0) as i32,
+                width: r["width"].as_u64().unwrap_or(0) as u32,
+                height: r["height"].as_u64().unwrap_or(0) as u32,
+                scale: r["scale"].as_f64().unwrap_or(1.0) as f32,
+                primary: r["primary"].as_bool().unwrap_or(false),
+            })
+            .collect();
+        let screens = (list, current.max(0) as usize);
+        let (changed, first) = {
+            let view = v.page.view.borrow();
+            (view.screens != screens, view.screens.0.is_empty())
+        };
+        if changed {
+            v.page.view.borrow_mut().screens = screens;
+            if !first {
+                v.page.screen_changed();
+            }
+        }
+        changed
+    })
+}
+
+/// The system delivered an application event: `kind` is `"second-instance"` (another copy was started: `data_json` is
+/// `{"arguments": [...], "cwd": "..."}`), `"open-url"` (`{"url": "..."}`) or `"open-file"` (`{"path": "..."}`). Scripts get an
+/// event of that name, carrying the fields of `data_json`, on `document` and `window`. `kind` may contain only lower-case
+/// letters and `-`, and `data_json` must be a JSON object (or NULL), or nothing happens. Returns true if the page changed.
+///
+/// # Safety
+/// `view` must be a live view; `kind` and `data_json` valid strings.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_application_event(view: *mut NileView, kind: *const c_char, data_json: *const c_char) -> bool {
+    let (Some(v), Some(kind)) = (view_ref(view), text(kind)) else { return false };
+    let data = text(data_json).unwrap_or("{}");
+    if kind.is_empty() || !kind.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') || !serde_json::from_str::<serde_json::Value>(data).is_ok_and(|d| d.is_object()) {
+        return false;
+    }
+    guard(false, || v.page.application_event(kind, data))
+}
+
+/// The rectangle of the page's first `role="window-maximize"` element in physical pixels (`x, y, width, height` into
+/// `rect`), for hosts that give a frameless window Windows 11 Snap Layouts. Returns false when there is none.
+///
+/// # Safety
+/// `view` must be a live view; `rect` must point to four writable floats.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_maximize_button_rect(view: *mut NileView, rect: *mut f32) -> bool {
+    let Some(v) = view_ref(view) else { return false };
+    if rect.is_null() {
+        return false;
+    }
+    guard(false, || match v.page.maximize_button_rect() {
+        Some(r) => {
+            unsafe { std::slice::from_raw_parts_mut(rect, 4) }.copy_from_slice(&r);
+            true
+        }
+        None => false,
+    })
+}
+
+/// The corner radius in logical pixels the root element asks for (its `border-radius`): clip a frameless window to it.
+///
+/// # Safety
+/// `view` must be a live view.
+#[no_mangle]
+pub unsafe extern "C" fn nile_view_window_corner_radius(view: *mut NileView) -> f32 {
+    view_ref(view).map_or(0.0, |v| guard(0.0, || v.page.window_corner_radius()))
+}
+
 // ---- paged output -----------------------------------------------------------------------------
 
 /// Cut the document into pages (`@page` size and margins, `break-*`) and write them to a PDF at
@@ -826,14 +1090,15 @@ pub unsafe extern "C" fn nile_view_title(view: *mut NileView) -> *const c_char {
 /// `view` must be a live view and `out` writable.
 #[no_mangle]
 pub unsafe extern "C" fn nile_view_window_config(view: *mut NileView, desktop_width: f32, desktop_height: f32, out: *mut NileWindowConfig) -> bool {
-    let (Some(v), Some(out)) = (view_ref(view), unsafe { out.as_mut() }) else { return false };
+    let Some(v) = view_ref(view) else { return false };
     guard(false, || {
         let c = WindowConfig::from_document(&v.page.doc.borrow());
         let desktop = (desktop_width, desktop_height);
         let (width, height) = c.inner_size(desktop);
         let pos = c.position((width, height), desktop);
         v.config_title = cstring(&c.title);
-        *out = NileWindowConfig {
+        let config = NileWindowConfig {
+            struct_size: std::mem::size_of::<NileWindowConfig>() as u32,
             title: v.config_title.as_ptr(),
             width,
             height,
@@ -878,7 +1143,7 @@ pub unsafe extern "C" fn nile_view_window_config(view: *mut NileView, desktop_wi
                 Material::Hud => 6,
             },
         };
-        true
+        write_out(out, config)
     })
 }
 
@@ -890,7 +1155,8 @@ pub unsafe extern "C" fn nile_view_window_config(view: *mut NileView, desktop_wi
 /// `view` must be a live view; `out` NULL or writable.
 #[no_mangle]
 pub unsafe extern "C" fn nile_view_take_window_command(view: *mut NileView, out: *mut NileWindowCommand) -> bool {
-    let none = NileWindowCommand { kind: NileWindowCommandKind::None, a: 0.0, b: 0.0 };
+    let size = std::mem::size_of::<NileWindowCommand>() as u32;
+    let none = NileWindowCommand { struct_size: size, kind: NileWindowCommandKind::None, a: 0.0, b: 0.0 };
     // Requests about other windows stay queued for `nile_view_take_window_request`.
     let cmd = view_ref(view).and_then(|v| {
         let mut view = v.page.view.borrow_mut();
@@ -916,12 +1182,10 @@ pub unsafe extern "C" fn nile_view_take_window_command(view: *mut NileView, out:
                 // Filtered out above.
                 WindowCommand::CloseWith(_) | WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) | WindowCommand::Quit(_) => (K::None, 0.0, 0.0),
             };
-            (true, NileWindowCommand { kind, a, b })
+            (true, NileWindowCommand { struct_size: size, kind, a, b })
         }
     };
-    if let Some(out) = unsafe { out.as_mut() } {
-        *out = result;
-    }
+    write_out(out, result);
     found
 }
 

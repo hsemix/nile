@@ -117,7 +117,7 @@ cc examples/c/render.c -Icrates/nile-capi/include -Ltarget/release -lnile -Wl,-r
 ```
 
 Every exported function, with ownership and safety rules, is in the [native API reference](docs/reference/native-api.md).
-Not in the C API yet: multiple mouse buttons, touch, GPU surfaces (it paints into CPU memory).
+The C API is versioned (`nile_abi_version()` against `NILE_ABI_VERSION`, and every struct starts with its size, so a newer library serves an older host) and reaches the shell features a host has to provide: menus, tray, badge and progress, global hotkeys, monitors, application events, dialogs, clipboard, IME, accessibility and popup windows. Not in it yet: multiple mouse buttons, touch, signed updates, GPU surfaces (it paints into CPU memory).
 
 ## Native extensions
 
@@ -178,7 +178,8 @@ verified and what is only compiled.
   serial, email, camera and more.
 - **[Feature reference](docs/reference/README.md)**: CSS, DOM and events, web APIs, built-in modules, windows and menus,
   editing, the C API, [what's supported](docs/reference/supported.md) and [known gaps](docs/reference/known-gaps.md).
-- **[Native extensions](docs/extensions.md)** and the [changelog](CHANGELOG.md).
+- **[Native extensions](docs/extensions.md)**, the [changelog](CHANGELOG.md), the [architecture notes](docs/architecture/README.md) for contributors and the
+  [Windows and Linux test checklist](docs/testing/platform-checklist.md).
 - Compatibility with Sciter follows its documentation ([docs.sciter.com](https://docs.sciter.com)), but Nile is its own
   project and not a drop-in replacement. Nile is a desktop UI engine, not a browser: features are added for named
   desktop needs, not for web parity.

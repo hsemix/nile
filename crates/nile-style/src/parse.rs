@@ -438,11 +438,32 @@ fn media_matches(query: &str, (vw, vh): (f32, f32)) -> bool {
             let part = part.trim();
             match part.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
                 Some(feature) => media_feature(feature.trim(), vw, vh),
+                // Sciter's `@media platform == "OSX"` (also `!=`): "OSX", "Windows" or "Linux".
+                None if part.contains("==") || part.contains("!=") => platform_term(part),
                 None => matches!(part, "all" | "screen" | ""),
             }
         });
         ok != negate
     })
+}
+
+fn platform_term(term: &str) -> bool {
+    let (negate, parts) = match term.split_once("!=") {
+        Some(p) => (true, p),
+        None => match term.split_once("==") {
+            Some(p) => (false, p),
+            None => return false,
+        },
+    };
+    let current = if cfg!(windows) {
+        "Windows"
+    } else if cfg!(target_os = "macos") {
+        "OSX"
+    } else {
+        "Linux"
+    };
+    let value = parts.1.trim().trim_matches(|c| c == '"' || c == '\'');
+    parts.0.trim() == "platform" && (value.eq_ignore_ascii_case(current) != negate)
 }
 
 fn media_feature(f: &str, vw: f32, vh: f32) -> bool {

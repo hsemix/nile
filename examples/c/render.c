@@ -26,6 +26,12 @@ int main(int argc, char **argv) {
   const char *out = argc > 2 ? argv[2] : "out.ppm";
   const uint32_t width = 640, height = 400;
 
+  /* Header and library must agree on the binary interface before anything else is used. */
+  if (nile_abi_version() != NILE_ABI_VERSION) {
+    fprintf(stderr, "libnile is ABI %u, this program was built for %u\n", nile_abi_version(), NILE_ABI_VERSION);
+    return 3;
+  }
+
   NileView *view = nile_view_create_file(file, (float)width, (float)height);
   if (!view) return 1;
   printf("Nile %s, title: %s\n", nile_version(), nile_view_title(view));
@@ -46,11 +52,12 @@ int main(int argc, char **argv) {
   nile_text_input(view, "hello");
 
   /* Let timers and animations run for a moment, as a real host would from its event loop. */
-  NileTick tick;
+  /* Structs the library fills start with their size, which lets a newer library serve an older program. */
+  NileTick tick = {.struct_size = sizeof(NileTick)};
   nile_view_tick(view, &tick);
 
   /* Window requests the page made (close buttons, moveTo, ...). */
-  NileWindowCommand cmd;
+  NileWindowCommand cmd = {.struct_size = sizeof(NileWindowCommand)};
   while (nile_view_take_window_command(view, &cmd))
     printf("window request %d (%g, %g)\n", cmd.kind, cmd.a, cmd.b);
 

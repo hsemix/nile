@@ -14,6 +14,19 @@
 #include <stddef.h>
 
 /**
+ * The version of this library's binary interface. It changes whenever a function's signature or a struct's layout
+ * changes incompatibly; compare it with [`nile_abi_version`] at start-up, before using anything else:
+ *
+ * ```c
+ * if (nile_abi_version() != NILE_ABI_VERSION) abort(); // the header and the library do not match
+ * ```
+ *
+ * Version 2 (current): every struct that crosses the boundary starts with a `uint32_t struct_size` that the caller sets to
+ * `sizeof` its own copy of the struct, so a library newer than the host can add fields without breaking it.
+ */
+#define NILE_ABI_VERSION 2
+
+/**
  * Shift is held.
  */
 #define NILE_MOD_SHIFT 1
@@ -86,6 +99,24 @@ typedef enum NileA11yAction {
 } NileA11yAction;
 
 /**
+ * What happened to a global hotkey (`nile_view_hotkey_event`).
+ */
+typedef enum NileHotkeyState {
+  /**
+   * The system accepted the registration (`application.registerHotkey(...).ready` resolves true).
+   */
+  NILE_HOTKEY_STATE_REGISTERED = 0,
+  /**
+   * The system refused it: a bad accelerator, or another program owns it (`ready` resolves false).
+   */
+  NILE_HOTKEY_STATE_REFUSED = 1,
+  /**
+   * The user pressed it: the page's handler runs.
+   */
+  NILE_HOTKEY_STATE_PRESSED = 2,
+} NileHotkeyState;
+
+/**
  * What a window request asks for.
  */
 typedef enum NileWindowCommandKind {
@@ -125,6 +156,10 @@ typedef struct NileView NileView;
  */
 typedef struct NileTick {
   /**
+   * Set to `sizeof(NileTick)` before the call.
+   */
+  uint32_t struct_size;
+  /**
    * Something changed; draw again.
    */
   bool redraw;
@@ -139,6 +174,10 @@ typedef struct NileTick {
  * Clipboard access. `get` returns the current text (copied immediately) or NULL; `set` stores text.
  */
 typedef struct NileClipboard {
+  /**
+   * Set to `sizeof(NileClipboard)`; callbacks your struct does not have count as NULL.
+   */
+  uint32_t struct_size;
   const char *(*get)(void *user);
   void (*set)(const char *text, void *user);
   void *user;
@@ -158,6 +197,10 @@ typedef struct NileClipboard {
  * immediately. Leave a callback NULL to have that dialog unavailable (scripts get `null`).
  */
 typedef struct NileDialogs {
+  /**
+   * Set to `sizeof(NileDialogs)`; callbacks your struct does not have count as NULL.
+   */
+  uint32_t struct_size;
   /**
    * Open dialog. `filters` is Sciter's `label|*.ext;*.ext|label|*.*` text (may be empty), `dir`
    * where to start. Return the chosen paths separated by newlines, or NULL when cancelled.
@@ -191,6 +234,10 @@ typedef struct NileDialogs {
  * The window settings in the page's root `<html>` element (`window-frame`, `window-width`, ...).
  */
 typedef struct NileWindowConfig {
+  /**
+   * Set to `sizeof(NileWindowConfig)` before the call; only the fields that fit are written.
+   */
+  uint32_t struct_size;
   /**
    * The title (`window-title` or `<title>`); valid until the next call on the view.
    */
@@ -256,6 +303,10 @@ typedef struct NileWindowConfig {
  * A request from the page (a script, or an element with `role="window-close"` etc.).
  */
 typedef struct NileWindowCommand {
+  /**
+   * Set to `sizeof(NileWindowCommand)` before the call.
+   */
+  uint32_t struct_size;
   enum NileWindowCommandKind kind;
   float a;
   float b;
@@ -271,6 +322,11 @@ typedef const char *(*NileHostFn)(const char *args_json, void *user);
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
+
+/**
+ * The binary interface version this library implements (see `NILE_ABI_VERSION` in the header).
+ */
+uint32_t nile_abi_version(void);
 
 /**
  * The engine's version, e.g. "0.1.0".
@@ -444,7 +500,7 @@ char *nile_view_selected_text(struct NileView *view);
  * # Safety
  * `view` must be a live view; the callbacks and `user` must stay valid for its lifetime.
  */
-void nile_view_set_clipboard(struct NileView *view, struct NileClipboard clipboard);
+void nile_view_set_clipboard(struct NileView *view, const struct NileClipboard *clipboard);
 
 /**
  * Install native dialogs for scripts and `<input type=file>` (without them scripts get `null`
@@ -453,7 +509,7 @@ void nile_view_set_clipboard(struct NileView *view, struct NileClipboard clipboa
  * # Safety
  * `view` must be a live view; the callbacks and `user` must stay valid for its lifetime.
  */
-void nile_view_set_dialogs(struct NileView *view, struct NileDialogs dialogs);
+void nile_view_set_dialogs(struct NileView *view, const struct NileDialogs *dialogs);
 
 /**
  * Tell Nile the system's colour theme: `dark` for `prefers-color-scheme: dark` (and the dark
@@ -571,6 +627,114 @@ char *nile_view_menu_click(struct NileView *view,
 bool nile_view_menu_accelerator(struct NileView *view,
                                 const char *key,
                                 uint8_t modifiers);
+
+/**
+ * The tray icon the page asked for (`Window.this.tray = {...}`) as JSON, or NULL when it has none:
+ * `{"tooltip": "...", "template": bool, "icon": "<base64 of the icon file's bytes (PNG)>", "menu": [...]}`, where `menu` has the
+ * shape of [`nile_view_menu`] (choose an item with [`nile_view_menu_click`]). Show the icon in the notification area / menu
+ * bar, report clicks with [`nile_view_tray_event`], and call again after the page changes. Free the string with
+ * [`nile_string_free`].
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+char *nile_view_tray(struct NileView *view);
+
+/**
+ * The tray icon was clicked (`"trayclick"`) or double-clicked (`"traydoubleclick"`): fires that event on the document.
+ * Returns true if the page changed.
+ *
+ * # Safety
+ * `view` must be a live view and `kind` a valid string.
+ */
+bool nile_view_tray_event(struct NileView *view,
+                          const char *kind);
+
+/**
+ * The dock / taskbar badge text (`application.badge`), or NULL when none is set. Free it with [`nile_string_free`].
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+char *nile_view_badge(struct NileView *view);
+
+/**
+ * The dock / taskbar progress (`application.progress`): returns 0 for none, 1 for indeterminate, 2 for a value, which is
+ * then written to `value` (0.0 to 1.0; `value` may be NULL).
+ *
+ * # Safety
+ * `view` must be a live view; `value` NULL or writable.
+ */
+int32_t nile_view_progress(struct NileView *view,
+                           float *value);
+
+/**
+ * The global hotkeys the page registered (`application.registerHotkey`), as JSON
+ * `[{"id": 1, "accelerator": "CmdOrCtrl+Shift+K"}]`. Register each with the system, report the outcome with
+ * [`nile_view_hotkey_event`] (`Registered` or `Refused`) and later each press (`Pressed`). Accelerators are modifiers
+ * (`Ctrl`, `Shift`, `Alt`/`Option`, `Cmd`/`Super`, `CmdOrCtrl`) and a key joined by `+`. Call again after the page changes; ids
+ * that vanished from the list were released. Free the string with [`nile_string_free`].
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+char *nile_view_hotkeys(struct NileView *view);
+
+/**
+ * Report a global hotkey's registration result or a press, by the `id` from [`nile_view_hotkeys`]. Returns true if the
+ * page changed.
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+bool nile_view_hotkey_event(struct NileView *view,
+                            uint32_t id,
+                            enum NileHotkeyState state);
+
+/**
+ * Tell scripts about the monitors (`Window.screens`, `Window.screenBox`, `Window.this.screen`): `screens_json` is
+ * `[{"name": "...", "x": 0, "y": 0, "width": 2880, "height": 1800, "scale": 2.0, "primary": true}]` (position and size in
+ * physical pixels, `scale` device pixels per CSS pixel) and `current` the index of the monitor the window is on. Call it when
+ * the window is created and whenever the monitors or the window's monitor change: a change after the first call fires
+ * `resolutionchange` on the window. Returns true if the information changed.
+ *
+ * # Safety
+ * `view` must be a live view and `screens_json` a valid string.
+ */
+bool nile_view_set_screens(struct NileView *view,
+                           const char *screens_json,
+                           int32_t current);
+
+/**
+ * The system delivered an application event: `kind` is `"second-instance"` (another copy was started: `data_json` is
+ * `{"arguments": [...], "cwd": "..."}`), `"open-url"` (`{"url": "..."}`) or `"open-file"` (`{"path": "..."}`). Scripts get an
+ * event of that name, carrying the fields of `data_json`, on `document` and `window`. `kind` may contain only lower-case
+ * letters and `-`, and `data_json` must be a JSON object (or NULL), or nothing happens. Returns true if the page changed.
+ *
+ * # Safety
+ * `view` must be a live view; `kind` and `data_json` valid strings.
+ */
+bool nile_view_application_event(struct NileView *view,
+                                 const char *kind,
+                                 const char *data_json);
+
+/**
+ * The rectangle of the page's first `role="window-maximize"` element in physical pixels (`x, y, width, height` into
+ * `rect`), for hosts that give a frameless window Windows 11 Snap Layouts. Returns false when there is none.
+ *
+ * # Safety
+ * `view` must be a live view; `rect` must point to four writable floats.
+ */
+bool nile_view_maximize_button_rect(struct NileView *view,
+                                    float *rect);
+
+/**
+ * The corner radius in logical pixels the root element asks for (its `border-radius`): clip a frameless window to it.
+ *
+ * # Safety
+ * `view` must be a live view.
+ */
+float nile_view_window_corner_radius(struct NileView *view);
 
 /**
  * Cut the document into pages (`@page` size and margins, `break-*`) and write them to a PDF at

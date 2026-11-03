@@ -8,13 +8,26 @@ the section becomes that version's.
 
 ## Unreleased
 
+### 2026-11-03
+
+#### Fixed
+- Sciter's `calculator` sample (a page written for both browsers and Sciter, with `@supports (display: grid)` next to `@supports (flow: horizontal)`) now renders and works:
+  - `//` line comments in style sheets (Sciter allows them) no longer swallow the declaration after them.
+  - `<tag ... />` is an empty element for any tag, as in Sciter (`<picture src="x" />` used to swallow the caption and buttons that followed it into the picture).
+  - `@media platform == "OSX"` (also `!=`, `"Windows"`, `"Linux"`) works in style sheets, not only in `<include media>`.
+  - `width: *` / `size: *` on a `flow: grid` (or any grid) item fills its cell instead of the whole grid; on a fixed or absolute box it fills the containing block.
+  - `flow: grid(...)` replaces any other `grid-template-*`, `justify-content` and `align-content` the page set for browsers (when a sheet carries both, the Sciter one wins).
+  - A root `<html>` with a border or padding fits the viewport instead of being wider and taller than it (and `body { height: 100% }` is a percentage of what is left); `window-frame-width` is 0 on macOS.
+
 ### 2026-10-27
 
 #### Changed
+- **C API ABI version 2:** `nile_abi_version()` / `NILE_ABI_VERSION`; `NileTick`, `NileWindowCommand`, `NileWindowConfig`, `NileClipboard` and `NileDialogs` start with `struct_size` (set it to `sizeof`), `nile_view_set_clipboard` and `nile_view_set_dialogs` take pointers, and a library newer than the host fills or reads only the part the host knows. C hosts must update (see `examples/c/render.c`).
 - README rewritten as a front page (what you get, screenshots, demos, platform status, roadmap); the full feature inventory and the known gaps moved to `docs/reference/supported.md` and `docs/reference/known-gaps.md`.
 - Native extension buffers reach scripts as `Uint8Array`s directly instead of base64 text (a camera frame took hundreds of milliseconds to decode).
 
 #### Added
+- C API: `nile_view_tray`, `nile_view_tray_event`, `nile_view_badge`, `nile_view_progress`, `nile_view_hotkeys`, `nile_view_hotkey_event`, `nile_view_set_screens`, `nile_view_application_event`, `nile_view_maximize_button_rect`, `nile_view_window_corner_radius`; the reference now documents every exported function; `examples/c/abi_check.c` is built and run by CI.
 - `@media`, an optional native extension (`extensions/media`) for camera and microphone capture: device lists, a camera preview as `ImageData`/`drawTo(canvas)`, full-size JPEG photos, microphone chunks with a level meter and WAV recording. `examples/media/`, [guide](docs/guide/camera-and-microphone.md). Checked on a MacBook; Windows and Linux untested.
 - `nile --pack --camera "reason" --microphone "reason"` write `NSCameraUsageDescription`/`NSMicrophoneUsageDescription` into the macOS bundle's `Info.plist`.
 - `@nile/serial`: serial ports in the binary (`serialport` crate without libudev; cargo feature `serial`, default in nile-engine): `list`, `open` with baud/data bits/stop bits/parity/flow control, `write`, `onData`, buffered `read`/`readUntil` with timeouts, DTR/RTS/break and status lines, unplug notice. `examples/serial.html`, [guide](docs/guide/serial.md).

@@ -52,17 +52,43 @@ The authoritative declarations and enums are in
 current exported-function contracts from [lib.rs](../../crates/nile-capi/src/lib.rs).
 See [render.c](../../examples/c/render.c) for a runnable host.
 
+## ABI version and struct sizes
+
+`NILE_ABI_VERSION` (in `nile.h`) is the binary interface the header describes; `nile_abi_version()` is the one the loaded library
+implements. **Compare them first** and refuse to run when they differ:
+
+```c
+if (nile_abi_version() != NILE_ABI_VERSION) { /* header and library do not match */ }
+```
+
+The version changes only for incompatible changes (a function's signature, a struct's layout). Version 2 is the current one;
+version 1 was the unversioned API before it, whose structs had no size field.
+
+Every struct that crosses the boundary (`NileTick`, `NileWindowCommand`, `NileWindowConfig`, `NileClipboard`, `NileDialogs`)
+starts with `uint32_t struct_size`. Set it to `sizeof` your copy of the struct before you pass it, even when you only
+read the result:
+
+- **Structs the library fills** (`NileTick`, `NileWindowCommand`, `NileWindowConfig`): the library writes only the fields
+  that fit in `struct_size` bytes, so a library newer than your header can add fields without overrunning your memory. A
+  struct with `struct_size` 0 is refused (`nile_view_window_config` returns false; the others write nothing).
+- **Structs you fill and pass by pointer** (`NileClipboard`, `NileDialogs`): callbacks that are past `struct_size` read as NULL,
+  so a host built before `get_html` existed keeps working.
+
+New fields are only ever added at the end. `examples/c/abi_check.c` is a smoke test of the whole surface that CI builds and runs.
+
 ## Types, callbacks and constants
 
 | Type | Contract |
 |---|---|
 | `NileView` | Opaque page handle; one-thread ownership |
-| `NileTick` | `redraw` boolean and `next_ms` deadline; -1 means wait for input |
-| `NileClipboard` | `get(user)` borrowed UTF-8 text or NULL; copied immediately. `set(text,user)` receives text. Keep callback/user lifetimes valid |
+| `NileTick` | `struct_size`, `redraw` boolean and `next_ms` deadline; -1 means wait for input |
+| `NileClipboard` | `struct_size`, then `get(user)` borrowed UTF-8 text or NULL; copied immediately. `set(text,user)` receives text. Keep callback/user lifetimes valid |
 | `NileHostFn` | `(args_json,user)` receives JSON argument array; returned UTF-8 JSON is copied immediately; NULL means undefined |
-| `NileWindowConfig` | Caption pointer (valid until next view call), width/height and limits, resizable/margin/minimizable/maximizable, state/alignment/x/y/frame/frameless |
-| `NileWindowCommand` | `kind`, `a`, `b`; NONE when queue has no simple command |
+| `NileWindowConfig` | `struct_size`, caption pointer (valid until next view call), width/height and limits, resizable/margin/minimizable/maximizable, state/alignment/x/y/frame/frameless |
+| `NileWindowCommand` | `struct_size`, `kind`, `a`, `b`; NONE when queue has no simple command |
 | `NileCursor` | Default, pointer, text, crosshair, move, not-allowed, wait, progress, help, grab/grabbing, horizontal/vertical/diagonal resize or hidden |
+| `NileDialogs` | `struct_size`, then blocking callbacks `open_files`, `save_file`, `pick_folder`, `message` and `user`; a NULL callback makes that dialog unavailable |
+| `NileHotkeyState` | REGISTERED=0, REFUSED=1, PRESSED=2 (`nile_view_hotkey_event`) |
 | `NileA11yAction` | CLICK=0, FOCUS=1, SET_VALUE=2, INCREMENT=3, DECREMENT=4, SCROLL_INTO_VIEW=5 |
 
 Modifier bits combine with OR: SHIFT=1, CONTROL=2, ALT=4, META=8.
@@ -84,6 +110,14 @@ The engine's version, e.g. "0.1.0".
 
 ```c
 const char *nile_version(void);
+```
+
+### nile_abi_version
+
+The binary interface version this library implements (see `NILE_ABI_VERSION` in the header).
+
+```c
+uint32_t nile_abi_version(void);
 ```
 
 ### nile_view_create_html
@@ -306,7 +340,7 @@ Install clipboard callbacks (the default is a private in-memory clipboard).
 `view` must be a live view; the callbacks and `user` must stay valid for its lifetime.
 
 ```c
-void nile_view_set_clipboard(struct NileView *view, struct NileClipboard clipboard);
+void nile_view_set_clipboard(struct NileView *view, const struct NileClipboard *clipboard);
 ```
 
 ### nile_view_accessibility_tree
@@ -717,3 +751,227 @@ The `console.log`/`warn`/`error` lines written since the last call, separated by
 char *nile_view_take_console(struct NileView *view);
 ```
 
+### nile_view_set_dialogs
+
+Install native dialogs for scripts and `<input type=file>` (without them scripts get `null`
+and file inputs use `nile_view_take_file_request`). Kept across reloads.
+
+**Safety**
+`view` must be a live view; the callbacks and `user` must stay valid for its lifetime.
+
+```c
+void nile_view_set_dialogs(struct NileView *view, const struct NileDialogs *dialogs);
+```
+
+### nile_view_set_system_theme
+
+Tell Nile the system's colour theme: `dark` for `prefers-color-scheme: dark` (and the dark
+look of pages that say `color-scheme: light dark`), `accent_rgb` the system accent colour as
+`0xRRGGBB` (negative = the platform's stock accent). It is a per-thread setting shared by every
+view of the thread; call it before creating views and again when the OS changes. Restyles this
+view (call it on the others too) and returns true if the theme changed.
+
+**Safety**
+`view` must be a live view.
+
+```c
+bool nile_view_set_system_theme(struct NileView *view, bool dark, int32_t accent_rgb);
+```
+
+### nile_view_drop_files
+
+Files were dropped on the window at the pointer's last position (tell the page where with
+`nile_pointer_move` first). `paths` are UTF-8 paths separated by newlines. A file input under
+the pointer takes them; elsewhere the target gets a `drop` event. Returns true if the page changed.
+
+**Safety**
+`view` must be a live view and `paths` a valid string.
+
+```c
+bool nile_view_drop_files(struct NileView *view,
+                          const char *paths);
+```
+
+### nile_view_window_activated
+
+The window became active (`active` true) or inactive: fires `activate` on `Window.this`.
+Returns true if the page changed.
+
+**Safety**
+`view` must be a live view.
+
+```c
+bool nile_view_window_activated(struct NileView *view, bool active);
+```
+
+### nile_view_portals
+
+Popups that want an OS window of their own (`popup({window: "popup"})`), as JSON
+`[{"id":N,"x":..,"y":..,"w":..,"h":..}]` with the border box in this view's logical coordinates (it
+may lie outside the view). Free the string with `nile_string_free`. For each: make a frameless,
+always-on-top window at that rectangle, draw it with `nile_view_render_portal`, and send its
+pointer, wheel and key input to this same view with `x`/`y` offset by the rectangle's origin.
+
+**Safety**
+`view` must be a live view.
+
+```c
+char *nile_view_portals(struct NileView *view);
+```
+
+### nile_view_render_portal
+
+Draw one popup from `nile_view_portals` into its window's buffer (same format as
+`nile_view_render`): `width` x `height` physical pixels at `scale`, the popup's top-left
+corner at the buffer's. Returns false if `id` isn't a current popup or the arguments are wrong.
+
+**Safety**
+`pixels` must point to `len` writable bytes.
+
+```c
+bool nile_view_render_portal(struct NileView *view,
+                             size_t id,
+                             uint8_t *pixels,
+                             size_t len,
+                             uint32_t width,
+                             uint32_t height,
+                             float scale);
+```
+
+### nile_view_tray
+
+The tray icon the page asked for (`Window.this.tray = {...}`) as JSON, or NULL when it has none:
+`{"tooltip": "...", "template": bool, "icon": "<base64 of the icon file's bytes (PNG)>", "menu": [...]}`, where `menu` has the
+shape of `nile_view_menu` (choose an item with `nile_view_menu_click`). Show the icon in the notification area / menu
+bar, report clicks with `nile_view_tray_event`, and call again after the page changes. Free the string with
+`nile_string_free`.
+
+**Safety**
+`view` must be a live view.
+
+```c
+char *nile_view_tray(struct NileView *view);
+```
+
+### nile_view_tray_event
+
+The tray icon was clicked (`"trayclick"`) or double-clicked (`"traydoubleclick"`): fires that event on the document.
+Returns true if the page changed.
+
+**Safety**
+`view` must be a live view and `kind` a valid string.
+
+```c
+bool nile_view_tray_event(struct NileView *view,
+                          const char *kind);
+```
+
+### nile_view_badge
+
+The dock / taskbar badge text (`application.badge`), or NULL when none is set. Free it with `nile_string_free`.
+
+**Safety**
+`view` must be a live view.
+
+```c
+char *nile_view_badge(struct NileView *view);
+```
+
+### nile_view_progress
+
+The dock / taskbar progress (`application.progress`): returns 0 for none, 1 for indeterminate, 2 for a value, which is
+then written to `value` (0.0 to 1.0; `value` may be NULL).
+
+**Safety**
+`view` must be a live view; `value` NULL or writable.
+
+```c
+int32_t nile_view_progress(struct NileView *view,
+                           float *value);
+```
+
+### nile_view_hotkeys
+
+The global hotkeys the page registered (`application.registerHotkey`), as JSON
+`[{"id": 1, "accelerator": "CmdOrCtrl+Shift+K"}]`. Register each with the system, report the outcome with
+`nile_view_hotkey_event` (`Registered` or `Refused`) and later each press (`Pressed`). Accelerators are modifiers
+(`Ctrl`, `Shift`, `Alt`/`Option`, `Cmd`/`Super`, `CmdOrCtrl`) and a key joined by `+`. Call again after the page changes; ids
+that vanished from the list were released. Free the string with `nile_string_free`.
+
+**Safety**
+`view` must be a live view.
+
+```c
+char *nile_view_hotkeys(struct NileView *view);
+```
+
+### nile_view_hotkey_event
+
+Report a global hotkey's registration result or a press, by the `id` from `nile_view_hotkeys`. Returns true if the
+page changed.
+
+**Safety**
+`view` must be a live view.
+
+```c
+bool nile_view_hotkey_event(struct NileView *view,
+                            uint32_t id,
+                            enum NileHotkeyState state);
+```
+
+### nile_view_set_screens
+
+Tell scripts about the monitors (`Window.screens`, `Window.screenBox`, `Window.this.screen`): `screens_json` is
+`[{"name": "...", "x": 0, "y": 0, "width": 2880, "height": 1800, "scale": 2.0, "primary": true}]` (position and size in
+physical pixels, `scale` device pixels per CSS pixel) and `current` the index of the monitor the window is on. Call it when
+the window is created and whenever the monitors or the window's monitor change: a change after the first call fires
+`resolutionchange` on the window. Returns true if the information changed.
+
+**Safety**
+`view` must be a live view and `screens_json` a valid string.
+
+```c
+bool nile_view_set_screens(struct NileView *view,
+                           const char *screens_json,
+                           int32_t current);
+```
+
+### nile_view_application_event
+
+The system delivered an application event: `kind` is `"second-instance"` (another copy was started: `data_json` is
+`{"arguments": [...], "cwd": "..."}`), `"open-url"` (`{"url": "..."}`) or `"open-file"` (`{"path": "..."}`). Scripts get an
+event of that name, carrying the fields of `data_json`, on `document` and `window`. `kind` may contain only lower-case
+letters and `-`, and `data_json` must be a JSON object (or NULL), or nothing happens. Returns true if the page changed.
+
+**Safety**
+`view` must be a live view; `kind` and `data_json` valid strings.
+
+```c
+bool nile_view_application_event(struct NileView *view,
+                                 const char *kind,
+                                 const char *data_json);
+```
+
+### nile_view_maximize_button_rect
+
+The rectangle of the page's first `role="window-maximize"` element in physical pixels (`x, y, width, height` into
+`rect`), for hosts that give a frameless window Windows 11 Snap Layouts. Returns false when there is none.
+
+**Safety**
+`view` must be a live view; `rect` must point to four writable floats.
+
+```c
+bool nile_view_maximize_button_rect(struct NileView *view,
+                                    float *rect);
+```
+
+### nile_view_window_corner_radius
+
+The corner radius in logical pixels the root element asks for (its `border-radius`): clip a frameless window to it.
+
+**Safety**
+`view` must be a live view.
+
+```c
+float nile_view_window_corner_radius(struct NileView *view);
+```
