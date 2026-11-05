@@ -4,8 +4,10 @@
 
 ## My stylesheet has no effect
 
-Use `<style>` in the HTML or inject a style element from JavaScript. External
-`<link rel="stylesheet">` loading is not implemented. Check the selector and the
+Styles come from `<style>`, from `<link rel="stylesheet" href="app.css">` (and `@import` inside a sheet),
+or from a style element you inject with JavaScript. A linked sheet that can't be read (a wrong path, relative
+to the HTML file) is skipped silently, and a link added by script after the page loads is not loaded. Check
+the file path, the selector and the
 [supported properties](../../README.md#whats-supported-today). Unsupported selector
 syntax can drop a rule. For dynamic styles, use `.style` or `.classList`; avoid
 assuming every browser CSS property is available.
