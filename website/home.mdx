@@ -1,0 +1,37 @@
+---
+title: Nile
+description: An open-source, embeddable HTML, CSS and JavaScript UI engine for desktop apps, written in Rust. No webview.
+template: splash
+hero:
+  tagline: Desktop interfaces from HTML, CSS and JavaScript, drawn by Nile's own renderer. No webview, small enough to ship inside your app.
+  image:
+    file: ../../assets/logo.svg
+  actions:
+    - text: Get started
+      link: /nile/guide/getting-started/
+      icon: right-arrow
+    - text: Reference
+      link: /nile/reference/
+      variant: minimal
+    - text: GitHub
+      link: https://github.com/hsemix/nile
+      variant: minimal
+      icon: external
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid stagger>
+  <Card title="Its own renderer" icon="rocket">
+    Skia for painting, Taffy for layout, Parley for text and QuickJS for scripts. No Chromium and no system webview.
+  </Card>
+  <Card title="Sciter-compatible where sensible" icon="puzzle">
+    Sciter's CSS extensions (`flow:`, `size:`, `*` units), window settings and `host` calls, so existing apps can port.
+  </Card>
+  <Card title="Embed it from anywhere" icon="seti:c">
+    A versioned C API, plus Python, .NET and PHP bindings. Run a page in a window or render it headless to a PNG.
+  </Card>
+  <Card title="Desktop features built in" icon="laptop">
+    Native menus, tray, dialogs, printing, serial ports, hotkeys, packaging, signed updates and native extensions.
+  </Card>
+</CardGrid>

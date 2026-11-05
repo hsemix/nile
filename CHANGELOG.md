@@ -11,6 +11,7 @@ the section becomes that version's.
 ### 2026-11-03
 
 #### Added
+- A documentation site (Astro Starlight, in `website/`) built from `docs/` and published to GitHub Pages by `.github/workflows/docs.yml`: sidebar, search, per-page table of contents, dark and light themes, and the Nile icon as a transparent SVG logo. The Markdown in `docs/` stays the only source (`npm run dev` / `npm run build` in `website/`).
 - Python bindings in `bindings/python` (`import nile`), over `libnile_app` with `ctypes` and no dependencies: `nile.run(path)` opens a window, `@nile.function` exposes Python functions to pages as `host.<name>(...)`, and `nile.View` drives a page headless (`eval`, `call`, input, `render`, `save_png`, `write_pdf`). Tests run in CI on macOS and Linux; `examples/hello.py` shows the round trip. Not on PyPI yet.
 - .NET bindings in `bindings/dotnet` (`using Nile;`, `net8.0`, P/Invoke, no dependencies) with the same shape: `App.Run`, `App.Function("name", ...)` for `host.*`, `NileView` for headless use. Tests run in CI on all three systems (the first run of Nile's library on Windows from another language); `examples/Hello` shows the round trip. Not on NuGet yet.
 - PHP bindings in `bindings/php` (`Nile\App`, `Nile\View`; PHP 8.2+ with the FFI extension, no Composer packages): `App::run`, `App::function('name', ...)` for `host.*`, `View` for headless use. Tests run in CI on all three systems; `examples/hello.php` shows the round trip. Not on Packagist yet.

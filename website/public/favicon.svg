@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 464 464" width="464" height="464">
+  <!-- The Nile icon (assets/icon.html) redrawn as vector shapes so it has a transparent background. -->
+  <defs>
+    <linearGradient id="sky" x1="0.33" y1="0" x2="0.67" y2="1">
+      <stop offset="0" stop-color="#1f6fe0"/>
+      <stop offset="0.55" stop-color="#0b3d91"/>
+      <stop offset="1" stop-color="#072a66"/>
+    </linearGradient>
+    <clipPath id="tile"><rect width="464" height="464" rx="104"/></clipPath>
+  </defs>
+  <g clip-path="url(#tile)">
+    <rect width="464" height="464" fill="url(#sky)"/>
+    <circle cx="360" cy="92" r="42" fill="#ffd166" fill-opacity="0.95"/>
+    <polygon fill="#fff" points="161,96 197,96 275,214 275,96 311,96 311,278 275,278 197,160 197,278 161,278"/>
+    <ellipse cx="240" cy="428" rx="300" ry="110" fill="#78beff" fill-opacity="0.35"/>
+    <ellipse cx="240" cy="462" rx="300" ry="110" fill="#a0d7ff" fill-opacity="0.5"/>
+    <ellipse cx="240" cy="502" rx="300" ry="110" fill="#e9f6ff"/>
+  </g>
+</svg>

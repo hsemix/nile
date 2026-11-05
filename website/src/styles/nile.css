@@ -1,0 +1,12 @@
+/* Nile blue and sun yellow, from the app icon. */
+:root {
+  --sl-color-accent-low: #0b2a5c;
+  --sl-color-accent: #1f6fe0;
+  --sl-color-accent-high: #a9cdfa;
+}
+:root[data-theme="light"] {
+  --sl-color-accent-low: #cfe2fc;
+  --sl-color-accent: #0b57c9;
+  --sl-color-accent-high: #072a66;
+}
+.hero img { filter: drop-shadow(0 12px 28px rgba(5, 25, 70, 0.45)); }
