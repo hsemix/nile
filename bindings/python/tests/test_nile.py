@@ -1,9 +1,11 @@
 import os
 import struct
+import sys
 import tempfile
 import unittest
 
-import nile
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # the package, whatever the working directory
+import nile  # noqa: E402
 
 
 class ViewTests(unittest.TestCase):
