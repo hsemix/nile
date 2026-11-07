@@ -1,0 +1,35 @@
+<html>
+    <head>
+        <title>Test</title>
+        <style></style>
+        <script>
+
+const content = <html>
+  <body>Window as a dialog</body>
+</html>;
+
+class ToolWindow extends Window {
+  constructor() {
+    let params = {
+      html: content,
+      type: Window.TOOL_WINDOW,
+      caption: "Tool window"
+    };
+    super(params);
+  }
+}
+
+document.on("click","button#show", function(){
+  let r = Window.this.modal(new ToolWindow());
+  console.log(r);
+});
+
+
+        </script>
+    </head>
+    <body>
+
+<button#show>Show window modally</button>
+
+    </body>
+</html>

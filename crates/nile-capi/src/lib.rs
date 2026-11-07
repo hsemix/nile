@@ -113,6 +113,10 @@ pub enum NileWindowCommandKind {
     MoveTo = 7,
     /// Resize the window's content area to `a` x `b` logical pixels.
     ResizeTo = 8,
+    /// `a` is 1 to keep the window above other windows, 0 to stop (`window-topmost`, `Window.this.isTopmost`).
+    Topmost = 9,
+    /// `a` is 1 to let the mouse go through the window, 0 to stop (`window-mouse-passthrough`).
+    MousePassthrough = 10,
 }
 
 /// A request from the page (a script, or an element with `role="window-close"` etc.).
@@ -167,6 +171,12 @@ pub struct NileWindowConfig {
     /// `window-material`: 0 none (or unset), 1 blur, 2 acrylic, 3 mica, 4 tabbed, 5 sidebar, 6 hud. Scripts can
     /// change it (`Window.this.material`): read the config again after ticks and apply a new value.
     pub material: i32,
+    /// `window-topmost` (or `window-floating`): keep the window above other windows. Scripts can change it
+    /// (`Window.this.isTopmost`), which arrives as a `NILE_WINDOW_COMMAND_KIND_TOPMOST` request.
+    pub topmost: bool,
+    /// `window-mouse-passthrough`: clicks go to whatever is behind the window (a HUD panel). Changing it from
+    /// script arrives as a `NILE_WINDOW_COMMAND_KIND_MOUSE_PASSTHROUGH` request.
+    pub mouse_passthrough: bool,
 }
 
 /// A function the host provides for scripts: it receives the call's arguments as a JSON array
@@ -710,8 +720,9 @@ pub unsafe extern "C" fn nile_view_window_activated(view: *mut NileView, active:
 
 /// Popups that want an OS window of their own (`popup({window: "popup"})`), as JSON
 /// `[{"id":N,"x":..,"y":..,"w":..,"h":..}]` with the border box in this view's logical coordinates (it
-/// may lie outside the view). Free the string with [`nile_string_free`]. For each: make a frameless,
-/// always-on-top window at that rectangle, draw it with [`nile_view_render_portal`], and send its
+/// may lie outside the view), plus `"topmost"` and `"mouse_passthrough"` booleans (`<popup window-topmost="false">`,
+/// `<popup window-mouse-passthrough>`). Free the string with [`nile_string_free`]. For each: make a frameless
+/// window (always on top unless `topmost` is false; transparent to the mouse if `mouse_passthrough`) at that rectangle, draw it with [`nile_view_render_portal`], and send its
 /// pointer, wheel and key input to this same view with `x`/`y` offset by the rectangle's origin.
 ///
 /// # Safety
@@ -727,7 +738,7 @@ pub unsafe extern "C" fn nile_view_portals(view: *mut NileView) -> *mut c_char {
             .borrow()
             .portals
             .iter()
-            .map(|p| format!("{{\"id\":{},\"x\":{},\"y\":{},\"w\":{},\"h\":{}}}", p.node.0, p.rect.0, p.rect.1, p.rect.2, p.rect.3))
+            .map(|p| format!("{{\"id\":{},\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"topmost\":{},\"mouse_passthrough\":{}}}", p.node.0, p.rect.0, p.rect.1, p.rect.2, p.rect.3, p.topmost, p.passthrough))
             .collect();
         into_c(format!("[{}]", items.join(",")))
     })
@@ -1142,6 +1153,8 @@ pub unsafe extern "C" fn nile_view_window_config(view: *mut NileView, desktop_wi
                 Material::Sidebar => 5,
                 Material::Hud => 6,
             },
+            topmost: c.topmost,
+            mouse_passthrough: c.mouse_passthrough,
         };
         write_out(out, config)
     })
@@ -1177,10 +1190,12 @@ pub unsafe extern "C" fn nile_view_take_window_command(view: *mut NileView, out:
                 WindowCommand::Restore => (K::Restore, 0.0, 0.0),
                 WindowCommand::ToggleMaximize => (K::ToggleMaximize, 0.0, 0.0),
                 WindowCommand::Fullscreen(on) => (K::Fullscreen, f32::from(on), 0.0),
+                WindowCommand::Topmost(on) => (K::Topmost, f32::from(on), 0.0),
+                WindowCommand::MousePassthrough(on) => (K::MousePassthrough, f32::from(on), 0.0),
                 WindowCommand::MoveTo(x, y) => (K::MoveTo, x, y),
                 WindowCommand::ResizeTo(w, h) => (K::ResizeTo, w, h),
                 // Filtered out above.
-                WindowCommand::CloseWith(_) | WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) | WindowCommand::Quit(_) => (K::None, 0.0, 0.0),
+                WindowCommand::CloseWith(_) | WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) | WindowCommand::Modal(_) | WindowCommand::Quit(_) => (K::None, 0.0, 0.0),
             };
             (true, NileWindowCommand { struct_size: size, kind, a, b })
         }
@@ -1192,7 +1207,7 @@ pub unsafe extern "C" fn nile_view_take_window_command(view: *mut NileView, out:
 /// Whether a command concerns the program or other windows (answered by `nile_view_take_window_request`)
 /// rather than this window itself.
 fn is_request(c: &WindowCommand) -> bool {
-    matches!(c, WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) | WindowCommand::Quit(_))
+    matches!(c, WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) | WindowCommand::Modal(_) | WindowCommand::Quit(_))
 }
 
 /// The id this view's window has (what other windows address it by, and `Window.this.id`).
@@ -1216,6 +1231,7 @@ pub unsafe extern "C" fn nile_view_window_id(view: *mut NileView) -> u32 {
 /// - `{"kind":"close","id":3,"value":null}`: close that window (ask [`nile_view_close_request`] first;
 ///   tell its opener with [`nile_view_window_closed`] afterwards).
 /// - `{"kind":"focus","id":3}`: bring it to the front.
+/// - `{"kind":"modal","id":3}`: that window (already open) is now modal to the one that asked.
 /// - `{"kind":"quit","code":0}`: `application.quit()`.
 ///
 /// # Safety
@@ -1239,6 +1255,7 @@ pub unsafe extern "C" fn nile_view_take_window_request(view: *mut NileView) -> *
             Some(WindowCommand::Post { to, json }) => into_c(format!("{{\"kind\":\"post\",\"from\":{id},\"to\":{},\"json\":{json}}}", if to == 0 { id } else { to })),
             Some(WindowCommand::CloseId(to)) => into_c(format!("{{\"kind\":\"close\",\"id\":{},\"value\":null}}", if to == 0 { id } else { to })),
             Some(WindowCommand::FocusId(to)) => into_c(format!("{{\"kind\":\"focus\",\"id\":{}}}", if to == 0 { id } else { to })),
+            Some(WindowCommand::Modal(to)) => into_c(format!("{{\"kind\":\"modal\",\"id\":{to}}}")),
             Some(WindowCommand::Quit(code)) => into_c(format!("{{\"kind\":\"quit\",\"code\":{code}}}")),
             _ => ptr::null_mut(),
         }

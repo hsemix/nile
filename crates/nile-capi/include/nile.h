@@ -144,6 +144,14 @@ typedef enum NileWindowCommandKind {
    * Resize the window's content area to `a` x `b` logical pixels.
    */
   NILE_WINDOW_COMMAND_KIND_RESIZE_TO = 8,
+  /**
+   * `a` is 1 to keep the window above other windows, 0 to stop (`window-topmost`, `Window.this.isTopmost`).
+   */
+  NILE_WINDOW_COMMAND_KIND_TOPMOST = 9,
+  /**
+   * `a` is 1 to let the mouse go through the window, 0 to stop (`window-mouse-passthrough`).
+   */
+  NILE_WINDOW_COMMAND_KIND_MOUSE_PASSTHROUGH = 10,
 } NileWindowCommandKind;
 
 /**
@@ -297,6 +305,16 @@ typedef struct NileWindowConfig {
    * change it (`Window.this.material`): read the config again after ticks and apply a new value.
    */
   int32_t material;
+  /**
+   * `window-topmost` (or `window-floating`): keep the window above other windows. Scripts can change it
+   * (`Window.this.isTopmost`), which arrives as a `NILE_WINDOW_COMMAND_KIND_TOPMOST` request.
+   */
+  bool topmost;
+  /**
+   * `window-mouse-passthrough`: clicks go to whatever is behind the window (a HUD panel). Changing it from
+   * script arrives as a `NILE_WINDOW_COMMAND_KIND_MOUSE_PASSTHROUGH` request.
+   */
+  bool mouse_passthrough;
 } NileWindowConfig;
 
 /**
@@ -546,8 +564,9 @@ bool nile_view_window_activated(struct NileView *view, bool active);
 /**
  * Popups that want an OS window of their own (`popup({window: "popup"})`), as JSON
  * `[{"id":N,"x":..,"y":..,"w":..,"h":..}]` with the border box in this view's logical coordinates (it
- * may lie outside the view). Free the string with [`nile_string_free`]. For each: make a frameless,
- * always-on-top window at that rectangle, draw it with [`nile_view_render_portal`], and send its
+ * may lie outside the view), plus `"topmost"` and `"mouse_passthrough"` booleans (`<popup window-topmost="false">`,
+ * `<popup window-mouse-passthrough>`). Free the string with [`nile_string_free`]. For each: make a frameless
+ * window (always on top unless `topmost` is false; transparent to the mouse if `mouse_passthrough`) at that rectangle, draw it with [`nile_view_render_portal`], and send its
  * pointer, wheel and key input to this same view with `x`/`y` offset by the rectangle's origin.
  *
  * # Safety
@@ -797,6 +816,7 @@ uint32_t nile_view_window_id(struct NileView *view);
  * - `{"kind":"close","id":3,"value":null}`: close that window (ask [`nile_view_close_request`] first;
  *   tell its opener with [`nile_view_window_closed`] afterwards).
  * - `{"kind":"focus","id":3}`: bring it to the front.
+ * - `{"kind":"modal","id":3}`: that window (already open) is now modal to the one that asked.
  * - `{"kind":"quit","code":0}`: `application.quit()`.
  *
  * # Safety

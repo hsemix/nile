@@ -1,0 +1,44 @@
+<html>
+    <head>
+        <title>Test</title>
+        <style></style>
+        <script>
+
+const name = "World";        
+
+document.on("click","button#basic", function(){
+  Window.this.modal(<info>Hello {name}!</info>);
+});
+
+
+function DialogWindow() {
+
+    function close() {
+       this.parentWindow.close("foo"); 
+    }
+
+    return <html window-frame="solid-with-shadow"
+         window-width="max-content"
+         window-height="max-content">
+      <body>
+        <p>Hello {name}!</p>
+        <button onclick={close}>Close</button>
+      </body>
+    </html>;    
+}
+
+document.on("click","button#custom", function(){
+  let r = Window.this.modal({html:<DialogWindow/>});
+  console.log(r);
+});
+
+
+        </script>
+    </head>
+    <body>
+
+<button#basic>Basic test</button>
+<button#custom>Custom window test</button>
+
+    </body>
+</html>

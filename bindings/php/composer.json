@@ -1,5 +1,5 @@
 {
-  "name": "nile/nile",
+  "name": "hsemix/nile-ui",
   "description": "PHP bindings for Nile, the embeddable HTML/CSS/JS UI engine (no webview)",
   "license": "MIT OR Apache-2.0",
   "require": { 

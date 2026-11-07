@@ -8,6 +8,18 @@ the section becomes that version's.
 
 ## Unreleased
 
+### 2026-11-07
+
+#### Changed
+- The PHP package is named `hsemix/nile-ui` (was `nile/nile`), matching `nile-ui` on PyPI and `Nile.UI` on NuGet: the plain name "nile" is taken on several registries. Import names (`import nile`, `using Nile;`, `Nile\App`) are unchanged.
+
+#### Fixed
+- `new Window({ html })` and `Window.this.modal({ html })` accept JSX (a vnode, a function component such as `<Dialog/>`, a fragment): it is turned into markup for the new window. Before, JSX was stringified, so the window showed the component's JavaScript source (or `html,[object Object],body,…`). Event handlers (`onclick={close}`) stay in the opener and the new window reports each event to them: `this.parentWindow.close(v)` closes the dialog, and `this`/`event.target` carry `id`, `name` and `value`. Class components (`extends Element`) throw a clear error. `Element.parentWindow` exists (this window).
+- `Window.this.modal(new Window({...}))` (or a `Window` subclass instance, as in Sciter's docs) makes the already open window modal to the opener; before, it opened a second, empty window. New window request `WindowCommand::Modal` / `{"kind":"modal","id":n}` in `nile_view_take_window_request`.
+
+#### Added
+- `<html window-topmost>` and `<html window-mouse-passthrough>`, and the same two flags on `<popup>` (Sciter's newest window attributes; `window-floating` is accepted for `window-topmost`). `Window.this.isTopmost` / `isMousePassthrough` change them live; popup windows (`popup({window: "popup"})`) honour them, so `<popup window-topmost="false">` can be covered by other windows. In the C API, `NileWindowConfig` gets `topmost` and `mouse_passthrough`, new window requests `NILE_WINDOW_COMMAND_KIND_TOPMOST` / `_MOUSE_PASSTHROUGH` arrive when scripts change them, and the `nile_view_portals` JSON carries both flags per popup. Example: `examples/window-flags.html`.
+
 ### 2026-11-03
 
 #### Added

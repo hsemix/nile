@@ -117,6 +117,10 @@ pub struct WindowConfig {
     pub icon: Option<String>,
     /// `window-remember`: the name its size, position and maximized state are saved under (a bare attribute is "main").
     pub remember: Option<String>,
+    /// `window-topmost` (Sciter's older spelling is `window-floating`): the window stays above other windows.
+    pub topmost: bool,
+    /// `window-mouse-passthrough`: the window is transparent for the mouse (clicks reach what is behind it), for HUD panels.
+    pub mouse_passthrough: bool,
 }
 
 fn size(v: &str) -> Option<Size> {
@@ -187,6 +191,8 @@ impl WindowConfig {
             },
             material: attr("window-material").map_or(Material::Auto, Material::parse),
             icon: attr("window-icon").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            topmost: boolean(attr("window-topmost").or_else(|| attr("window-floating")), false),
+            mouse_passthrough: boolean(attr("window-mouse-passthrough"), false),
             remember: attr("window-remember").map(|s| s.trim()).filter(|s| !s.eq_ignore_ascii_case("false")).map(|s| if s.is_empty() || s.eq_ignore_ascii_case("true") { "main".to_string() } else { s.to_string() }),
         }
     }
@@ -351,6 +357,17 @@ mod tests {
         assert_eq!((c.state, c.frame, c.alignment), (InitialState::Maximized, Frame::SolidShadow, Some(5)));
         assert!(c.shadow() && !config(r#"<html window-frame="solid"></html>"#).shadow());
         assert!(c.frameless());
+    }
+
+    #[test]
+    fn topmost_and_mouse_passthrough_flags() {
+        let c = config("<p>x</p>");
+        assert!(!c.topmost && !c.mouse_passthrough);
+        let c = config(r#"<html window-topmost window-mouse-passthrough="true"></html>"#);
+        assert!(c.topmost && c.mouse_passthrough);
+        // Sciter's older name for the same thing, and an explicit false.
+        assert!(config(r#"<html window-floating></html>"#).topmost);
+        assert!(!config(r#"<html window-topmost="false" window-mouse-passthrough="false"></html>"#).topmost);
     }
 
     #[test]

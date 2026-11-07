@@ -189,6 +189,8 @@ pub enum WindowCommand {
     CloseId(u32),
     /// Bring another window to the front.
     FocusId(u32),
+    /// `Window.this.modal(new Window(...))`: window `id`, already open, becomes modal to this one.
+    Modal(u32),
     /// `application.quit(code)`: end the program with this exit code.
     Quit(i32),
     Minimize,
@@ -197,6 +199,10 @@ pub enum WindowCommand {
     Restore,
     ToggleMaximize,
     Fullscreen(bool),
+    /// Keep the window above (or no longer above) other windows (`window-topmost`, `Window.this.isTopmost`).
+    Topmost(bool),
+    /// Let the mouse go through the window (`window-mouse-passthrough`, `Window.this.isMousePassthrough`).
+    MousePassthrough(bool),
     /// Outer position in screen pixels.
     MoveTo(f32, f32),
     /// Inner size in CSS px.
@@ -313,8 +319,8 @@ pub trait Environment {
     /// Close, move, resize, ... the host window. Embedders without a window ignore it.
     fn window_command(&self, _cmd: WindowCommand) {}
     /// Show the popup element `node` in an OS window of its own (`rect`: its border box in viewport
-    /// coordinates), or take it back.
-    fn portal_set(&self, _node: NodeId, _rect: [f32; 4]) {}
+    /// coordinates), or take it back. `topmost`: the window stays above others; `passthrough`: the mouse goes through it.
+    fn portal_set(&self, _node: NodeId, _rect: [f32; 4], _topmost: bool, _passthrough: bool) {}
     /// `Window.this.print()` / `exportPdf()`: the page should write its PDF to `path` (empty: a temp file) with `title`
     /// and answer with `__printReady(id, path, error)`.
     fn print_request(&self, _id: u32, _path: &str, _title: &str) {}
@@ -871,6 +877,8 @@ fn install_natives(
                 "quit" => WindowCommand::Quit(a as i32),
                 "toggleMaximize" => WindowCommand::ToggleMaximize,
                 "fullscreen" => WindowCommand::Fullscreen(a != 0.0),
+                "topmost" => WindowCommand::Topmost(a != 0.0),
+                "mousePassthrough" => WindowCommand::MousePassthrough(a != 0.0),
                 "moveTo" => WindowCommand::MoveTo(a, b),
                 "resizeTo" => WindowCommand::ResizeTo(a, b),
                 _ => return,
@@ -928,9 +936,9 @@ fn install_natives(
     });
     native!("portalSet", {
         let env = env.clone();
-        move |id: i32, x: f32, y: f32, w: f32, h: f32| {
+        move |id: i32, x: f32, y: f32, w: f32, h: f32, topmost: bool, passthrough: bool| {
             if let Some(n) = node(id) {
-                env.portal_set(n, [x, y, w, h]);
+                env.portal_set(n, [x, y, w, h], topmost, passthrough);
             }
         }
     });
@@ -974,6 +982,10 @@ fn install_natives(
     native!("shareSet", move |k: String, v: String| { SHARE.with(|s| s.borrow_mut().insert(k, v)); });
     native!("shareDel", move |k: String| { SHARE.with(|s| s.borrow_mut().remove(&k)); });
     native!("shareKeys", move || -> String { SHARE.with(|s| s.borrow().keys().cloned().collect::<Vec<_>>().join("\n")) });
+    native!("windowModal", {
+        let env = env.clone();
+        move |id: u32| env.window_command(WindowCommand::Modal(id))
+    });
     native!("windowFocus", {
         let env = env.clone();
         move |id: u32| env.window_command(WindowCommand::FocusId(id))

@@ -25,6 +25,8 @@ Put window attributes on `<html>`:
 | `window-alignment` | Numeric-keypad 1–9; 5 center, 7 top-left |
 | `window-frame` | default/standard, extended, solid/solid-with-shadow, transparent |
 | `window-icon` | Supported image resource for window icon |
+| `window-topmost` | Keep the window above other windows (Sciter's older name `window-floating` works too). Live: `Window.this.isTopmost` |
+| `window-mouse-passthrough` | The window is transparent for the mouse: clicks reach what is behind it, for HUD panels. Live: `Window.this.isMousePassthrough`. Needs a way to close it that is not a click |
 | `window-remember` | Nile extension: remember size, position and maximized state between runs under this name (bare = `main`; `false` = off) |
 
 Extended titlebar content is platform-dependent. Solid frames require your own
@@ -81,8 +83,16 @@ child pages or run [windows.html](../../examples/windows.html).
 
 `closerequest` on Window.this is cancelable; `activate` reports focus changes;
 `close` on an opened handle reports its value. `modal({ ... })` returns a Promise
-and blocks input to the opener until closure; it cannot retrofit an existing
-Window into a modal one. Use `await`, not a synchronous wait loop.
+and blocks input to the opener until closure; `modal(new Window({ ... }))` (or an instance of a subclass)
+makes a window you already opened modal the same way. Use `await`, not a synchronous wait loop.
+
+`html` takes markup, or JSX: `new Window({html: <Dialog/>})` and `modal({html: <Dialog/>})`. Function
+components are called with their props. Event handlers (`onclick={close}`) stay in the opener and the new
+window reports the event to them: the function runs in the opener with `this` (and `event.target`) a
+stand-in for the element that has `parentWindow` (the dialog's window handle, so
+`this.parentWindow.close(value)` works), `id`, `name` and `value`; the event has `type` and `key`. A handler
+sees the opener's variables, not the dialog's DOM. Class components (`extends Element`) are not supported in
+`html` yet.
 
 ```js
 addEventListener('message', event => console.log(event.data));
@@ -152,8 +162,13 @@ Options include explicit x/y, anchorAt/popupAt and supported animation fields.
 handled; command choice, submenu navigation and menu semantics remain JS work.
 
 `takeOff(options)` detaches/moves an element with its own popup handle.
-`isMousePassthrough` writes pointer-events, whose cascade behavior is not implemented; resizable/topmost flags are partial
-compatibility properties, not a general-purpose native window manager.
+A `<popup>` takes the same two flags as attributes: `<popup window-mouse-passthrough>` and `<popup window-topmost="false">`
+(popups in OS windows are above other windows unless told otherwise). The popup handle's `isTopmost` and
+`isMousePassthrough` change them while it is open. For a popup painted inside the page, `isMousePassthrough` sets
+`pointer-events: none`; `isTopmost` only matters for popups in OS windows of their own. Resizable is a partial
+compatibility property, not a general-purpose native window manager. See `examples/window-flags.html`.
+
+Mouse passthrough depends on the system (the window toolkit supports it on Windows, macOS, X11 and Wayland, but only macOS has been tried so far). A click-through window can't be closed by clicking, so give the user a keyboard shortcut or a timer.
 
 Pass `{window:'popup'}` or set `Window.this.popupWindows=true` to use an OS popup
 portal. It remains an element of the owner page, painted into a separate native
