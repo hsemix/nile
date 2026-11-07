@@ -816,6 +816,7 @@ uint32_t nile_view_window_id(struct NileView *view);
  * - `{"kind":"close","id":3,"value":null}`: close that window (ask [`nile_view_close_request`] first;
  *   tell its opener with [`nile_view_window_closed`] afterwards).
  * - `{"kind":"focus","id":3}`: bring it to the front.
+ * - `{"kind":"modal","id":3}`: that window (already open) is now modal to the one that asked.
  * - `{"kind":"quit","code":0}`: `application.quit()`.
  *
  * # Safety

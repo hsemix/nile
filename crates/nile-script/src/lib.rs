@@ -189,6 +189,8 @@ pub enum WindowCommand {
     CloseId(u32),
     /// Bring another window to the front.
     FocusId(u32),
+    /// `Window.this.modal(new Window(...))`: window `id`, already open, becomes modal to this one.
+    Modal(u32),
     /// `application.quit(code)`: end the program with this exit code.
     Quit(i32),
     Minimize,
@@ -980,6 +982,10 @@ fn install_natives(
     native!("shareSet", move |k: String, v: String| { SHARE.with(|s| s.borrow_mut().insert(k, v)); });
     native!("shareDel", move |k: String| { SHARE.with(|s| s.borrow_mut().remove(&k)); });
     native!("shareKeys", move || -> String { SHARE.with(|s| s.borrow().keys().cloned().collect::<Vec<_>>().join("\n")) });
+    native!("windowModal", {
+        let env = env.clone();
+        move |id: u32| env.window_command(WindowCommand::Modal(id))
+    });
     native!("windowFocus", {
         let env = env.clone();
         move |id: u32| env.window_command(WindowCommand::FocusId(id))

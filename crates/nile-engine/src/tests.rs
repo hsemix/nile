@@ -5282,6 +5282,53 @@ fn popup_windows_carry_topmost_and_mouse_passthrough_flags() {
 }
 
 #[test]
+fn window_html_can_be_jsx_and_components() {
+    let (mut p, path) = page(r#"<body><script>
+        const name = "World <3";
+        function Dialog(props, kids) { return <html window-frame="solid-with-shadow"><body><p class={{big: true, off: false}}>Hello {name}!</p><input value="a&b" disabled/>{kids}<button onclick={function () { this.parentWindow.close('foo'); }}>Close</button></body></html>; }
+        </script></body>"#, "window-html-jsx");
+    let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+    let take = |p: &Page| std::mem::take(&mut p.view.borrow_mut().window_requests);
+    let id: u32 = ev(&mut p, "globalThis.w = new Window({ html: <Dialog><i>x</i></Dialog> }); w._id").parse().unwrap();
+    let Some(WindowCommand::Open(spec)) = take(&p).into_iter().next() else { panic!("an Open request") };
+    assert!(spec.get("html").unwrap().starts_with(
+        r#"<html window-frame="solid-with-shadow"><body><p class="big">Hello World &lt;3!</p><input value="a&amp;b" disabled><i>x</i><button data-nile-on-click="1">Close</button><script>"#
+    ));
+    // The handler stays here; the dialog's script reports the click and the function runs with `this.parentWindow`.
+    assert!(spec.get("html").unwrap().contains(r#"var T=["click"]"#));
+    p.window_message(id, r#"{"__nileHandler":1,"type":"click","id":"","name":null}"#);
+    assert_eq!(take(&p), [WindowCommand::CloseId(id)]);
+    // And the dialog side really reports a click: load the generated page with a stand-in parent.
+    let html = spec.get("html").unwrap().to_string();
+    let inner = &html[html.find("<body>").unwrap() + 6..html.find("</body>").unwrap()];
+    let (mut child, child_path) = page(
+        &format!("<body><script>Object.defineProperty(Window, 'this', {{ get() {{ return {{ parent: {{ postMessage(m) {{ globalThis.got = JSON.stringify(m); }} }} }}; }} }});</script>{inner}</body>"),
+        "window-html-child",
+    );
+    ev(&mut child, "document.$('button').click()");
+    assert_eq!(ev(&mut child, "globalThis.got"), r#"{"__nileHandler":1,"type":"click","value":"","id":"","name":null}"#);
+    let _ = std::fs::remove_file(child_path);
+    // Plain strings still pass through untouched.
+    ev(&mut p, "Window.this.modal({ html: '<html><body>hi</body></html>' })");
+    let Some(WindowCommand::Open(spec)) = take(&p).into_iter().next() else { panic!("an Open request") };
+    assert_eq!(spec.get("html"), Some("<html><body>hi</body></html>"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn modal_accepts_a_window_that_is_already_open() {
+    let (mut p, path) = page("<body></body>", "modal-existing");
+    let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+    let take = |p: &Page| std::mem::take(&mut p.view.borrow_mut().window_requests);
+    let id: u32 = ev(&mut p, "class Tool extends Window { constructor() { super({ html: '<p>x</p>', type: Window.TOOL_WINDOW }); } } globalThis.t = new Tool(); Window.this.modal(t); t._id").parse().unwrap();
+    // One window is opened (not two) and then made modal.
+    assert_eq!(take(&p).iter().filter(|c| matches!(c, WindowCommand::Open(_))).count(), 1);
+    ev(&mut p, "Window.this.modal(t)");
+    assert_eq!(take(&p), [WindowCommand::Modal(id)]);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn window_this_topmost_and_mouse_passthrough_are_live() {
     let (mut p, path) = page(r#"<html window-topmost><body>x</body></html>"#, "window-flags");
     let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();

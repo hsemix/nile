@@ -55,6 +55,8 @@ enum Action {
     /// Close window `id` (0: the window that asked) with a result.
     Close { id: u32, value: String },
     Focus(u32),
+    /// An already open window becomes modal to the one that opened it.
+    Modal(u32),
     /// `application.quit(code)`.
     Quit(i32),
 }
@@ -244,6 +246,7 @@ impl Win {
                 WindowCommand::Open(spec) => actions.push(Action::Open(spec)),
                 WindowCommand::Post { to, json } => actions.push(Action::Post { from: self.id, to: if to == 0 { self.id } else { to }, json }),
                 WindowCommand::FocusId(id) => actions.push(Action::Focus(if id == 0 { self.id } else { id })),
+                WindowCommand::Modal(id) => actions.push(Action::Modal(id)),
                 WindowCommand::Quit(code) => actions.push(Action::Quit(code)),
                 WindowCommand::Minimize => window.set_minimized(true),
                 WindowCommand::Maximize => window.set_maximized(true),
@@ -914,6 +917,12 @@ impl App {
                 }
                 Action::Focus(id) => {
                     if let Some(i) = self.index(id) {
+                        self.wins[i].window.focus_window();
+                    }
+                }
+                Action::Modal(id) => {
+                    if let Some(i) = self.index(id) {
+                        self.wins[i].modal = true;
                         self.wins[i].window.focus_window();
                     }
                 }

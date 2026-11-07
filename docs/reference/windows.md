@@ -83,8 +83,16 @@ child pages or run [windows.html](../../examples/windows.html).
 
 `closerequest` on Window.this is cancelable; `activate` reports focus changes;
 `close` on an opened handle reports its value. `modal({ ... })` returns a Promise
-and blocks input to the opener until closure; it cannot retrofit an existing
-Window into a modal one. Use `await`, not a synchronous wait loop.
+and blocks input to the opener until closure; `modal(new Window({ ... }))` (or an instance of a subclass)
+makes a window you already opened modal the same way. Use `await`, not a synchronous wait loop.
+
+`html` takes markup, or JSX: `new Window({html: <Dialog/>})` and `modal({html: <Dialog/>})`. Function
+components are called with their props. Event handlers (`onclick={close}`) stay in the opener and the new
+window reports the event to them: the function runs in the opener with `this` (and `event.target`) a
+stand-in for the element that has `parentWindow` (the dialog's window handle, so
+`this.parentWindow.close(value)` works), `id`, `name` and `value`; the event has `type` and `key`. A handler
+sees the opener's variables, not the dialog's DOM. Class components (`extends Element`) are not supported in
+`html` yet.
 
 ```js
 addEventListener('message', event => console.log(event.data));

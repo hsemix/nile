@@ -1195,7 +1195,7 @@ pub unsafe extern "C" fn nile_view_take_window_command(view: *mut NileView, out:
                 WindowCommand::MoveTo(x, y) => (K::MoveTo, x, y),
                 WindowCommand::ResizeTo(w, h) => (K::ResizeTo, w, h),
                 // Filtered out above.
-                WindowCommand::CloseWith(_) | WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) | WindowCommand::Quit(_) => (K::None, 0.0, 0.0),
+                WindowCommand::CloseWith(_) | WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) | WindowCommand::Modal(_) | WindowCommand::Quit(_) => (K::None, 0.0, 0.0),
             };
             (true, NileWindowCommand { struct_size: size, kind, a, b })
         }
@@ -1207,7 +1207,7 @@ pub unsafe extern "C" fn nile_view_take_window_command(view: *mut NileView, out:
 /// Whether a command concerns the program or other windows (answered by `nile_view_take_window_request`)
 /// rather than this window itself.
 fn is_request(c: &WindowCommand) -> bool {
-    matches!(c, WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) | WindowCommand::Quit(_))
+    matches!(c, WindowCommand::Open(_) | WindowCommand::Post { .. } | WindowCommand::CloseId(_) | WindowCommand::FocusId(_) | WindowCommand::Modal(_) | WindowCommand::Quit(_))
 }
 
 /// The id this view's window has (what other windows address it by, and `Window.this.id`).
@@ -1231,6 +1231,7 @@ pub unsafe extern "C" fn nile_view_window_id(view: *mut NileView) -> u32 {
 /// - `{"kind":"close","id":3,"value":null}`: close that window (ask [`nile_view_close_request`] first;
 ///   tell its opener with [`nile_view_window_closed`] afterwards).
 /// - `{"kind":"focus","id":3}`: bring it to the front.
+/// - `{"kind":"modal","id":3}`: that window (already open) is now modal to the one that asked.
 /// - `{"kind":"quit","code":0}`: `application.quit()`.
 ///
 /// # Safety
@@ -1254,6 +1255,7 @@ pub unsafe extern "C" fn nile_view_take_window_request(view: *mut NileView) -> *
             Some(WindowCommand::Post { to, json }) => into_c(format!("{{\"kind\":\"post\",\"from\":{id},\"to\":{},\"json\":{json}}}", if to == 0 { id } else { to })),
             Some(WindowCommand::CloseId(to)) => into_c(format!("{{\"kind\":\"close\",\"id\":{},\"value\":null}}", if to == 0 { id } else { to })),
             Some(WindowCommand::FocusId(to)) => into_c(format!("{{\"kind\":\"focus\",\"id\":{}}}", if to == 0 { id } else { to })),
+            Some(WindowCommand::Modal(to)) => into_c(format!("{{\"kind\":\"modal\",\"id\":{to}}}")),
             Some(WindowCommand::Quit(code)) => into_c(format!("{{\"kind\":\"quit\",\"code\":{code}}}")),
             _ => ptr::null_mut(),
         }

@@ -1586,6 +1586,11 @@
     modal(arg) {
       // modal({ url, ... }) opens a dialog window; it returns a Promise of what the dialog passes to
       // `window.close(value)` (the script can't block, unlike Sciter's).
+      if (arg instanceof Window) {
+        // An already constructed window (`new Window(...)`, or a subclass) becomes modal to this one.
+        N.windowModal(arg._id);
+        return arg.closed;
+      }
       if (arg && !Array.isArray(arg) && typeof arg === "object") {
         const w = Object.create(Window.prototype);
         openWindow(w, { type: Window.DIALOG_WINDOW, ...arg }, true);
@@ -1688,7 +1693,67 @@
     }
     return w;
   };
+  // `html:` may be JSX (a vnode, a component such as `<Dialog/>`, or a list of them): turn it into
+  // markup text. Function components are called with their props; handlers (functions) and `ref`
+  // can't cross into another window's script and are left out.
+  const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]);
+  const escText = (t) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const escAttr = (t) => escText(t).replace(/"/g, "&quot;");
+  function markup(x, ctx) {
+    if (x == null || x === false || x === true) return "";
+    if (typeof x === "string" || typeof x === "number") return escText(x);
+    if (x instanceof Node) return x.nodeType === 1 ? x.outerHTML : escText(x.textContent || "");
+    if (Array.isArray(x) && x.$v === true) {
+      const [tag, attrs, kids] = x;
+      const inner = () => markup(kids, ctx);
+      if (tag === JSX.Fragment) return inner();
+      if (typeof tag === "function") {
+        if (tag.prototype instanceof Element) throw new Error("Window html: class components (extends Element) are not supported yet");
+        const flat = (k, out = []) => { if (Array.isArray(k) && k.$v !== true) k.forEach((y) => flat(y, out)); else if (k != null && k !== false) out.push(k); return out; };
+        return markup(tag(attrs || {}, flat(kids), null), ctx);
+      }
+      let a = "";
+      for (const [k, v] of Object.entries(attrs || {})) {
+        if (typeof v === "function" && /^on[a-z]+$/i.test(k) && ctx) {
+          // A handler can't be sent; it stays here and the new window reports the event (see `handlerBridge`).
+          const type = k.slice(2).toLowerCase();
+          ctx.types.add(type);
+          a += " data-nile-on-" + type + '="' + ctx.fns.push(v) + '"';
+          continue;
+        }
+        if (v == null || v === false || typeof v === "function" || k === "ref") continue;
+        let val = v;
+        if (k === "class" && typeof v === "object") val = Array.isArray(v) ? v.join(" ") : Object.keys(v).filter((c) => v[c]).join(" ");
+        else if (k === "style" && typeof v === "object") val = Object.entries(v).map(([n, c]) => n + ":" + c).join(";");
+        a += v === true ? " " + k : " " + k + '="' + escAttr(val) + '"';
+      }
+      return VOID.has(tag) ? "<" + tag + a + ">" : "<" + tag + a + ">" + inner() + "</" + tag + ">";
+    }
+    if (Array.isArray(x)) return x.map((y) => markup(y, ctx)).join("");
+    return escText(x);
+  }
+  // Handlers of JSX passed as `html:` live here, by the id of the window that shows them. The window gets a
+  // small script that reports each event (type, key, value, the element's id) to this one, which calls
+  // the function with `this` set to a stand-in for the element: it has `parentWindow` (so
+  // `this.parentWindow.close(v)` works), `id`, `name` and `value`, and the event has
+  // `type`, `key`, `target`. The handler runs in the opener, so it sees the opener's variables, not the
+  // dialog's DOM: read what you need from the event or `value`.
+  const remoteHandlers = new Map();
+  function handlerBridge(html, bridge) {
+    if (!bridge.fns.length) return html;
+    const types = JSON.stringify([...bridge.types]);
+    const script = "<script>(function(){var T=" + types + ";T.forEach(function(t){document.addEventListener(t,function(e){" +
+      "for(var el=e.target;el&&el.getAttribute;el=el.parentElement){var h=el.getAttribute('data-nile-on-'+t);" +
+      "if(h){var p=Window.this.parent;if(p)p.postMessage({__nileHandler:+h,type:t,key:e.key,value:el.value,id:el.id,name:el.getAttribute('name')});}}},true);});})();</" + "script>";
+    const at = html.lastIndexOf("</body>");
+    return at < 0 ? html + script : html.slice(0, at) + script + html.slice(at);
+  }
   function openWindow(w, p, modal) {
+    let bridge = null;
+    if (p.html != null && typeof p.html !== "string") {
+      bridge = { fns: [], types: new Set() };
+      p = { ...p, html: handlerBridge(markup(p.html, bridge), bridge) };
+    }
     const q = [];
     const put = (k, v) => { if (v !== undefined && v !== null) q.push(encodeURIComponent(k) + "=" + encodeURIComponent(String(v))); };
     for (const k of ["url", "html", "caption", "x", "y", "width", "height", "alignment", "screen", "client"]) put(k, p[k]);
@@ -1700,6 +1765,7 @@
     Object.assign(w, { _id: id, _valid: true, _listeners: {}, _parent: thisWindow, _parameters: p.parameters, _caption: p.caption });
     w.closed = new Promise((resolve) => { w._resolve = resolve; });
     known.set(id, w);
+    if (bridge && bridge.fns.length) remoteHandlers.set(id, bridge.fns);
     return w;
   }
   const fireWindow = (w, type, props) => {
@@ -1713,6 +1779,13 @@
     __windowActivate: { value: (on) => { active = !!on; fireWindow(thisWindow, "activate", { reason: on ? 1 : 0 }); } },
     __windowMessage: {
       value(from, data) {
+        if (data && typeof data === "object" && data.__nileHandler !== undefined && remoteHandlers.has(from)) {
+          const fn = remoteHandlers.get(from)[data.__nileHandler - 1];
+          const target = { parentWindow: refWindow(from), id: data.id || "", name: data.name || "", value: data.value };
+          const ev = { type: data.type, key: data.key, target, currentTarget: target, preventDefault() {}, stopPropagation() {} };
+          if (fn) fn.call(target, ev, target);
+          return;
+        }
         const e = new Event("message");
         e.data = data; e.origin = ""; e.source = refWindow(from);
         g.dispatchEvent(e);
@@ -1721,6 +1794,7 @@
     // A window this one opened has closed.
     __windowClosed: {
       value(id, value) {
+        remoteHandlers.delete(id);
         const w = known.get(id);
         if (!w) return;
         w._valid = false;
@@ -1964,6 +2038,8 @@
       }
     }, ms + 30);
   }
+  // The window an element is shown in (here always this window; a handler from a JSX dialog gets the dialog's).
+  Object.defineProperty(Element.prototype, "parentWindow", { configurable: true, get() { return thisWindow; } });
   Element.prototype.popup = function (content, params = {}) {
     const anchor = this;
     if (suppressed === anchor) { suppressed = null; return undefined; }

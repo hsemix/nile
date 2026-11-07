@@ -492,6 +492,7 @@ the view whose [`nile_view_window_id`] is `to`.
 - `{"kind":"close","id":3,"value":null}`: close that window (ask [`nile_view_close_request`] first;
 tell its opener with [`nile_view_window_closed`] afterwards).
 - `{"kind":"focus","id":3}`: bring it to the front.
+- `{"kind":"modal","id":3}`: that window (already open) is now modal to the one that asked: block input to its opener until it closes.
 - `{"kind":"quit","code":0}`: `application.quit()`.
 
 **Safety**
