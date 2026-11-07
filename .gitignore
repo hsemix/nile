@@ -3,7 +3,9 @@ target/
 .vscode/
 CLAUDE.md
 notes.txt
+# examples/retail-counter/
 examples/retail-counter/__pycache__/
 *.pyc
 bin/
 obj/
+examples/school-manager/
