@@ -20,7 +20,8 @@ use windows_sys::Win32::{
         Shell::{DefSubclassProc, SetWindowSubclass},
         WindowsAndMessaging::{
             GetWindowLongW, IsZoomed, PostMessageW, SetWindowLongW, SetWindowPos, GWL_STYLE, HTMAXBUTTON, SC_MAXIMIZE, SC_RESTORE, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-            SWP_NOSIZE, SWP_NOZORDER, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_STYLECHANGING, WM_SYSCOMMAND, WS_CAPTION,
+            SWP_NOSIZE, SWP_NOZORDER, WM_NCACTIVATE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_NCPAINT, WM_STYLECHANGING, WM_SYSCOMMAND,
+            WS_CAPTION,
         },
     },
 };
@@ -98,6 +99,13 @@ unsafe extern "system" fn proc(hwnd: isize, msg: u32, wparam: usize, lparam: isi
             // SAFETY: for this message `lparam` points at the STYLESTRUCT the system is about to apply.
             unsafe { (*(lparam as *mut STYLESTRUCT)).styleNew &= !WS_CAPTION };
         }
+        // The page is the whole window, so nothing may be painted outside it. Whenever the system draws the
+        // frame itself it draws a classic title bar and sizing border over the page: on show, on activation
+        // (`WM_NCACTIVATE` repaints the caption) and on `WM_NCPAINT`, until the next full repaint of the
+        // page wipes it (a second or two after the window opened). Painting is ours alone.
+        WM_NCPAINT => return 0,
+        // `-1` as `lparam` tells the default handler to change the active state without repainting the frame.
+        WM_NCACTIVATE => return unsafe { DefSubclassProc(hwnd, msg, wparam, -1) },
         WM_NCHITTEST => {
             if let Some((l, t, r, b)) = rect_of(hwnd) {
                 // The point comes in screen coordinates, packed as two signed 16-bit halves.
