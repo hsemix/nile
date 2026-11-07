@@ -17,6 +17,7 @@ pub mod frames;
 pub mod menus;
 pub mod paged;
 mod inputs;
+mod keystate;
 mod net;
 pub mod window;
 
@@ -293,6 +294,8 @@ pub struct Portal {
     pub topmost: bool,
     /// The mouse goes through the window (`<popup window-mouse-passthrough>`).
     pub passthrough: bool,
+    /// The window has an alpha channel (`<popup window-frame="transparent">`): the popup's own pixels over nothing.
+    pub transparent: bool,
 }
 
 /// Style, layout and scroll state. Shared (`Rc<RefCell<..>>`) between the page
@@ -783,6 +786,9 @@ pub struct FileRequest {
 }
 
 impl Environment for Env {
+    fn key_state(&self, name: &str) -> Option<bool> {
+        keystate::key_state(name)
+    }
     fn bounding_rect(&self, node: NodeId) -> Option<[f32; 4]> {
         let mut v = self.0.borrow_mut();
         v.sync();
@@ -979,12 +985,12 @@ impl Environment for Env {
         self.0.borrow_mut().print_requests.push((id, path.to_string(), title.to_string()));
     }
 
-    fn portal_set(&self, node: NodeId, rect: [f32; 4], topmost: bool, passthrough: bool) {
+    fn portal_set(&self, node: NodeId, rect: [f32; 4], topmost: bool, passthrough: bool, transparent: bool) {
         let mut v = self.0.borrow_mut();
         let rect = (rect[0], rect[1], rect[2], rect[3]);
         match v.portals.iter_mut().find(|p| p.node == node) {
-            Some(p) => (p.rect, p.topmost, p.passthrough) = (rect, topmost, passthrough),
-            None => v.portals.push(Portal { node, rect, topmost, passthrough }),
+            Some(p) => (p.rect, p.topmost, p.passthrough, p.transparent) = (rect, topmost, passthrough, transparent),
+            None => v.portals.push(Portal { node, rect, topmost, passthrough, transparent }),
         }
         // The popup is no longer painted here: the cached layout is still right, the paint must run.
         v.scroll_dirty = true;
@@ -4305,7 +4311,12 @@ impl Page {
             self.layout(lw, lh);
             self.update_frames();
         }
-        let bg = if portal.is_some() { Color::WHITE } else { self.canvas_background() };
+        let transparent = portal.is_some_and(|(n, _)| self.view.borrow().portals.iter().any(|p| p.node == n && p.transparent));
+        let bg = match portal {
+            Some(_) if transparent => Color::TRANSPARENT,
+            Some(_) => Color::WHITE,
+            None => self.canvas_background(),
+        };
         let caret = self.caret_for_paint();
         let selection = self.selection_for_paint();
         let dom_caret = self.dom_caret_for_paint();

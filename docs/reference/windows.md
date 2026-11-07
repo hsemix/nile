@@ -164,7 +164,7 @@ handled; command choice, submenu navigation and menu semantics remain JS work.
 `takeOff(options)` detaches/moves an element with its own popup handle.
 A `<popup>` takes the same two flags as attributes: `<popup window-mouse-passthrough>` and `<popup window-topmost="false">`
 (popups in OS windows are above other windows unless told otherwise). The popup handle's `isTopmost` and
-`isMousePassthrough` change them while it is open. For a popup painted inside the page, `isMousePassthrough` sets
+`isMousePassthrough` change them while it is open. `<popup window-frame="transparent">` gives a popup in an OS window an alpha channel, so only what the popup paints shows (a balloon's arrow, rounded corners): the window is exactly the popup's border box, so leave room for the arrow in the popup's padding and draw the bubble in an element inside it (`examples/capslock-warning.html`). For a popup painted inside the page, `isMousePassthrough` sets
 `pointer-events: none`; `isTopmost` only matters for popups in OS windows of their own. Resizable is a partial
 compatibility property, not a general-purpose native window manager. See `examples/window-flags.html`.
 

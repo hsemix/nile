@@ -525,6 +525,17 @@ pub enum Cursor {
     None,
 }
 
+/// Sciter's `content-horizontal-align` / `content-vertical-align` (`horizontal-align`, and `vertical-align` on
+/// a block): where the element's content sits inside it. Left and right are start and end (no `direction` yet).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ContentAlign {
+    #[default]
+    Normal,
+    Start,
+    Center,
+    End,
+}
+
 /// `vertical-align`; only table cells act on it.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum VerticalAlign {
@@ -647,6 +658,9 @@ pub struct ComputedStyle {
     pub table_fixed: bool,
     /// `vertical-align` for table cells.
     pub vertical_align: VerticalAlign,
+    /// Sciter `horizontal-align` / `content-horizontal-align`, and `content-vertical-align` or a block's `vertical-align`.
+    pub content_h: ContentAlign,
+    pub content_v: ContentAlign,
     /// `width: fit-content | max-content | min-content` (the box shrinks to its content, up to the
     /// space available; `min-content` is treated like `max-content`).
     pub width_fit: bool,
@@ -860,6 +874,8 @@ impl Default for ComputedStyle {
             scrollbar_color: None,
             table_fixed: false,
             vertical_align: VerticalAlign::Baseline,
+            content_h: ContentAlign::Normal,
+            content_v: ContentAlign::Normal,
             cursor: Cursor::Auto,
             visible: true,
             pointer_events: true,
@@ -2447,6 +2463,27 @@ fn sciter_flow(style: &mut ComputedStyle, parent: &ComputedStyle, cell: usize) {
             style.align_items = Align::Start;
         }
     }
+    // Sciter's content alignment: the children (or the text) sit at the start, middle or end of the box.
+    // A plain block becomes a column for it; a flow row/column maps the two onto its axes.
+    if (style.content_h != ContentAlign::Normal || style.content_v != ContentAlign::Normal) && (style.display == Display::Block || (style.display == Display::Inline && parent.display == Display::Flex)) && !style.position.out_of_flow() {
+        style.display = Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+    }
+    if style.display == Display::Flex && (style.content_h != ContentAlign::Normal || style.content_v != ContentAlign::Normal) {
+        let to = |a: ContentAlign| match a {
+            ContentAlign::Normal => Align::Normal,
+            ContentAlign::Start => Align::Start,
+            ContentAlign::Center => Align::Center,
+            ContentAlign::End => Align::End,
+        };
+        let (main, cross) = if matches!(style.flex_direction, FlexDirection::Row | FlexDirection::RowReverse) { (style.content_h, style.content_v) } else { (style.content_v, style.content_h) };
+        if main != ContentAlign::Normal {
+            style.justify_content = to(main);
+        }
+        if cross != ContentAlign::Normal {
+            style.align_items = to(cross);
+        }
+    }
     let row = match (parent.display, parent.flow) {
         (Display::Flex, Flow::Default) => Some(matches!(parent.flex_direction, FlexDirection::Row | FlexDirection::RowReverse)),
         (Display::Flex, f) => Some(matches!(f, Flow::Horizontal | Flow::HorizontalWrap)),
@@ -3921,6 +3958,22 @@ fn apply(s: &mut ComputedStyle, d: &Declaration, parent_font_size: f32) {
                 s.flex_basis = basis.unwrap_or(Length::Px(0.0));
             }
         },
+        "horizontal-align" | "content-horizontal-align" => {
+            s.content_h = match first.and_then(Value::ident) {
+                Some("left" | "start") => ContentAlign::Start,
+                Some("center") => ContentAlign::Center,
+                Some("right" | "end") => ContentAlign::End,
+                _ => s.content_h,
+            }
+        }
+        "content-vertical-align" => {
+            s.content_v = match first.and_then(Value::ident) {
+                Some("top") => ContentAlign::Start,
+                Some("middle") => ContentAlign::Center,
+                Some("bottom") => ContentAlign::End,
+                _ => s.content_v,
+            }
+        }
         "justify-content" => s.justify_content = first.and_then(align).unwrap_or(s.justify_content),
         "align-items" => s.align_items = first.and_then(align).unwrap_or(s.align_items),
         _ => {
@@ -4449,6 +4502,26 @@ mod tests {
         assert_eq!(f("g"), (1.0, 0.0, Length::Px(0.0)));
         assert_eq!(f("h"), (3.0, 1.0, Length::Auto));
         assert_eq!(f("i"), (0.0, 0.0, Length::Auto));
+    }
+
+    #[test]
+    fn content_alignment_maps_onto_flex_axes() {
+        let doc = Document::parse(
+            r#"<div id="a" style="horizontal-align: right"></div>
+               <div id="b" style="vertical-align: middle; horizontal-align: center"></div>
+               <div id="c" style="flow: horizontal; horizontal-align: right; vertical-align: bottom"></div>
+               <span id="d" style="vertical-align: middle"></span><table><tr><td id="e" style="vertical-align: middle">x</td></tr></table>"#,
+        );
+        let styles = compute_styles(&doc);
+        let s = |id: &str| style_of(&doc, &styles, id);
+        // A block turns into a column: horizontal is the cross axis, vertical the main axis.
+        assert_eq!((s("a").display, s("a").flex_direction, s("a").align_items), (Display::Flex, FlexDirection::Column, Align::End));
+        assert_eq!((s("b").justify_content, s("b").align_items), (Align::Center, Align::Center));
+        // A flow row swaps them.
+        assert_eq!((s("c").justify_content, s("c").align_items), (Align::End, Align::End));
+        // Inline boxes and table cells keep the standard `vertical-align`.
+        assert_eq!(s("d").display, Display::Inline);
+        assert_eq!((s("e").display, s("e").vertical_align), (Display::TableCell, VerticalAlign::Middle));
     }
 
     #[test]

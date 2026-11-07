@@ -2503,6 +2503,7 @@ dependencies = [
  "skia-safe",
  "tempfile",
  "ureq",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

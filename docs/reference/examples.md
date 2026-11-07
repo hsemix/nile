@@ -79,6 +79,7 @@ browser compatibility.
 | [optgroup.html](../../examples/optgroup.html) | Grouped select options and disabled headings |
 | [pagination.html](../../examples/pagination.html) | Page breaks, tables and PDF |
 | [popups.html](../../examples/popups.html) | Popup positioning, context menus and detached portals |
+| [capslock-warning.html](../../examples/capslock-warning.html) | A Caps Lock balloon under a password field (`Event.keyState("CapsLock")`, a popup in an OS window of its own) |
 | [window-flags.html](../../examples/window-flags.html) | `window-topmost` and `window-mouse-passthrough` on the window and on a popup, toggled live |
 | [position.html](../../examples/position.html) | Relative/absolute positioning |
 | [print-layout.html](../../examples/print-layout.html) | Paged on-screen editable document |
@@ -116,6 +117,7 @@ browser compatibility.
 | [serial.html](../../examples/serial.html) | `@nile/serial` terminal: list ports, open, send, receive, toggle DTR |
 | [mail.html](../../examples/mail.html) | `@nile/mail` form: SMTP settings, message source preview, password kept in `@nile/keychain` |
 | [sciter-flow.html](../../examples/sciter-flow.html) | Sciter layout CSS: `flow:`, `*` units, `size:`, `dip`, `flow: grid(...)`, tag shortcuts |
+| [sciter-align.html](../../examples/sciter-align.html) | Sciter `horizontal-align` / `content-horizontal-align` and `content-vertical-align` (`vertical-align` on a block): where a box's content sits inside it, e.g. right-aligned form labels |
 | [sciter-paths.html](../../examples/sciter-paths.html) | Sciter `url(path:...)` images, `foreground-image`, `var(name)`, window constants |
 | [windows.html](../../examples/windows.html) | Multiple windows, modal result and shared messages |
 | [word-ribbon.html](../../examples/word-ribbon.html) | Word-style editing ribbon |

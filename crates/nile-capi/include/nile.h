@@ -564,7 +564,7 @@ bool nile_view_window_activated(struct NileView *view, bool active);
 /**
  * Popups that want an OS window of their own (`popup({window: "popup"})`), as JSON
  * `[{"id":N,"x":..,"y":..,"w":..,"h":..}]` with the border box in this view's logical coordinates (it
- * may lie outside the view), plus `"topmost"` and `"mouse_passthrough"` booleans (`<popup window-topmost="false">`,
+ * may lie outside the view), plus `"topmost"`, `"mouse_passthrough"` and `"transparent"` booleans (`<popup window-topmost="false">`,
  * `<popup window-mouse-passthrough>`). Free the string with [`nile_string_free`]. For each: make a frameless
  * window (always on top unless `topmost` is false; transparent to the mouse if `mouse_passthrough`) at that rectangle, draw it with [`nile_view_render_portal`], and send its
  * pointer, wheel and key input to this same view with `x`/`y` offset by the rectangle's origin.

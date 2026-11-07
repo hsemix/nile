@@ -175,6 +175,10 @@ struct PortalWin {
     rect: (f32, f32, f32, f32),
     topmost: bool,
     passthrough: bool,
+    /// The window has an alpha channel (`<popup window-frame="transparent">`).
+    transparent: bool,
+    #[cfg(windows)]
+    alpha: crate::alpha_win::Presenter,
 }
 
 impl Win {
@@ -1098,6 +1102,7 @@ impl App {
                 None => {
                     let attrs = Window::default_attributes()
                         .with_decorations(false)
+                        .with_transparent(w.transparent)
                         .with_resizable(false)
                         .with_active(false)
                         .with_window_level(if w.topmost { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal })
@@ -1111,7 +1116,7 @@ impl App {
                         let _ = window.set_cursor_hittest(false);
                     }
                     window.request_redraw();
-                    self.portals.push(PortalWin { owner, node: w.node, window, surface, rect: w.rect, topmost: w.topmost, passthrough: w.passthrough });
+                    self.portals.push(PortalWin { owner, node: w.node, window, surface, rect: w.rect, topmost: w.topmost, passthrough: w.passthrough, transparent: w.transparent, #[cfg(windows)] alpha: Default::default() });
                 }
             }
         }
@@ -1128,7 +1133,14 @@ impl App {
                 let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
                 let (scale, node) = (portal.window.scale_factor() as f32, portal.node);
                 let page = &mut self.wins[oi].page;
-                present(&mut portal.surface, (w, h), false, |bytes| page.paint_portal(bytes, size.width, size.height, scale, node, (rect.0, rect.1)));
+                #[cfg(windows)]
+                if portal.transparent {
+                    if let Some(hwnd) = owner_hwnd(&portal.window) {
+                        portal.alpha.present(hwnd, size.width, size.height, |bytes| page.paint_portal(bytes, size.width, size.height, scale, node, (rect.0, rect.1)));
+                        return;
+                    }
+                }
+                present(&mut portal.surface, (w, h), portal.transparent, |bytes| page.paint_portal(bytes, size.width, size.height, scale, node, (rect.0, rect.1)));
                 return;
             }
             WindowEvent::CursorMoved { position, .. } => {

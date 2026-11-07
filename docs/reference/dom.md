@@ -100,7 +100,8 @@ properties and supported inline event attributes are also accepted.
 | `Event` | `type`, `target`, `currentTarget`, `eventPhase`, `bubbles`, `cancelable`, `defaultPrevented`, `timeStamp` |
 | Cancellation | `preventDefault`, `stopPropagation`, `stopImmediatePropagation` |
 | `MouseEvent` | `clientX/Y`, `screenX/Y`, `button/buttons`, modifier flags and related fields from supported input |
-| `KeyboardEvent` | `key`, `code`, modifier flags and repeat-related fields where supplied |
+| `KeyboardEvent` | `key`, `code`, modifier flags and repeat-related fields where supplied; `getModifierState(name)` (also on `MouseEvent`) |
+| `Event.keyState(name)` | Sciter's static: `"CapsLock"`/`"NumLock"`/`"ScrollLock"` on or off, or `"Shift"`/`"Control"`/`"Alt"`/`"Meta"` held. The system's answer on macOS and Windows (read at any time, so it works on focus); on Linux `undefined` until a typed letter shows Caps Lock's state, then a guess. See [capslock-warning.html](../../examples/capslock-warning.html) |
 | `CustomEvent` | `detail` payload |
 | `FocusEvent` / `UIEvent` | Event subclasses; fields are a partial browser implementation |
 
