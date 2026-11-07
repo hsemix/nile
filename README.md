@@ -202,7 +202,7 @@ Next, in rough order:
 3. **GPU surfaces**: Skia on Metal, D3D and Vulkan instead of the CPU path (paint is already about 1 ms on a large page,
    so this matters for very large windows).
 4. **More desktop hardware** when an app needs it: HID, raw USB, Bluetooth LE.
-5. **Language bindings**: Python is in [`bindings/python`](bindings/python/README.md) (not on PyPI yet); [.NET](bindings/dotnet/README.md) and [PHP](bindings/php/README.md) are in too; none is published to a package index yet.
+5. **Language bindings**: Python is in [`bindings/python`](bindings/python/README.md) (not on PyPI yet); [.NET](bindings/dotnet/README.md) and [PHP](bindings/php/README.md) are in too; none is published to a package index yet. The project is Nile, but the plain name is taken on several registries, so the published packages carry `-ui`: `nile-ui` (PyPI), `Nile.UI` (NuGet), `hsemix/nile-ui` (Packagist), and `nile-*` crates. What you import stays `nile` / `Nile` / `Nile\`.
 
 Open CSS items (`@container`, multi-column layout, `writing-mode`, shadow DOM) are tracked in
 [Known gaps](docs/reference/known-gaps.md).
