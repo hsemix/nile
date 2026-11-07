@@ -1,0 +1,35 @@
+<html>
+<head>
+<title>Sciter content alignment</title>
+<style>
+  body { margin: 16px; font: 14px sans-serif; background: #f4f4f4 }
+  h3 { margin: 18px 0 6px; font-size: 13px; color: #555 }
+  .box { border: 1px solid #999; background: #fff; padding: 4px; margin-bottom: 4px }
+  .row { flow: horizontal; width: *; margin-bottom: 4px }
+  .row > label { width: 1*; horizontal-align: right; padding-right: 8px }
+  .row > input { width: 2* }
+  .tall { height: 70px }
+  .tall > b { background: #cde; padding: 2px 6px }
+</style>
+</head>
+<body>
+  <h3>horizontal-align on a label in a flow row (Sciter form pattern): labels sit against their inputs</h3>
+  <div class="box">
+    <div class="row"><label>Username</label><input type="text" /></div>
+    <div class="row"><label>Password</label><input type="password" /></div>
+  </div>
+
+  <h3>horizontal-align: left | center | right on a block holds its content</h3>
+  <div class="box" style="horizontal-align: left"><b>left</b></div>
+  <div class="box" style="horizontal-align: center"><b>center</b></div>
+  <div class="box" style="horizontal-align: right"><b>right</b></div>
+
+  <h3>vertical-align: top | middle | bottom on a 70px block</h3>
+  <div class="box tall" style="vertical-align: top"><b>top</b></div>
+  <div class="box tall" style="vertical-align: middle"><b>middle</b></div>
+  <div class="box tall" style="vertical-align: bottom"><b>bottom</b></div>
+
+  <h3>both, inside a flow: horizontal container</h3>
+  <div class="box tall" style="flow: horizontal; horizontal-align: center; vertical-align: middle"><b>one</b><b>two</b></div>
+</body>
+</html>

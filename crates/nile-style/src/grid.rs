@@ -2,7 +2,7 @@
 //! properties; layout turns the results into Taffy's grid style.
 
 use crate::parse::{RepeatKind, Value};
-use crate::{length, px, Align, ComputedStyle, Cursor, Length, VerticalAlign};
+use crate::{length, px, Align, ComputedStyle, ContentAlign, Cursor, Length, VerticalAlign};
 
 /// The size of a track's min or max.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -258,6 +258,13 @@ pub(crate) fn apply(s: &mut ComputedStyle, name: &str, v: &[Value], fs: f32) -> 
             _ => {}
         },
         "vertical-align" => {
+            // On a block (not inline, not a table cell) Sciter treats it as `content-vertical-align`.
+            s.content_v = match first.and_then(Value::ident) {
+                Some("top") => ContentAlign::Start,
+                Some("middle") => ContentAlign::Center,
+                Some("bottom") => ContentAlign::End,
+                _ => ContentAlign::Normal,
+            };
             s.vertical_align = match first.and_then(Value::ident) {
                 Some("top") => VerticalAlign::Top,
                 Some("middle") => VerticalAlign::Middle,

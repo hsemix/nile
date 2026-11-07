@@ -1,0 +1,185 @@
+<html window-frame="extended" window-icon="images/icon.jpg">
+<head>
+    <title>&#xb5; School Management Information System</title>
+    <style>
+        html { 
+            var(accent-color): window-accent-color; 
+            border: window-frame-width solid transparent; 
+        }
+
+        html:owns-focus {
+            border-color: morph(color(accent-color), opacity:50%);   
+        }
+
+        html > header { 
+            width:*;  
+            height: 24px; 
+            background: rgba(207, 205, 205, 0.25);
+            border-bottom: 1px solid grey;
+            margin: 0;
+            /* padding: 1px; */
+        }
+
+        /* html > header { width:*; flow:horizontal; height:window-caption-height; margin:0; }  */
+        html > header > window-caption { 
+            display:block; 
+            line-height:window-caption-height; 
+            width:*;
+            color: #000000; 
+            padding-bottom: 1px;
+            padding-left: 2px;
+        }
+        
+        html {
+            background: #EDEDED;
+            border: 1px solid rgba(207, 205, 205, 0.25);
+        }
+        #title {
+            /* margin: 1px; */
+            /* margin-top: 5px; */
+            border: 1px solid grey;
+            height: 70px;
+            width: *;
+            text-align: center;
+            padding-left: 120px;
+            border-radius: 3px;
+        }
+        #title > div {
+            color:blueviolet;
+            text-align: center;
+            font-size: 22px;
+            font-weight: bold;
+            margin-top: 30px;
+        }
+        body {
+            margin: 0;
+            margin-top: 1px;
+        }
+
+        #form-container {
+
+        }
+
+        #form-container > #form-links, #form-container > #footer {
+            color:rgb(140, 29, 245);
+            text-align: right;
+            padding: 1px;
+            text-decoration: underline;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        #form-container > #form {
+            flow: horizontal;
+            width: *;
+            height: 200px;
+            margin-right: 100dip;
+        }
+        #form > div#empty {
+            width: 1*;
+        }
+        #form > #form-elements {
+            width: 2*;
+        }
+        #form-elements > div {
+            border: 1px solid grey;
+            border-radius: 3px;
+            height: 150dip;
+        }
+        .title {
+            text-align: center;
+            font-size: 11px;
+            /* font-weight: bold; */
+            border-bottom: 1px solid grey;
+            background: rgba(207, 205, 205, 0.25);
+            padding: 1px;
+        }
+
+        #form > #form-elements > div > .form-components {
+            width: *;
+            padding: 5dip;
+        }
+
+        #form > #form-elements > div > form > div {
+            flow: horizontal;
+            width: *;
+            padding: 2dip;
+            margin-bottom: 5dip;
+        }
+        
+        form {
+            flow: vertical;
+            width: *;
+        }
+
+        form > div > input {
+            width: 2*;
+            /* margin-right: 0; */
+        }
+        .form-components > div > label { 
+            width: 1*;
+            white-space: nowrap; 
+            horizontal-align: right;
+        }
+
+        #form-elements > div > #form-bottons {
+            flow: horizontal;
+            width: *;
+            margin: 10dip 20dip;
+            height: 200dip;
+        }
+
+        #form-elements > div > #form-bottons > div {
+            width: 1*;
+        }
+        #form-elements > div > #form-bottons > div > button {
+            size: *;
+            padding: 10px;
+            border-radius: 3px;
+            background: threedface;
+            box-shadow: 1px 1px 1px 1px rgba(0, 0, 0, 0.3), 1px 1px 1px 1px rgba(0, 0, 0, 0.3);
+        }
+
+        #form-elements > div > #form-bottons > div > button:hover {
+            background: rgba(207, 205, 205, 0.25);
+        }
+    </style>
+</head>
+<header style="color: #000000">
+    <window-caption role=window-caption>&#xb5; School Management Information System</window-caption>
+</header>
+<body>
+    <main>
+        <div #title>
+            <div>Continuous Assessment <span style="color:lightcoral;font-weight: normal;">System</span></div>
+        </div>
+        <div id="form-container">
+            <div id="form-links">Register</div>
+            <div id="form">
+                <div #empty></div>
+                <div #form-elements>
+                    <div>
+                        <div id="test-logic"></div>
+                        <div class="title">System Login</div>
+                        <form class="form-components" model="Login">
+                            <div>
+                                <label for=username>Username</label>
+                                <input|text(username) value="" />
+                            </div>
+                            <div>
+                                <label for=password>Password</label>
+                                <input|password(password) value="" />
+                            </div>
+                        </form>
+                        <div id="form-bottons">
+                            <div style="margin-right: 4dip;"><button #login>LOGIN</button></div>
+                            <div><button style="margin-left: 4dip;" #close-application>CANCEL</button></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div id="footer">&copy; Copy Right (2019) Soft Pack Icon (U)</div>
+        </div>
+    </main>
+</body>
+</html>

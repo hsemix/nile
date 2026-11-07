@@ -116,6 +116,7 @@ browser compatibility.
 | [serial.html](../../examples/serial.html) | `@nile/serial` terminal: list ports, open, send, receive, toggle DTR |
 | [mail.html](../../examples/mail.html) | `@nile/mail` form: SMTP settings, message source preview, password kept in `@nile/keychain` |
 | [sciter-flow.html](../../examples/sciter-flow.html) | Sciter layout CSS: `flow:`, `*` units, `size:`, `dip`, `flow: grid(...)`, tag shortcuts |
+| [sciter-align.html](../../examples/sciter-align.html) | Sciter `horizontal-align` / `content-horizontal-align` and `content-vertical-align` (`vertical-align` on a block): where a box's content sits inside it, e.g. right-aligned form labels |
 | [sciter-paths.html](../../examples/sciter-paths.html) | Sciter `url(path:...)` images, `foreground-image`, `var(name)`, window constants |
 | [windows.html](../../examples/windows.html) | Multiple windows, modal result and shared messages |
 | [word-ribbon.html](../../examples/word-ribbon.html) | Word-style editing ribbon |
