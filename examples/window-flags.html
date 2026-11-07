@@ -1,0 +1,103 @@
+<html
+  window-title="Topmost and mouse passthrough"
+  window-width="420"
+  window-height="300"
+  window-topmost
+>
+  <head>
+    <style>
+      body {
+        margin: 0;
+        padding: 20px;
+        font: 14px system-ui;
+        background: #f8fafc;
+        color: #0f172a;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 8px;
+      }
+      p {
+        margin: 6px 0;
+        color: #475569;
+      }
+      button {
+        font: inherit;
+        padding: 6px 12px;
+        margin: 4px 6px 4px 0;
+      }
+      code {
+        background: #e2e8f0;
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+      #state {
+        margin-top: 12px;
+        padding: 8px 10px;
+        background: #e0f2fe;
+        border-radius: 6px;
+      }
+      popup {
+        width: 190px;
+        height: 56px;
+        padding: 10px;
+        background: #fef3c7;
+        border: 1px solid #f59e0b;
+        border-radius: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Topmost and mouse passthrough</h1>
+    <p>
+      This window has <code>window-topmost</code>: it stays above other windows.
+    </p>
+    <button id="top">Toggle topmost</button>
+    <button id="pass">Click-through for 3 s</button>
+    <button id="pop">Show HUD popup</button>
+    <div id="state"></div>
+
+    <!-- A popup in its own OS window that mouse clicks go through and that other windows may cover. -->
+    <popup id="hud" window-mouse-passthrough window-topmost="false"
+      >HUD: clicks go through me.</popup
+    >
+
+    <script>
+      const state = document.getElementById("state");
+      const show = () =>
+        (state.textContent =
+          "isTopmost = " +
+          Window.this.isTopmost +
+          ", isMousePassthrough = " +
+          Window.this.isMousePassthrough);
+      document.getElementById("top").onclick = () => {
+        Window.this.isTopmost = !Window.this.isTopmost;
+        show();
+      };
+      document.getElementById("pass").onclick = () => {
+        Window.this.isMousePassthrough = true;
+        show();
+        setTimeout(() => {
+          Window.this.isMousePassthrough = false;
+          show();
+        }, 3000);
+      };
+      let hud = null;
+      document.getElementById("pop").onclick = () => {
+        if (hud && hud.isValid) {
+          hud.close();
+          hud = null;
+          return;
+        }
+        hud = document
+          .getElementById("pop")
+          .popup(document.getElementById("hud"), {
+            x: 20,
+            y: 200,
+            window: "popup",
+          });
+      };
+      show();
+    </script>
+  </body>
+</html>

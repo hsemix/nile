@@ -171,6 +171,8 @@ struct PortalWin {
     surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
     /// Border box in the owner's viewport coordinates.
     rect: (f32, f32, f32, f32),
+    topmost: bool,
+    passthrough: bool,
 }
 
 impl Win {
@@ -257,6 +259,10 @@ impl Win {
                 }
                 WindowCommand::Fullscreen(on) => {
                     window.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
+                }
+                WindowCommand::Topmost(on) => window.set_window_level(if on { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal }),
+                WindowCommand::MousePassthrough(on) => {
+                    let _ = window.set_cursor_hittest(!on);
                 }
                 WindowCommand::MoveTo(x, y) => window.set_outer_position(LogicalPosition::new(x, y)),
                 WindowCommand::ResizeTo(w, h) => {
@@ -712,6 +718,10 @@ impl App {
             }
         }
         let (w, h) = config.inner_size(desktop);
+        // `window-topmost`: above other windows (popup and tool windows already are).
+        if config.topmost {
+            level = WindowLevel::AlwaysOnTop;
+        }
         let mut attrs = Window::default_attributes()
             .with_title(config.title.clone())
             .with_inner_size(LogicalSize::new(w, h))
@@ -784,6 +794,10 @@ impl App {
             attrs = attrs.with_owner_window(hwnd);
         }
         let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
+        // `window-mouse-passthrough`: clicks go to whatever is behind the window (not every system supports it).
+        if config.mouse_passthrough {
+            let _ = window.set_cursor_hittest(false);
+        }
         // A remembered position, if it is still on a screen.
         let screens: Vec<(i32, i32, u32, u32)> = event_loop.available_monitors().map(|m| (m.position().x, m.position().y, m.size().width, m.size().height)).collect();
         let restored = saved.filter(|s| explicit_pos.is_none() && crate::winstate::on_screen(s.x, s.y, (s.w * window.scale_factor() as f32) as u32, &screens));
@@ -1062,6 +1076,14 @@ impl App {
                         let _ = p.window.request_inner_size(size);
                         p.window.set_outer_position(at);
                     }
+                    if p.topmost != w.topmost {
+                        p.topmost = w.topmost;
+                        p.window.set_window_level(if w.topmost { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal });
+                    }
+                    if p.passthrough != w.passthrough {
+                        p.passthrough = w.passthrough;
+                        let _ = p.window.set_cursor_hittest(!w.passthrough);
+                    }
                     p.window.request_redraw();
                 }
                 None => {
@@ -1069,15 +1091,18 @@ impl App {
                         .with_decorations(false)
                         .with_resizable(false)
                         .with_active(false)
-                        .with_window_level(WindowLevel::AlwaysOnTop)
+                        .with_window_level(if w.topmost { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal })
                         .with_inner_size(size)
                         .with_position(at)
                         .with_title("");
                     let window = Rc::new(event_loop.create_window(attrs).expect("create popup window"));
                     let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
                     let surface = softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
+                    if w.passthrough {
+                        let _ = window.set_cursor_hittest(false);
+                    }
                     window.request_redraw();
-                    self.portals.push(PortalWin { owner, node: w.node, window, surface, rect: w.rect });
+                    self.portals.push(PortalWin { owner, node: w.node, window, surface, rect: w.rect, topmost: w.topmost, passthrough: w.passthrough });
                 }
             }
         }

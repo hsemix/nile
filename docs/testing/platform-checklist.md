@@ -41,6 +41,7 @@ Result: machine / OS version / session: ______________________  date: __________
 | 2.3 | `transparent.html`, `material.html` | Open | Windows: translucency or Mica/Acrylic where supported (Mica needs build 22523+). Linux: **expected gap on X11** (corners stay opaque); Wayland shows alpha | |
 | 2.4 | `screens.html` | Open on a multi-monitor setup if you have one; move the window between screens | Lists every monitor, marks the current one, fires `resolutionchange`; battery, online and idle values are plausible (Linux idle needs `xprintidle`) | |
 | 2.5 | Windows only | Frameless window with a maximize button: hover it | Snap Layouts flyout appears (Windows 11) | |
+| 2.7 | `window-flags.html` | Open: it starts topmost. Click **Toggle topmost**, focus another app's window | Topmost on: stays above it; off: goes behind. **Click-through for 3 s**: clicks pass to the window behind, then it responds again. **Show HUD popup**: clicks on the popup reach the window below it | |
 | 2.6 | Windows only | Frameless window with rounded `html` corners | Window is clipped to the radius | |
 
 ## 3. Menus, tray and desktop integration

@@ -5261,6 +5261,44 @@ fn an_opened_window_knows_its_opener_and_parameters() {
 }
 
 #[test]
+fn popup_windows_carry_topmost_and_mouse_passthrough_flags() {
+    let (mut p, path) = page(
+        r#"<body style="margin:0"><button id="b">go</button>
+           <popup id="a" style="width:50px;height:20px"></popup>
+           <popup id="h" window-topmost="false" window-mouse-passthrough style="width:50px;height:20px"></popup></body>"#,
+        "portal-flags",
+    );
+    let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+    ev(&mut p, "globalThis.a = document.$('#b').popup(document.$('#a'), { x: 10, y: 10, window: 'popup' })");
+    ev(&mut p, "globalThis.h = document.$('#b').popup(document.$('#h'), { x: 80, y: 10, window: 'popup' })");
+    let portals = p.view.borrow().portals.clone();
+    assert_eq!(portals.iter().map(|q| (q.topmost, q.passthrough)).collect::<Vec<_>>(), [(true, false), (false, true)]);
+    // The popup window's own properties reach the portal too.
+    assert_eq!(ev(&mut p, "[a.isTopmost, a.isMousePassthrough, h.isTopmost, h.isMousePassthrough].join()"), "true,false,false,true");
+    ev(&mut p, "a.isTopmost = false; a.isMousePassthrough = true");
+    let first = p.view.borrow().portals.iter().find(|q| q.rect.0 == 10.0).map(|q| (q.topmost, q.passthrough));
+    assert_eq!(first, Some((false, true)));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn window_this_topmost_and_mouse_passthrough_are_live() {
+    let (mut p, path) = page(r#"<html window-topmost><body>x</body></html>"#, "window-flags");
+    let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+    assert_eq!(ev(&mut p, "[Window.this.isTopmost, Window.this.isMousePassthrough].join()"), "true,false");
+    p.view.borrow_mut().window_requests.clear();
+    ev(&mut p, "Window.this.isMousePassthrough = true; Window.this.isTopmost = false");
+    assert_eq!(
+        std::mem::take(&mut p.view.borrow_mut().window_requests),
+        [WindowCommand::MousePassthrough(true), WindowCommand::Topmost(false)]
+    );
+    // The root's attributes follow, so a reload or a config read sees the same state.
+    assert_eq!(ev(&mut p, "[Window.this.isTopmost, Window.this.isMousePassthrough].join()"), "false,true");
+    assert!(WindowConfig::from_document(&p.doc.borrow()).mouse_passthrough);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn popups_can_live_in_windows_of_their_own() {
     let (mut p, path) = page(
         r#"<body style="margin:0;background:#ffffff"><button id="b" style="position:absolute;left:10px;top:10px">go</button>

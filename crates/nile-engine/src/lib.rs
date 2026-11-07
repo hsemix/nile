@@ -289,6 +289,10 @@ pub struct SnapPending {
 pub struct Portal {
     pub node: NodeId,
     pub rect: (f32, f32, f32, f32),
+    /// The window stays above other windows (`<popup window-topmost>`; on unless the popup says `false`).
+    pub topmost: bool,
+    /// The mouse goes through the window (`<popup window-mouse-passthrough>`).
+    pub passthrough: bool,
 }
 
 /// Style, layout and scroll state. Shared (`Rc<RefCell<..>>`) between the page
@@ -975,12 +979,12 @@ impl Environment for Env {
         self.0.borrow_mut().print_requests.push((id, path.to_string(), title.to_string()));
     }
 
-    fn portal_set(&self, node: NodeId, rect: [f32; 4]) {
+    fn portal_set(&self, node: NodeId, rect: [f32; 4], topmost: bool, passthrough: bool) {
         let mut v = self.0.borrow_mut();
         let rect = (rect[0], rect[1], rect[2], rect[3]);
         match v.portals.iter_mut().find(|p| p.node == node) {
-            Some(p) => p.rect = rect,
-            None => v.portals.push(Portal { node, rect }),
+            Some(p) => (p.rect, p.topmost, p.passthrough) = (rect, topmost, passthrough),
+            None => v.portals.push(Portal { node, rect, topmost, passthrough }),
         }
         // The popup is no longer painted here: the cached layout is still right, the paint must run.
         v.scroll_dirty = true;

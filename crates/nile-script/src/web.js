@@ -1539,6 +1539,16 @@
     };
   }
   Object.defineProperty(g, "__screenChanged", { value() { const e = new Event("resolutionchange"); g.dispatchEvent(e); } });
+  const rootFlag = (name, alias) => [name, alias].some((n) => {
+    const v = n ? document.documentElement.getAttribute(n) : null;
+    return v !== null && v.trim().toLowerCase() !== "false";
+  });
+  const setRootFlag = (name, alias, on, command) => {
+    const root = document.documentElement;
+    if (alias) root.removeAttribute(alias);
+    root.setAttribute(name, on ? "true" : "false");
+    N.windowCommand(command, on ? 1 : 0, 0);
+  };
   class Window {
     constructor(params = {}) { openWindow(this, params, false); }
     static get this() { return thisWindow; }
@@ -1601,6 +1611,12 @@
       if (v) document.documentElement.setAttribute("window-material", String(v));
       else document.documentElement.removeAttribute("window-material");
     }
+    // `window-topmost` / `window-mouse-passthrough` on the root element, live: `Window.this.isTopmost = true` keeps the
+    // window above the others; `isMousePassthrough = true` lets the mouse go through it (a HUD panel). Only for this window.
+    get isTopmost() { return this === thisWindow && rootFlag("window-topmost", "window-floating"); }
+    set isTopmost(v) { if (this === thisWindow) setRootFlag("window-topmost", "window-floating", v, "topmost"); }
+    get isMousePassthrough() { return this === thisWindow && rootFlag("window-mouse-passthrough"); }
+    set isMousePassthrough(v) { if (this === thisWindow) setRootFlag("window-mouse-passthrough", null, v, "mousePassthrough"); }
     get popupWindows() { return popupWindows; }
     set popupWindows(v) { popupWindows = !!v; }
     get messageBoxes() { return boxMode; }
@@ -1815,16 +1831,19 @@
     get anchor() { return this._r.anchor || null; }
     get isValid() { return this._r.open; }
     get isTopmost() { return this._r.topmost; }
-    set isTopmost(v) { this._r.topmost = !!v; }
+    set isTopmost(v) { this._r.topmost = !!v; if (this._r.portal && this._r.open) syncPortal(this._r); }
     get isResizable() { return !!this._r.resizable; }
     set isResizable(v) { this._r.resizable = !!v; }
     get isMousePassthrough() { return !!this._r.passthrough; }
-    set isMousePassthrough(v) { this._r.passthrough = !!v; this._r.el.style.pointerEvents = v ? "none" : ""; }
+    set isMousePassthrough(v) { this._r.passthrough = !!v; this._r.el.style.pointerEvents = v ? "none" : ""; if (this._r.portal && this._r.open) syncPortal(this._r); }
     on(type, cb) { (this._r.listeners[type] ||= []).push(cb); return this; }
     close() { closePopup(this._r); }
   }
   const lift = (el) => {
-    const rec = { el, open: true, listeners: {}, topmost: true, saved: {}, attached: el.parentNode };
+    // `<popup window-topmost="false">` lets other windows cover its OS window; `window-mouse-passthrough` lets clicks through it.
+    const flag = (name, fallback) => { const v = el.getAttribute(name); return v === null ? fallback : v.trim().toLowerCase() !== "false"; };
+    const rec = { el, open: true, listeners: {}, topmost: flag("window-topmost", true), passthrough: flag("window-mouse-passthrough", false), saved: {}, attached: el.parentNode };
+    if (rec.passthrough) el.style.pointerEvents = "none";
     for (const k of SAVED) rec.saved[k] = el.style.getPropertyValue(k);
     rec.next = el.nextSibling;
     if (!el.parentNode || !document.body.contains(el)) document.body.appendChild(el);
@@ -1834,7 +1853,7 @@
   // lie outside the window).
   const syncPortal = (rec) => {
     const r = rec.el.getBoundingClientRect();
-    N.portalSet(rec.el._id, r.left, r.top, r.width, r.height);
+    N.portalSet(rec.el._id, r.left, r.top, r.width, r.height, !!rec.topmost, !!rec.passthrough);
   };
   const place = (rec, left, top) => {
     rec.el.style.left = Math.round(left) + "px";

@@ -8,6 +8,11 @@ the section becomes that version's.
 
 ## Unreleased
 
+### 2026-11-07
+
+#### Added
+- `<html window-topmost>` and `<html window-mouse-passthrough>`, and the same two flags on `<popup>` (Sciter's newest window attributes; `window-floating` is accepted for `window-topmost`). `Window.this.isTopmost` / `isMousePassthrough` change them live; popup windows (`popup({window: "popup"})`) honour them, so `<popup window-topmost="false">` can be covered by other windows. In the C API, `NileWindowConfig` gets `topmost` and `mouse_passthrough`, new window requests `NILE_WINDOW_COMMAND_KIND_TOPMOST` / `_MOUSE_PASSTHROUGH` arrive when scripts change them, and the `nile_view_portals` JSON carries both flags per popup. Example: `examples/window-flags.html`.
+
 ### 2026-11-03
 
 #### Added
