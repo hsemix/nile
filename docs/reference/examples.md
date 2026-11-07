@@ -79,6 +79,7 @@ browser compatibility.
 | [optgroup.html](../../examples/optgroup.html) | Grouped select options and disabled headings |
 | [pagination.html](../../examples/pagination.html) | Page breaks, tables and PDF |
 | [popups.html](../../examples/popups.html) | Popup positioning, context menus and detached portals |
+| [capslock-warning.html](../../examples/capslock-warning.html) | A Caps Lock balloon under a password field (`Event.keyState("CapsLock")`, a popup in an OS window of its own) |
 | [window-flags.html](../../examples/window-flags.html) | `window-topmost` and `window-mouse-passthrough` on the window and on a popup, toggled live |
 | [position.html](../../examples/position.html) | Relative/absolute positioning |
 | [print-layout.html](../../examples/print-layout.html) | Paged on-screen editable document |

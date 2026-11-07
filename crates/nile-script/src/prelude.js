@@ -623,6 +623,29 @@
     querySelector(s) { const r = N.select(this._id, String(s)); return r.length ? wrap(r[0]) : null; }
     querySelectorAll(s) { return N.select(this._id, String(s)).map(wrap); }
   }
+  // `Event.keyState("CapsLock")` (Sciter) and `event.getModifierState("CapsLock")` (the web): the system's answer
+  // where it has one (macOS, Windows); elsewhere what the keys typed so far imply, or `undefined` before any
+  // evidence. The lock keys answer on/off, Shift, Control, Alt and Meta whether they are down.
+  const lockGuess = {};
+  const keyState = (name) => {
+    name = String(name);
+    const os = N.keyState(name);
+    if (os !== undefined && os !== null) return !!os;
+    const k = name.toLowerCase();
+    if (k === "capslock") return lockGuess.capslock;
+    return undefined;
+  };
+  Event.keyState = keyState;
+  const modifierState = function (name) {
+    const k = String(name).toLowerCase();
+    if (k === "shift") return !!this.shiftKey;
+    if (k === "control") return !!this.ctrlKey;
+    if (k === "alt") return !!this.altKey;
+    if (k === "meta") return !!this.metaKey;
+    return !!keyState(name);
+  };
+  MouseEvent.prototype.getModifierState = modifierState;
+  KeyboardEvent.prototype.getModifierState = modifierState;
   let readyState = "loading";
   const documentObj = new Document(N.root());
   cache.set(N.root(), documentObj);
@@ -637,6 +660,16 @@
     performance: { now: () => N.now() },
     queueMicrotask: (f) => { Promise.resolve().then(f).catch(report); },
   });
+  // Without a system answer, learn Caps Lock from what is typed: the key itself toggles it, and a letter
+  // that is upper case without Shift (or lower case with it) means it is on.
+  g.addEventListener("keydown", (e) => {
+    if (e.key === "CapsLock") {
+      if (lockGuess.capslock !== undefined) lockGuess.capslock = !lockGuess.capslock;
+    } else if (typeof e.key === "string" && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const up = e.key.toUpperCase(), low = e.key.toLowerCase();
+      if (up !== low) lockGuess.capslock = (e.key === up) !== !!e.shiftKey;
+    }
+  }, true);
 
   // ---- form controls -------------------------------------------------------
   // `value` is stored in the `value` attribute (a simplification: there is no

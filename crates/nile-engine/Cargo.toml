@@ -46,3 +46,7 @@ cc = "1"
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # A pseudo-terminal pair stands in for a serial device in the `@nile/serial` test.
 serialport = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# `GetKeyState` for `Event.keyState("CapsLock")`.
+windows-sys.workspace = true

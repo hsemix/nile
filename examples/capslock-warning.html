@@ -1,0 +1,67 @@
+<html window-width="520" window-height="340">
+<head>
+<title>Caps Lock warning</title>
+<style>
+  body { margin: 0; padding: 24px; font: 14px sans-serif; background: #eee }
+  h3 { margin: 0 0 14px }
+  .row { flow: horizontal; margin-bottom: 14px }
+  .row > label { width: 90px; horizontal-align: right; padding-right: 8px }
+  .row > input { width: 220px }
+  button { margin-top: 10px }
+
+  /* The balloon: a popup under the field, arrow pointing at it. With window: "popup" it is a window of its own,
+     so it can reach past the edge of this one. window-frame="transparent" makes that window see-through around
+     what the popup paints; the 9px of padding on top is room for the arrow (a window shows only what is inside the
+     popup's own box), and the grey bubble and its shadow are the .bubble inside. */
+  popup#caps { width: 380px; padding: 9px 0 0; background: transparent; border: 0; box-shadow: none }
+  popup#caps .bubble { position: relative; padding: 14px 18px; background: #808080; color: #fff; border-radius: 3px }
+  popup#caps .bubble::before {
+    content: ""; position: absolute; top: -9px; left: 34px;
+    border: 9px solid transparent; border-top: 0; border-bottom: 9px solid #808080;
+  }
+  popup#caps b { display: block; font-size: 16px; margin-bottom: 8px }
+  popup#caps p { margin: 0 0 8px }
+  popup#caps p:last-child { margin-bottom: 0 }
+</style>
+</head>
+<body>
+  <h3>System Login</h3>
+  <div class="row"><label for="user">Username</label><input id="user" type="text" /></div>
+  <div class="row"><label for="pw">Password</label><input id="pw" type="password" /></div>
+  <button id="test">Show the warning</button>
+
+  <popup id="caps" window-frame="transparent">
+    <div class="bubble">
+      <b>Caps Lock is On</b>
+      <p>Having Caps Lock on may cause you to enter your password incorrectly.</p>
+      <p>You should press Caps Lock to turn it off before entering your password</p>
+    </div>
+  </popup>
+
+<script>
+  const pw = document.$("#pw"), balloon = document.$("#caps");
+  let shown = null;
+
+  function show() {
+    if (shown) return;
+    // Under the field: the balloon's top left corner (7) on the field's bottom left corner (1).
+    shown = pw.popup(balloon, { anchorAt: 1, popupAt: 7, window: "popup" });
+  }
+  function hide() {
+    if (!shown) return;
+    shown.close();
+    shown = null;
+  }
+  // The system's answer where there is one (macOS, Windows); on other systems undefined until a key says so.
+  const capsOn = () => Event.keyState("CapsLock") === true;
+
+  pw.on("focus", () => { if (capsOn()) show(); });
+  pw.on("blur", hide);
+  // Pressing Caps Lock itself (keyup: the state has changed by then) and typing both re-check.
+  pw.on("keyup", () => { capsOn() ? show() : hide(); });
+  pw.on("keydown", () => { if (!capsOn()) hide(); });
+
+  document.$("#test").on("click", () => { hide(); show(); });
+</script>
+</body>
+</html>

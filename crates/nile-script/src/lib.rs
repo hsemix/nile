@@ -318,9 +318,14 @@ pub trait Environment {
     }
     /// Close, move, resize, ... the host window. Embedders without a window ignore it.
     fn window_command(&self, _cmd: WindowCommand) {}
+    /// `Event.keyState(name)`: is this lock key on (or modifier held)? `None` when the system can't say.
+    fn key_state(&self, _name: &str) -> Option<bool> {
+        None
+    }
     /// Show the popup element `node` in an OS window of its own (`rect`: its border box in viewport
-    /// coordinates), or take it back. `topmost`: the window stays above others; `passthrough`: the mouse goes through it.
-    fn portal_set(&self, _node: NodeId, _rect: [f32; 4], _topmost: bool, _passthrough: bool) {}
+    /// coordinates), or take it back. `topmost`: the window stays above others; `passthrough`: the mouse goes through it; `transparent`: the window has an alpha channel
+    /// (`<popup window-frame="transparent">`), so only what the popup paints shows.
+    fn portal_set(&self, _node: NodeId, _rect: [f32; 4], _topmost: bool, _passthrough: bool, _transparent: bool) {}
     /// `Window.this.print()` / `exportPdf()`: the page should write its PDF to `path` (empty: a temp file) with `title`
     /// and answer with `__printReady(id, path, error)`.
     fn print_request(&self, _id: u32, _path: &str, _title: &str) {}
@@ -936,9 +941,10 @@ fn install_natives(
     });
     native!("portalSet", {
         let env = env.clone();
-        move |id: i32, x: f32, y: f32, w: f32, h: f32, topmost: bool, passthrough: bool| {
+        // `flags`: 1 topmost, 2 mouse passthrough, 4 transparent window.
+        move |id: i32, x: f32, y: f32, w: f32, h: f32, flags: i32| {
             if let Some(n) = node(id) {
-                env.portal_set(n, [x, y, w, h], topmost, passthrough);
+                env.portal_set(n, [x, y, w, h], flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
             }
         }
     });
@@ -982,6 +988,10 @@ fn install_natives(
     native!("shareSet", move |k: String, v: String| { SHARE.with(|s| s.borrow_mut().insert(k, v)); });
     native!("shareDel", move |k: String| { SHARE.with(|s| s.borrow_mut().remove(&k)); });
     native!("shareKeys", move || -> String { SHARE.with(|s| s.borrow().keys().cloned().collect::<Vec<_>>().join("\n")) });
+    native!("keyState", {
+        let env = env.clone();
+        move |name: String| -> Option<bool> { env.key_state(&name) }
+    });
     native!("windowModal", {
         let env = env.clone();
         move |id: u32| env.window_command(WindowCommand::Modal(id))

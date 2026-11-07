@@ -1914,9 +1914,10 @@
     close() { closePopup(this._r); }
   }
   const lift = (el) => {
+    // `<popup window-frame="transparent">` makes its OS window see-through around what it paints (an arrow, rounded corners).
     // `<popup window-topmost="false">` lets other windows cover its OS window; `window-mouse-passthrough` lets clicks through it.
     const flag = (name, fallback) => { const v = el.getAttribute(name); return v === null ? fallback : v.trim().toLowerCase() !== "false"; };
-    const rec = { el, open: true, listeners: {}, topmost: flag("window-topmost", true), passthrough: flag("window-mouse-passthrough", false), saved: {}, attached: el.parentNode };
+    const rec = { el, open: true, listeners: {}, topmost: flag("window-topmost", true), passthrough: flag("window-mouse-passthrough", false), transparent: String(el.getAttribute("window-frame") || "").trim().toLowerCase() === "transparent", saved: {}, attached: el.parentNode };
     if (rec.passthrough) el.style.pointerEvents = "none";
     for (const k of SAVED) rec.saved[k] = el.style.getPropertyValue(k);
     rec.next = el.nextSibling;
@@ -1927,7 +1928,7 @@
   // lie outside the window).
   const syncPortal = (rec) => {
     const r = rec.el.getBoundingClientRect();
-    N.portalSet(rec.el._id, r.left, r.top, r.width, r.height, !!rec.topmost, !!rec.passthrough);
+    N.portalSet(rec.el._id, r.left, r.top, r.width, r.height, (rec.topmost ? 1 : 0) | (rec.passthrough ? 2 : 0) | (rec.transparent ? 4 : 0));
   };
   const place = (rec, left, top) => {
     rec.el.style.left = Math.round(left) + "px";

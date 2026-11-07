@@ -5282,6 +5282,36 @@ fn popup_windows_carry_topmost_and_mouse_passthrough_flags() {
 }
 
 #[test]
+fn transparent_popup_windows_paint_over_nothing() {
+    let (mut p, path) = page(
+        r#"<body style="margin:0;background:#00ff00"><button id="b">go</button>
+           <popup id="t" window-frame="transparent" style="width:60px;height:40px;padding:0;border:0;background:transparent;box-shadow:none">
+             <div style="margin-top:20px;height:20px;background:#ff0000"></div></popup>
+           <popup id="o" style="width:60px;height:40px;padding:0;border:0;box-shadow:none"></popup></body>"#,
+        "portal-transparent",
+    );
+    let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+    ev(&mut p, "document.$('#b').popup(document.$('#t'), { x: 100, y: 100, window: 'popup' }); document.$('#b').popup(document.$('#o'), { x: 300, y: 100, window: 'popup' })");
+    let portals = p.view.borrow().portals.clone();
+    let of = |x: f32| portals.iter().find(|q| q.rect.0 == x).unwrap().clone();
+    assert!(of(100.0).transparent && !of(300.0).transparent);
+    let paint = |p: &mut Page, q: &crate::Portal| {
+        let (w, h) = (q.rect.2 as u32, q.rect.3 as u32);
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        p.paint_portal(&mut buf, w, h, 1.0, q.node, (q.rect.0, q.rect.1));
+        buf
+    };
+    // The see-through popup: nothing in the top half (alpha 0), the red bar below it.
+    let t = paint(&mut p, &of(100.0));
+    assert_eq!(t[(5 * 60 + 5) * 4 + 3], 0, "top half has no alpha");
+    assert_eq!(&t[(30 * 60 + 5) * 4..(30 * 60 + 5) * 4 + 4], &[0, 0, 255, 255], "bar is opaque red (BGRA)");
+    // An ordinary popup window is opaque white where it paints nothing.
+    let o = paint(&mut p, &of(300.0));
+    assert_eq!(o[(5 * 60 + 5) * 4 + 3], 255);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn window_html_can_be_jsx_and_components() {
     let (mut p, path) = page(r#"<body><script>
         const name = "World <3";
@@ -5312,6 +5342,27 @@ fn window_html_can_be_jsx_and_components() {
     ev(&mut p, "Window.this.modal({ html: '<html><body>hi</body></html>' })");
     let Some(WindowCommand::Open(spec)) = take(&p).into_iter().next() else { panic!("an Open request") };
     assert_eq!(spec.get("html"), Some("<html><body>hi</body></html>"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn key_state_and_get_modifier_state() {
+    let (mut p, path) = page("<body><input id=i></body>", "key-state");
+    let ev = |p: &mut Page, js: &str| p.eval(js).0.unwrap();
+    // Modifiers come from the event itself.
+    assert_eq!(ev(&mut p, "const e = new KeyboardEvent('keydown', { key: 'a', shiftKey: true, metaKey: true }); [e.getModifierState('Shift'), e.getModifierState('Meta'), e.getModifierState('Alt')].join()"), "true,true,false");
+    assert_eq!(ev(&mut p, "typeof Event.keyState"), "function");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        // No system answer here: undefined until a key says something, then what the letters imply.
+        assert_eq!(ev(&mut p, "String(Event.keyState('CapsLock'))"), "undefined");
+        ev(&mut p, "document.$('#i').dispatchEvent(new KeyboardEvent('keydown', { key: 'A', bubbles: true }))");
+        assert_eq!(ev(&mut p, "String(Event.keyState('CapsLock'))"), "true");
+        ev(&mut p, "document.$('#i').dispatchEvent(new KeyboardEvent('keydown', { key: 'A', shiftKey: true, bubbles: true }))");
+        assert_eq!(ev(&mut p, "String(Event.keyState('CapsLock'))"), "false");
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    assert_eq!(ev(&mut p, "typeof Event.keyState('CapsLock')"), "boolean");
     let _ = std::fs::remove_file(path);
 }
 
