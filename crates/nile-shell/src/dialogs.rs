@@ -596,7 +596,7 @@ mod win {
                     return None;
                 }
                 let library = LoadLibraryW(wide("comctl32.dll").as_ptr());
-                let function = if library == 0 { None } else { GetProcAddress(library, b"TaskDialogIndirect\0".as_ptr()) };
+                let function = if library == 0 { None } else { GetProcAddress(library, c"TaskDialogIndirect".as_ptr().cast()) };
                 DeactivateActCtx(0, cookie);
                 function.map(|f| (context, std::mem::transmute::<unsafe extern "system" fn() -> isize, TaskDialogIndirectFn>(f)))
             };
