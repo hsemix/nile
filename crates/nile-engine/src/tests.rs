@@ -5196,6 +5196,14 @@ fn inline_message_boxes_are_html_and_resolve_a_promise() {
     assert_eq!(ev(&mut p, "answers.slice(2).join()"), "yes");
     // `native` wins over the global setting.
     assert_eq!(ev(&mut p, "Window.this.modal(JSX('question', { native: true }, ['x']))"), "no");
+    // The title bar has the window's icon (or the tag's `icon`; "none" hides it) and a close button that answers like Escape.
+    ev(&mut p, "document.documentElement.setAttribute('window-icon', 'app.png'); Window.this.modal(JSX('question', { inline: true }, ['Close me?'])).then((v) => answers.push(v))");
+    assert_eq!(ev(&mut p, "document.$('.nile-messagebox-appicon').getAttribute('src')"), "app.png");
+    assert_eq!(ev(&mut p, "document.$$('.nile-messagebox button').length"), "2");
+    ev(&mut p, "document.$('.nile-messagebox-close').click()");
+    assert_eq!(ev(&mut p, "answers.slice(3).join()"), "no");
+    ev(&mut p, "Window.this.modal(JSX('info', { inline: true, icon: 'none' }, ['No icon']))");
+    assert_eq!(ev(&mut p, "document.$$('.nile-messagebox-appicon').length"), "0");
     let _ = std::fs::remove_file(path);
 }
 

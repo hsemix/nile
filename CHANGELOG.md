@@ -11,6 +11,7 @@ the section becomes that version's.
 ### 2026-11-07
 
 #### Changed
+- Inline message boxes (`inline`, `messageBoxes = "inline"`) look like the system's box: a title bar with the window's icon (`window-icon` on `<html>`, or the tag's `icon`; `icon="none"` hides it), the caption and a close button (answers like Escape), a larger icon, and the buttons in a grey strip with the default one in the accent colour. New parts `.nile-messagebox-titlebar`, `-appicon`, `-close`; the existing class names, the caption in `.nile-messagebox-title` and the box's own `<button>`s are as before. Example: `examples/dialogs.html`.
 - The PHP package is named `hsemix/nile-ui` (was `nile/nile`), matching `nile-ui` on PyPI and `Nile.UI` on NuGet: the plain name "nile" is taken on several registries. Import names (`import nile`, `using Nile;`, `Nile\App`) are unchanged.
 
 #### Fixed

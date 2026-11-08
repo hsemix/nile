@@ -206,7 +206,7 @@ if (Window.this.modal(<question>Delete it?</question>) === "yes") { /* ... */ }
 default and only shows the tag's plain text and a `caption`/`title`. To go further, opt in per box with an
 `inline` attribute, or for every box with `Window.this.messageBoxes = "inline"` (`native` on a tag wins
 over the setting). The box is then plain HTML in the window, `.nile-modal` > `.nile-messagebox.<kind>`
-with `-title`, `-body`, `-icon`, `-text` and `-buttons` parts, so CSS restyles it; the tag's content
+with `-titlebar` (holding `-appicon`, `-title` and `-close`), `-body`, `-icon`, `-text` and `-buttons` parts, so CSS restyles it. It is drawn like the system's box: the page's `window-icon` (or the tag's `icon="x.png"`; `icon="none"` hides it) and the caption in the title bar, a close button that answers like Escape, and the buttons in a grey strip with the default one highlighted; the tag's content
 may be rich markup, and `<button value="save" default>` / `cancel` children replace the default OK or
 Yes/No buttons. Enter chooses the default button, Escape the `cancel` one. Because it can't block the
 script it returns a **Promise** of the clicked button's `value` (else its `id`, else its text):
