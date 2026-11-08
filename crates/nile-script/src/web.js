@@ -1603,7 +1603,10 @@
       const caption = (attrs && (attrs.caption || attrs.title)) || document.title || "";
       const inline = attrs && attrs.native !== undefined ? false : attrs && attrs.inline !== undefined ? true : boxMode === "inline";
       if (inline) return inlineBox(tag, attrs || {}, kids || [], caption);
-      const answer = dialog("message", tag, textOf(kids).trim(), caption);
+      // `cancel` adds a Cancel button ("cancel" is then a possible answer); `task` makes it a task dialog (Windows),
+      // whose close button and Escape work. Hosts that don't know them show the plain box.
+      const style = [attrs && attrs.cancel !== undefined && attrs.cancel !== false ? "cancel" : "", attrs && attrs.task !== undefined && attrs.task !== false ? "task" : ""].join(" ").trim();
+      const answer = dialog("message", tag, textOf(kids).trim(), caption, style);
       if (answer === undefined) return tag === "question" ? "no" : "yes";
       return tag === "question" ? answer : "yes";
     }

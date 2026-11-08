@@ -21,6 +21,9 @@
   <button id="alert">alert</button>
   <button id="error">error</button>
   <button id="question">question</button>
+  <button id="q-cancel">question + cancel</button>
+  <button id="q-task">question, task dialog</button>
+  <button id="q-both">question, task + cancel</button>
   <label>The same boxes drawn in the window (<code>inline</code>: rich content, your own buttons, CSS-styleable; returns a Promise)</label>
   <button id="inline-q">inline question</button>
   <button id="inline-e">inline error</button>
@@ -38,6 +41,11 @@
     document.$('#info').on('click', () => show('info', win.modal(<info>Everything is fine.</info>)));
     document.$('#alert').on('click', () => show('alert', win.modal(<alert>Careful: this is a warning.</alert>)));
     document.$('#error').on('click', () => show('error', win.modal(<error>Something went wrong.</error>)));
+    // `cancel` adds a Cancel button ("cancel" is then an answer); `task` is a Windows task dialog whose close button
+    // and Escape work (they answer "no", or "cancel" with the Cancel button). Other systems show the plain box.
+    document.$('#q-cancel').on('click', () => show('question cancel', win.modal(<question cancel caption="Unsaved changes">Save your work before closing?</question>)));
+    document.$('#q-task').on('click', () => show('question task', win.modal(<question task caption="Quit">Quit the application?</question>)));
+    document.$('#q-both').on('click', () => show('question task cancel', win.modal(<question task cancel caption="Unsaved changes">Save your work before closing?</question>)));
     document.$('#question').on('click', () => show('question', win.modal(<question>Delete everything?</question>)));
     document.$('#inline-q').on('click', async () => {
       const answer = await win.modal(

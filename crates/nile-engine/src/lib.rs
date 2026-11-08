@@ -1018,7 +1018,9 @@ impl Environment for Env {
                     "question" => MessageKind::Question,
                     _ => MessageKind::Alert,
                 };
-                if dialogs.message(kind, c, b) { "yes" } else { "no" }.to_string()
+                // `d` carries the box's style words (`cancel`, `task`); only a question has more than one answer.
+                let answer = dialogs.message_with(kind, c, b, dialogs::MessageStyle::parse(d));
+                if kind == MessageKind::Question { answer.as_str() } else { "yes" }.to_string()
             }
             _ => return None,
         })

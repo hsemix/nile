@@ -137,6 +137,14 @@ const answer = await Window.this.modal(
 );
 ```
 
+A native `<question>` is a plain Yes/No box by default. Two attributes change that: `cancel` adds a Cancel
+button (the answer can then be `"cancel"`), and `task` makes it a Windows task dialog, whose title bar's close
+button and Escape work (a plain Yes/No message box leaves them disabled): they answer `"no"`, or `"cancel"` with
+the Cancel button. `<question task cancel caption="Quit">…</question>` has both. Only a question has more than
+one answer. Task dialogs are Windows only and have no question-mark icon; if one can't be created the plain box
+is shown. `cancel` also works on macOS; Linux shows the plain Yes/No box for now. A C host that only implements
+the `message` callback gets the plain box. The caption is the tag's `caption` (or `title`) attribute, else the page title.
+
 Inline dialogs are styleable HTML with focus/keyboard handling. `native` forces
 the system box. Native info/alert/error normalize to yes; questions to yes/no.
 An embedder needs a Dialogs implementation; absence can produce fallback answers,

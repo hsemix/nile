@@ -47,7 +47,7 @@ browser compatibility.
 | [components.html](../../examples/components.html) | Class components and lifecycle |
 | [controls2.html](../../examples/controls2.html) | Additional engine-drawn controls |
 | [css-compat.html](../../examples/css-compat.html) | CSS compatibility checks |
-| [dialogs.html](../../examples/dialogs.html) | Native and inline message/file dialogs |
+| [dialogs.html](../../examples/dialogs.html) | Native and inline message/file dialogs, question boxes with Cancel or as a task dialog |
 | [editor.html](../../examples/editor.html) | Contenteditable, formatting, selection and history |
 | [fetch.html](../../examples/fetch.html) | File requests, networking and storage |
 | [fixed.html](../../examples/fixed.html) | Fixed/sticky positioning and scroll hit testing |
