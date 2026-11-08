@@ -301,11 +301,13 @@ mod win {
 
     use nile_engine::dialogs::{FileFilter, MessageKind};
     use windows_sys::Win32::{
+        Foundation::RECT,
+        Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED},
         System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED},
         UI::{
             Controls::Dialogs::{GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW},
             Input::KeyboardAndMouse::GetActiveWindow,
-            WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, MessageBoxW, SendMessageW, SetForegroundWindow, MB_SETFOREGROUND, MB_TOPMOST, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
+            WindowsAndMessaging::{EnumWindows, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, GWL_EXSTYLE, GW_OWNER, IsIconic, IsWindow, IsWindowVisible, MessageBoxW, SendMessageW, SetForegroundWindow, MB_SETFOREGROUND, MB_TOPMOST, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
         },
     };
 
@@ -346,6 +348,43 @@ mod win {
             }
         };
         usable(guess).then_some(guess)
+    }
+
+    /// `NILE_TRACE` aid: shortly after a box opens, list this process's top-level windows (class, title, owner,
+    /// visibility, whether DWM cloaks it, extended style, rectangle), so a box that is open but out of sight can be found.
+    fn trace_windows_soon() {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            // SAFETY: plain window queries; the callback only reads.
+            unsafe extern "system" fn each(hwnd: isize, _: isize) -> i32 {
+                let mut process = 0u32;
+                GetWindowThreadProcessId(hwnd, &mut process);
+                if process == std::process::id() {
+                    let (mut class, mut title) = ([0u16; 96], [0u16; 96]);
+                    let (c, t) = (GetClassNameW(hwnd, class.as_mut_ptr(), 96), GetWindowTextW(hwnd, title.as_mut_ptr(), 96));
+                    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                    GetWindowRect(hwnd, &mut rect);
+                    let mut cloaked = 0u32;
+                    DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED as u32, &mut cloaked as *mut u32 as *mut c_void, 4);
+                    eprintln!(
+                        "[dialog]   window {hwnd} class {:?} title {:?} owner {} visible {} iconic {} cloaked {cloaked} exstyle {:#x} rect {},{} {}x{}",
+                        String::from_utf16_lossy(&class[..c.max(0) as usize]),
+                        String::from_utf16_lossy(&title[..t.max(0) as usize]),
+                        GetWindow(hwnd, GW_OWNER),
+                        IsWindowVisible(hwnd),
+                        IsIconic(hwnd),
+                        GetWindowLongW(hwnd, GWL_EXSTYLE),
+                        rect.left,
+                        rect.top,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top
+                    );
+                }
+                1
+            }
+            eprintln!("[dialog] windows of this process, 0.8 s after the box opened:");
+            unsafe { EnumWindows(Some(each), 0) };
+        });
     }
 
     fn wide(s: &str) -> Vec<u16> {
@@ -500,16 +539,15 @@ mod win {
             // SAFETY: a plain query.
             let foreground = unsafe { GetForegroundWindow() };
             eprintln!("[dialog] opening {kind:?} owner {owner:?} usable {} foreground {foreground}", owner.is_some_and(usable));
+            trace_windows_soon();
         }
-        // Always topmost: owned by a window of ours it could still open behind it (seen on Windows 11 when it is
-        // raised from a `closerequest` handler or a second time in a session), leaving the owner disabled and the
-        // user with no box to answer.
-        let styles = icon | MB_SETFOREGROUND | MB_TOPMOST | if question { MB_YESNO } else { MB_OK };
-        let mut answer = unsafe { MessageBoxW(owner.unwrap_or(0), text.as_ptr(), caption.as_ptr(), styles) };
+        // Without a usable owner the box is topmost so it can't open behind the application.
+        let styles = icon | MB_SETFOREGROUND | if question { MB_YESNO } else { MB_OK };
+        let mut answer = unsafe { MessageBoxW(owner.unwrap_or(0), text.as_ptr(), caption.as_ptr(), if owner.is_some() { styles } else { styles | MB_TOPMOST }) };
         if answer == 0 {
             // 0 means the box could not be shown at all: say why, and try once more with no owner.
             eprintln!("[dialog] MessageBoxW({kind:?}, owner {owner:?}) failed: {}", std::io::Error::last_os_error());
-            answer = unsafe { MessageBoxW(0, text.as_ptr(), caption.as_ptr(), styles) };
+            answer = unsafe { MessageBoxW(0, text.as_ptr(), caption.as_ptr(), styles | MB_TOPMOST) };
         }
         if std::env::var_os("NILE_TRACE").is_some() {
             eprintln!("[dialog] {kind:?} owner {owner:?} -> {answer}");
