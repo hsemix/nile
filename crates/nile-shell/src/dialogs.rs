@@ -495,13 +495,21 @@ mod win {
         };
         let (text, caption) = (wide(text), wide(caption));
         let owner = owner();
-        // Without a usable owner the box is topmost so it can't open behind the application.
-        let styles = icon | MB_SETFOREGROUND | if question { MB_YESNO } else { MB_OK };
-        let mut answer = unsafe { MessageBoxW(owner.unwrap_or(0), text.as_ptr(), caption.as_ptr(), if owner.is_some() { styles } else { styles | MB_TOPMOST }) };
+        if std::env::var_os("NILE_TRACE").is_some() {
+            // Before the call: a box that opens out of sight blocks here, so the line after it never prints.
+            // SAFETY: a plain query.
+            let foreground = unsafe { GetForegroundWindow() };
+            eprintln!("[dialog] opening {kind:?} owner {owner:?} usable {} foreground {foreground}", owner.is_some_and(usable));
+        }
+        // Always topmost: owned by a window of ours it could still open behind it (seen on Windows 11 when it is
+        // raised from a `closerequest` handler or a second time in a session), leaving the owner disabled and the
+        // user with no box to answer.
+        let styles = icon | MB_SETFOREGROUND | MB_TOPMOST | if question { MB_YESNO } else { MB_OK };
+        let mut answer = unsafe { MessageBoxW(owner.unwrap_or(0), text.as_ptr(), caption.as_ptr(), styles) };
         if answer == 0 {
             // 0 means the box could not be shown at all: say why, and try once more with no owner.
             eprintln!("[dialog] MessageBoxW({kind:?}, owner {owner:?}) failed: {}", std::io::Error::last_os_error());
-            answer = unsafe { MessageBoxW(0, text.as_ptr(), caption.as_ptr(), styles | MB_TOPMOST) };
+            answer = unsafe { MessageBoxW(0, text.as_ptr(), caption.as_ptr(), styles) };
         }
         if std::env::var_os("NILE_TRACE").is_some() {
             eprintln!("[dialog] {kind:?} owner {owner:?} -> {answer}");
