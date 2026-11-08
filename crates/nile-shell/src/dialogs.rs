@@ -307,7 +307,7 @@ mod win {
         UI::{
             Controls::Dialogs::{GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW},
             Input::KeyboardAndMouse::GetActiveWindow,
-            WindowsAndMessaging::{EnumWindows, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, GWL_EXSTYLE, GW_OWNER, IsIconic, IsWindow, IsWindowVisible, MessageBoxW, SendMessageW, SetForegroundWindow, MB_SETFOREGROUND, MB_TOPMOST, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
+            WindowsAndMessaging::{EnumWindows, SendMessageTimeoutW, ShowWindow, SMTO_ABORTIFHUNG, SW_SHOWNORMAL, WM_NULL, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, GWL_EXSTYLE, GW_OWNER, IsIconic, IsWindow, IsWindowVisible, MessageBoxW, SendMessageW, SetForegroundWindow, MB_SETFOREGROUND, MB_TOPMOST, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
         },
     };
 
@@ -352,26 +352,28 @@ mod win {
 
     /// `NILE_TRACE` aid: shortly after a box opens, list this process's top-level windows (class, title, owner,
     /// visibility, whether DWM cloaks it, extended style, rectangle), so a box that is open but out of sight can be found.
+    /// A dialog (`#32770`) that is still hidden is then asked whether its thread answers and is shown by hand, and
+    /// the line after says whether that made it visible (an experiment: if it works, the shell can do it itself).
     fn trace_windows_soon() {
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(800));
-            // SAFETY: plain window queries; the callback only reads.
-            unsafe extern "system" fn each(hwnd: isize, _: isize) -> i32 {
+            // SAFETY: plain window queries; the callback only reads and pushes into the Vec `lparam` points to.
+            unsafe extern "system" fn each(hwnd: isize, hidden: isize) -> i32 {
                 let mut process = 0u32;
                 GetWindowThreadProcessId(hwnd, &mut process);
                 if process == std::process::id() {
                     let (mut class, mut title) = ([0u16; 96], [0u16; 96]);
                     let (c, t) = (GetClassNameW(hwnd, class.as_mut_ptr(), 96), GetWindowTextW(hwnd, title.as_mut_ptr(), 96));
+                    let class = String::from_utf16_lossy(&class[..c.max(0) as usize]);
                     let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
                     GetWindowRect(hwnd, &mut rect);
                     let mut cloaked = 0u32;
                     DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED as u32, &mut cloaked as *mut u32 as *mut c_void, 4);
+                    let visible = IsWindowVisible(hwnd);
                     eprintln!(
-                        "[dialog]   window {hwnd} class {:?} title {:?} owner {} visible {} iconic {} cloaked {cloaked} exstyle {:#x} rect {},{} {}x{}",
-                        String::from_utf16_lossy(&class[..c.max(0) as usize]),
+                        "[dialog]   window {hwnd} class {class:?} title {:?} owner {} visible {visible} iconic {} cloaked {cloaked} exstyle {:#x} rect {},{} {}x{}",
                         String::from_utf16_lossy(&title[..t.max(0) as usize]),
                         GetWindow(hwnd, GW_OWNER),
-                        IsWindowVisible(hwnd),
                         IsIconic(hwnd),
                         GetWindowLongW(hwnd, GWL_EXSTYLE),
                         rect.left,
@@ -379,11 +381,28 @@ mod win {
                         rect.right - rect.left,
                         rect.bottom - rect.top
                     );
+                    if class == "#32770" && visible == 0 {
+                        (*(hidden as *mut Vec<isize>)).push(hwnd);
+                    }
                 }
                 1
             }
+            let mut hidden: Vec<isize> = Vec::new();
             eprintln!("[dialog] windows of this process, 0.8 s after the box opened:");
-            unsafe { EnumWindows(Some(each), 0) };
+            unsafe { EnumWindows(Some(each), &mut hidden as *mut Vec<isize> as isize) };
+            for dialog in hidden {
+                // SAFETY: plain calls on a window handle that may have gone away (they then just fail).
+                unsafe {
+                    let mut result = 0usize;
+                    let answered = SendMessageTimeoutW(dialog, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 500, &mut result);
+                    eprintln!("[dialog] hidden dialog {dialog}: its thread {} (WM_NULL)", if answered != 0 { "answers" } else { "does not answer" });
+                    ShowWindow(dialog, SW_SHOWNORMAL);
+                    SetForegroundWindow(dialog);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                // SAFETY: a plain query.
+                eprintln!("[dialog] hidden dialog {dialog}: after ShowWindow visible = {}", unsafe { IsWindowVisible(dialog) });
+            }
         });
     }
 
