@@ -3,6 +3,19 @@ use super::*;
 use nile_style::compute_styles;
 
 #[test]
+fn scroll_containers_in_a_full_height_page_do_not_make_the_page_scroll() {
+    let doc = Document::parse(
+        r#"<html style="height:100%"><body style="margin:0;height:100%;display:flex;flex-direction:column">
+             <div style="height:30px"></div>
+             <main style="flex:1;min-height:0;overflow:auto"><div style="height:900px"></div></main>
+             <footer style="height:20px"></footer></body></html>"#,
+    );
+    let mut text = TextEngine::new();
+    let tree = layout(&doc, &compute_styles(&doc), &mut text, 200.0, 300.0);
+    assert_eq!(tree.content_height, 300.0, "the 900px inside <main> scrolls in <main>, not the page");
+}
+
+#[test]
 fn flex_row_splits_width() {
     let doc = Document::parse(
         r#"<body style="margin:0"><div style="display:flex; gap:10px">

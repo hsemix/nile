@@ -8,6 +8,12 @@ the section becomes that version's.
 
 ## Unreleased
 
+### 2026-11-11
+
+#### Fixed
+
+- A page with a fixed-height root (`html, body { height: 100% }`) no longer scrolls as a whole when an `overflow: auto` box inside it has more content than fits: the toolbar and footer used to move once the wheel scrolled past the end of the box.
+
 ### 2026-11-07
 
 #### Changed

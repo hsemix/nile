@@ -1510,7 +1510,10 @@ pub fn layout_with(
                 continue;
             }
             content_height = content_height.max(b.rect.y + b.rect.height);
-            i = if b.scroll.is_some() { b.subtree_end.max(i + 1) } else { i + 1 };
+            // `scroll` isn't computed yet (`compute_scroll_boxes` runs below), so ask the style: a
+            // clipping box's overflowing contents scroll inside it, not the page.
+            let clips = i > 0 && matches!(b.content, BoxContent::Element) && styles.get(b.node).clips() && b.subtree_end > i + 1;
+            i = if clips { b.subtree_end.max(i + 1) } else { i + 1 };
         }
     }
     let index = boxes
