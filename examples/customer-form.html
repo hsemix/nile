@@ -1,0 +1,218 @@
+<!doctype html>
+<html window-title="Customer Entry" window-width="1180" window-height="760" window-min-width="900" window-min-height="620" window-alignment="5">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>Customer Entry</title>
+<!-- The system look (Windows, macOS or Linux controls); delete this line to get the engine's own. -->
+<include src="../themes/system/system.htm"></include>
+<style>
+  /* A desktop data-entry form: native menu bar, toolbar, grouped fields, rich notes and a status bar.
+     Colours are the system's (Canvas, Field, ButtonBorder, AccentColor), so light and dark mode follow the OS. */
+  :root { color-scheme: light dark; --gap: 10px; --row: 28px }
+  body.compact { --gap: 6px; --row: 24px }
+  /* The system theme package only knows light colours (its --ui-* variables); give it dark ones. */
+  @media (prefers-color-scheme: dark) {
+    :root { --ui-bg: #202020; --ui-surface: #2b2b2b; --ui-soft: #272727; --ui-text: #f3f3f3; --ui-muted: #a6a6a6; --ui-border: #505050;
+            --ui-hover: #353535; --ui-pressed: #3d3d3d; --ui-accent: #4cc2ff; --ui-accent-hover: #6ccbff; --ui-accent-pressed: #3aa8e0;
+            --ui-selected: #2d3a4a; --ui-focus: #4cc2ff80 }
+  }
+  html, body { height: 100% }
+  body { margin: 0; font: 14px "Segoe UI", system-ui, sans-serif; background: Canvas; color: CanvasText; display: flex; flex-direction: column }
+  menu#app { display: none } /* the system draws the menu bar; this markup only describes it */
+
+  .toolbar { display: flex; align-items: center; gap: 2px; padding: 6px 10px; border-bottom: 1px solid ButtonBorder }
+  .toolbar button, .notes-bar button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 30px; padding: 0; border: 1px solid transparent; background: transparent; border-radius: 4px; color: CanvasText }
+  .toolbar button:hover, .notes-bar button:hover { background: color-mix(in srgb, CanvasText 10%, transparent) }
+  .toolbar button[disabled] { opacity: .4 }
+  .toolbar button.on { background: color-mix(in srgb, AccentColor 28%, transparent); border-color: AccentColor }
+  .toolbar .sep { width: 1px; height: 20px; background: ButtonBorder; margin: 0 6px }
+  svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round }
+
+  main { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px 16px; align-content: start }
+  input[readonly] { background: color-mix(in srgb, Field 88%, CanvasText 10%); color: GrayText }
+  fieldset { margin: 0; padding: 10px 14px 14px; border: 1px solid ButtonBorder; border-radius: 4px; min-width: 0 }
+  legend { padding: 0 6px }
+  .fields { display: grid; grid-template-columns: max-content 1fr; gap: var(--gap) 12px; align-items: center }
+  .fields > label { white-space: nowrap }
+  .fields input[type=text], .fields input[type=email], .fields input[type=tel], .fields input[type=number], .fields input[type=date], .fields select { width: 100%; box-sizing: border-box; height: var(--row) }
+  .fields .span { grid-column: 2 }
+  .inline { display: flex; gap: 14px; align-items: center; flex-wrap: wrap }
+  .inline label { display: inline-flex; align-items: center; gap: 6px }
+  .three { display: grid; grid-template-columns: 1fr 110px 70px; gap: 8px }
+  .two { display: grid; grid-template-columns: max-content 1fr max-content 1fr; gap: var(--gap) 12px; align-items: center }
+  .two > label { white-space: nowrap }
+  .two select, .two input { width: 100%; min-width: 0; box-sizing: border-box }
+  .wide { grid-column: 1 / 3 }
+
+  .notes-bar { display: flex; gap: 2px; margin-bottom: 8px }
+  .notes-bar .sep { width: 1px; background: ButtonBorder; margin: 4px 6px }
+  #notes { min-height: 130px; padding: 8px 10px; border: 1px solid ButtonBorder; background: Field; color: FieldText; border-radius: 2px; outline: none; overflow: auto }
+  #notes:focus { border-color: AccentColor }
+
+  footer { display: flex; justify-content: space-between; gap: 16px; padding: 5px 12px; border-top: 1px solid ButtonBorder; font-size: 12px; color: GrayText }
+  #accent-probe { position: absolute; width: 0; height: 0; background: AccentColor }
+  body.view-off fieldset > * { opacity: .55 }
+</style>
+</head>
+<body>
+  <!-- The menu bar. On macOS and Windows it is the system's; on Linux it is drawn as a bar in the window. -->
+  <menu id="app">
+    <li>File <menu>
+      <li id="new" accesskey="CmdOrCtrl+N">New customer</li>
+      <li id="save" accesskey="CmdOrCtrl+S">Save</li>
+      <hr>
+      <li id="quit" role="quit" accesskey="CmdOrCtrl+Q">Exit</li>
+    </menu></li>
+    <li>Edit <menu>
+      <li role="cut" accesskey="CmdOrCtrl+X">Cut</li>
+      <li role="copy" accesskey="CmdOrCtrl+C">Copy</li>
+      <li role="paste" accesskey="CmdOrCtrl+V">Paste</li>
+      <hr>
+      <li id="editmode" accesskey="CmdOrCtrl+E">Edit mode</li>
+    </menu></li>
+    <li>View <menu>
+      <li class="page">TextBox / RichTextBox scenarios</li>
+      <li class="page">Button visual styles</li>
+      <li class="page">Cash register</li>
+      <li class="page" id="p-customer" checked>Customer entry form</li>
+      <hr>
+      <li class="density" id="classic" checked>Classic</li>
+      <li class="density" id="compact">Compact</li>
+      <hr>
+      <li id="dim">Dim read-only fields</li>
+    </menu></li>
+  </menu>
+
+  <div class="toolbar">
+    <button id="t-save" title="Save (Ctrl+S)"><svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/></svg></button>
+    <button id="t-new" title="New customer (Ctrl+N)"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+    <span class="sep"></span>
+    <button id="t-edit" title="Edit mode (Ctrl+E)"><svg viewBox="0 0 24 24"><path d="M4 20l4-1 10-10-3-3L5 16z"/><path d="M13 7l3 3"/></svg></button>
+  </div>
+
+  <main>
+    <fieldset>
+      <legend>Customer</legend>
+      <div class="fields">
+        <label for="id">Customer ID:</label><input id="id" type="text" value="C-004217" readonly>
+        <label for="title">Title:</label>
+        <select id="title"><option>Mr.</option><option>Ms.</option><option>Dr.</option><option>Prof.</option></select>
+        <label for="first">First name:</label><input id="first" type="text" value="Alex">
+        <label for="middle">Middle:</label><input id="middle" type="text">
+        <label for="last">Last name:</label><input id="last" type="text" value="Morgan">
+        <label for="birth">Birth date:</label><input id="birth" type="date" value="1987-06-15">
+        <label>Status:</label><span class="inline"><label><input type="checkbox" checked> Active</label></span>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Contact details</legend>
+      <div class="fields">
+        <label for="email">Email:</label><input id="email" type="email" value="alex.morgan@example.com">
+        <label for="phone">Phone:</label><input id="phone" type="tel" value="(206) 555-0142">
+        <label for="mobile">Mobile:</label><input id="mobile" type="tel" value="(206) 555-0188">
+        <label for="pref">Preferred contact:</label>
+        <select id="pref"><option>Email</option><option>Phone</option><option>Mobile</option><option>SMS</option></select>
+        <label>Permissions:</label>
+        <span class="inline"><label><input type="checkbox" checked> Allow email</label><label><input type="checkbox"> Allow SMS</label></span>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Address</legend>
+      <div class="fields">
+        <label for="a1">Address line 1:</label><input id="a1" type="text" value="1420 Fifth Avenue">
+        <label for="a2">Address line 2:</label><input id="a2" type="text" value="Suite 900">
+        <label for="street">Street:</label><input id="street" type="text" value="Fifth Avenue">
+        <label for="city">City / ZIP / State:</label>
+        <div class="three"><input id="city" type="text" value="Seattle"><input type="text" value="98101-1234" aria-label="ZIP"><input type="text" value="WA" aria-label="State"></div>
+        <label for="country">Country:</label>
+        <select id="country"><option>United States</option><option>Canada</option><option>Mexico</option><option>United Kingdom</option></select>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Account and preferences</legend>
+      <div class="two">
+        <label for="type">Type:</label><select id="type"><option>Retail</option><option>Wholesale</option><option>Partner</option></select>
+        <label for="status">Status:</label><select id="status"><option>Active</option><option>On hold</option><option>Closed</option></select>
+        <label for="credit">Credit limit:</label><input id="credit" type="number" value="7500" step="100" min="0" style="height:var(--row)">
+        <label for="disc">Default discount %:</label><input id="disc" type="number" value="5" step="0.5" min="0" max="100" style="height:var(--row)">
+        <label for="lang">Language:</label><select id="lang"><option>English</option><option>Español</option><option>Français</option></select>
+        <label for="tz">Time zone:</label><select id="tz"><option>Pacific</option><option>Mountain</option><option>Central</option><option>Eastern</option></select>
+      </div>
+      <div class="inline" style="margin-top:14px"><span>Options:</span><label><input type="checkbox" checked> Paperless billing</label><label><input type="checkbox"> Priority customer</label></div>
+    </fieldset>
+
+    <fieldset class="wide">
+      <legend>Customer notes</legend>
+      <div class="notes-bar">
+        <button data-cmd="cut" title="Cut"><svg viewBox="0 0 24 24"><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M7.5 16L17 4M16.5 16L7 4"/></svg></button>
+        <button data-cmd="copy" title="Copy"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="12" rx="1.5"/><path d="M5 15V5a1 1 0 011-1h9"/></svg></button>
+        <button data-cmd="paste" title="Paste"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="16" rx="1.5"/><path d="M9 5V3h6v2"/></svg></button>
+        <span class="sep"></span>
+        <button data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+        <button data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+        <button data-cmd="underline" title="Underline (Ctrl+U)"><u>U</u></button>
+      </div>
+      <div id="notes" contenteditable="true">Prefers email contact. Interested in the <b>premium support</b> plan.</div>
+    </fieldset>
+  </main>
+
+  <footer>
+    <span id="left"></span>
+    <span id="right"></span>
+  </footer>
+  <div id="accent-probe"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let editing = true;
+const fields = () => [...document.querySelectorAll("main input:not([readonly]), main select")];
+
+function status() {
+  const w = Math.round(window.innerWidth), h = Math.round(window.innerHeight);
+  $("#left").textContent = `Window: ${w} x ${h}   Customer Entry Form: edit mode ${editing ? "on" : "off"}`;
+  const c = getComputedStyle($("#accent-probe")).backgroundColor.match(/\d+/g);
+  const hex = c ? "#" + c.slice(0, 3).map((v) => (+v).toString(16).padStart(2, "0")).join("").toUpperCase() : "";
+  $("#right").textContent = `Display: ${Math.round(window.devicePixelRatio * 100)}%   Accent: ${hex}`;
+}
+
+function setEditing(on) {
+  editing = on;
+  for (const f of fields()) f.disabled = !on;
+  $("#notes").contentEditable = on ? "true" : "false";
+  $("#t-edit").classList.toggle("on", on);
+  $("#editmode").toggleAttribute("checked", on);
+  status();
+}
+
+// ---- menu ----------------------------------------------------------------------------------------
+Window.this.menu = $("#app");
+$("#app").addEventListener("click", (e) => {
+  const li = e.target.closest("li");
+  if (!li || li.querySelector("menu")) return;
+  if (li.id === "editmode") setEditing(!editing);
+  else if (li.id === "save") Window.this.modal(<info caption="Customer Entry">Customer saved.</info>);
+  else if (li.id === "new") { for (const f of fields()) if (f.type === "text" || f.type === "email" || f.type === "tel") f.value = ""; $("#first").focus(); }
+  else if (li.classList.contains("page")) { document.querySelectorAll(".page").forEach((p) => p.toggleAttribute("checked", p === li)); }
+  else if (li.classList.contains("density")) {
+    document.querySelectorAll(".density").forEach((p) => p.toggleAttribute("checked", p === li));
+    document.body.classList.toggle("compact", li.id === "compact");
+  } else if (li.id === "dim") { li.toggleAttribute("checked"); document.body.classList.toggle("view-off", li.hasAttribute("checked")); }
+});
+
+// ---- toolbar and notes -------------------------------------------------------------------------------
+$("#t-save").onclick = () => $("#save").click();
+$("#t-new").onclick = () => $("#new").click();
+$("#t-edit").onclick = () => setEditing(!editing);
+for (const b of document.querySelectorAll("[data-cmd]")) {
+  b.addEventListener("mousedown", (e) => e.preventDefault()); // keep the selection in the notes
+  b.addEventListener("click", () => { $("#notes").focus(); document.execCommand(b.dataset.cmd); });
+}
+addEventListener("resize", status);
+setEditing(true);
+</script>
+</body>
+</html>
