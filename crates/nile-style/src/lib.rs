@@ -1264,17 +1264,21 @@ menu.popup > li[disabled], menu.context > li[disabled], popup > menu > li[disabl
 .nile-picker .np-swatch { width: 28px; height: 20px; border: 1px solid rgba(0,0,0,0.25) }
 frame { display: block; height: 150px; border: 0 }
 .nile-modal { position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 2147483600; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center }
-.nile-messagebox { min-width: 280px; max-width: 460px; background: #fff; color: #222; border: 1px solid #b4b8c0; border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,0.4); overflow: hidden }
-.nile-messagebox-title { padding: 8px 14px; font-weight: bold; background: #f1f3f6; border-bottom: 1px solid #dde0e6 }
-.nile-messagebox-body { display: flex; padding: 16px 14px }
-.nile-messagebox-icon { width: 30px; height: 30px; border-radius: 15px; margin-right: 12px; text-align: center; line-height: 30px; font-weight: bold; color: @ACCENT_TEXT@; background: @ACCENT@; flex: none }
+.nile-messagebox { min-width: 300px; max-width: 480px; background: #fff; color: #1b1b1b; border: 1px solid #a6a6a6; border-radius: 8px; box-shadow: 0 12px 38px rgba(0,0,0,0.38); overflow: hidden }
+.nile-messagebox-titlebar { display: flex; align-items: center; height: 32px; padding-left: 12px; background: #f3f3f3 }
+.nile-messagebox-appicon { width: 16px; height: 16px; margin-right: 8px; flex: none }
+.nile-messagebox-title { flex: 1; font-size: 13px; color: #1b1b1b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.nile-messagebox-close { width: 46px; height: 32px; line-height: 30px; text-align: center; font-size: 20px; color: #1b1b1b; flex: none }
+.nile-messagebox-close:hover { background: #c42b1c; color: #fff }
+.nile-messagebox-body { display: flex; padding: 24px 24px 26px }
+.nile-messagebox-icon { width: 40px; height: 40px; border-radius: 20px; margin-right: 18px; text-align: center; line-height: 40px; font-size: 22px; font-weight: bold; color: @ACCENT_TEXT@; background: @ACCENT@; flex: none }
 .nile-messagebox.alert .nile-messagebox-icon { background: #e0a100 }
 .nile-messagebox.error .nile-messagebox-icon { background: #d33a3a }
 .nile-messagebox.question .nile-messagebox-icon { background: @ACCENT@ }
 .nile-messagebox-text { flex: 1; align-self: center }
-.nile-messagebox-buttons { display: flex; justify-content: flex-end; padding: 8px 14px 12px }
-.nile-messagebox-buttons > button { margin-left: 8px; padding: 4px 16px }
-.nile-messagebox-buttons > button.default { border-color: @ACCENT@; font-weight: bold }
+.nile-messagebox-buttons { display: flex; justify-content: flex-end; padding: 14px 16px; background: #f0f0f0; border-top: 1px solid #dfdfdf }
+.nile-messagebox-buttons > button { margin-left: 8px; min-width: 84px; padding: 5px 14px }
+.nile-messagebox-buttons > button.default { background: @ACCENT@; border-color: @ACCENT@; color: @ACCENT_TEXT@ }
 frameset { display: grid; height: 100%; min-height: 150px }
 frameset > * { min-width: 0; min-height: 0 }
 frameset > frame { height: auto }
@@ -1433,7 +1437,9 @@ menu.popup > li[disabled], menu.context > li[disabled], popup > menu > li[disabl
 .nile-picker .np-link { color: #8ab4f8 }
 .nile-picker .np-preview { border-color: #555 }
 .nile-messagebox { background: #2b2b2b; color: #f0f0f0; border-color: #4a4a4a }
-.nile-messagebox-title { background: #333333; border-bottom-color: #444444 }
+.nile-messagebox-titlebar { background: #333333 }
+.nile-messagebox-title, .nile-messagebox-close { color: #f0f0f0 }
+.nile-messagebox-buttons { background: #202020; border-top-color: #3a3a3a }
 hr { border-top-color: #666666; border-bottom-color: #333333 }
 fieldset { border-color: #555555 }
 mark { background: #665c00; color: #ffffff }

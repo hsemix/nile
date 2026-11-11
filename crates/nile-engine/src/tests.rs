@@ -4939,6 +4939,69 @@ fn scripts_open_native_dialogs() {
 }
 
 #[test]
+fn question_boxes_pass_cancel_and_task_styles_to_the_host() {
+    use dialogs::{Dialogs, FileFilter, MessageAnswer, MessageKind, MessageStyle};
+    struct Styled(RefCell<Vec<String>>);
+    impl Dialogs for Styled {
+        fn open_files(&self, _: bool, _: &[FileFilter], _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn save_file(&self, _: &[FileFilter], _: &str, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn pick_folder(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn message(&self, _: MessageKind, _: &str, _: &str) -> bool {
+            self.0.borrow_mut().push("plain".into());
+            true
+        }
+        fn message_with(&self, kind: MessageKind, _: &str, text: &str, style: MessageStyle) -> MessageAnswer {
+            self.0.borrow_mut().push(format!("{kind:?} {text} cancel={} task={}", style.cancel, style.task));
+            if style.cancel { MessageAnswer::Cancel } else { MessageAnswer::No }
+        }
+    }
+    let (mut p, path) = page("<body></body>", "question-styles");
+    let host = Rc::new(Styled(RefCell::new(Vec::new())));
+    p.set_dialogs(host.clone());
+    assert_eq!(p.eval("Window.this.modal(JSX('question', null, ['A?']))").0.unwrap(), "no");
+    assert_eq!(p.eval("Window.this.modal(JSX('question', { cancel: true }, ['B?']))").0.unwrap(), "cancel");
+    assert_eq!(p.eval("Window.this.modal(JSX('question', { task: true }, ['C?']))").0.unwrap(), "no");
+    assert_eq!(p.eval("Window.this.modal(JSX('question', { cancel: true, task: true }, ['D?']))").0.unwrap(), "cancel");
+    // Only a question has more than one answer.
+    assert_eq!(p.eval("Window.this.modal(JSX('alert', { cancel: true }, ['E']))").0.unwrap(), "yes");
+    assert_eq!(
+        *host.0.borrow(),
+        [
+            "Question A? cancel=false task=false",
+            "Question B? cancel=true task=false",
+            "Question C? cancel=false task=true",
+            "Question D? cancel=true task=true",
+            "Alert E cancel=true task=false",
+        ]
+    );
+    // A host that only knows `message` still works: the styles are ignored.
+    struct Old;
+    impl Dialogs for Old {
+        fn open_files(&self, _: bool, _: &[FileFilter], _: &str, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn save_file(&self, _: &[FileFilter], _: &str, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn pick_folder(&self, _: &str, _: &str) -> Option<String> {
+            None
+        }
+        fn message(&self, _: MessageKind, _: &str, _: &str) -> bool {
+            false
+        }
+    }
+    p.set_dialogs(Rc::new(Old));
+    assert_eq!(p.eval("Window.this.modal(JSX('question', { cancel: true, task: true }, ['F?']))").0.unwrap(), "no");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn default_dialogs_are_there_for_the_first_scripts() {
     use dialogs::{Dialogs, FileFilter, MessageKind};
     struct Count(Rc<std::cell::Cell<u32>>);
@@ -5133,6 +5196,14 @@ fn inline_message_boxes_are_html_and_resolve_a_promise() {
     assert_eq!(ev(&mut p, "answers.slice(2).join()"), "yes");
     // `native` wins over the global setting.
     assert_eq!(ev(&mut p, "Window.this.modal(JSX('question', { native: true }, ['x']))"), "no");
+    // The title bar has the window's icon (or the tag's `icon`; "none" hides it) and a close button that answers like Escape.
+    ev(&mut p, "document.documentElement.setAttribute('window-icon', 'app.png'); Window.this.modal(JSX('question', { inline: true }, ['Close me?'])).then((v) => answers.push(v))");
+    assert_eq!(ev(&mut p, "document.$('.nile-messagebox-appicon').getAttribute('src')"), "app.png");
+    assert_eq!(ev(&mut p, "document.$$('.nile-messagebox button').length"), "2");
+    ev(&mut p, "document.$('.nile-messagebox-close').click()");
+    assert_eq!(ev(&mut p, "answers.slice(3).join()"), "no");
+    ev(&mut p, "Window.this.modal(JSX('info', { inline: true, icon: 'none' }, ['No icon']))");
+    assert_eq!(ev(&mut p, "document.$$('.nile-messagebox-appicon').length"), "0");
     let _ = std::fs::remove_file(path);
 }
 

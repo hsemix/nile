@@ -1603,7 +1603,10 @@
       const caption = (attrs && (attrs.caption || attrs.title)) || document.title || "";
       const inline = attrs && attrs.native !== undefined ? false : attrs && attrs.inline !== undefined ? true : boxMode === "inline";
       if (inline) return inlineBox(tag, attrs || {}, kids || [], caption);
-      const answer = dialog("message", tag, textOf(kids).trim(), caption);
+      // `cancel` adds a Cancel button ("cancel" is then a possible answer); `task` makes it a task dialog (Windows),
+      // whose close button and Escape work. Hosts that don't know them show the plain box.
+      const style = [attrs && attrs.cancel !== undefined && attrs.cancel !== false ? "cancel" : "", attrs && attrs.task !== undefined && attrs.task !== false ? "task" : ""].join(" ").trim();
+      const answer = dialog("message", tag, textOf(kids).trim(), caption, style);
       if (answer === undefined) return tag === "question" ? "no" : "yes";
       return tag === "question" ? answer : "yes";
     }
@@ -1836,7 +1839,23 @@
       const box = document.createElement("div");
       box.className = "nile-messagebox " + kind;
       box.setAttribute("role", kind === "question" ? "dialog" : "alertdialog");
-      if (caption) { const t = document.createElement("div"); t.className = "nile-messagebox-title"; t.textContent = caption; box.appendChild(t); }
+      // A title bar like the system's: the window's icon (`window-icon` on <html>, or the tag's `icon`, `icon="none"` hides
+      // it), the caption, and a close button that answers like Escape. The close button is not a <button>, so the
+      // box's own buttons stay the only ones inside it.
+      const bar = document.createElement("div");
+      bar.className = "nile-messagebox-titlebar";
+      const iconSrc = attrs.icon !== undefined ? String(attrs.icon) : document.documentElement.getAttribute("window-icon") || "";
+      if (iconSrc && iconSrc !== "none") { const im = document.createElement("img"); im.className = "nile-messagebox-appicon"; im.setAttribute("src", iconSrc); bar.appendChild(im); }
+      const title = document.createElement("div");
+      title.className = "nile-messagebox-title";
+      title.textContent = caption || "";
+      const closeBox = document.createElement("div");
+      closeBox.className = "nile-messagebox-close";
+      closeBox.setAttribute("role", "button");
+      closeBox.setAttribute("aria-label", "Close");
+      closeBox.textContent = "\u00d7";
+      bar.append(title, closeBox);
+      box.appendChild(bar);
       const body = document.createElement("div");
       body.className = "nile-messagebox-body";
       const icon = document.createElement("div");
@@ -1868,6 +1887,7 @@
       }
       const cancel = specs.find((x) => x.isCancel);
       const fallback = specs.find((x) => x.isDefault) || specs[0];
+      closeBox.addEventListener("click", () => finish(cancel ? cancel.value : null));
       function onKey(e) {
         if (e.key === "Escape") { e.preventDefault(); finish(cancel ? cancel.value : null); }
         else if (e.key === "Enter" && !(e.target && e.target.localName === "button")) { e.preventDefault(); finish(fallback.value); }

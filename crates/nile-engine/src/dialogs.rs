@@ -35,6 +35,41 @@ pub enum MessageKind {
     Question,
 }
 
+/// How a native question box should look beyond the plain Yes/No one (`<question cancel task>`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MessageStyle {
+    /// A third button, Cancel (the answer is then `Cancel`, not `No`).
+    pub cancel: bool,
+    /// A task dialog (Windows): the title bar's close button and Escape work and answer like Cancel (like No without `cancel`).
+    pub task: bool,
+}
+
+impl MessageStyle {
+    /// From the space separated words a script passes (`"cancel task"`).
+    pub fn parse(words: &str) -> Self {
+        let has = |w: &str| words.split_whitespace().any(|x| x == w);
+        MessageStyle { cancel: has("cancel"), task: has("task") }
+    }
+}
+
+/// What the user chose in a message box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageAnswer {
+    Yes,
+    No,
+    Cancel,
+}
+
+impl MessageAnswer {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MessageAnswer::Yes => "yes",
+            MessageAnswer::No => "no",
+            MessageAnswer::Cancel => "cancel",
+        }
+    }
+}
+
 pub trait Dialogs {
     /// Paths chosen in an open dialog (empty when cancelled). `dir` is where to start.
     fn open_files(&self, multiple: bool, filters: &[FileFilter], caption: &str, dir: &str) -> Vec<String>;
@@ -43,11 +78,23 @@ pub trait Dialogs {
     fn pick_folder(&self, caption: &str, dir: &str) -> Option<String>;
     /// A modal message box; `true` for OK / Yes. Only `Question` has a second button.
     fn message(&self, kind: MessageKind, caption: &str, text: &str) -> bool;
+    /// A message box with a [`MessageStyle`]. The default ignores the style and uses [`Dialogs::message`], so embedders
+    /// that only implement `message` keep working (a Cancel button needs a host that overrides this).
+    fn message_with(&self, kind: MessageKind, caption: &str, text: &str, _style: MessageStyle) -> MessageAnswer {
+        if self.message(kind, caption, text) { MessageAnswer::Yes } else { MessageAnswer::No }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_styles_come_from_words() {
+        assert_eq!(MessageStyle::parse(""), MessageStyle::default());
+        assert_eq!(MessageStyle::parse("task cancel"), MessageStyle { cancel: true, task: true });
+        assert_eq!(MessageStyle::parse("cancelled"), MessageStyle::default());
+    }
 
     #[test]
     fn filters_follow_sciters_syntax() {

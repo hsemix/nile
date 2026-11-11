@@ -6,7 +6,7 @@ use std::path::Path;
 #[cfg(not(windows))]
 use std::process::Command;
 
-use nile_engine::dialogs::{Dialogs, FileFilter, MessageKind};
+use nile_engine::dialogs::{Dialogs, FileFilter, MessageAnswer, MessageKind, MessageStyle};
 
 pub struct NativeDialogs;
 
@@ -245,6 +245,27 @@ impl Dialogs for NativeDialogs {
             }
         }
     }
+
+    fn message_with(&self, kind: MessageKind, caption: &str, text: &str, style: MessageStyle) -> MessageAnswer {
+        if cfg!(target_os = "macos") && style.cancel && kind == MessageKind::Question {
+            // Cancel (or Escape) makes `display dialog` fail, so only a named Yes/No button counts.
+            let script = format!(
+                "display dialog {} with title {} buttons {{\"Cancel\", \"No\", \"Yes\"}} default button \"Yes\" cancel button \"Cancel\" with icon note",
+                osa_str(text),
+                osa_str(caption)
+            );
+            let out = osa(&script).join(" ");
+            return if out.contains("button returned:Yes") {
+                MessageAnswer::Yes
+            } else if out.contains("button returned:No") {
+                MessageAnswer::No
+            } else {
+                MessageAnswer::Cancel
+            };
+        }
+        // TODO: a Cancel button with zenity/kdialog (`--extra-button`, `--yesnocancel`); until then it is a plain Yes/No box.
+        if self.message(kind, caption, text) { MessageAnswer::Yes } else { MessageAnswer::No }
+    }
 }
 
 #[cfg(test)]
@@ -281,7 +302,11 @@ impl Dialogs for NativeDialogs {
     }
 
     fn message(&self, kind: MessageKind, caption: &str, text: &str) -> bool {
-        win::message(kind, caption, text)
+        win::message(kind, caption, text, MessageStyle::default()) == MessageAnswer::Yes
+    }
+
+    fn message_with(&self, kind: MessageKind, caption: &str, text: &str, style: MessageStyle) -> MessageAnswer {
+        win::message(kind, caption, text, style)
     }
 }
 
@@ -299,15 +324,21 @@ mod win {
         ptr::{null, null_mut},
     };
 
-    use nile_engine::dialogs::{FileFilter, MessageKind};
+    use nile_engine::dialogs::{FileFilter, MessageAnswer, MessageKind, MessageStyle};
     use windows_sys::Win32::{
-        Foundation::RECT,
-        Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED},
-        System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED},
+        Foundation::INVALID_HANDLE_VALUE,
+        System::{
+            ApplicationInstallationAndServicing::{ActivateActCtx, CreateActCtxW, DeactivateActCtx, ACTCTXW},
+            Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED},
+            LibraryLoader::{GetProcAddress, LoadLibraryW},
+        },
         UI::{
-            Controls::Dialogs::{GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW},
+            Controls::{
+                Dialogs::{GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW},
+                TASKDIALOGCONFIG,
+            },
             Input::KeyboardAndMouse::GetActiveWindow,
-            WindowsAndMessaging::{EnumWindows, SendMessageTimeoutW, ShowWindow, SMTO_ABORTIFHUNG, SW_SHOWNORMAL, WM_NULL, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, GWL_EXSTYLE, GW_OWNER, IsIconic, IsWindow, IsWindowVisible, MessageBoxW, SendMessageW, SetForegroundWindow, MB_SETFOREGROUND, MB_TOPMOST, IDOK, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO},
+            WindowsAndMessaging::{EnumWindows, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowThreadProcessId, ShowWindow, GW_OWNER, SW_SHOWNORMAL, IsIconic, IsWindow, IsWindowVisible, MessageBoxW, SendMessageW, SetForegroundWindow, MB_SETFOREGROUND, MB_TOPMOST, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO, MB_YESNOCANCEL, IDCANCEL},
         },
     };
 
@@ -350,58 +381,53 @@ mod win {
         usable(guess).then_some(guess)
     }
 
-    /// `NILE_TRACE` aid: shortly after a box opens, list this process's top-level windows (class, title, owner,
-    /// visibility, whether DWM cloaks it, extended style, rectangle), so a box that is open but out of sight can be found.
-    /// A dialog (`#32770`) that is still hidden is then asked whether its thread answers and is shown by hand, and
-    /// the line after says whether that made it visible (an experiment: if it works, the shell can do it itself).
-    fn trace_windows_soon() {
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(800));
-            // SAFETY: plain window queries; the callback only reads and pushes into the Vec `lparam` points to.
-            unsafe extern "system" fn each(hwnd: isize, hidden: isize) -> i32 {
-                let mut process = 0u32;
-                GetWindowThreadProcessId(hwnd, &mut process);
-                if process == std::process::id() {
-                    let (mut class, mut title) = ([0u16; 96], [0u16; 96]);
-                    let (c, t) = (GetClassNameW(hwnd, class.as_mut_ptr(), 96), GetWindowTextW(hwnd, title.as_mut_ptr(), 96));
-                    let class = String::from_utf16_lossy(&class[..c.max(0) as usize]);
-                    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-                    GetWindowRect(hwnd, &mut rect);
-                    let mut cloaked = 0u32;
-                    DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED as u32, &mut cloaked as *mut u32 as *mut c_void, 4);
-                    let visible = IsWindowVisible(hwnd);
-                    eprintln!(
-                        "[dialog]   window {hwnd} class {class:?} title {:?} owner {} visible {visible} iconic {} cloaked {cloaked} exstyle {:#x} rect {},{} {}x{}",
-                        String::from_utf16_lossy(&title[..t.max(0) as usize]),
-                        GetWindow(hwnd, GW_OWNER),
-                        IsIconic(hwnd),
-                        GetWindowLongW(hwnd, GWL_EXSTYLE),
-                        rect.left,
-                        rect.top,
-                        rect.right - rect.left,
-                        rect.bottom - rect.top
-                    );
-                    if class == "#32770" && visible == 0 {
-                        (*(hidden as *mut Vec<isize>)).push(hwnd);
+    /// What `keep_visible` looks for: dialogs of this process owned by `owner` that are not shown.
+    struct Hidden {
+        owner: isize,
+        found: Vec<isize>,
+    }
+
+    unsafe extern "system" fn collect_hidden(hwnd: isize, lparam: isize) -> i32 {
+        // SAFETY: `lparam` is the `Hidden` that `keep_visible` keeps alive for the whole enumeration.
+        let hidden = &mut *(lparam as *mut Hidden);
+        let mut process = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut process);
+        if process == std::process::id() && IsWindowVisible(hwnd) == 0 && GetWindow(hwnd, GW_OWNER) == hidden.owner {
+            let mut class = [0u16; 16];
+            let n = GetClassNameW(hwnd, class.as_mut_ptr(), 16).max(0) as usize;
+            if String::from_utf16_lossy(&class[..n]) == "#32770" {
+                hidden.found.push(hwnd);
+            }
+        }
+        1
+    }
+
+    /// While a message box is open (`open`), show it if Windows created it but never made it visible. On
+    /// Windows 11 (seen in a VM) a `MessageBoxW` could stay hidden with an empty title: its thread was
+    /// answering messages and the owner was disabled (it beeped when clicked), so there was a box nobody could
+    /// see or answer. Showing the dialog by hand brought it up. Cheap: three looks in the first 1.5 s.
+    fn keep_visible(owner: Option<isize>, open: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        std::thread::spawn(move || {
+            for wait in [250u64, 500, 750] {
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+                if !open.load(Relaxed) {
+                    return;
+                }
+                let mut hidden = Hidden { owner: owner.unwrap_or(0), found: Vec::new() };
+                // SAFETY: plain window calls; `hidden` outlives the enumeration, and a handle that has gone away just fails.
+                unsafe {
+                    EnumWindows(Some(collect_hidden), &mut hidden as *mut Hidden as isize);
+                    for dialog in hidden.found {
+                        if open.load(Relaxed) {
+                            if std::env::var_os("NILE_TRACE").is_some() {
+                                eprintln!("[dialog] the box {dialog} was not shown; showing it");
+                            }
+                            ShowWindow(dialog, SW_SHOWNORMAL);
+                            SetForegroundWindow(dialog);
+                        }
                     }
                 }
-                1
-            }
-            let mut hidden: Vec<isize> = Vec::new();
-            eprintln!("[dialog] windows of this process, 0.8 s after the box opened:");
-            unsafe { EnumWindows(Some(each), &mut hidden as *mut Vec<isize> as isize) };
-            for dialog in hidden {
-                // SAFETY: plain calls on a window handle that may have gone away (they then just fail).
-                unsafe {
-                    let mut result = 0usize;
-                    let answered = SendMessageTimeoutW(dialog, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 500, &mut result);
-                    eprintln!("[dialog] hidden dialog {dialog}: its thread {} (WM_NULL)", if answered != 0 { "answers" } else { "does not answer" });
-                    ShowWindow(dialog, SW_SHOWNORMAL);
-                    SetForegroundWindow(dialog);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                // SAFETY: a plain query.
-                eprintln!("[dialog] hidden dialog {dialog}: after ShowWindow visible = {}", unsafe { IsWindowVisible(dialog) });
             }
         });
     }
@@ -543,7 +569,86 @@ mod win {
         }
     }
 
-    pub fn message(kind: MessageKind, caption: &str, text: &str) -> bool {
+    /// The task dialog function (comctl32 version 6) and the activation context it must run in. Linking against
+    /// `TaskDialogIndirect` would stop the program from starting where version 5 is loaded, and the exe carries
+    /// no manifest asking for version 6, so a small manifest is activated around loading and calling it.
+    type TaskDialogIndirectFn = unsafe extern "system" fn(*const TASKDIALOGCONFIG, *mut i32, *mut i32, *mut i32) -> i32;
+
+    fn task_dialog_fn() -> Option<(isize, TaskDialogIndirectFn)> {
+        static FN: std::sync::OnceLock<Option<(isize, TaskDialogIndirectFn)>> = std::sync::OnceLock::new();
+        *FN.get_or_init(|| {
+            const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/></dependentAssembly></dependency></assembly>"#;
+            let path = std::env::temp_dir().join(format!("nile-comctl6-{}.manifest", std::process::id()));
+            std::fs::write(&path, MANIFEST).ok()?;
+            let source = wide(&path.to_string_lossy());
+            // SAFETY: plain calls; the structure and the strings outlive them.
+            let found = unsafe {
+                let mut config: ACTCTXW = std::mem::zeroed();
+                config.cbSize = std::mem::size_of::<ACTCTXW>() as u32;
+                config.lpSource = source.as_ptr();
+                let context = CreateActCtxW(&config);
+                let _ = std::fs::remove_file(&path);
+                if context == INVALID_HANDLE_VALUE {
+                    return None;
+                }
+                let mut cookie = 0usize;
+                if ActivateActCtx(context, &mut cookie) == 0 {
+                    return None;
+                }
+                let library = LoadLibraryW(wide("comctl32.dll").as_ptr());
+                let function = if library == 0 { None } else { GetProcAddress(library, c"TaskDialogIndirect".as_ptr().cast()) };
+                DeactivateActCtx(0, cookie);
+                function.map(|f| (context, std::mem::transmute::<unsafe extern "system" fn() -> isize, TaskDialogIndirectFn>(f)))
+            };
+            if found.is_none() {
+                eprintln!("[dialog] TaskDialogIndirect is not available; using a plain message box");
+            }
+            found
+        })
+    }
+
+    /// A task dialog: like the message box, but the title bar's close button and Escape work (they answer
+    /// `IDCANCEL`). `None` when it can't be used, so the caller falls back to `MessageBoxW`.
+    fn task_dialog(owner: Option<isize>, kind: MessageKind, caption: &str, text: &str, cancel: bool) -> Option<i32> {
+        const TDF_ALLOW_DIALOG_CANCELLATION: i32 = 0x0008;
+        const TDF_POSITION_RELATIVE_TO_WINDOW: i32 = 0x1000;
+        const TDCBF_OK: i32 = 1;
+        const TDCBF_YES: i32 = 2;
+        const TDCBF_NO: i32 = 4;
+        const TDCBF_CANCEL: i32 = 8;
+        let (context, function) = task_dialog_fn()?;
+        let (caption, text) = (wide(caption), wide(text));
+        // MAKEINTRESOURCE(-1 / -2 / -3): TD_WARNING_ICON, TD_ERROR_ICON, TD_INFORMATION_ICON. A question has no icon.
+        let icon: usize = match kind {
+            MessageKind::Alert => 0xFFFF,
+            MessageKind::Error => 0xFFFE,
+            MessageKind::Info => 0xFFFD,
+            MessageKind::Question => 0,
+        };
+        let buttons = if kind == MessageKind::Question { TDCBF_YES | TDCBF_NO | if cancel { TDCBF_CANCEL } else { 0 } } else { TDCBF_OK };
+        let mut pressed = 0i32;
+        // SAFETY: the configuration and its strings live across the call; the activation context is active for it.
+        let result = unsafe {
+            let mut config: TASKDIALOGCONFIG = std::mem::zeroed();
+            config.cbSize = std::mem::size_of::<TASKDIALOGCONFIG>() as u32;
+            config.hwndParent = owner.unwrap_or(0);
+            config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | if owner.is_some() { TDF_POSITION_RELATIVE_TO_WINDOW } else { 0 };
+            config.dwCommonButtons = buttons;
+            config.pszWindowTitle = caption.as_ptr();
+            config.Anonymous1.pszMainIcon = icon as *const u16;
+            config.pszContent = text.as_ptr();
+            let mut cookie = 0usize;
+            if ActivateActCtx(context, &mut cookie) == 0 {
+                return None;
+            }
+            let result = function(&config, &mut pressed, std::ptr::null_mut(), std::ptr::null_mut());
+            DeactivateActCtx(0, cookie);
+            result
+        };
+        (result >= 0).then_some(pressed)
+    }
+
+    pub fn message(kind: MessageKind, caption: &str, text: &str, style: MessageStyle) -> MessageAnswer {
         let question = kind == MessageKind::Question;
         let icon = match kind {
             MessageKind::Info => MB_ICONINFORMATION,
@@ -551,26 +656,39 @@ mod win {
             MessageKind::Error => MB_ICONERROR,
             MessageKind::Question => MB_ICONQUESTION,
         };
-        let (text, caption) = (wide(text), wide(caption));
         let owner = owner();
         if std::env::var_os("NILE_TRACE").is_some() {
             // Before the call: a box that opens out of sight blocks here, so the line after it never prints.
             // SAFETY: a plain query.
             let foreground = unsafe { GetForegroundWindow() };
-            eprintln!("[dialog] opening {kind:?} owner {owner:?} usable {} foreground {foreground}", owner.is_some_and(usable));
-            trace_windows_soon();
+            eprintln!("[dialog] opening {kind:?} {style:?} owner {owner:?} usable {} foreground {foreground}", owner.is_some_and(usable));
         }
-        // Without a usable owner the box is topmost so it can't open behind the application.
-        let styles = icon | MB_SETFOREGROUND | if question { MB_YESNO } else { MB_OK };
-        let mut answer = unsafe { MessageBoxW(owner.unwrap_or(0), text.as_ptr(), caption.as_ptr(), if owner.is_some() { styles } else { styles | MB_TOPMOST }) };
-        if answer == 0 {
-            // 0 means the box could not be shown at all: say why, and try once more with no owner.
-            eprintln!("[dialog] MessageBoxW({kind:?}, owner {owner:?}) failed: {}", std::io::Error::last_os_error());
-            answer = unsafe { MessageBoxW(0, text.as_ptr(), caption.as_ptr(), styles | MB_TOPMOST) };
-        }
+        let open = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        keep_visible(owner, open.clone());
+        let task = if style.task { task_dialog(owner, kind, caption, text, style.cancel) } else { None };
+        let answer = task.unwrap_or_else(|| {
+            let (text, caption) = (wide(text), wide(caption));
+            // Without a usable owner the box is topmost so it can't open behind the application.
+            let buttons = if question && style.cancel { MB_YESNOCANCEL } else if question { MB_YESNO } else { MB_OK };
+            let styles = icon | MB_SETFOREGROUND | buttons;
+            let mut answer = unsafe { MessageBoxW(owner.unwrap_or(0), text.as_ptr(), caption.as_ptr(), if owner.is_some() { styles } else { styles | MB_TOPMOST }) };
+            if answer == 0 {
+                // 0 means the box could not be shown at all: say why, and try once more with no owner.
+                eprintln!("[dialog] MessageBoxW({kind:?}, owner {owner:?}) failed: {}", std::io::Error::last_os_error());
+                answer = unsafe { MessageBoxW(0, text.as_ptr(), caption.as_ptr(), styles | MB_TOPMOST) };
+            }
+            answer
+        });
+        open.store(false, std::sync::atomic::Ordering::Relaxed);
         if std::env::var_os("NILE_TRACE").is_some() {
-            eprintln!("[dialog] {kind:?} owner {owner:?} -> {answer}");
+            eprintln!("[dialog] {kind:?} owner {owner:?} task {} -> {answer}", task.is_some());
         }
-        answer == IDYES || (!question && answer == IDOK)
+        match answer {
+            _ if !question => MessageAnswer::Yes,
+            IDYES => MessageAnswer::Yes,
+            // The close button and Escape of a task dialog (and Cancel itself) answer IDCANCEL.
+            IDCANCEL if style.cancel => MessageAnswer::Cancel,
+            _ => MessageAnswer::No,
+        }
     }
 }
