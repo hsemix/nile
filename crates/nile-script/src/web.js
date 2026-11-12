@@ -1648,6 +1648,16 @@
       else N.traySet(false, "", "", -1, false);
     }
     set menu(el) { appMenu = el || null; N.menuSet(el ? el._id : -1); renderMenuBar(); }
+    // The window's state as a constant (WINDOW_SHOWN, WINDOW_MINIMIZED, WINDOW_MAXIMIZED, WINDOW_FULL_SCREEN) and a
+    // `statechange` event on the window when it changes. Assigning asks the system to change it. Only this window's
+    // own state is known; an opened handle's is `undefined`.
+    get state() { return this === thisWindow ? N.windowState() : undefined; }
+    set state(v) {
+      if (this !== thisWindow) return;
+      const cmd = { 1: "restore", 2: "minimize", 3: "maximize" }[v];
+      if (cmd) N.windowCommand(cmd, 0, 0);
+      else if (v === 5) N.windowCommand("fullscreen", 1, 0);
+    }
     get isActive() { return this === thisWindow ? active : this._valid; }
     get isValid() { return this === thisWindow || this._valid; }
     // Asks the window to close; a `closerequest` listener may cancel it. `value` is what the opener's
@@ -1776,6 +1786,8 @@
     for (const fn of [...((w._listeners && w._listeners[type]) || [])]) fn.call(w, e);
     return e;
   };
+  // `statechange` fires on the global (`window.addEventListener`) and on `Window.this.on`.
+  g.addEventListener("statechange", () => fireWindow(thisWindow, "statechange"));
   Object.defineProperties(g, {
     // From the shell: the user (or `close()`) wants this window closed.
     __closeRequest: { value: (reason) => !fireWindow(thisWindow, "closerequest", { reason }).defaultPrevented },

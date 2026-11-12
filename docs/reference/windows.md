@@ -76,6 +76,7 @@ child pages or run [windows.html](../../examples/windows.html).
 | `closed` | Promise for an opened handle's closure |
 | `focus()` | Native focus request |
 | `postMessage(data)` | JSON message to target; receive on global `message` event |
+| `state` | This window's state as a constant (`Window.WINDOW_SHOWN`, `WINDOW_MINIMIZED`, `WINDOW_MAXIMIZED`, `WINDOW_FULL_SCREEN`). Assigning one asks the system to change it. `undefined` on an opened handle. `statechange` fires on `Window.this` (and `window`) when it changes |
 | `isValid`, `isActive` | This-window state; another window's isActive currently approximates validity |
 | `caption` | This window read/write title; another handle's setter is not implemented |
 | `on/off`, add/removeEventListener | Window-handle event subscriptions |

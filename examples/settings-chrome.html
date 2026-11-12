@@ -1,0 +1,382 @@
+<html
+  window-frame="solid-with-shadow"
+  window-material="mica"
+  window-title="Settings"
+  window-width="1000"
+  window-height="640"
+  window-alignment="5"
+  window-resizable="true"
+>
+  <head>
+    <meta name="color-scheme" content="light dark" />
+    <title>Settings</title>
+    <style>
+      /* A Windows 11 Settings-style window: no system frame, the page draws the title bar, and the
+         three caption buttons carry the window roles so the system still moves, maximizes (with
+         Snap Layouts on Windows 11) and closes the window. The Mica material shows through the
+         translucent backgrounds where the platform has one (Windows 11 build 22523+, macOS vibrancy). */
+      :root {
+        color-scheme: light dark;
+        --fg: CanvasText;
+        --dim: GrayText;
+        --card: rgba(255, 255, 255, 0.55);
+        --hover: rgba(0, 0, 0, 0.06);
+        --line: rgba(0, 0, 0, 0.1);
+        --accent: AccentColor;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --card: rgba(255, 255, 255, 0.06);
+          --hover: rgba(255, 255, 255, 0.08);
+          --line: rgba(255, 255, 255, 0.1);
+        }
+      }
+      html {
+        border-radius: 8px;
+        background: color-mix(in srgb, Canvas 72%, transparent);
+      } /* translucent: Mica shows through, and it stays readable without one */
+      body {
+        margin: 0;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        font:
+          14px "Segoe UI",
+          system-ui,
+          sans-serif;
+        color: var(--fg);
+        background: transparent;
+        overflow: hidden;
+      }
+      button {
+        appearance: none;
+        box-shadow: none;
+      }
+      html {
+        height: 100%;
+      }
+      svg {
+        width: 16px;
+        height: 16px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.4;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .bar {
+        display: flex;
+        align-items: center;
+        height: 44px;
+        flex: none;
+      }
+      .bar .back {
+        width: 32px;
+        height: 32px;
+        margin: 0 6px 0 8px;
+        border: 0;
+        background: transparent;
+        border-radius: 4px;
+        color: var(--fg);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .bar .back:hover {
+        background: var(--hover);
+      }
+      .bar .title {
+        font-size: 12px;
+        margin-right: 24px;
+      }
+      .bar .search {
+        flex: 0 1 460px;
+        height: 30px;
+        box-sizing: border-box;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 15px;
+        background: var(--card);
+        color: var(--fg);
+        outline: none;
+      }
+      .bar .search:focus {
+        border-color: var(--accent);
+      }
+      .bar .fill {
+        flex: 1;
+        height: 100%;
+      }
+      .bar .cap {
+        width: 46px;
+        height: 44px;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: var(--fg);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .bar .cap:hover {
+        background: var(--hover);
+      }
+      .bar .cap.close:hover {
+        background: #c42b1c;
+        color: #fff;
+      }
+
+      .i-restore {
+        display: none;
+      }
+      body.maximized .i-max {
+        display: none;
+      }
+      body.maximized .i-restore {
+        display: block;
+      }
+      body.maximized {
+        border-radius: 0;
+      }
+
+      .shell {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+      }
+      nav {
+        width: 260px;
+        flex: none;
+        padding: 4px 10px;
+        overflow: auto;
+      }
+      .user {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 8px 16px;
+      }
+      .avatar {
+        width: 44px;
+        height: 44px;
+        border-radius: 22px;
+        background: var(--accent);
+        color: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 600;
+      }
+      .user b {
+        display: block;
+      }
+      .user span {
+        font-size: 12px;
+        color: var(--dim);
+      }
+      nav a {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        height: 38px;
+        padding: 0 12px;
+        margin-bottom: 2px;
+        border-radius: 4px;
+        color: var(--fg);
+        text-decoration: none;
+        position: relative;
+      }
+      nav a:hover {
+        background: var(--hover);
+      }
+      nav a.on {
+        background: var(--hover);
+      }
+      nav a.on::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 10px;
+        bottom: 10px;
+        width: 3px;
+        border-radius: 2px;
+        background: var(--accent);
+      }
+
+      main {
+        flex: 1;
+        min-width: 0;
+        overflow: auto;
+        padding: 8px 40px 24px 24px;
+      }
+      .crumb {
+        font-size: 26px;
+        font-weight: 600;
+        margin: 6px 0 20px;
+      }
+      .crumb span {
+        color: var(--dim);
+        font-weight: 400;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 16px 20px;
+        margin-bottom: 4px;
+      }
+      .card h4 {
+        margin: 0 0 6px;
+        font-size: 14px;
+      }
+      .card p {
+        margin: 0;
+        color: var(--dim);
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .row small {
+        display: block;
+        color: var(--dim);
+        font-size: 12px;
+      }
+      h5 {
+        margin: 22px 0 8px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .preview {
+        height: 120px;
+      }
+      #sample {
+        font-size: 14px;
+      }
+      button.apply {
+        padding: 6px 20px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: var(--card);
+        color: var(--fg);
+      }
+      button.apply:hover {
+        background: var(--hover);
+      }
+      input[type="range"] {
+        width: 160px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bar" role="window-caption">
+      <button class="back" aria-label="Back">
+        <svg viewBox="0 0 16 16"><path d="M13 8H3M7 4L3 8l4 4" /></svg>
+      </button>
+      <div class="title">Settings</div>
+      <input
+        class="search"
+        type="text"
+        placeholder='Try "My mouse pointer is too small"'
+      />
+      <div class="fill"></div>
+      <button class="cap" role="window-minimize" aria-label="Minimize">
+        <svg viewBox="0 0 16 16"><path d="M3 8h10" /></svg>
+      </button>
+      <button class="cap" role="window-maximize" aria-label="Maximize">
+        <svg class="i-max" viewBox="0 0 16 16">
+          <rect x="3.5" y="3.5" width="9" height="9" rx="1" /></svg
+        ><svg class="i-restore" viewBox="0 0 16 16">
+          <rect x="3.5" y="5.5" width="7" height="7" rx="1" />
+          <path
+            d="M5.5 5.5v-1a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1"
+          />
+        </svg>
+      </button>
+      <button class="cap close" role="window-close" aria-label="Close">
+        <svg viewBox="0 0 16 16"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9" /></svg>
+      </button>
+    </div>
+
+    <div class="shell">
+      <nav>
+        <div class="user">
+          <div class="avatar">KL</div>
+          <div><b>Klaus Loffelmann</b><span>klaus@example.com</span></div>
+        </div>
+        <a href="#">Home</a>
+        <a href="#">System</a>
+        <a href="#">Bluetooth &amp; devices</a>
+        <a href="#">Network &amp; internet</a>
+        <a href="#">Personalization</a>
+        <a href="#">Apps</a>
+        <a href="#">Accounts</a>
+        <a href="#">Time &amp; language</a>
+        <a href="#">Gaming</a>
+        <a href="#" class="on">Accessibility</a>
+        <a href="#">Privacy &amp; security</a>
+        <a href="#">Windows Update</a>
+      </nav>
+      <main>
+        <div class="crumb">Accessibility <span>&rsaquo;</span> Text size</div>
+        <div class="card preview">
+          <h4>Text size preview</h4>
+          <p id="sample">
+            The size of these words will change as you adjust the slider.
+            Changes you make here will apply to most of the text on your device.
+          </p>
+        </div>
+        <div class="card row">
+          <div>
+            <h4>Text size</h4>
+            <small
+              >Text size that appears throughout Windows and your apps</small
+            >
+          </div>
+          <div class="row">
+            <span>A</span
+            ><input id="size" type="range" min="12" max="28" value="14" /><span
+              style="font-size: 20px"
+              >A</span
+            ><button class="apply" id="apply">Apply</button>
+          </div>
+        </div>
+        <h5>Related settings</h5>
+        <div class="card row">
+          <div>
+            <h4>Display</h4>
+            <small>Monitors, brightness, night light, display profile</small>
+          </div>
+          <span>&rsaquo;</span>
+        </div>
+        <h5>Related support</h5>
+        <div class="card row">
+          <h4>Help with Text size</h4>
+          <span>&#x2303;</span>
+        </div>
+      </main>
+    </div>
+    <script>
+      // `Window.this.state` is live and `statechange` fires when the user maximizes, restores or minimizes:
+      // the middle button shows the restore icon while the window is maximized.
+      const syncMaximized = () =>
+        document.body.classList.toggle(
+          "maximized",
+          Window.this.state === Window.WINDOW_MAXIMIZED,
+        );
+      Window.this.on("statechange", syncMaximized);
+      syncMaximized();
+      const size = document.getElementById("size"),
+        sample = document.getElementById("sample");
+      size.addEventListener("input", () => {
+        sample.style.fontSize = size.value + "px";
+      });
+      document.getElementById("apply").onclick = () => {
+        document.body.style.fontSize = size.value + "px";
+      };
+    </script>
+  </body>
+</html>

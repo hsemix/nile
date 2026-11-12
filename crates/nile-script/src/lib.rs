@@ -359,6 +359,10 @@ pub trait Environment {
     fn screens(&self) -> (Vec<ScreenInfo>, usize) {
         (Vec::new(), 0)
     }
+    /// The window's state: 1 shown, 2 minimized, 3 maximized, 5 full screen (`Window.this.state`).
+    fn window_state(&self) -> u8 {
+        1
+    }
     /// Window `[screenX, screenY, outerWidth, outerHeight, fullscreen (0/1)]`.
     fn window_rect(&self) -> [f32; 5] {
         let (w, h) = self.viewport();
@@ -1008,6 +1012,10 @@ fn install_natives(
             let rows: Vec<serde_json::Value> = list.iter().map(|s| serde_json::json!([s.name, s.x, s.y, s.width, s.height, s.scale, s.primary])).collect();
             serde_json::json!({ "screens": rows, "at": at }).to_string()
         }
+    });
+    native!("windowState", {
+        let env = env.clone();
+        move || -> i32 { i32::from(env.window_state()) }
     });
     native!("windowRect", {
         let env = env.clone();

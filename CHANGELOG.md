@@ -8,6 +8,16 @@ the section becomes that version's.
 
 ## Unreleased
 
+### 2026-11-11
+
+#### Added
+
+- `Window.this.state` reads the window's state (shown, minimized, maximized, full screen; assigning changes it) and a `statechange` event fires when it changes, so a custom title bar can swap its maximize button for a restore button (`examples/settings-chrome.html`).
+
+#### Fixed
+
+- A page with a fixed-height root (`html, body { height: 100% }`) no longer scrolls as a whole when an `overflow: auto` box inside it has more content than fits: the toolbar and footer used to move once the wheel scrolled past the end of the box.
+
 ### 2026-11-07
 
 #### Changed

@@ -80,6 +80,9 @@ struct Win {
     title: String,
     /// The rounded-corner clip last applied: (radius in logical px, outer size, scale).
     corner: (f32, (u32, u32), f64),
+    /// Whether we maximized the window ourselves: stands in for `Window::is_maximized` on a frameless macOS window,
+    /// where asking flips the style mask and sends resize events (see `corner_radius`).
+    zoomed: bool,
     /// Which window edge a frameless window's pointer is over, if any.
     edge: Option<(i8, i8)>,
     /// Whether the window's input method is on, and where its candidate window was last put.
@@ -253,15 +256,21 @@ impl Win {
                 WindowCommand::Modal(id) => actions.push(Action::Modal(id)),
                 WindowCommand::Quit(code) => actions.push(Action::Quit(code)),
                 WindowCommand::Minimize => window.set_minimized(true),
-                WindowCommand::Maximize => window.set_maximized(true),
+                WindowCommand::Maximize => {
+                    self.zoomed = true;
+                    window.set_maximized(true)
+                }
                 WindowCommand::Restore => {
+                    self.zoomed = false;
                     window.set_fullscreen(None);
                     window.set_minimized(false);
                     window.set_maximized(false);
                 }
                 WindowCommand::ToggleMaximize => {
                     if self.config.maximizable && self.config.resizable != Resizable::No {
-                        window.set_maximized(!window.is_maximized());
+                        let on = !self.is_maximized();
+                        self.zoomed = on;
+                        window.set_maximized(on);
                     }
                 }
                 WindowCommand::Fullscreen(on) => {
@@ -311,6 +320,15 @@ impl Win {
         let pos = window.outer_position().map(|p| p.to_logical::<f32>(scale)).unwrap_or_default();
         let outer = window.outer_size().to_logical::<f32>(scale);
         self.page.view.borrow_mut().window_rect = Some([pos.x, pos.y, outer.width, outer.height, f32::from(window.fullscreen().is_some())]);
+        self.page.view.borrow_mut().window_state = if window.fullscreen().is_some() {
+            5
+        } else if window.is_minimized().unwrap_or(false) {
+            2
+        } else if self.is_maximized() {
+            3
+        } else {
+            1
+        };
         let screens = screens_of(&window);
         let changed = self.page.view.borrow().screens != screens;
         if changed {
@@ -321,6 +339,16 @@ impl Win {
             }
         }
         actions
+    }
+
+    /// Whether the window is maximized. A frameless macOS window can't be asked (`Window::is_maximized` flips its style
+    /// mask and sends events that come straight back here, a busy loop), so it is what we last asked for.
+    fn is_maximized(&self) -> bool {
+        if cfg!(target_os = "macos") && self.config.frameless() {
+            self.zoomed
+        } else {
+            self.window.is_maximized()
+        }
     }
 
     /// The corner radius this window is clipped to: the root's `border-radius` for a frameless one that
@@ -387,7 +415,7 @@ impl Win {
         let Some((app, slot)) = &self.remember else { return };
         let w = &self.window;
         let mut s = crate::winstate::load(app, slot).unwrap_or_default();
-        let maximized = w.is_maximized();
+        let maximized = self.is_maximized();
         if !maximized && !w.is_minimized().unwrap_or(false) && w.fullscreen().is_none() {
             if let Ok(p) = w.outer_position() {
                 let size = w.inner_size().to_logical::<f32>(w.scale_factor());
@@ -852,6 +880,7 @@ impl App {
             config,
             title,
             corner: (0.0, (0, 0), 1.0),
+            zoomed: false,
             edge: None,
             ime_on: false,
             ime_area: None,
@@ -1059,8 +1088,9 @@ impl App {
             }
             "zoom" | "maximize" => {
                 if let Some(i) = self.index(id) {
-                    let w = &self.wins[i].window;
-                    w.set_maximized(!w.is_maximized());
+                    let on = !self.wins[i].is_maximized();
+                    self.wins[i].zoomed = on;
+                    self.wins[i].window.set_maximized(on);
                 }
             }
             _ => {}
