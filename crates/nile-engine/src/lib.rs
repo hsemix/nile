@@ -383,6 +383,10 @@ pub struct View {
     /// Where the window is: `[screenX, screenY, outerWidth, outerHeight, fullscreen]`, kept
     /// current by the window loop. `None` in headless runs.
     pub window_rect: Option<[f32; 5]>,
+    /// The window's state (1 shown, 2 minimized, 3 maximized, 5 full screen), kept current by the window loop.
+    pub window_state: u8,
+    /// The state `statechange` last fired for.
+    pub window_state_seen: u8,
     /// The monitors and the index of the window's, kept current by the window loop (empty in headless runs).
     pub screens: (Vec<nile_script::ScreenInfo>, usize),
 }
@@ -1037,6 +1041,10 @@ impl Environment for Env {
         v.screens.clone()
     }
 
+    fn window_state(&self) -> u8 {
+        self.0.borrow().window_state
+    }
+
     fn window_rect(&self) -> [f32; 5] {
         let v = self.0.borrow();
         v.window_rect.unwrap_or([0.0, 0.0, v.viewport.0, v.viewport.1, 0.0])
@@ -1378,6 +1386,8 @@ impl Page {
             dialogs: DEFAULTS.with(|d| d.borrow().0.clone()),
             resized: false,
             window_rect: None,
+            window_state: 1,
+            window_state_seen: 1,
             screens: (Vec::new(), 0),
             window_info: info,
             app_menu: None,
@@ -1738,6 +1748,15 @@ impl Page {
         let Some(host) = &self.scripts else { return (false, None) };
         if std::mem::take(&mut self.view.borrow_mut().resized) {
             host.fire_window_event("resize");
+        }
+        let state_changed = {
+            let mut v = self.view.borrow_mut();
+            let changed = v.window_state != v.window_state_seen;
+            v.window_state_seen = v.window_state;
+            changed
+        };
+        if state_changed {
+            host.fire_window_event("statechange");
         }
         let next = host.tick();
         (self.sync(), next)

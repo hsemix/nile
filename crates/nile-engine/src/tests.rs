@@ -6069,3 +6069,23 @@ fn hover_waits_for_scrolling_to_pause() {
     p.release();
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn window_state_is_readable_and_fires_statechange() {
+    let (mut p, path) = page(
+        r#"<body><script>
+          window.seen = [];
+          Window.this.on("statechange", () => window.seen.push(Window.this.state));
+        </script></body>"#,
+        "window-state",
+    );
+    p.run_timers();
+    assert_eq!(js(&mut p, "Window.this.state"), "1", "shown by default");
+    p.view.borrow_mut().window_state = 3;
+    p.run_timers();
+    p.view.borrow_mut().window_state = 1;
+    p.run_timers();
+    p.run_timers();
+    assert_eq!(js(&mut p, "window.seen.join()"), "3,1", "one event per change, each reading the new state");
+    std::fs::remove_file(path).ok();
+}
