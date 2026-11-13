@@ -55,6 +55,8 @@ browser compatibility.
 | [font-face.html](../../examples/font-face.html) | Local TTF/WOFF2 custom fonts |
 | [forms.html](../../examples/forms.html) | Text controls, checkbox/radio, input events and selection |
 | [customer-form.html](../../examples/customer-form.html) | A desktop data-entry form: native menu bar, toolbar, grouped fields, rich-text notes, status bar, system theme with light and dark colours |
+| [utilities.html](../../examples/utilities.html) | Static utility CSS: layout, spacing, semantic colors, state variants, and an interactive form; [class reference](../../themes/utilities/README.md) |
+| [dark-titlebar.html](../../examples/dark-titlebar.html) | `color-scheme: dark` on a normal framed window: the native title bar and frame go dark too, whatever the system theme |
 | [settings-chrome.html](../../examples/settings-chrome.html) | A Windows 11 Settings-style window: no system frame, the page draws the title bar (back button, search box, caption buttons with the window roles), Mica material, light and dark |
 | [frames-transformed.html](../../examples/frames-transformed.html) | Clipped/transformed frames |
 | [frames.html](../../examples/frames.html) | Nested documents and frame messages |

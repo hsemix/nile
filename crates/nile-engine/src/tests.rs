@@ -6089,3 +6089,66 @@ fn window_state_is_readable_and_fires_statechange() {
     assert_eq!(js(&mut p, "window.seen.join()"), "3,1", "one event per change, each reading the new state");
     std::fs::remove_file(path).ok();
 }
+
+#[test]
+fn static_utilities_lay_out_and_paint_without_a_build_step() {
+    let css = include_str!("../../../themes/utilities/nile.css");
+    let markup = format!(r#"<style>{css}
+        :root {{ --nile-surface:#123456; --nile-hover:#654321; --nile-accent:#abcdef; --nile-border:#222222; }}
+        </style><body class="m-0">
+        <div id="row" class="box-border flex items-center gap-3 p-4 border rounded-lg" style="width:200px">
+          <div id="first" class="bg-surface" style="width:40px;height:24px"></div>
+          <div id="second" class="bg-surface" style="width:40px;height:24px"></div>
+        </div>
+        <div id="grid" class="grid grid-cols-2 gap-4" style="width:200px">
+          <div id="cell" style="height:20px"></div><div style="height:20px"></div>
+        </div>
+        <button id="hover" class="border bg-surface hover:bg-hover focus:border-accent" style="position:absolute;left:250px;top:20px;width:100px;height:40px">Hover</button>
+        <button id="disabled" disabled class="bg-surface hover:bg-hover disabled:opacity-50" style="position:absolute;left:250px;top:100px;width:100px;height:40px">Disabled</button>
+        <div id="gone" class="hidden">Hidden</div></body>"#);
+    let (mut p, path) = page(&markup, "static-utilities");
+    assert_eq!(js(&mut p, "(() => { const a=document.getElementById('first').getBoundingClientRect(); const b=document.getElementById('second').getBoundingClientRect(); return [a.x,a.y,b.x-a.right].join(); })()"), "17,17,12");
+    assert_eq!(js(&mut p, "document.getElementById('cell').getBoundingClientRect().width"), "92");
+    assert_eq!(js(&mut p, "getComputedStyle(document.getElementById('gone')).display"), "none");
+    let mut pixels = vec![0u8; 600 * 300 * 4];
+    p.paint(&mut pixels, 600, 300, 1.0);
+    // The first box uses the overridden surface token, in the engine's BGRA buffer.
+    assert_eq!(&pixels[(20 * 600 + 20) * 4..(20 * 600 + 20) * 4 + 4], &[0x56, 0x34, 0x12, 255]);
+    p.pointer_moved(270.0, 30.0);
+    p.sync();
+    p.paint(&mut pixels, 600, 300, 1.0);
+    assert_eq!(&pixels[(25 * 600 + 260) * 4..(25 * 600 + 260) * 4 + 4], &[0x21, 0x43, 0x65, 255]);
+    click(&mut p, "hover");
+    assert_eq!(js(&mut p, "getComputedStyle(document.getElementById('hover')).getPropertyValue('border-top-color')"), "rgb(171, 205, 239)");
+    p.pointer_moved(270.0, 110.0);
+    p.sync();
+    assert_eq!(js(&mut p, "getComputedStyle(document.getElementById('disabled')).getPropertyValue('opacity')"), "0.5");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn dark_canvas_takes_the_bodys_background() {
+    // A dark-only page, whatever the system says: no background anywhere is the dark canvas, and a `body`
+    // background reaches the whole canvas (the user-agent sheet must not give `html` one of its own).
+    let canvas = |body: &str| {
+        let (p, path) = page(&format!(r#"<html><head><meta name="color-scheme" content="dark"></head><body style="{body}"></body></html>"#), "dark-canvas");
+        let c = p.canvas_background();
+        let _ = std::fs::remove_file(path);
+        (c.r(), c.g(), c.b())
+    };
+    assert_eq!(canvas(""), (0x1f, 0x1f, 0x1f));
+    assert_eq!(canvas("background: #252525"), (0x25, 0x25, 0x25));
+}
+
+#[test]
+fn a_dark_only_page_wants_dark_window_chrome() {
+    let wants = |scheme: &str| {
+        let (p, path) = page(&format!(r#"<html><head><meta name="color-scheme" content="{scheme}"></head><body></body></html>"#), "dark-chrome");
+        let w = p.wants_dark_chrome();
+        let _ = std::fs::remove_file(path);
+        w
+    };
+    assert!(wants("dark"));
+    assert!(!wants("light dark"), "follows the system");
+    assert!(!wants("light"));
+}

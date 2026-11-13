@@ -4298,9 +4298,26 @@ impl Page {
                 }
             })
             .unwrap_or_else(|| {
-                // A transparent or material window shows what is behind it where the page has no background.
-                if WindowConfig::from_document(&self.doc.borrow()).translucent() { Color::TRANSPARENT } else { Color::WHITE }
+                // No page background: a dark page shows the dark canvas (not a rule on `html`, which would hide a
+                // background the page gave `body`); a transparent or material window shows what is behind it.
+                if self.view.borrow().styles.dark {
+                    let c = nile_style::DARK_CANVAS;
+                    Color::from_argb(255, c.r, c.g, c.b)
+                } else if WindowConfig::from_document(&self.doc.borrow()).translucent() {
+                    Color::TRANSPARENT
+                } else {
+                    Color::WHITE
+                }
             })
+    }
+
+    /// The page says `color-scheme: dark` (dark only): its window chrome, such as the title bar, should be dark
+    /// whatever the system theme is.
+    pub fn wants_dark_chrome(&self) -> bool {
+        let Some(html) = self.doc.borrow().find(|n| n.tag() == Some("html")) else {
+            return false;
+        };
+        self.view.borrow().styles.get(html).color_scheme == nile_style::ColorScheme::Dark
     }
 
     /// Paint into a BGRA pixel buffer of `width`×`height` physical pixels.

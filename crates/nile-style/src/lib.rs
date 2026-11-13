@@ -1418,11 +1418,14 @@ input[type=checkbox]:hover:not(:checked):not(:disabled), input[type=radio]:hover
 button:focus-visible, select:focus-visible, input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, input[type=button]:focus-visible, input[type=submit]:focus-visible, input[type=file]:focus-visible { box-shadow: 0 0 0 2px @ACCENT@ }
 "#;
 
+/// The canvas colour of a dark page that sets no background of its own (`Page::canvas_background`).
+pub const DARK_CANVAS: Color = Color::rgb(0x1f, 0x1f, 0x1f);
+
 /// Applied over the light sheets when the system is dark and the page says it supports it
 /// (`color-scheme: dark` or `light dark` on the root, or `<meta name="color-scheme">`): the canvas,
 /// text, links, popups, pickers and message boxes.
 const DARK_BASE: &str = r#"
-html { background: #1f1f1f; color: #f0f0f0 }
+html { color: #f0f0f0 }
 a { color: #8ab4f8 }
 a:visited { color: #c58af9 }
 popup, menu.popup, menu.context, popup > menu { background: #2b2b2b; color: #f0f0f0; border-color: #4a4a4a }

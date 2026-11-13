@@ -83,6 +83,8 @@ struct Win {
     /// Whether we maximized the window ourselves: stands in for `Window::is_maximized` on a frameless macOS window,
     /// where asking flips the style mask and sends resize events (see `corner_radius`).
     zoomed: bool,
+    /// The window was told to use the dark theme because the page asked for `color-scheme: dark`.
+    chrome_dark: bool,
     /// Which window edge a frameless window's pointer is over, if any.
     edge: Option<(i8, i8)>,
     /// Whether the window's input method is on, and where its candidate window was last put.
@@ -310,6 +312,12 @@ impl Win {
         if corner != self.corner {
             self.corner = corner;
             material::set_corner(&window, corner.0);
+        }
+        // A page that says `color-scheme: dark` gets a dark title bar and frame on any system theme; others follow the system.
+        let dark_chrome = self.page.wants_dark_chrome();
+        if dark_chrome != self.chrome_dark {
+            self.chrome_dark = dark_chrome;
+            window.set_theme(dark_chrome.then_some(winit::window::Theme::Dark));
         }
         let title = window::current_title(&self.page.doc.borrow(), &self.config);
         if title != self.title {
@@ -871,6 +879,7 @@ impl App {
             title,
             corner: (0.0, (0, 0), 1.0),
             zoomed: false,
+            chrome_dark: false,
             edge: None,
             ime_on: false,
             ime_area: None,

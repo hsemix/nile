@@ -124,6 +124,12 @@ The C API is versioned (`nile_abi_version()` against `NILE_ABI_VERSION`, and eve
 Python bindings (`ctypes`, no dependencies) live in [`bindings/python`](bindings/python/README.md): `nile.run("index.html")`,
 `@nile.function` for `host.*` calls from the page, and a headless `nile.View`. [`bindings/dotnet`](bindings/dotnet/README.md) is the same for .NET (`App.Run`, `App.Function`, `NileView`), and [`bindings/php`](bindings/php/README.md) for PHP 8.2+ (FFI).
 
+## Utility CSS
+
+Use the optional [static utility stylesheet](themes/utilities/README.md) for layout, spacing,
+typography, system colors and interaction states. Include `themes/utilities/nile.css` directly;
+no build step or runtime is required. Try `cargo run -p nile-shell -- examples/utilities.html`.
+
 ## Native extensions
 
 Native packages can add operations that return Promises, binary buffers, managed resources and event streams, without

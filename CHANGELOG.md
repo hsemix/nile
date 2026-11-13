@@ -12,10 +12,12 @@ the section becomes that version's.
 
 #### Added
 
+- A page that says `color-scheme: dark` (alone) now gets a dark native title bar and frame on any system theme (`Window::set_theme`: the dark-mode setting of the window on Windows, the appearance on macOS); `light dark` and light pages still follow the system (`examples/dark-titlebar.html`).
 - `Window.this.state` reads the window's state (shown, minimized, maximized, full screen; assigning changes it) and a `statechange` event fires when it changes, so a custom title bar can swap its maximize button for a restore button (`examples/settings-chrome.html`).
 
 #### Fixed
 
+- In a dark page, a background set on `body` (not `html`) now fills the whole window: the built-in dark canvas colour used to be a rule on `html` that hid it below the content.
 - A page with a fixed-height root (`html, body { height: 100% }`) no longer scrolls as a whole when an `overflow: auto` box inside it has more content than fits: the toolbar and footer used to move once the wheel scrolled past the end of the box.
 
 ### 2026-11-07
