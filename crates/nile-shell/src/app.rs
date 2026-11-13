@@ -763,7 +763,7 @@ impl App {
             .with_resizable(config.resizable != Resizable::No)
             .with_decorations(!config.frameless())
             .with_transparent(config.translucent())
-            // Shown after the accessibility adapter exists (it must see the window first).
+            // Stay hidden until the accessibility adapter and the first painted frame exist.
             .with_visible(false)
             .with_maximized(config.state == InitialState::Maximized)
             .with_window_level(level)
@@ -845,11 +845,6 @@ impl App {
         if let (Some((x, y)), None) = (pos, restored) {
             window.set_outer_position(LogicalPosition::new(x, y));
         }
-        match config.state {
-            InitialState::Minimized => window.set_minimized(true),
-            InitialState::Fullscreen => window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None))),
-            _ => {}
-        }
         material::apply(&window, material::effective(&config), config.translucent(), if config.frameless() { page.window_corner_radius() } else { 0.0 });
         #[cfg(windows)]
         if config.frameless() {
@@ -858,11 +853,6 @@ impl App {
             }
         }
         let access = accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
-        window.set_visible(config.state != InitialState::Hidden);
-        // After the adapter: on macOS attaching a child orders it in, which shows the window.
-        if let Some(o) = owner.and_then(|o| self.index(o)) {
-            attach_to_owner(&window, &self.wins[o].window);
-        }
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
         let surface = softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");
         let title = config.title.clone();
@@ -894,6 +884,23 @@ impl App {
         self.refresh_theme(last);
         let actions = self.wins[last].sync_window();
         self.run(event_loop, self.wins[last].id, actions);
+        // Paint synchronously: hidden windows need not receive RedrawRequested, and showing
+        // an unpainted window exposes the native blank background during the first layout.
+        // Startup commands may have closed this window, so look it up again first.
+        let Some(idx) = self.index(id) else { return };
+        self.wins[idx].handle(WindowEvent::RedrawRequested);
+        let window = self.wins[idx].window.clone();
+        match self.wins[idx].config.state {
+            InitialState::Minimized => window.set_minimized(true),
+            InitialState::Fullscreen => window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None))),
+            _ => {}
+        }
+        window.set_visible(self.wins[idx].config.state != InitialState::Hidden);
+        // After painting and the adapter: on macOS attaching a child also shows it.
+        if let Some(o) = owner.and_then(|o| self.index(o)) {
+            attach_to_owner(&window, &self.wins[o].window);
+        }
+        window.request_redraw();
     }
 
     /// Read the OS's light/dark setting and accent colour (through window `idx`) and restyle every
