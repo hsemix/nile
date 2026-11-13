@@ -4311,6 +4311,15 @@ impl Page {
             })
     }
 
+    /// The page says `color-scheme: dark` (dark only): its window chrome, such as the title bar, should be dark
+    /// whatever the system theme is.
+    pub fn wants_dark_chrome(&self) -> bool {
+        let Some(html) = self.doc.borrow().find(|n| n.tag() == Some("html")) else {
+            return false;
+        };
+        self.view.borrow().styles.get(html).color_scheme == nile_style::ColorScheme::Dark
+    }
+
     /// Paint into a BGRA pixel buffer of `width`×`height` physical pixels.
     pub fn paint(&mut self, pixels: &mut [u8], width: u32, height: u32, scale: f32) {
         self.paint_inner(pixels, width, height, scale, None);

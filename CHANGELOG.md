@@ -12,6 +12,7 @@ the section becomes that version's.
 
 #### Added
 
+- A page that says `color-scheme: dark` (alone) now gets a dark native title bar and frame on any system theme (`Window::set_theme`: the dark-mode setting of the window on Windows, the appearance on macOS); `light dark` and light pages still follow the system (`examples/dark-titlebar.html`).
 - `Window.this.state` reads the window's state (shown, minimized, maximized, full screen; assigning changes it) and a `statechange` event fires when it changes, so a custom title bar can swap its maximize button for a restore button (`examples/settings-chrome.html`).
 
 #### Fixed

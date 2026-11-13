@@ -6139,3 +6139,16 @@ fn dark_canvas_takes_the_bodys_background() {
     assert_eq!(canvas(""), (0x1f, 0x1f, 0x1f));
     assert_eq!(canvas("background: #252525"), (0x25, 0x25, 0x25));
 }
+
+#[test]
+fn a_dark_only_page_wants_dark_window_chrome() {
+    let wants = |scheme: &str| {
+        let (p, path) = page(&format!(r#"<html><head><meta name="color-scheme" content="{scheme}"></head><body></body></html>"#), "dark-chrome");
+        let w = p.wants_dark_chrome();
+        let _ = std::fs::remove_file(path);
+        w
+    };
+    assert!(wants("dark"));
+    assert!(!wants("light dark"), "follows the system");
+    assert!(!wants("light"));
+}

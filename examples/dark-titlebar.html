@@ -1,0 +1,39 @@
+<html
+  window-title="Dark title bar"
+  window-width="520"
+  window-height="260"
+  window-alignment="5"
+>
+  <head>
+    <!-- `color-scheme: dark` (alone) makes the page dark and asks the system for a dark title bar and frame,
+         even when the system is set to light. `light dark` would follow the system instead. -->
+    <meta name="color-scheme" content="dark" />
+    <title>Dark title bar</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        font:
+          14px system-ui,
+          sans-serif;
+        background: Canvas;
+        color: CanvasText;
+      }
+      h3 {
+        margin: 0 0 8px;
+      }
+      p {
+        color: GrayText;
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>Dark title bar</h3>
+    <p>
+      The page says <code>color-scheme: dark</code>, so the native title bar,
+      caption buttons and border should be dark too, on Windows, macOS and
+      Linux, whatever the system theme is.
+    </p>
+  </body>
+</html>
