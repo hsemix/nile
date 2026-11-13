@@ -16,6 +16,7 @@ the section becomes that version's.
 
 #### Fixed
 
+- In a dark page, a background set on `body` (not `html`) now fills the whole window: the built-in dark canvas colour used to be a rule on `html` that hid it below the content.
 - A page with a fixed-height root (`html, body { height: 100% }`) no longer scrolls as a whole when an `overflow: auto` box inside it has more content than fits: the toolbar and footer used to move once the wheel scrolled past the end of the box.
 
 ### 2026-11-07

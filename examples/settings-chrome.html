@@ -1,9 +1,12 @@
+<!doctype html>
 <html
   window-frame="solid-with-shadow"
   window-material="mica"
   window-title="Settings"
   window-width="1000"
-  window-height="640"
+  window-height="760"
+  window-min-width="760"
+  window-min-height="580"
   window-alignment="5"
   window-resizable="true"
 >
@@ -33,7 +36,7 @@
       }
       html {
         border-radius: 8px;
-        background: color-mix(in srgb, Canvas 72%, transparent);
+        background: rgba(243, 243, 243, 0.92);
       } /* translucent: Mica shows through, and it stays readable without one */
       body {
         margin: 0;
@@ -41,7 +44,7 @@
         display: flex;
         flex-direction: column;
         font:
-          14px "Segoe UI",
+          14px "Segoe UI Variable", "Segoe UI",
           system-ui,
           sans-serif;
         color: var(--fg);
@@ -90,20 +93,6 @@
         font-size: 12px;
         margin-right: 24px;
       }
-      .bar .search {
-        flex: 0 1 460px;
-        height: 30px;
-        box-sizing: border-box;
-        padding: 0 12px;
-        border: 1px solid var(--line);
-        border-radius: 15px;
-        background: var(--card);
-        color: var(--fg);
-        outline: none;
-      }
-      .bar .search:focus {
-        border-color: var(--accent);
-      }
       .bar .fill {
         flex: 1;
         height: 100%;
@@ -146,9 +135,9 @@
         display: flex;
       }
       nav {
-        width: 260px;
+        width: 280px;
         flex: none;
-        padding: 4px 10px;
+        padding: 12px 16px;
         overflow: auto;
       }
       .user {
@@ -208,10 +197,10 @@
         flex: 1;
         min-width: 0;
         overflow: auto;
-        padding: 8px 40px 24px 24px;
+        padding: 20px 40px 40px 24px;
       }
       .crumb {
-        font-size: 26px;
+        font-size: 28px;
         font-weight: 600;
         margin: 6px 0 20px;
       }
@@ -222,7 +211,7 @@
       .card {
         background: var(--card);
         border: 1px solid var(--line);
-        border-radius: 6px;
+        border-radius: 8px;
         padding: 16px 20px;
         margin-bottom: 4px;
       }
@@ -251,7 +240,7 @@
         font-weight: 600;
       }
       .preview {
-        height: 120px;
+        min-height: 156px;
       }
       #sample {
         font-size: 14px;
@@ -269,6 +258,57 @@
       input[type="range"] {
         width: 160px;
       }
+
+      * { box-sizing: border-box; }
+      :root { --dim: #616161; --line: rgba(0, 0, 0, 0.07); }
+      @media (prefers-color-scheme: dark) {
+        :root { --dim: #bdbdbd; --line: rgba(255, 255, 255, 0.08); }
+      }
+      button, input { font-family: inherit; font-size: 14px; }
+      .bar { height: 48px; position: relative; }
+      .bar .title { margin-left: 4px; }
+      .bar .cap { align-self: flex-start; height: 32px; }
+      .user { padding: 4px 8px 24px; gap: 14px; }
+      .avatar { width: 56px; height: 56px; border-radius: 28px; font-size: 18px; flex: none; }
+      .user b { font-weight: 600; margin-bottom: 4px; }
+      .title-search { position: absolute; left: 28%; top: 6px; width: 43%; }
+      .title-search input { width: 100%; height: 34px; padding: 7px 16px 7px 40px; border: 1px solid var(--line); border-bottom-color: color-mix(in srgb, var(--dim) 35%, transparent); border-radius: 18px; background: var(--card); color: var(--fg); }
+      .title-search svg { position: absolute; left: 14px; top: 9px; pointer-events: none; }
+      nav a { height: 38px; margin-bottom: 4px; padding: 0 12px; }
+      nav a svg { width: 18px; height: 18px; flex: none; }
+      nav a.on::before { top: 11px; bottom: 11px; }
+      .crumb { margin: 0 0 28px; line-height: 1.3; }
+      @media (prefers-color-scheme: dark) { html { background: rgba(32, 32, 32, 0.92); } }
+      .text-size-card { flex-direction: column; align-items: flex-start; gap: 18px; }
+      .text-size-card > .row { width: 100%; justify-content: flex-end; }
+      .crumb-arrow { font-size: 24px; margin: 0 8px; }
+      .card { padding: 20px 24px; }
+      .card h4 { font-weight: 400; margin-bottom: 4px; }
+      .preview { padding: 24px; margin-bottom: 8px; }
+      .preview h4 { font-weight: 600; margin-bottom: 14px; }
+      .preview p { color: var(--fg); line-height: 1.6; max-width: 540px; }
+      .row small { line-height: 1.5; }
+      .card.row { min-height: 80px; }
+      .slider-control { width: 140px; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+      #size-value { font-size: 12px; color: var(--dim); }
+      input[type="range"] { width: 140px; accent-color: var(--accent); }
+      button.apply { min-width: 88px; height: 32px; padding: 0 18px; }
+      button.apply:disabled { color: var(--dim); background: transparent; }
+      button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      .title-search input:focus {
+        outline: none;
+        box-shadow: none;
+        background: Canvas;
+        border-color: var(--line);
+        border-bottom: 2px solid var(--accent);
+        padding-bottom: 6px;
+      }
+      h5 { margin: 28px 0 10px; }
+      @media (max-width: 900px) {
+        nav { width: 240px; }
+        main { padding-right: 24px; }
+        .card.row { flex-wrap: wrap; }
+      }
     </style>
   </head>
   <body>
@@ -277,11 +317,10 @@
         <svg viewBox="0 0 16 16"><path d="M13 8H3M7 4L3 8l4 4" /></svg>
       </button>
       <div class="title">Settings</div>
-      <input
-        class="search"
-        type="text"
-        placeholder='Try "My mouse pointer is too small"'
-      />
+        <div class="title-search">
+          <input id="find-setting" type="search" placeholder="Find a setting" aria-label="Find a setting" />
+          <svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+        </div>
       <div class="fill"></div>
       <button class="cap" role="window-minimize" aria-label="Minimize">
         <svg viewBox="0 0 16 16"><path d="M3 8h10" /></svg>
@@ -302,26 +341,27 @@
     </div>
 
     <div class="shell">
-      <nav>
+      <nav aria-label="Settings categories">
         <div class="user">
           <div class="avatar">KL</div>
           <div><b>Klaus Loffelmann</b><span>klaus@example.com</span></div>
         </div>
-        <a href="#">Home</a>
-        <a href="#">System</a>
-        <a href="#">Bluetooth &amp; devices</a>
-        <a href="#">Network &amp; internet</a>
-        <a href="#">Personalization</a>
-        <a href="#">Apps</a>
-        <a href="#">Accounts</a>
-        <a href="#">Time &amp; language</a>
-        <a href="#">Gaming</a>
-        <a href="#" class="on">Accessibility</a>
-        <a href="#">Privacy &amp; security</a>
-        <a href="#">Windows Update</a>
+        <a href="#"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10 12 3l9 7v10h-6v-6H9v6H3Z"/></svg><span>Home</span></a>
+        <a href="#"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v12H3ZM8 21h8M12 16v5"/></svg><span>System</span></a>
+        <a href="#"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 3 8 6-8 6V3Zm0 6 8 6-8 6V9M5 7l12 10M5 17 12 10"/></svg><span>Bluetooth &amp; devices</span></a>
+        <a href="#"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9a15 15 0 0 1 18 0M6 13a10 10 0 0 1 12 0M9 17a5 5 0 0 1 6 0M12 21h.01"/></svg><span>Network &amp; internet</span></a>
+        <a href="#"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16 11-11 4 4L8 20H4Zm9-9 4 4"/></svg><span>Personalization</span></a>
+        <a href="#"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4ZM14 4h6v6h-6ZM4 14h6v6H4ZM14 14h6v6h-6Z"/></svg><span>Apps</span></a>
+        <a href="#"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0ZM4 21v-2a8 8 0 0 1 16 0v2"/></svg><span>Accounts</span></a>
+        <a href="#"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9M12 6v6l4 2M17 3v5h5"/></svg><span>Time &amp; language</span></a>
+        <a href="#"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10l4 11-3 2-5-5h-2l-5 5-3-2ZM6 11h6M9 8v6M17 11h.01"/></svg><span>Gaming</span></a>
+        <a href="#" class="on" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v6M5 9l7 3 7-3M12 13l-4 8M12 13l4 8"/></svg><span>Accessibility</span></a>
+        <a href="#"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6ZM9 12l2 2 4-4"/></svg><span>Privacy &amp; security</span></a>
+        <a href="#"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 8a8 8 0 0 0-14-3L3 8M3 3v5h5M4 16a8 8 0 0 0 14 3l3-3M21 21v-5h-5"/></svg><span>Windows Update</span></a>
+        <p id="search-empty" role="status" style="display: none; color: var(--dim); padding: 0 12px; font-size: 12px">No matching categories.</p>
       </nav>
       <main>
-        <div class="crumb">Accessibility <span>&rsaquo;</span> Text size</div>
+        <h1 class="crumb"><span>Accessibility</span> <span class="crumb-arrow">›</span> Text size</h1>
         <div class="card preview">
           <h4>Text size preview</h4>
           <p id="sample">
@@ -329,7 +369,7 @@
             Changes you make here will apply to most of the text on your device.
           </p>
         </div>
-        <div class="card row">
+        <div class="card row text-size-card">
           <div>
             <h4>Text size</h4>
             <small
@@ -337,11 +377,10 @@
             >
           </div>
           <div class="row">
-            <span>A</span
-            ><input id="size" type="range" min="12" max="28" value="14" /><span
+            <span aria-hidden="true">A</span><div class="slider-control"><output id="size-value" for="size">100%</output><input id="size" aria-label="Text size" type="range" min="100" max="200" step="5" value="100" /></div><span
               style="font-size: 20px"
               >A</span
-            ><button class="apply" id="apply">Apply</button>
+            ><button class="apply" id="apply" disabled>Apply</button>
           </div>
         </div>
         <h5>Related settings</h5>
@@ -354,8 +393,8 @@
         </div>
         <h5>Related support</h5>
         <div class="card row">
-          <h4>Help with Text size</h4>
-          <span>&#x2303;</span>
+          <h4>Help with text size</h4>
+          <span>⌄</span>
         </div>
       </main>
     </div>
@@ -371,12 +410,28 @@
       syncMaximized();
       const size = document.getElementById("size"),
         sample = document.getElementById("sample");
+      const apply = document.getElementById("apply");
+      let appliedSize = size.value;
       size.addEventListener("input", () => {
-        sample.style.fontSize = size.value + "px";
+        sample.style.fontSize = (14 * Number(size.value) / 100) + "px";
+        document.getElementById("size-value").textContent = size.value + "%";
+        apply.disabled = size.value === appliedSize;
       });
-      document.getElementById("apply").onclick = () => {
-        document.body.style.fontSize = size.value + "px";
+      apply.onclick = () => {
+        document.body.style.fontSize = (14 * Number(size.value) / 100) + "px";
+        appliedSize = size.value;
+        apply.disabled = true;
       };
+      document.getElementById("find-setting").addEventListener("input", (event) => {
+        const query = event.target.value.trim().toLowerCase();
+        let matches = 0;
+        document.querySelectorAll("nav a").forEach((link) => {
+          const match = link.textContent.toLowerCase().includes(query);
+          link.style.display = match ? "flex" : "none";
+          if (match) matches++;
+        });
+        document.getElementById("search-empty").style.display = matches ? "none" : "block";
+      });
     </script>
   </body>
 </html>

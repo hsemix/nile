@@ -1,0 +1,103 @@
+<!doctype html>
+<html window-title="Nile utilities" window-width="960" window-height="720">
+  <head>
+    <meta name="color-scheme" content="light dark" />
+    <title>Nile utilities</title>
+    <link rel="stylesheet" href="../themes/utilities/nile.css" />
+  </head>
+  <body class="m-0 font-sans text-sm text-foreground bg-subtle">
+    <main class="box-border max-w-4xl mx-auto p-8 flex flex-col gap-6">
+      <header class="flex items-center justify-between gap-4">
+        <div>
+          <p class="m-0 mb-2 text-muted text-xs">NILE / UTILITIES</p>
+          <h1 class="m-0 text-3xl font-semibold">Make yourself at home</h1>
+        </div>
+        <span class="px-3 py-2 bg-surface border rounded-full text-xs"
+          >Plain CSS</span
+        >
+      </header>
+      <p class="m-0 text-muted leading-relaxed">
+        A small utility vocabulary for desktop interfaces. Include one
+        stylesheet, choose your classes, and reload.
+      </p>
+      <section class="grid grid-cols-2 gap-4">
+        <div
+          class="box-border p-6 bg-surface border rounded-lg flex flex-col gap-4"
+        >
+          <h2 class="m-0 text-lg font-semibold">Workspace</h2>
+          <label class="flex flex-col gap-2"
+            >Display name<input
+              class="box-border w-full p-3 border rounded bg-surface text-foreground focus:border-accent"
+              value="Alex Davis"
+          /></label>
+          <label class="flex flex-col gap-2"
+            >Workspace<input
+              class="box-border w-full p-3 border rounded bg-surface text-foreground focus:border-accent"
+              value="Northstar Studio"
+          /></label>
+          <div class="flex items-center gap-3">
+            <input id="updates" type="checkbox" checked /><label for="updates"
+              >Receive activity updates</label
+            >
+          </div>
+          <div class="flex items-center gap-3 mt-2">
+            <button
+              id="save"
+              class="px-4 py-2 border-0 rounded bg-accent text-on-accent focus-visible:outline-accent"
+            >
+              Save preferences
+            </button>
+            <button
+              id="reset"
+              class="px-4 py-2 border rounded bg-surface text-foreground hover:bg-hover focus-visible:outline-accent"
+            >
+              Reset
+            </button>
+          </div>
+          <p id="status" role="status" class="m-0 text-xs text-muted">
+            Changes apply to this preview.
+          </p>
+        </div>
+        <div class="flex flex-col gap-4">
+          <article class="p-6 bg-surface border rounded-lg">
+            <h2 class="m-0 mb-3 text-lg font-semibold">
+              Consistent by default
+            </h2>
+            <p class="m-0 leading-relaxed text-muted">
+              Spacing follows a four-pixel scale. Colors follow the system, and
+              theme tokens can be overridden with regular CSS.
+            </p>
+          </article>
+          <article class="p-6 bg-surface border rounded-lg">
+            <h2 class="m-0 mb-3 text-lg font-semibold">A focused vocabulary</h2>
+            <p class="m-0 mb-4 leading-relaxed text-muted">
+              Flex, grid, spacing, typography, borders, and a small set of
+              interaction states.
+            </p>
+            <button
+              disabled
+              class="px-4 py-2 border rounded bg-subtle text-muted disabled:opacity-50"
+            >
+              Unavailable action
+            </button>
+          </article>
+        </div>
+      </section>
+      <footer class="border-t pt-4 text-xs text-muted">
+        No compiler. No runtime styling. No dependencies.
+      </footer>
+    </main>
+    <script>
+      document.getElementById("save").onclick = () => {
+        document.getElementById("status").textContent =
+          "Preferences saved for this preview.";
+      };
+      document.getElementById("reset").onclick = () => {
+        document.querySelectorAll("input")[0].value = "Alex Davis";
+        document.querySelectorAll("input")[1].value = "Northstar Studio";
+        document.getElementById("updates").checked = true;
+        document.getElementById("status").textContent = "Defaults restored.";
+      };
+    </script>
+  </body>
+</html>

@@ -4298,8 +4298,16 @@ impl Page {
                 }
             })
             .unwrap_or_else(|| {
-                // A transparent or material window shows what is behind it where the page has no background.
-                if WindowConfig::from_document(&self.doc.borrow()).translucent() { Color::TRANSPARENT } else { Color::WHITE }
+                // No page background: a dark page shows the dark canvas (not a rule on `html`, which would hide a
+                // background the page gave `body`); a transparent or material window shows what is behind it.
+                if self.view.borrow().styles.dark {
+                    let c = nile_style::DARK_CANVAS;
+                    Color::from_argb(255, c.r, c.g, c.b)
+                } else if WindowConfig::from_document(&self.doc.borrow()).translucent() {
+                    Color::TRANSPARENT
+                } else {
+                    Color::WHITE
+                }
             })
     }
 
