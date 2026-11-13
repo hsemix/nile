@@ -894,8 +894,8 @@ impl LayoutTree {
     pub fn selection_ranges(&self, a: TextPoint, b: TextPoint) -> Vec<(usize, usize, usize)> {
         let (from, to) = if a <= b { (a, b) } else { (b, a) };
         let mut out = Vec::new();
-        for run in from.run..=to.run.min(self.boxes.len().saturating_sub(1)) {
-            let BoxContent::Text(c) = &self.boxes[run].content else { continue };
+        for (run, layout_box) in self.boxes.iter().enumerate().take(to.run.saturating_add(1)).skip(from.run) {
+            let BoxContent::Text(c) = &layout_box.content else { continue };
             if !c.selectable() {
                 continue;
             }
