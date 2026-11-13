@@ -13,14 +13,14 @@ use windows_sys::Win32::{
     Foundation::POINT,
     Graphics::{
         Dwm::{DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY},
-        Gdi::ScreenToClient,
+        Gdi::{GetMonitorInfoW, MonitorFromWindow, ScreenToClient, MONITORINFO, MONITOR_DEFAULTTONEAREST},
     },
     UI::{
         Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT},
         Shell::{DefSubclassProc, SetWindowSubclass},
         WindowsAndMessaging::{
-            GetWindowLongW, IsZoomed, PostMessageW, SetWindowLongW, SetWindowPos, GWL_STYLE, HTMAXBUTTON, SC_MAXIMIZE, SC_RESTORE, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-            SWP_NOSIZE, SWP_NOZORDER, WM_NCACTIVATE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_NCPAINT, WM_STYLECHANGING, WM_SYSCOMMAND,
+            GetWindowLongW, IsZoomed, MINMAXINFO, PostMessageW, SetWindowLongW, SetWindowPos, GWL_STYLE, HTMAXBUTTON, SC_MAXIMIZE, SC_RESTORE, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+            SWP_NOSIZE, SWP_NOZORDER, WM_GETMINMAXINFO, WM_NCACTIVATE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_NCPAINT, WM_STYLECHANGING, WM_SYSCOMMAND,
             WS_CAPTION,
         },
     },
@@ -104,6 +104,26 @@ unsafe extern "system" fn proc(hwnd: isize, msg: u32, wparam: usize, lparam: isi
         // (`WM_NCACTIVATE` repaints the caption) and on `WM_NCPAINT`, until the next full repaint of the
         // page wipes it (a second or two after the window opened). Painting is ours alone.
         WM_NCPAINT => return 0,
+        // A frameless window has no frame for the system to size a maximized window by, so it would cover the
+        // whole monitor, taskbar included. Maximize to the monitor's work area instead (whichever monitor the
+        // window is on), after the chain below has applied the minimum and maximum sizes.
+        WM_GETMINMAXINFO => {
+            // SAFETY: forwards to the next handler first, then edits the MINMAXINFO that `lparam` points at for
+            // this message; the monitor queries are plain reads.
+            unsafe {
+                let result = DefSubclassProc(hwnd, msg, wparam, lparam);
+                let info = lparam as *mut MINMAXINFO;
+                let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                let mut mi: MONITORINFO = std::mem::zeroed();
+                mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+                if !info.is_null() && GetMonitorInfoW(monitor, &mut mi) != 0 {
+                    let (work, full) = (mi.rcWork, mi.rcMonitor);
+                    (*info).ptMaxPosition = POINT { x: work.left - full.left, y: work.top - full.top };
+                    (*info).ptMaxSize = POINT { x: work.right - work.left, y: work.bottom - work.top };
+                }
+                return result;
+            }
+        }
         // `-1` as `lparam` tells the default handler to change the active state without repainting the frame.
         WM_NCACTIVATE => return unsafe { DefSubclassProc(hwnd, msg, wparam, -1) },
         WM_NCHITTEST => {
